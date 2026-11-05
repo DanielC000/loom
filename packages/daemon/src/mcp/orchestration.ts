@@ -1062,226 +1062,99 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
     "gate_queue",
     {
       description:
-        "Read-only snapshot of the WHOLE daemon-global gate queue — the resolved concurrency cap plus " +
-        "every gate run currently `running` or `queued` (merge/deploy/worker-self-check alike), so you can " +
-        "answer 'why is my gate queued, who holds the slot, how deep am I' from ONE read instead of " +
-        "guessing or polling gate_status per-opId, or firing `run_gate` blind to find out. " +
-        "⚠️ THIS MEASURES SEMAPHORE ADMISSIONS, NEVER HOST LOAD (a peer's own " +
-        "live trace: a sibling worktree hand-running `tsx --test`, 6+ node children, was CONFIRMED " +
-        "consuming the box while this tool read `activeCount:0` — that alone proves the instrument is " +
-        "blind, no comparison needed, since that load never went through `run_gate` and so never touched " +
-        "this tool's count at all. Blind is not the same as HARMFUL-ON-ANY-GIVEN-READ, though — a " +
-        "companion sample pair the same peer also took (49.3s with `activeCount:0` before/after vs. " +
-        "34.3s with a merge gate confirmed running) is illustrative ONLY, NOT load-bearing evidence of " +
-        "magnitude: it's two points, and it would collapse if the 34.3s sample also carried hidden load " +
-        "nobody traced). " +
-        "`activeCount:0`/`queuedCount:0` means 'nothing is admitted through the GateSemaphore right now' " +
-        "— it is NOT 'the box is idle', and treating it that way is the exact defect this card fixed. It " +
-        "is BLIND to: (1) ANY hand-run test/build a worker or human runs directly — INCLUDING this " +
-        "project's OWN worker doctrine, whose DoD DEFAULTS every worker to running its affected test " +
-        "file(s) directly rather than through `run_gate` (see CLAUDE.md's targeted-test default), so the " +
-        "fleet's ORDINARY, EXPECTED behavior is semaphore-invisible host load, up to one lane per live " +
-        "worker; and (2) ALL non-agent load — a game client, a browser, media — which measured as the " +
-        "SINGLE BIGGEST layer (~88% sustained) on a real desktop host, invisible to this tool AND to any " +
-        "worktree-scoped process check. If you actually need to know whether the BOX (not the queue) is " +
-        "quiet, that is a DIFFERENT question this tool cannot answer — reach for two narrower " +
-        "instruments instead, kept separate: a whole-box CPU load reading (the one that actually " +
-        "licenses the word 'quiet') and a read-only, worktree-scoped process ATTRIBUTION check — " +
-        "coverage is necessarily partial there (it can only see what it can attribute to a known " +
-        "worktree), so check whichever your install provides for what it structurally cannot see. " +
-        "Returns {cap, " +
-        "activeCount, queuedCount, running: " +
-        "GateQueueEntry[], queued: GateQueueEntry[], repoGuardOnly: RepoGuardOnlyQueueEntry[], " +
-        "squashing: SquashQueueEntry[], " +
-        "declarations: GateIntentEntry[], waitingOnSelfCheck: WaitingOnSelfCheckQueueEntry[]} — " +
-        "`queued` is ordered by ARRIVAL within its priority tier (all " +
-        "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
-        "tier), so its array index + 1 IS `queuePosition` — but that position is a BELIEF about arrival " +
-        "order, NOT a promise of GRANT order: the semaphore skips a head-of-line waiter that isn't " +
-        "admissible right now and grants the next one that is, so a later-positioned entry can be " +
-        "admitted before an earlier one. Three independent reasons a queued entry can be skipped this " +
-        "way: its own worktree is still held by a running entry; its own repoPath is " +
-        "still guarded (see `repoContended` below); or its " +
-        "project already holds its fair share of `cap` while a DIFFERENT project has an ADMISSIBLE " +
-        "queued waiter — which can let a foreign LOW-tier (worker self-check) waiter be granted ahead of " +
-        "THIS project's own HIGH-tier (merge/deploy) waiter. Tier priority stays fully preserved WITHIN " +
-        "one project either way — only cross-project ordering bends, deliberately, for fairness. " +
-        "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, idleMs, extended, " +
-        "attempt, priorAttemptMs, attemptStartedAt, queuePosition, repoContended} — " +
-        "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +
-        "clock: for a `queued` entry they measure time WAITING (since it was enqueued); once admitted, the " +
-        "SAME entry RE-BASES to admission time and they measure time RUNNING instead. " +
-        "⚠️ A QUEUED entry's `since` is only APPROXIMATELY queue-entry time — do not read it " +
-        "as, and never substitute it for, `gate_status`'s `admittedAt` (that field is MINT time, stamped " +
-        "when the op's durable record is first created, and measured running a couple of SECONDS ahead of " +
-        "this entry's `since` — whatever setup work, e.g. worktree prep, happens between minting the op and " +
-        "actually enqueueing it into this semaphore). Once the SAME entry flips to `running`, its `since` " +
-        "re-bases again, to the real command-start instant (genuine semaphore admission) — measured MINUTES " +
-        "after the queued-side `since` on a contended op. So one op's life can show THREE distinct, " +
-        "non-interchangeable timestamps: `gate_status.admittedAt` (mint) → this tool's queued-row `since` " +
-        "(queue entry) → this tool's running-row `since` (command start). " +
-        "Don't read a `queued` " +
-        "entry's `elapsedMs` as run time — a deeply-queued op can show a large `elapsedMs` while it has done " +
-        "zero seconds of actual work, and mistaking that for a hung run is exactly backwards: it lands " +
-        "hardest on the op that's MOST expensive to wrongly cancel. ⚠️ AND EVEN A `running` ENTRY'S LARGE " +
-        "`elapsedMs` IS NOT EVIDENCE OF A WEDGE — it is routinely HEALTHY BY DESIGN: the gate auto-extends a " +
-        "step's timeout, rather than killing it, for as long as the step keeps producing output (see " +
-        "`GATE_EXTEND_IDLE_MS` in gate-runner.ts), so a long-running gate is frequently just working hard, " +
-        "not hung. `idleMs` (`Date.now()` minus that run's last liveness event — started, or produced a " +
-        "stdout/stderr byte — " +
-        "the SAME liveness clock the gate's own auto-extend decision reads, never a second, " +
-        "independently-computed number) is the signal that actually tells \"working hard\" apart from " +
-        "\"hung\": non-null once the run has genuinely started (normally the same instant it's admitted " +
-        "into `running`, though a brief real pre-flight gap can still read `null` too), `null` while " +
-        "`queued` or otherwise not live. A small `idleMs` means recent, active output regardless of how " +
-        "large `elapsedMs` has grown; `idleMs` approaching this project's gate-idle threshold is the real " +
-        "warning sign. `extended` (always `true`/`false`) tells you whether the CURRENT step already used " +
-        "its one-time auto-extend — `true` means the NEXT deadline is a real kill, not another reprieve. " +
-        "Both `idleMs`/`extended` are present on EVERY entry regardless of project — unlike `taskId`/" +
-        "`branch`/`workerLabel` below, they carry no more than the age a cross-project entry already " +
-        "exposes, so cross-project redaction doesn't apply to them. `opId` is the SAME id `gate_status(opId)` accepts (full or an " +
-        "unambiguous 8-char prefix), so you can chain into a live per-op read if you want one. An entry " +
-        "belonging to YOUR OWN project ALSO " +
-        "carries {taskId, branch, workerLabel, fallbackOfBatchOpId} (\"<agent> · <short task title>\"); " +
-        "an entry from a " +
-        "DIFFERENT project omits those four fields entirely (never redacted-to-null) and instead carries " +
-        "`redacted: true` so the omission reads as deliberate rather than an ambiguous " +
-        "gap. WHAT IS OMITTED cross-project is EXACTLY {taskId, branch, workerLabel, " +
-        "fallbackOfBatchOpId} — " +
-        "everything else in the enumeration above (`opId` in FULL, chainable into `gate_status` same as " +
-        "for an own-project entry; `gateType`/`projectId`/`projectName`; the phase-scoped `since`/" +
-        "`elapsedMs`/`idleMs`/`extended`/`attempt`/`priorAttemptMs`/`attemptStartedAt`; `queuePosition`/`repoContended`; and, on its own separate " +
-        "has-a-branch condition unrelated to project ownership, `recentTimeoutStreak`) still rides the " +
-        "wire cross-project, un-redacted. That four-field omission — not 'project + gate kind + age', " +
-        "which undercounted what a foreign entry actually carries — is enough to tell 'someone else " +
-        "legitimately holds the slot' apart from 'this looks leaked' without exposing another project's " +
-        "task/branch identity, or which of its own batch merges a per-branch fallback row descends from. " +
-        "`repoContended` (bool, every entry) is `true` ONLY for a QUEUED `merge`- or `worker`-kind entry " +
-        "blocked by the per-repo admission guard — " +
-        "ASYMMETRIC: a queued `merge` is contended by ANY other holder of its repo (another `merge` OR a " +
-        "`worker`), so two same-repo merges never race to squash and a same-repo merge/worker pair never " +
-        "races a shared cross-process resource; a queued `worker` is contended ONLY by an active `merge` " +
-        "holder OR by ANY same-repo `merge` currently QUEUED, whichever arrived first (a " +
-        "waiting merge blocks every not-yet-admitted same-repo worker so worker self-checks cannot starve " +
-        "it) — TWO workers on the " +
-        "same repo with no merge waiting never contend each other and both show `false` while " +
-        "running fully concurrently. A queued entry can show this `true` even while `cap` has a free " +
-        "lane, which is expected, not a bug: it's waiting on the REPO, not the cap. `false` " +
-        "means this specific guard isn't why it's queued (still possibly `cap`, or the older, separate " +
-        "per-worktree guard, which this field does NOT report on). Always `false` " +
-        "while `running`, or for a `deploy`/other non-guarded entry. It's a LIVE read, recomputed on " +
-        "every call — it can flip on a still-queued entry as sibling ops settle. " +
-        "`attempt`/`priorAttemptMs`/`attemptStartedAt` (`attempt`/`priorAttemptMs` are `merge`-kind only, " +
-        "`null`/`null` on a first admission; `attemptStartedAt` is set for EVERY running entry, of any gate type) describe a RETRY of the same op: `confirmWorkerMerge`'s own " +
-        "single-file retry (after a genuine failure narrows to a small re-runnable set) and its transient-kill " +
-        "retry (after a timeout/kill) CONTINUE the SAME admission — the cap slot and the per-repo " +
-        "guard are held straight through the fail->retry gap and the retry is NEVER re-queued, so a retry reads " +
-        "`running` with `attempt:2`, not `queued`. `since` keeps the ORIGINAL admission time; `attemptStartedAt` " +
-        "(ISO; `null` while queued) is when the CURRENT attempt began, and `priorAttemptMs` is how long the attempts " +
-        "before it ran. `attempt:3` (both the solo AND batch merge paths) is a further link of the " +
-        "same admission: the single-file retry above already passed, but the original gate had short-circuited on a " +
-        "non-final step, so this is resuming whatever step(s) never ran before a pass can be reported. An " +
-        "`attempt>=2` entry can therefore only be QUEUED for a reason other than its own retry (none exists today); " +
-        "a `running`→`queued` swap for one op is no longer an expected retry shape — check `gate_status` before " +
-        "concluding a retry was lost. " +
-        "IMPORTANT — `phase`/`queuePosition` reflect only what the semaphore BELIEVES, which can diverge " +
-        "from reality: a gate timeout can settle (freeing the slot) without its process tree actually " +
-        "dying, leaving an orphan the registry no longer tracks. So EVERY entry with a `branch` — OWN- " +
-        "project AND cross-project alike (unlike taskId/branch/workerLabel, this bare " +
-        "integer carries no task/branch identity, and the orphan hazard is cross-project by nature) — " +
-        "ALSO carries `recentTimeoutStreak` (an integer ≥0) — how many consecutive timeouts that branch " +
-        "has recorded, from an INDEPENDENT tracker that survives exactly the eviction the live registry " +
-        "doesn't. A nonzero streak on a 'queued' or 'running' entry is a reason to verify no orphaned " +
-        "process survives from an earlier attempt before treating this worktree as otherwise idle — treat " +
-        "it as a second data point, not a verdict this tool merges into `phase` itself. This tool is cheap " +
-        "(an in-memory read bounded by cap + queue depth, never a real scan) — safe to call BEFORE firing " +
-        "`run_gate`/`worker_merge_confirm` to confirm a lane is actually free instead of firing blind into " +
-        "a saturated cap, and again right after either comes back `pending` to see the full picture instead " +
-        "of only your own op's state. " +
-        "ALSO returns `repoGuardOnly` - a SEPARATE array, not folded into `running`/" +
-        "`queued`: an inert-diff-skip merge holding or waiting on a same-repo sibling's per-repo " +
-        "guard without ever admitting through the ordinary cap/registry above. Each entry is " +
-        "{id, phase:\"holding\"|\"queued\", since, elapsedMs, queuePosition, opId, projectId, " +
-        "projectName, repoPath?, taskId?, branch?, workerLabel?, redacted?} - `repoPath`/`taskId`/`branch`/" +
-        "`workerLabel` are OWN-PROJECT ONLY (never redacted-to-null - simply absent for a foreign entry, " +
-        "same as `running`/`queued`'s own redaction; `repoPath` is an absolute host filesystem path, never " +
-        "disclosed cross-project); a foreign entry ALSO carries `redacted: true` (matching " +
-        "`running`/`queued`'s own `redacted` field) so that four-field omission reads as deliberate rather " +
-        "than an ambiguous gap — never present (let alone `false`) on the caller's own entries. Explains a " +
-        "queued `merge`-kind entry above reporting " +
-        "`repoContended:true` while `activeCount`/`running` shows zero running merges on that repo: the " +
-        "contending holder is here, not there. " +
-        "ALSO returns `squashing` — a THIRD, independent array, separate from BOTH " +
-        "`running`/`queued` AND `repoGuardOnly`: a `merge`-kind op that has already finished its own gate " +
-        "command (so its registry entry above is gone) but is still holding its per-repo merge-admission " +
-        "guard while its squash (the actual git merge/commit) is in flight. Before this array existed, " +
-        "a squashing merge was enumerated NOWHERE in this tool's result — `activeCount`/`running`/`queued`/" +
-        "`repoGuardOnly` could ALL read empty for a repo whose merge was still genuinely in progress, and " +
-        "an empty read was silently indistinguishable from 'nothing is running'. Each entry is " +
-        "{opId, projectId, projectName, since, elapsedMs, repoPath?, taskId?, branch?, workerLabel?, " +
-        "redacted?} — " +
-        "same cross-project redaction as `repoGuardOnly` (`repoPath`/`taskId`/`branch`/`workerLabel` " +
-        "own-project only, never redacted-to-null, simply absent for a foreign entry; a foreign entry ALSO " +
-        "carries `redacted: true`, same as `repoGuardOnly` above). `since`/`elapsedMs` " +
-        "measure from the instant the gate command settled (NOT from admission — see `gate_status`'s " +
-        "`admittedAt` for that), i.e. how long the squash itself has been running. A repo appearing here " +
-        "explains a queued `merge`-kind entry above reporting `repoContended:true` with NO matching " +
-        "`running` entry for that repo at all: the contending holder is here, not there — the SAME shape " +
-        "`repoGuardOnly` already covers for its own resource, now covered for THIS one too. " +
-        "ALSO returns `declarations` — a FOURTH, independent array: a manager's own " +
-        "structured \"I intend to fire a gate at ~T\" advisory, declared via `gate_intent_declare` and " +
-        "withdrawn via `gate_intent_withdraw`. ⛔ ADVISORY DISCLOSURE ONLY — nothing here was ever admitted " +
-        "through, or even seen by, the GateSemaphore that governs `running`/`queued`/`repoGuardOnly` above; " +
-        "a declaration can NEVER block, delay, or gate an actual fire, and nothing in `run_gate`/" +
-        "`worker_merge_confirm`/deploy ever reads this array — see `gate_intent_declare`'s own doc for the " +
-        "full rationale. Each entry is {projectId, projectName, declaredAt, firesAt, ageMs, msUntilFire, " +
-        "gateType?, repoKey?, note?, declaredBy?} (ISO timestamps; `declaredAt`/`firesAt` are server-" +
-        "stamped, never client-supplied, so there's no clock-skew question). `msUntilFire` (`firesAt - now`) " +
-        "is deliberately NEVER clamped to 0 — it goes NEGATIVE once the declared time passes, which is the " +
-        "self-describing signal that the intent likely already fired (a manager SHOULD `gate_intent_withdraw` " +
-        "once it does — a courtesy, never enforced) rather than the row silently vanishing exactly on " +
-        "`firesAt` and leaving no way to tell 'it fired' from 'it just expired'. A row self-expires — see " +
-        "`gate_intent_declare`'s own doc for the exact rule — so a stale declaration from a since-recycled " +
-        "or exited session is gone by the NEXT read, not merely eventually: there is no raw session id on " +
-        "the wire anywhere in this array (own-project OR foreign) — the daemon uses it server-side, before " +
-        "you ever see this array, to decide whether a row is still live at all, which makes a dead seat's " +
-        "residue structurally unobservable rather than something you'd have to notice was stale yourself. " +
-        "SAME cross-project redaction posture as `running`/`queued` above: an entry belonging to YOUR OWN " +
-        "project ALSO carries {repoKey?, note?, declaredBy?} (`declaredBy` is the declaring manager's AGENT " +
-        "name, mirroring `workerLabel`'s own pattern); a foreign-project entry omits those three entirely " +
-        "(never redacted-to-null) and carries `redacted: true` instead — `gateType` stays visible either " +
-        "way, since gate KIND is already part of the sanctioned cross-project set above, this isn't a new " +
-        "boundary. " +
-        "⛔ WHAT THIS TOOL STOPS BEING ABLE TO TELL YOU THE MOMENT A ROW LEAVES `queued`: " +
-        "once an entry is admitted (or has already settled and dropped out of this snapshot entirely), " +
-        "NOTHING here recovers how long it actually waited — queue wait is only ever legible from the " +
-        "queued side, and only approximately (see the `since` caveat above). For a settled op's real span, " +
-        "read `gate_status(opId)` instead: its `admittedAt`/`settledAt`/`totalDurationMs` triple covers the " +
-        "WHOLE op (worktree prep + queue wait + gate command + squash) — see that tool's own description " +
-        "for exactly what `totalDurationMs` does and doesn't include. `gate_history` (the separate, durable " +
-        "audit series) carries NEITHER `admittedAt` NOR `settledAt` — only `durationMs`, the gate COMMAND " +
-        "span alone — so it cannot answer a queue-wait question either; it's for a cross-op duration TREND, " +
-        "not one op's wait time. Picking a duration source deliberately means picking among THREE tiers, " +
-        "not one: `run-summary` (test execution only) → `gate_history.durationMs` (the full gate command: " +
-        "build + guards + tests) → `gate_status.totalDurationMs` (the whole op: command PLUS queue wait " +
-        "PLUS worktree/squash overhead). A duration SERIES (e.g. \"is the gate getting slower\") wants the " +
-        "COMMAND tier — `totalDurationMs` will show a spike from a busy fleet, not from the code under " +
-        "test. ⚠️ Agreement between two tiers on any GIVEN op is NOT evidence you picked the right one: a " +
-        "never-queued op's envelope is small enough that its whole-op and command tiers nearly coincide, so " +
-        "a wrong-tier reading can pass undetected on exactly that op (n=1, a named gap from this same " +
-        "card's own investigation — not promoted to a general rule). " +
-        "ALSO returns `waitingOnSelfCheck` — a FIFTH, independent array: a `merge`-kind op " +
-        "that has NOT YET reached its own gate admission at all — it's still parked inside its own pre-" +
-        "admission wait for its worker's `run_gate` self-check, so it appears in " +
-        "NONE of `running`/`queued`/`repoGuardOnly`/`squashing` above (none of those are backed by anything " +
-        "this op has touched yet). Each entry is {opId, blockingOpId, since, elapsedMs, projectId, " +
-        "projectName, taskId?, branch?, workerLabel?, redacted?} — `opId` is the MERGE's own opId (pass " +
-        "THIS to `gate_cancel` to abort the wait: the merge settles `cancelled`, exactly like a QUEUED " +
-        "merge gate withdrawn before admission); `blockingOpId` is the self-check's own opId, informational " +
-        "only — cancelling the merge does NOT touch the self-check, which is left running untouched, so " +
-        "cancel `blockingOpId` separately (also via `gate_cancel`) if its own verdict should stop too. Same " +
-        "cross-project redaction as `repoGuardOnly`/`squashing` (`taskId`/`branch`/`workerLabel` own-project " +
-        "only, a foreign entry carries `redacted: true` instead). " +
+        "Read-only snapshot of the WHOLE daemon-global gate queue: the resolved concurrency `cap` plus every gate run " +
+        "`running` or `queued` (merge/deploy/worker-self-check alike) — answers 'why is my gate queued, who holds the " +
+        "slot, how deep am I' in one read. Cheap (in-memory, bounded by cap + queue depth); safe to call before " +
+        "`run_gate`/`worker_merge_confirm` and again after either returns `pending`. " +
+        "⚠️ IT MEASURES SEMAPHORE ADMISSIONS, NEVER HOST LOAD: `activeCount:0`/`queuedCount:0` means nothing is " +
+        "admitted through the GateSemaphore, NOT that the box is idle. It is blind to any hand-run test/build " +
+        "(the worker DoD default, so up to one lane per live worker) and to all non-agent load. For 'is the box " +
+        "quiet', use a whole-box CPU reading plus a worktree-scoped process attribution check, whichever your " +
+        "install provides (the latter is partial by construction). " +
+        "Returns {cap, activeCount, queuedCount, running, queued, repoGuardOnly, squashing, declarations, " +
+        "waitingOnSelfCheck}. " +
+        "`queued` is ordered by ARRIVAL within priority tier (high-priority merge/deploy before low-priority worker " +
+        "self-checks, FIFO within each), so index + 1 IS `queuePosition` — a BELIEF about arrival order, NOT a " +
+        "promise of grant order: the semaphore skips a head-of-line waiter that isn't admissible and grants the " +
+        "next one that is. Skip reasons: its worktree is still held by a running entry; its repoPath is guarded " +
+        "(see `repoContended`); or its project already holds its fair share of `cap` while a DIFFERENT project has " +
+        "an admissible waiter (which can let a foreign low-tier waiter beat this project's own high-tier one; tier " +
+        "priority holds WITHIN a project). " +
+        "Each running/queued entry carries {opId, gateType, projectId, projectName, since, elapsedMs, idleMs, " +
+        "extended, attempt, priorAttemptMs, attemptStartedAt, queuePosition, repoContended}. " +
+        "`since`/`elapsedMs` are PHASE-SCOPED: while `queued` they measure time WAITING (approximately; `since` is " +
+        "only roughly queue-entry time); once admitted the SAME entry RE-BASES to the real command-start instant and " +
+        "they measure time RUNNING. One op therefore shows three non-interchangeable timestamps: " +
+        "`gate_status.admittedAt` (MINT time, a few seconds before enqueue) → queued-row `since` → running-row " +
+        "`since`. Never substitute one for another, and never read a queued `elapsedMs` as run time: a deeply " +
+        "queued op can show a large `elapsedMs` with zero work done. " +
+        "A large running `elapsedMs` is NOT evidence of a wedge either — the gate auto-extends a step's timeout " +
+        "while it keeps producing output. `idleMs` (now minus the last liveness event: start or a stdout/stderr " +
+        "byte; the same clock the auto-extend reads) is the real signal: `null` while `queued`/not live, a small " +
+        "value means recent output, and one approaching this project's gate-idle threshold is the warning sign. " +
+        "`extended` (bool) says whether the CURRENT step already used its one-time auto-extend; `true` means the " +
+        "NEXT deadline is a real kill. `idleMs`/`extended` are on every entry, cross-project too. " +
+        "`opId` is the id `gate_status(opId)` accepts (full or unambiguous 8-char prefix). " +
+        "Your OWN project's entries also carry {taskId, branch, workerLabel, fallbackOfBatchOpId}; a " +
+        "DIFFERENT project's entry omits exactly those four (never redacted-to-null) and carries `redacted: true` " +
+        "instead. Everything else above rides cross-project un-redacted, including `recentTimeoutStreak` — enough " +
+        "to tell 'someone else holds the slot' from 'this looks leaked' without exposing task/branch identity. " +
+        "`repoContended` (bool, live-recomputed each call) is `true` ONLY for a QUEUED `merge`- or `worker`-kind " +
+        "entry blocked by the per-repo admission guard. ASYMMETRIC: a queued `merge` is contended by ANY other " +
+        "same-repo holder (merge or worker); a queued `worker` only by an active same-repo `merge` or a same-repo " +
+        "`merge` QUEUED ahead of it (so worker self-checks cannot starve a waiting merge). Two same-repo workers " +
+        "with no merge waiting never contend. `true` with a free `cap` lane is expected: it is waiting on the " +
+        "REPO. `false` means this guard is not why it's queued (it may still be `cap` or the per-worktree guard, " +
+        "which this field does not report). Always `false` while `running` or for `deploy`. " +
+        "`attempt`/`priorAttemptMs` (`merge`-kind only, `null` on first admission) and `attemptStartedAt` (set on " +
+        "every running entry, `null` while queued) describe a RETRY of the same op: the single-file retry and " +
+        "transient-kill retry CONTINUE the SAME admission (slot and repo guard held through the gap, never " +
+        "re-queued), so a retry reads `running` with `attempt:2`. `since` keeps the ORIGINAL admission time; " +
+        "`attemptStartedAt` is when the CURRENT attempt began; `priorAttemptMs` is how long earlier attempts " +
+        "ran. `attempt:3` (solo and batch) resumes the step(s) the original gate short-circuited past, after the " +
+        "single-file retry passed. A `running`→`queued` swap for one op is not an expected retry shape: check " +
+        "`gate_status` before concluding a retry was lost. " +
+        "IMPORTANT: `queuePosition` and phase reflect only what the semaphore BELIEVES; a gate timeout can free " +
+        "the slot without its process tree dying. So every entry with a `branch` carries `recentTimeoutStreak` " +
+        "(integer ≥0, consecutive timeouts for that branch, from an independent tracker). A nonzero streak is a " +
+        "reason to verify no orphaned process survives before treating that worktree as idle — a second data " +
+        "point, not a verdict. " +
+        "`repoGuardOnly` is a SEPARATE array: an inert-diff-skip merge holding or waiting on a same-repo " +
+        "sibling's per-repo guard without admitting through the cap. Entry: {id, phase:\"holding\"|\"queued\", " +
+        "since, elapsedMs, queuePosition, opId, projectId, projectName, repoPath?, taskId?, branch?, " +
+        "workerLabel?, redacted?}. `repoPath` (absolute host path)/`taskId`/`branch`/`workerLabel` are " +
+        "own-project only (simply absent for a foreign entry, which carries `redacted: true`). It explains a " +
+        "queued `merge` showing `repoContended:true` with zero running merges on that repo. " +
+        "`squashing` is a THIRD array: a `merge`-kind op whose gate command has finished (registry entry gone) " +
+        "but which still holds its per-repo guard while the git squash runs. Without it every other array could " +
+        "read empty during a live merge. Entry: {opId, projectId, projectName, since, elapsedMs, repoPath?, " +
+        "taskId?, branch?, workerLabel?, redacted?}, same redaction as `repoGuardOnly`; `since`/`elapsedMs` run " +
+        "from the instant the gate command settled (NOT admission). It likewise explains `repoContended:true` " +
+        "with no matching `running` entry. " +
+        "`declarations` is a FOURTH array: managers' advisory 'I intend to fire a gate at ~T' notes from " +
+        "`gate_intent_declare`/`gate_intent_withdraw`. ⛔ ADVISORY ONLY: never admitted through the " +
+        "GateSemaphore, can never block, delay or gate any fire, and nothing in `run_gate`/" +
+        "`worker_merge_confirm`/deploy reads it. Entry: {projectId, projectName, declaredAt, firesAt, ageMs, " +
+        "msUntilFire, gateType?, repoKey?, note?, declaredBy?} (server-stamped ISO times). `msUntilFire` is " +
+        "never clamped: negative means the declared time passed and the intent likely fired. Rows self-expire " +
+        "(rule in `gate_intent_declare`'s doc) and a dead seat's row is gone by the next read; no session id is " +
+        "on the wire. Own-project entries also carry {repoKey?, note?, declaredBy?} (declaredBy = the " +
+        "declaring manager's agent name); a foreign entry omits those three and carries `redacted: true`, " +
+        "`gateType` visible either way. " +
+        "⛔ Once a row leaves `queued`, NOTHING here recovers how long it waited. For a settled op's real span " +
+        "read `gate_status(opId)`: `admittedAt`/`settledAt`/`totalDurationMs` cover the WHOLE op (worktree prep + " +
+        "queue wait + command + squash; see that tool for what it includes). `gate_history` carries only " +
+        "`durationMs`, the gate COMMAND span, so it cannot answer queue wait; it is for cross-op duration TRENDS. " +
+        "Duration tiers: `run-summary` (test execution only) → `gate_history.durationMs` (build + guards + tests) " +
+        "→ `gate_status.totalDurationMs` (command PLUS queue wait PLUS overhead). A SERIES (e.g. 'is the gate " +
+        "getting slower') wants the COMMAND tier; `totalDurationMs` spikes with fleet busyness. Agreement between " +
+        "two tiers on one op is not evidence you picked the right one (a never-queued op's tiers nearly coincide). " +
+        "`waitingOnSelfCheck` is a FIFTH array: a `merge`-kind op still parked in its pre-admission wait for its " +
+        "worker's `run_gate` self-check, so in none of the arrays above. Entry: {opId, blockingOpId, since, " +
+        "elapsedMs, projectId, projectName, taskId?, branch?, workerLabel?, redacted?}, same redaction as " +
+        "`repoGuardOnly`. `opId` is the MERGE's id: pass it to `gate_cancel` to abort the wait (the merge settles " +
+        "`cancelled`). `blockingOpId` is the self-check's id, informational: cancelling the merge leaves the " +
+        "self-check running, so cancel `blockingOpId` separately if its verdict should stop too. " +
         "Cancel a QUEUED one via `gate_cancel(opId)` - see that tool's own doc for the fallback " +
         "resolution it uses.",
       inputSchema: strictShape({}),
@@ -1903,96 +1776,69 @@ export class OrchestrationMcpRouter {
           "{loomSessionId, engineSessionId, ctxInputTokens, contextWindow, pct, model, measuredAt, " +
           "ctxMidTurn, gateCommand}: pct is your measured " +
           "context size as a percentage of your model's window. `ctxMidTurn` is true " +
-          "only while `ctxInputTokens`/`pct` were measured DURING the turn that's still running (Loom's " +
-          "own mid-turn sampler, not just your last completed turn's Stop reading) — false means either " +
-          "you're idle (the reading is from your last completed turn, which is accurate while idle) or " +
-          "your current turn hasn't been re-sampled yet (the reading may be stale relative to how much " +
-          "you've actually consumed so far this turn). ⚠️ APPROXIMATE, not exact: a few OTHER writes " +
-          "(a recorded error, a process-state change, an engine-session-id rotation, a capability patch) " +
-          "also bump the same `lastActivity` this is keyed against, so a `false` reading can occasionally " +
-          "mean one of those rather than a genuinely stale sample — it self-corrects on the sampler's " +
-          "very next tick either way, so never treat one `false` as proof the reading is stale. " +
-          "Use it at a clean seam to self-assess — " +
+          "only while `ctxInputTokens`/`pct` were measured DURING the still-running turn (Loom's mid-turn " +
+          "sampler); false means you're idle (the reading is your last completed turn's, accurate while idle) " +
+          "or the current turn hasn't been re-sampled yet (may be stale). APPROXIMATE: other writes (an error, " +
+          "a process-state change, an engine-session-id rotation, a capability patch) also bump the same " +
+          "`lastActivity`, so one `false` is not proof the reading is stale; it self-corrects on the next " +
+          "sampler tick. Use it at a clean seam to self-assess — " +
           "a manager to decide whether to recycle_me, a worker to worker_report that it's getting heavy. " +
-          "`loomSessionId` is the id the DAEMON uses for you — it's what a manager/durable event row/" +
-          "peer frame names you by, and the one to state when SELF-IDENTIFYING in a report (e.g. \"my " +
-          "session is X\"). `engineSessionId` is the SEPARATE id the underlying engine assigns (what your " +
-          "own scratchpad/transcript/tool-results paths are namespaced under) — returned alongside so you " +
-          "can always tell which is which; it is explicit `null` (never an absent key) until the " +
-          "SessionStart hook has captured it. WHY BOTH EXIST: both are well-formed v4 uuids that look " +
-          "identical by shape. A value read off the ENGINE's OWN transcript file path, or its harness-" +
-          "managed tool-results directory, is ALWAYS the engine one, never the daemon one — reporting " +
-          "that id as \"my session\" silently fails to match against Loom-stamped rows, with no error, " +
-          "and reads identically to \"nothing was wrong\". ⚠️ NOT every path you can read is engine-" +
-          "keyed, though: Loom's OWN scratch dir (exposed as `LOOM_SCRATCH_DIR` when set, and where a " +
-          "spilled result like an oversized `tasks_list` read's `rowsFile` lands) is keyed by the LOOM " +
-          "session id instead — reading a uuid off THAT path is a second legitimate self-identification " +
-          "route, not the same trap. Prefer `loomSessionId` for self-identification unless you " +
-          "specifically mean the engine's own id, and check WHICH KIND of path you're reading off before " +
-          "trusting either. " +
+          "`loomSessionId` is the id the DAEMON uses for you (what managers, event rows and peer frames name " +
+          "you by); state it when SELF-IDENTIFYING in a report. `engineSessionId` is the SEPARATE id the engine " +
+          "assigns (your own scratchpad/transcript/tool-results paths are namespaced under it); explicit `null` " +
+          "(never an absent key) until the SessionStart hook has captured it. Both are v4 uuids that look alike: " +
+          "an id read off the ENGINE's transcript path or harness tool-results directory is ALWAYS the engine " +
+          "one, and reporting it as \"my session\" silently fails to match Loom-stamped rows. Loom's OWN scratch " +
+          "dir (`LOOM_SCRATCH_DIR`, where a spilled `rowsFile` lands) is keyed by the LOOM session id, a second " +
+          "legitimate route. Prefer `loomSessionId` unless you mean the engine's id. " +
           "If not yet measured (no completed turn), pct is null and `measured:false` is set explicitly — " +
-          "contextWindow/model in that case reflect your CONFIGURED profile model (still accurate), not a " +
-          "fake reading. `mergeGate` (READ-ONLY — the cadence and interval are HUMAN-only) is " +
+          "contextWindow/model then reflect your CONFIGURED profile model, not a fake reading. `mergeGate` " +
+          "(READ-ONLY — cadence and interval are HUMAN-only) is " +
           "{cadence: \"every\"|\"interval\"|\"never\", interval: number|null, ungatedSinceLastPass, " +
-          "nextLandingGated, gateOwed}: `every` = every merge runs the gate; `interval` = the human-only gate is " +
-          "off but every N-th landing still runs it (ungatedSinceLastPass counts branches landed WITHOUT a " +
-          "passing gate since the last pass); `never` = gate off, no interval (ungatedSinceLastPass is the " +
-          "\"unverified on main\" figure). `nextLandingGated` is whether the NEXT landing of ONE branch will run " +
-          "the gate; `gateOwed` means a periodic gate failed (or a human asked) so every landing is gated until one " +
-          "passes. `gateCommand` is the project's RESOLVED build/DoD gate, READ-ONLY: " +
+          "nextLandingGated, gateOwed}: `every` = every merge runs the gate; `interval` = gate off but every " +
+          "N-th landing still runs it (ungatedSinceLastPass counts branches landed WITHOUT a passing gate since " +
+          "the last pass); `never` = gate off, no interval (ungatedSinceLastPass is the \"unverified on main\" " +
+          "figure). `nextLandingGated` is whether the NEXT landing of ONE branch will run the gate; `gateOwed` " +
+          "means a periodic gate failed (or a human asked) so every landing is gated until one passes. " +
+          "`gateCommand` is the project's RESOLVED build/DoD gate, READ-ONLY: " +
           "{configured:true, command, timeoutMs} when set, else {configured:false, command:null, note, " +
           "timeoutMs} — when unconfigured, ASK THE OWNER to set one (a human-only action); never " +
-          "hand-roll a gate command into a worker's DoD. `timeoutMs` is the RESOLVED gate timeout (the " +
-          "same number the gate itself enforces, per-project override or platform default — never guess " +
-          "or carry an inherited figure). Read all four facts about it before reasoning about margin: " +
-          "(1) a step is auto-extended past `timeoutMs` while it keeps producing output, so exceeding " +
-          "this number does NOT by itself mean failure — but (2) the merge gate's retry-after-timeout " +
-          "runs with NO extension (allowExtend:false, deliberately) — so first attempt = timeoutMs + one " +
-          "extension (~2x), while a retry is a HARD timeout with no net; state (1) and (2) together, " +
-          "never (1) alone, or the reader computes margin against the wrong ceiling. (3) The extension " +
-          "is refused if the child has been idle for a while (it rescues 'working hard', never " +
-          "'stalled'). (4) A retry only fires when the failure is classified non-genuine — a timeout is " +
-          "retry-eligible, a clean non-zero exit (a real test failure) never retries. `composerDirtyLen` " +
+          "hand-roll a gate command into a worker's DoD. `timeoutMs` is the RESOLVED gate timeout (what the gate " +
+          "enforces); never guess or carry an inherited figure. Margin facts: " +
+          "(1) a step is auto-extended past `timeoutMs` while it keeps producing output, so exceeding it does " +
+          "NOT by itself mean failure; (2) the merge gate's retry-after-timeout runs with NO extension, so first " +
+          "attempt = timeoutMs + one extension (~2x) while a retry is a HARD timeout — state (1) and (2) " +
+          "together or the margin is computed against the wrong ceiling; (3) the extension is refused if the " +
+          "child has been idle for a while; (4) a retry fires only for a non-genuine failure — a timeout is " +
+          "retry-eligible, a clean non-zero exit (real test failure) never retries. `composerDirtyLen` " +
           "is a count of characters possibly still sitting UNSUBMITTED in YOUR OWN composer from an " +
           "earlier delivery that never confirmed (null when not live in this process; 0 means genuinely " +
-          "clean, NOT unknown) — a non-zero value here, with no turn progressing, MAY mean your own last " +
-          "message never actually landed; one Enter in your terminal (or worker_flush, if you're a " +
-          "worker) recovers a genuinely stranded one. `composerDirtyLenBelieved` (same " +
-          "null-vs-0 discipline) is the OPTIMISTIC counterpart — `composerDirtyLen` never assumes a " +
-          "defensive clear-prefix actually landed, `composerDirtyLenBelieved` always does. Read them " +
-          "TOGETHER: equal means nothing to doubt; `composerDirtyLenBelieved` LOWER than `composerDirtyLen` " +
-          "means a clear was attempted and is unresolved, and the gap is exactly how many characters are " +
-          "in doubt. ⚠️ NOT decisive alone: a GIVE-UP " +
-          "SUPPRESSED mark — Loom believed your turn already started because the engine produced output " +
-          "after its final Enter attempt — has NO automatic clear path on its OWN generation and can " +
-          "read non-zero indefinitely even though nothing is actually stranded (confirmed in production " +
-          "against a verified-empty composer); it clears only once a LATER, unrelated delivery's own " +
-          "confirm resets it. Pressing Enter (or worker_flush) is itself the free disambiguator — a " +
-          "composer-empty-shaped result means nothing was actually stranded. " +
-          "`unconfirmedDeliveryMs` is an EARLIER signal than composerDirtyLen: " +
-          "milliseconds since your CURRENT generation's Enter was written, for as long as it stays " +
-          "unconfirmed — null when nothing is outstanding (never submitted, or already confirmed) OR " +
-          "when the session isn't live in this process — an ABSENT signal, not a measured zero, same " +
-          "discipline as composerDirtyLen's own null; a " +
-          "number the INSTANT a write is outstanding (no dependency on the give-up/heal budget actually " +
-          "firing, unlike composerDirtyLen). It does NOT distinguish 'still within Loom's own retry " +
-          "budget' from 'Loom already gave up on this exact generation, outcome still unknown' — giving " +
-          "up never resets it. Cross-check composerDirtyLen: zero there while this is non-null means " +
-          "genuinely in-flight and never given up; non-zero there is ambiguous (may be this generation's " +
-          "own give-up, or stale residue from an earlier one). If you are a " +
+          "clean, NOT unknown) — non-zero with no turn progressing MAY mean your last message never landed; " +
+          "one Enter in your terminal (or worker_flush, if you're a worker) recovers a genuinely stranded one. " +
+          "`composerDirtyLenBelieved` (same null-vs-0 discipline) is the OPTIMISTIC counterpart: " +
+          "`composerDirtyLen` never assumes a defensive clear-prefix landed, `composerDirtyLenBelieved` always " +
+          "does. Read them TOGETHER: equal means nothing to doubt; Believed LOWER means a clear was attempted " +
+          "and is unresolved, the gap being how many characters are in doubt. ⚠️ NOT decisive alone: a GIVE-UP " +
+          "SUPPRESSED mark (Loom believed your turn started because output followed its final Enter) has no " +
+          "automatic clear path on its own generation and can read non-zero indefinitely with nothing stranded; " +
+          "it clears when a LATER unrelated delivery confirms. Pressing Enter (or worker_flush) is the free " +
+          "disambiguator. " +
+          "`unconfirmedDeliveryMs` is an EARLIER signal: milliseconds since your CURRENT generation's Enter was " +
+          "written, while it stays unconfirmed — null (an ABSENT signal, not a measured zero) when nothing is " +
+          "outstanding or the session isn't live in this process; a number the INSTANT a write is outstanding. " +
+          "It does NOT distinguish 'still within the retry budget' from 'already gave up, outcome unknown' " +
+          "(giving up never resets it). Cross-check composerDirtyLen: zero there while this is non-null means " +
+          "genuinely in-flight and never given up; non-zero is ambiguous (this generation's give-up, or stale " +
+          "residue from an earlier one). If you are a " +
           "Companion (chat_reply is on your tool list), the response ALSO " +
           "includes `companion`: {bindings: [{channel, voiceReplies}], lastDelivery: {channel, text, " +
           "viaVoice, sentAt} | null} — your OWN bound channel(s) + effective voice-reply mode, and the last " +
-          "reply you actually delivered (`text` IS that clip's transcript when `viaVoice` is true). Use it " +
-          "to answer 'what did you just send / on which channel / was it spoken' from real state. " +
+          "reply you delivered (`text` IS the clip's transcript when `viaVoice` is true). " +
           "`columns` is your project's RESOLVED board layout — the SAME array the `board_column_create/" +
-          "rename/delete` tools already return in their own {ok, columns, warnings} payload, so THIS is " +
-          "the read-only way to see it without issuing a mutating call just to read the response. Each " +
-          "entry carries at least {key, label, role, excludeFromIdleWatchdog} — role and " +
-          "excludeFromIdleWatchdog are OPTIONAL and ABSENT when not set on that column, meaning today's " +
-          "default (unroled / not discounted from the idle watchdog), never a measured `false`. Use it to " +
-          "audit which lanes are discounted from the idle watchdog (`excludeFromIdleWatchdog: true`) " +
-          "instead of guessing from a census that can't see them.",
+          "rename/delete` tools return, readable without a mutating call. Each " +
+          "entry carries at least {key, label, role, excludeFromIdleWatchdog}; role and " +
+          "excludeFromIdleWatchdog are OPTIONAL and ABSENT when not set (today's default: unroled / not " +
+          "discounted from the idle watchdog), never a measured `false`.",
         inputSchema: strictShape({}),
       },
       async () => ok(this.myContext(sessionId)),
@@ -2435,7 +2281,7 @@ export class OrchestrationMcpRouter {
       server.registerTool(
         "worker_report",
         {
-          description: "Report your status up to your manager: moves your task (done→review, blocked→waiting) and notifies the manager. Call when done, blocked, or to checkpoint progress. Returns a `deliveryStatus` (delivered-live | queued | boarded | dropped): your manager got it now, it's queued for its next turn, or it's durably boarded for a parked/offline manager (Loom auto-wakes it) — all safe; only `dropped` means it reached nobody. This report is recorded as a durable orchestration event at the instant you call this tool, independent of delivery — a `queued` or `boarded` status survives a daemon restart (boot-reconcile redrives it), so do NOT re-send an already-reported status just because a restart happened before you saw it confirmed live. `noChanges` is an OPTIONAL flag on a `done` report for a LEGITIMATE no-op — you reviewed only, investigated and found nothing to change, or your deliverable lives outside this repo (e.g. a mockup) — where the CORRECT outcome is 0 commits. Set it and a 0-commit done skips the 'you likely forgot to commit' warning and auto-retires your session cleanly (frees your manager's concurrency slot, no worker_stop needed) — the same clean exit a declared no-commit role gets. Omit it (or a done that DID commit) and behavior is unchanged; a 0-commit done without it still warns, so don't set it unless the no-op is genuinely intentional. Conversely, `noChanges:true` is REFUSED (not merely warned) when your assigned branch actually carries commits ahead of base — no legitimate case exists for a done claiming no changes while real commits sit on the branch, so this is a hard refusal (task stays in_progress) naming the verified commit count; drop `noChanges` and report the work honestly, or explain the discrepancy, then re-report. `awaiting` is an OPTIONAL hint on a `progress` report that disambiguates WHY you then go idle: pass `\"background\"` when you're parking because you kicked off a backgrounded command/sub-agent and are relying on its own completion (or the harness's on-completion re-invoke) to bring you back — the daemon cannot see an in-flight background shell, so without this flag the `[loom:worker-idle]` watchdog defaults to assuming you're awaiting your manager's reply, which wrongly invites a `worker_message` that would double-dispatch onto your still-running work. Omit it (or pass `\"manager\"`, the default) for a real checkpoint where you genuinely are waiting on your manager's decision — that case is unaffected and still reads as awaiting-reply. Only meaningful on `progress`: a `blocked` report already means you're waiting on your manager's decision (self-contradictory with `\"background\"`), and a `done` report means you're awaiting merge review, not a reply — don't set it on either.",
+          description: "Report your status up to your manager: moves your task (done→review, blocked→waiting) and notifies the manager. Call when done, blocked, or to checkpoint progress. Returns a `deliveryStatus` (delivered-live | queued | boarded | dropped): your manager got it now, it's queued for its next turn, or it's durably boarded for a parked/offline manager (Loom auto-wakes it) — all safe; only `dropped` means it reached nobody. The report is durably recorded the instant you call this tool, independent of delivery; `queued`/`boarded` survive a daemon restart (boot-reconcile redrives them), so do NOT re-send an already-reported status just because a restart hit before you saw it confirmed live. `noChanges` is an OPTIONAL flag on a `done` report for a LEGITIMATE no-op — you reviewed only, investigated and found nothing to change, or your deliverable lives outside this repo (e.g. a mockup) — where the CORRECT outcome is 0 commits. Set it and a 0-commit done skips the 'you likely forgot to commit' warning and auto-retires your session cleanly (frees your manager's concurrency slot, no worker_stop needed). Without it a 0-commit done still warns, so set it only when the no-op is intentional. `noChanges:true` is REFUSED (task stays in_progress, verified commit count named) when your assigned branch actually carries commits ahead of base; drop it and report the work honestly, or explain the discrepancy, then re-report. `awaiting` is an OPTIONAL hint on a `progress` report that says WHY you go idle: pass `\"background\"` when you're parking on a backgrounded command/sub-agent whose completion will bring you back — the daemon cannot see an in-flight background shell, so without it the `[loom:worker-idle]` watchdog assumes you await your manager's reply and invites a `worker_message` that would double-dispatch onto your still-running work. Omit it (or pass `\"manager\"`, the default) for a real checkpoint awaiting your manager's decision. Only meaningful on `progress`: `blocked` already means awaiting your manager and `done` means awaiting merge review, so don't set it on either.",
           inputSchema: strictShape({
             status: z.enum(["done", "blocked", "progress"]),
             summary: z.string(),
@@ -2475,114 +2321,79 @@ export class OrchestrationMcpRouter {
             "GateSemaphore/`maxConcurrentGates` budget the merge/deploy gates already share, instead of an " +
             "unbounded raw-Bash self-check. Prefer this over running the gate yourself via Bash: it structurally " +
             "bounds total concurrent test-lanes across every worker + merge/deploy gate on the daemon (it also " +
-            "pins LOOM_GATE_TEST_CONCURRENCY=3 on the spawned child itself (matching the merge gate's own default " +
-            "parallelism — semaphore-admitted, so this is structurally safe), so you don't need to set that " +
-            "env var). " +
-            "Because it shares one budget with merge/deploy gates, a busy fleet MAY mean this call queues behind " +
-            "another in-flight gate before it even starts — that's expected, not a hang. " +
-            "COST MODEL (this text was corrected once already — an earlier " +
-            "version claimed a green result here is NEVER consulted by the merge gate's own re-gate; that was " +
-            "FALSE and is retracted, confirmed reused in production more than once). A green self-check here " +
-            "CAN be reused and skip the merge gate's own re-run entirely, IF at merge time your branch is " +
-            "`freshBehindMain === 0` against main's then-current HEAD AND your worktree is clean with no " +
-            "drift since this self-check settled — both re-derived fresh at merge time, never assumed. " +
-            "THE FORFEIT CONDITION IS YOUR OWN BRANCH FALLING BEHIND MAIN BETWEEN THIS SELF-CHECK AND YOUR " +
-            "MERGE, NOT A BUSY OR CONTENDED GATE LANE — a saturated `maxConcurrentGates` lane does NOT by " +
-            "itself defeat reuse (measured directly: reuse still fired while a sibling merge gate held the " +
-            "other lane slot for the entire run). Your decision rule: this self-check pays for itself when " +
-            "your branch is current with main and likely to STAY current until you request merge — " +
-            "regardless of how busy `gate_queue` looks — and it is wasted (~2 full gate runs end to end: this " +
-            "one plus a full re-run at merge, observed ~35 minutes of gate time for one card) only when main " +
-            "is genuinely moving out from under your branch in that window, e.g. several sibling branches on " +
-            "this same project landing while you wait. `worker_merge_confirm`'s OWN re-call verdict cache is " +
-            "a SEPARATE mechanism (for repeated confirm calls on the SAME branch, not for a prior run_gate " +
-            "call) and is likewise defeated whenever that branch was behind main at admission — see that " +
-            "tool's own description for the mechanism and the `supersededBy` signal that announces it. " +
-            "Ordering this before requesting merge is worth it whenever your branch is likely to stay " +
-            "current — a bounded, semaphore-admitted self-check with real per-step diagnosis before you ask " +
-            "for merge, that in that case also amortizes the merge gate's own cost via the reuse above. " +
+            "pins LOOM_GATE_TEST_CONCURRENCY=3 on the spawned child, matching the merge gate's parallelism, so " +
+            "don't set that env var yourself). " +
+            "It shares one budget with merge/deploy gates, so on a busy fleet this call MAY queue behind another " +
+            "in-flight gate before starting — expected, not a hang. " +
+            "COST MODEL: a green self-check here CAN be reused and skip the merge gate's own re-run, IF at merge " +
+            "time your branch is `freshBehindMain === 0` against main's then-current HEAD AND your worktree is " +
+            "clean with no drift since this self-check settled (both re-derived fresh at merge time). THE FORFEIT " +
+            "CONDITION IS YOUR OWN BRANCH FALLING BEHIND MAIN BETWEEN THIS SELF-CHECK AND YOUR MERGE, NOT A BUSY " +
+            "GATE LANE: a saturated `maxConcurrentGates` does NOT by itself defeat reuse. Decision rule: the " +
+            "self-check pays for itself when your branch is current with main and likely to STAY current until " +
+            "you request merge, however busy `gate_queue` looks; it is wasted (~2 full gate runs) only when main " +
+            "moves under your branch in that window, e.g. sibling branches landing while you wait. " +
+            "`worker_merge_confirm`'s OWN re-call verdict cache is a SEPARATE mechanism (repeated confirms on the " +
+            "SAME branch, not a prior run_gate), likewise defeated when the branch was behind main at admission; " +
+            "see that tool's description and its `supersededBy` signal. " +
             "Returns {ran:false, " +
             "reason} if this project has no gateCommand configured at all — fall back to running your own " +
             "build/test command directly (still pin LOOM_GATE_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
             "returns {ran:true, passed, validatedHead, durationMs?, headCurrent?, headWarning?, steps?, " +
-            "outputTail?, outputFile?, gateDetail?} — " +
-            "`validatedHead` is stamped when this run was ISSUED, before it's even admitted past the queue — " +
-            "NOT when the build/test command actually starts. Read `headCurrent` on EVERY settled result, pass " +
-            "or fail, not just on a failure: `true` means `validatedHead` is still your branch HEAD as of " +
-            "settle time — nothing to check. `false` always comes with `headWarning` explaining WHICH of two " +
-            "shapes it is, and they call for DIFFERENT responses: a tree that moved during the QUEUE WAIT " +
-            "(before the command was admitted) was still fully present in what actually got built and tested — " +
-            "the reported sha just understates it, trust the result; a tree that moved WHILE the command was " +
-            "already RUNNING is genuinely unverified — the run may have read an inconsistent mix of old and " +
-            "new files, don't trust it for your current code. `headWarning`'s own wording tells you which one " +
-            "you're looking at — don't guess from `validatedHead` alone. `durationMs` is wall-clock from the moment THIS run was " +
-            "admitted past the semaphore to the moment it settled — this is the trustworthy timing number to " +
-            "reach for instead of hand-running the suite yourself for one (that bypass is exactly what silently " +
-            "opts out of the concurrency cap this tool exists to enforce). Read it precisely: it EXCLUDES queue " +
-            "wait (a run that sat behind another gate isn't penalized for that wait), but it does NOT exclude " +
-            "general host/fleet load, and — if `maxConcurrentGates` is configured above 1 — it does NOT exclude " +
-            "time spent running alongside another concurrently-admitted gate. This is a real duration under " +
-            "real fleet conditions, not an isolated benchmark; don't report it as one. `durationMs`, " +
-            "`headCurrent`, and `headWarning` are all omitted (undefined) on the circuit-breaker short-circuit " +
-            "path, where no gate actually ran. `steps` (per-step {step, durationMs, status}, diagnostic only — " +
-            "never compare these against a threshold or each other) and a bounded `outputTail` are set on " +
-            "EVERY `ran:true` result, PASS INCLUDED — a passing run used to retain neither at all, leaving a " +
-            "green self-check with nothing durable behind a bare pass/fail bit. `outputFile`, " +
-            "present alongside `outputTail` whenever anything was captured, is an absolute path to the FULL " +
-            "captured output — read it (or re-read it later via `gate_status(opId)`) when `outputTail`'s own " +
-            "~4KB/~16KB bound has cut the diagnostic you need mid-line. On a failure, gateDetail " +
-            "ADDITIONALLY " +
+            "outputTail?, outputFile?, gateDetail?}. " +
+            "`validatedHead` is stamped when this run was ISSUED, before it is admitted past the queue, NOT when " +
+            "the command starts. Read `headCurrent` on EVERY settled result, pass or fail: `true` means " +
+            "`validatedHead` is still your branch HEAD at settle time. `false` always comes with `headWarning` " +
+            "saying WHICH of two shapes it is, and they call for DIFFERENT responses: a tree that moved during " +
+            "the QUEUE WAIT was still fully present in what got built and tested (the sha just understates it; " +
+            "trust the result); a tree that moved WHILE the command was RUNNING is genuinely unverified (possibly " +
+            "an inconsistent mix of old and new files; don't trust it for your current code). Don't guess from " +
+            "`validatedHead` alone. `durationMs` is wall-clock from admission past the semaphore to settle: the " +
+            "trustworthy timing number to use instead of hand-running the suite (which opts out of the " +
+            "concurrency cap). It EXCLUDES queue wait but NOT host/fleet load, nor time alongside another " +
+            "concurrently-admitted gate when `maxConcurrentGates` is above 1: a real duration under real fleet " +
+            "conditions, not an isolated benchmark. `durationMs`, `headCurrent` and `headWarning` are omitted on " +
+            "the circuit-breaker short-circuit path, where no gate ran. `steps` (per-step {step, durationMs, " +
+            "status}, diagnostic only — never compare against a threshold or each other) and a bounded " +
+            "`outputTail` are set on EVERY `ran:true` result, PASS INCLUDED. `outputFile`, present alongside " +
+            "`outputTail` whenever anything was captured, is an absolute path to the FULL captured output (also " +
+            "re-readable later via `gate_status(opId)`) for when `outputTail`'s ~4KB/~16KB bound cut the " +
+            "diagnostic mid-line. On a failure, gateDetail ADDITIONALLY " +
             "carries {phase, failedStep, failingTest, failingTestCount, " +
-            "failingTestReason, stderrTail, exitCode, signal, timedOut} so you can diagnose a real test failure " +
-            "vs. a flake without re-running blind — failingTest is `undefined` (never a guessed name) only when " +
-            "nothing recognizable was found, and failingTestReason then says why (gateDetail's own `stderrTail` " +
-            "is the SAME string as the top-level `outputTail`, just alongside the rest of the failure diagnosis). " +
-            "`failingTestCount` is how many lines matched that SAME winning tier — `undefined` " +
-            "iff `failingTest` is itself `undefined`; `1` means `failingTest` is a complete account of the " +
-            "failure; `>1` means it's only the LAST of several matching lines and the rest go unnamed here. " +
-            "NEVER size a fix from `failingTest` alone when `failingTestCount` reads `>1` — go run the file " +
-            "and enumerate; even at `1`, treat it as a prompt to confirm, not proof nothing else could be wrong. " +
-            "The async [loom:gate-failed] " +
-            "nudge (see below) carries this SAME phase/failedStep/failingTest detail in its own text, not just a " +
-            "raw stderr tail — you don't need the sync result in hand to get the diagnosis. The [loom:gate-done] " +
-            "PASS nudge likewise now states its duration and the SAME per-step diagnostic line (never the raw " +
-            "output tail — that stays in the queryable side channel, see below). Both the " +
-            "[loom:gate-done] AND [loom:gate-failed] nudges also inline `headWarning` when it's set, so an " +
-            "async-settled gate's HEAD-currency signal reaches you the same way the sync result does. If you " +
-            "missed the nudge or need to re-check after the fact, `gate_status(opId)` on a SETTLED op now " +
-            "returns this SAME verdict (passed/reason/durationMs/steps/outputTail/gateDetail) directly — see " +
-            "its own tool description; it's a recovery path, not a substitute for waiting on the nudge. " +
-            "CLIENT-TIMEOUT " +
-            "RESILIENT, same shape as worker_merge_confirm: a fast run returns the full " +
-            "result inline (stamped with a correlation `opId`); a genuinely slow one (a real multi-minute test " +
-            "suite) instead returns {opId, status:\"pending\", attachedToInFlight, staleAgainstWorktree}. " +
+            "failingTestReason, stderrTail, exitCode, signal, timedOut} to tell a real test failure from a flake " +
+            "without re-running blind. `failingTest` is `undefined` (never a guessed name) only when nothing " +
+            "recognizable was found, and failingTestReason then says why (`stderrTail` is the same string as the " +
+            "top-level `outputTail`). `failingTestCount` is how many lines matched that SAME winning tier " +
+            "(`undefined` iff `failingTest` is): `1` means `failingTest` is a complete account; `>1` means it is " +
+            "only the LAST of several and the rest go unnamed. NEVER size a fix from `failingTest` alone when the " +
+            "count reads `>1` — run the file and enumerate; even at `1`, confirm. " +
+            "The async [loom:gate-failed] nudge carries this SAME phase/failedStep/failingTest detail, and the " +
+            "[loom:gate-done] PASS nudge states its duration and the per-step line (never the raw output tail); " +
+            "both inline `headWarning` when set. If you missed a nudge, `gate_status(opId)` on a SETTLED op " +
+            "returns the SAME verdict (passed/reason/durationMs/steps/outputTail/gateDetail): a recovery path, " +
+            "not a substitute for waiting on the nudge. " +
+            "CLIENT-TIMEOUT RESILIENT, same shape as worker_merge_confirm: a fast run returns the full " +
+            "result inline (stamped with a correlation `opId`); a slow one instead returns " +
+            "{opId, status:\"pending\", attachedToInFlight, staleAgainstWorktree}. " +
             "DO NOT POLL OR RE-CALL TO FETCH THE RESULT — worker_report progress with awaiting:\"background\" " +
             "and END YOUR TURN; the [loom:gate-done]/[loom:gate-failed] nudge (carrying this SAME opId) starts " +
-            "your next turn with the result. A re-call IS still safe and well-defined, just not how you fetch a " +
-            "result: while the gate is still running, a re-call attaches to that SAME run (attachedToInFlight:" +
-            "true) instead of starting a second one — `staleAgainstWorktree:true` on that reply means the " +
-            "worktree changed (a new commit or an uncommitted edit) since THAT run started, so trust nothing it " +
-            "reports about your current code. Within a short grace window AFTER a run settles, a re-call is " +
-            "USUALLY served that SAME settled result (same opId) instead of starting a fresh run — EXCEPT when " +
-            "that settled result itself already carries `headCurrent:false` (the worktree moved WHILE the gate " +
-            "was running): a KNOWN-CONTAMINATED result is never re-served — a re-call in that case always starts " +
-            "a genuinely new run against your current tree, same as outside the window. CAVEAT on an ordinarily- " +
-            "served settled-window reply: it is NOT re-checked against your worktree's current state — you can " +
-            "still tell if the commit changed by comparing its `validatedHead` to your own HEAD, but an " +
-            "UNCOMMITTED edit you make AFTER an already-clean settle, before your re-call, is invisible to it. " +
-            "If you've edited since the last run_gate call, don't trust a cached pass — wait out the grace " +
-            "window (or just act on your own judgment) before treating it as current. " +
-            "STALE RE-ATTACH IS REFUSED, NOT JOINED: a re-call that would otherwise " +
-            "attach to an in-flight op ALREADY known — before ever attaching — to be GENUINELY ADMITTED " +
-            "(past the gate cap, not merely queued behind a higher-priority merge/deploy gate — a queued " +
-            "op's own eventual run still covers whatever's on disk at admission, so a commit made while it " +
-            "was only queued is harmless and never triggers this) and running against a worktree that has " +
-            "moved SINCE that admission is refused outright: {status:\"refused\", action:\"stale-attached\", " +
-            "opId, canCancel:true, note}, never a wasted wait on a result you'd only have to discard. " +
-            "`gate_cancel` is on YOUR OWN tool surface too — cancel that opId yourself, then re-fire run_gate " +
-            "against your current tree. Pass `force:true` to opt back into the OLD behavior (attach anyway) " +
-            "— e.g. if you'd rather let the stale run finish than pay for a fresh one. `force` has no effect " +
-            "unless there's actually a stale, admitted in-flight op to attach to; it's always safe to pass.",
+            "your next turn with the result. A re-call is still safe, just not how you fetch a result: while the " +
+            "gate is running it attaches to that SAME run (attachedToInFlight:true), and " +
+            "`staleAgainstWorktree:true` means the worktree changed (a new commit or an uncommitted edit) since " +
+            "THAT run started, so trust nothing it reports about your current code. Within a short grace window " +
+            "AFTER a run settles, a re-call is USUALLY served that SAME settled result (same opId), EXCEPT when it " +
+            "already carries `headCurrent:false`: a KNOWN-CONTAMINATED result is never re-served and a re-call " +
+            "starts a genuinely new run. A settled-window reply is NOT re-checked against your worktree: a changed " +
+            "commit shows as `validatedHead` differing from your HEAD, but an UNCOMMITTED edit made after a clean " +
+            "settle is invisible to it, so if you've edited since the last run, don't trust a cached pass. " +
+            "STALE RE-ATTACH IS REFUSED, NOT JOINED: a re-call that would attach to an in-flight op already known " +
+            "to be GENUINELY ADMITTED (past the gate cap, not merely queued; a commit made while it was only " +
+            "queued is harmless) and running against a worktree that has moved SINCE admission is refused: " +
+            "{status:\"refused\", action:\"stale-attached\", opId, canCancel:true, note}. " +
+            "`gate_cancel` is on YOUR OWN tool surface too — cancel that opId, then re-fire run_gate against your " +
+            "current tree. `force:true` opts back into attaching anyway (e.g. to let the stale run finish rather " +
+            "than pay for a fresh one); it has no effect unless there is a stale, admitted in-flight op, and is " +
+            "always safe to pass.",
           inputSchema: strictShape({ force: z.boolean().optional() }),
         },
         async ({ force }) => {
@@ -2644,22 +2455,19 @@ export class OrchestrationMcpRouter {
             "your own worker self-check (gateType `worker`), queued or running — never a merge/deploy gate " +
             "or another session's op, which are refused exactly like a cross-project attempt. " +
             "Returns {outcome:\"cancelled\", phase:\"queued\"|\"running\", opId, gateType:\"worker\"} on " +
-            "success — settles that run_gate op as a distinct `cancelled` outcome, never a failure, and " +
-            "pushes you the SAME `[loom:gate-cancelled]` nudge a manager-initiated cancel would. " +
-            "{outcome:\"refused\", reason} covers a different project's op, a merge/deploy gate, or another " +
-            "session's op — you may only cancel your own run_gate self-check. {outcome:\"not_found\"} means " +
-            "nothing LIVE matches this id (already settled — check the nudge — or never existed). " +
-            "{outcome:\"ambiguous\", reason} means your opId prefix matches more than one of your own " +
-            "project's ops — pass more characters. {outcome:\"not_cancelled\", reason} covers a race with " +
-            "natural completion, or — for a RUNNING self-check — a kill issued but not verified dead within " +
-            "a bounded window (the run continues under its own existing timeout; the slot stays held rather " +
-            "than freed on an unverified assumption). " +
-            "`intent`/`reason` (both optional) are rendered into the SAME text this call returns AND into " +
-            "your own settled op's `reason` — which is what your `[loom:gate-cancelled]` nudge reads out. " +
-            "`intent` is a one-word next-step signal: `refire-when-clear` (re-fire once whatever you're " +
-            "clearing makes way), `hold-for-instructions` (wait for direction before re-firing), or " +
-            "`superseded` (a newer run already replaces this one). `reason` is free text for anything the " +
-            "intent alone doesn't say.",
+            "success — the op settles as a distinct `cancelled` outcome, never a failure, and you get the " +
+            "`[loom:gate-cancelled]` nudge. " +
+            "{outcome:\"refused\", reason} covers another project's op, a merge/deploy gate, or another " +
+            "session's op. {outcome:\"not_found\"} means nothing LIVE matches (already settled — check the " +
+            "nudge — or never existed). {outcome:\"ambiguous\", reason}: your opId prefix matches several of " +
+            "your project's ops — pass more characters. {outcome:\"not_cancelled\", reason} covers a race with " +
+            "natural completion, or a RUNNING self-check whose kill wasn't verified dead within a bounded window " +
+            "(the run continues under its own timeout; the slot stays held). " +
+            "`intent`/`reason` (both optional) are rendered into this call's return text AND your settled op's " +
+            "`reason`, which your `[loom:gate-cancelled]` nudge reads out. " +
+            "`intent` is a one-word next-step signal: `refire-when-clear`, `hold-for-instructions` (wait for " +
+            "direction before re-firing), or `superseded` (a newer run replaces this one). `reason` is free text " +
+            "for what the intent doesn't say.",
           inputSchema: strictShape({
             opId: z.string(),
             intent: z.enum(["refire-when-clear", "hold-for-instructions", "superseded"]).optional(),
@@ -2704,44 +2512,30 @@ export class OrchestrationMcpRouter {
         {
           description:
             "Read your OWN durable delivery history — the mechanical complement to the visible " +
-            "`[loom:possible-duplicate root:XXXXXXXX]` tag. Scoped server-side to YOUR " +
-            "session only (there is no session/worker parameter): reads YOUR OWN recycle lineage (this " +
-            "session plus any predecessor it was recycled from) and nothing else — never another worker, " +
-            "another project, or message TEXT. " +
-            "Call with NO argument to see your most recent known deliveries across every root in your " +
-            "lineage (bounded to the 20 most recent — `truncated:true` means older ones exist; call with " +
-            "`root` for one label's complete history). Call with `root` set to the exact 8 lowercase-hex " +
-            "characters copied verbatim from a duplicate-tag you just received to filter to that one label. " +
-            "A malformed `root` (not 8 hex chars) returns `{error}` — distinguishable from a well-formed " +
-            "root that legitimately has zero matches, never silently identical to it. " +
-            "Returns `{deliveries, deliveryCount, currentTurnSeq, truncated}`. Each entry in `deliveries` " +
-            "is a DURABLE, TURN-CONFIRMED hand-off (never a merely-queued or parked attempt, those carry no " +
-            "signal about what you've seen) with fields: `root` (the label it matched); `at` (when this " +
-            "hand-off/confirmation was recorded); `msgId` (the internal id of the specific hop that actually " +
-            "delivered — NOT necessarily the id printed in the tag you saw, which names the CHAIN's root, " +
-            "not this particular hop); `turnSeq` (see below); `fromSession` (the session that actually SENT " +
-            "it — a manager, another session, or occasionally empty for a system-originated redirect); " +
-            "`receivedBy` (which session in YOUR OWN lineage took the hand-off — this session, OR a " +
-            "predecessor you were recycled from; it is NOT always you, and a value other than your own " +
-            "current session id is exactly the recycle-boundary case: a predecessor of yours received this, " +
-            "not you personally, but it is still genuinely part of your own history). " +
-            "HAVE-I-SEEN-THIS-BEFORE, mechanically: compare each entry's `turnSeq` against the `currentTurnSeq` " +
-            "this same reply carries — `turnSeq < currentTurnSeq` means that delivery happened in an EARLIER " +
-            "turn than this one. `turnSeq` is `null` on a `confirmed-after-park` entry (Loom's own retry " +
-            "budget gave up before a hand-off was cleanly stamped, and a late independent signal proved the " +
-            "engine ran it anyway) — its presence is still a genuine, durably-recorded delivery, but the " +
-            "turnSeq-comparison technique above does not apply to it: Loom cannot mechanically place it " +
-            "relative to your current turn. Treat it as evidence you may have seen this content before, not " +
-            "as proof it was an EARLIER turn specifically. " +
-            "`deliveryCount === 0` is a legitimate, expected answer: despite the tag you may have seen, " +
-            "Loom's own durable history shows no record of this content having reached any of your turns " +
-            "before — the sender-side 'possible duplicate' framing was a false alarm for this instance. " +
-            "KNOWN LIMITATION: matching is by the 8-character LABEL you see in the tag, not by the full " +
-            "internal id the label is derived from — an extremely rare label collision could in principle " +
-            "merge two unrelated messages' history into one answer. " +
-            "THE ONE THING THIS CANNOT TELL YOU: whether you actually ACTED on a prior delivery — only that " +
-            "the text reached one of your turns. Delivery is recorded; action is not. Use your own " +
-            "transcript/memory to judge whether you already acted on it.",
+            "`[loom:possible-duplicate root:XXXXXXXX]` tag. Scoped server-side to YOUR session only (no " +
+            "session/worker parameter): your own recycle lineage (this session plus any predecessor it was " +
+            "recycled from), never another worker, another project, or message TEXT. " +
+            "Call with NO argument for your most recent deliveries across every root in your lineage (the 20 most " +
+            "recent; `truncated:true` means older ones exist — pass `root` for one label's full history), or " +
+            "with `root` = the exact 8 lowercase-hex characters copied verbatim from a duplicate-tag. " +
+            "A malformed `root` returns `{error}`, distinguishable from a well-formed root with zero matches. " +
+            "Returns `{deliveries, deliveryCount, currentTurnSeq, truncated}`. Each entry is a DURABLE, " +
+            "TURN-CONFIRMED hand-off (never a merely-queued or parked attempt) with: `root` (the label it " +
+            "matched); `at` (when recorded); `msgId` (the id of the specific hop that delivered — NOT necessarily " +
+            "the id in the tag you saw, which names the CHAIN's root); `turnSeq`; `fromSession` (who SENT it — a " +
+            "manager, another session, or empty for a system-originated redirect); `receivedBy` (which session " +
+            "in YOUR lineage took it — a value other than your current session id means a predecessor you were " +
+            "recycled from received it, still part of your history). " +
+            "HAVE-I-SEEN-THIS-BEFORE: `turnSeq < currentTurnSeq` means that delivery happened in an EARLIER turn. " +
+            "`turnSeq` is `null` on a `confirmed-after-park` entry (Loom's retry budget gave up before a clean " +
+            "stamp, and a late signal proved the engine ran it anyway): still a genuine delivery, but the " +
+            "comparison doesn't apply; treat it as evidence you may have seen the content, not proof of an " +
+            "earlier turn. `deliveryCount === 0` is a legitimate answer: Loom's history shows this content never " +
+            "reached any of your turns, so the 'possible duplicate' framing was a false alarm. " +
+            "KNOWN LIMITATION: matching is by the 8-character label, so an extremely rare collision could merge " +
+            "two unrelated messages' history. " +
+            "THE ONE THING THIS CANNOT TELL YOU: whether you ACTED on a prior delivery, only that the text " +
+            "reached one of your turns. Use your own transcript/memory for that.",
           inputSchema: strictShape({ root: z.string().optional() }),
         },
         async ({ root }) => {
@@ -4446,61 +4240,48 @@ export class OrchestrationMcpRouter {
           "to \"decision\"): \"decision\" — `options` is an OPTIONAL array of choices for the human to " +
           "pick between (omit for a pure blocker — free-text note only) and `recommendation` is an " +
           "OPTIONAL suggested answer shown as a nudge, not enforced. \"input\" — a freeform-text ask, no " +
-          "options. \"notice\" — an FYI/status update that needs NO answer: it lands in the inbox " +
-          "immediately in its OWN terminal 'notice' state — it is NEVER 'pending', NEVER 'answered', and " +
-          "NEVER returned by question_pull (there's nothing to pull back, and you get no push nudge for " +
-          "it either — that nudge only ever fires for a real human answer). Rate-limited per agent " +
-          "lineage (a human-only, per-project cap — you cannot raise your own limit) — exceeding it " +
-          "REFUSES loudly, naming the limit; consolidate repeated status updates into fewer, more " +
-          "meaningful notices rather than filing one per increment. \"permission\" — ask the human to authorize/deny an irreversible/outward/spend " +
-          "action; `action` (REQUIRED) describes it, `scope` (\"once\"|\"standing\", optional) is the " +
-          "requested grant lifetime, `expiresAt` (optional ISO timestamp) is a requested expiry — this is " +
-          "an ask/answer channel, not a second gate: it does not itself block anything, so if the action " +
-          "must actually WAIT on the answer, hold it yourself. These are your ASK-TIME REQUEST only — the " +
-          "human may grant a different scope/expiry, or none; see question_pull's permission-entry shape " +
-          "for what was actually decided. ADVISORY ONLY: Loom persists + surfaces the decided grant (and " +
-          "flags it once its expiry has passed) but never itself enforces, blocks, or revokes it — you " +
-          "must read the answer and honor it yourself (this tool's `provisionTo`/`fulfillmentTarget`, " +
-          "below, are the same STATES-INTENT-ONLY posture for credentials/observability). OPTIONAL " +
+          "options. \"notice\" — an FYI/status update that needs NO answer: it lands in the inbox in its OWN " +
+          "terminal 'notice' state — NEVER 'pending', NEVER 'answered', NEVER returned by question_pull, and no " +
+          "push nudge (that only fires for a real human answer). Rate-limited per agent lineage (a human-only, " +
+          "per-project cap you cannot raise) — exceeding it REFUSES loudly, naming the limit; consolidate " +
+          "repeated status updates into fewer notices. \"permission\" — ask the human to authorize/deny an " +
+          "irreversible/outward/spend action; `action` (REQUIRED) describes it, `scope` (\"once\"|\"standing\", " +
+          "optional) is the requested grant lifetime, `expiresAt` (optional ISO timestamp) a requested expiry. " +
+          "This is an ask/answer channel, not a second gate: it blocks nothing, so if the action must WAIT on " +
+          "the answer, hold it yourself. Scope/expiry are your ASK-TIME REQUEST only; the human may grant " +
+          "different or none (see question_pull's permission-entry shape). ADVISORY ONLY: Loom persists and " +
+          "surfaces the decided grant (flagging it once expired) but never enforces, blocks or revokes it — " +
+          "read the answer and honor it yourself. OPTIONAL " +
           "`fulfillmentTarget: {profileId, key, expectedValue?}` (\"permission\" only) declares a " +
-          "LIVE-CHECKABLE profile field that would prove the authorized human-only write actually " +
-          "happened — an approval is an AUTHORIZATION, not evidence the write landed, and this is how you " +
-          "let the read side (question_pull/requests_list/task_request_get) tell the difference instead of " +
-          "you re-checking a profile by hand. `key` must name a real Profile field; `expectedValue`, if " +
-          "given, is the exact value that counts as fulfilled (omit for a generic \"no longer at its " +
-          "empty/off default\" presence check). NEVER itself performs or enables the write — the profile " +
-          "field it names stays human-only exactly as before; declaring this only tells the read side WHAT " +
-          "to observe. Omit it and fulfilment reads \"unknown\" (today's exact behavior, unconditionally) " +
-          "— see question_pull's own doc for the resulting {state, detail} shape. \"credential\" — ask for a secret " +
-          "(API key/token) under a NEVER-ECHO model: you will NEVER receive the plaintext, only an ack " +
-          "once it's provided; `envVar` (optional) names the env var/config key you'd like it stored " +
-          "under. It is NOT auto-injected into any session — wiring it in is a separate, human-only step " +
-          "(outside this tool) that must happen before an agent session can use it. " +
-          "`taskId` (optional) softly links this to a board task. `supersedes` (optional): the questionId " +
-          "of a still-PENDING ask (asked by you) that this new ask replaces — atomically cancels it via " +
-          "the SAME machinery as `question_cancel` (your own agent lineage only; pending-only) and lands " +
-          "it `cancelled` with a reason linking this new ask, so a moot/superseded Request never has to " +
-          "sit in the human's inbox waiting on a separate cancel call. This NEW ask is filed regardless " +
-          "of whether the supersede succeeds — if the named ask was already answered/cancelled, unknown, " +
-          "or isn't yours, the cancel is refused (an answer the human already gave is NEVER discarded) " +
-          "and that failure is reported back in the response's `supersede` field, never silently " +
-          "swallowed. You'll get a one-time push nudge into " +
-          "your own session when the human answers; call question_pull to fetch the answer. Returns {questionId} — or, when `supersedes` was " +
-          "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}. A recycle predecessor " +
-          "stuck past its own settle timeout (every OTHER fleet tool refused) is let through HERE ONLY, " +
-          "and the response ALSO carries {note} naming the stuck successor + the human action that " +
-          "resolves it — a question you file this way is auto-CANCELLED if that successor later reaches " +
-          "ready on its own, so you don't need to retract it yourself. OPTIONAL `attachments: " +
-          "[{path, label?}]` — files to show the human alongside this ask (valid on every type, " +
-          "including \"notice\"). `path` MUST be an ABSOLUTE path under one of: the project repo root, " +
-          "this project's worker worktrees, this project's work dir, this project's vault root, or any " +
-          "of this project's registered multi-repo `repos[]` paths — a relative path is refused, and so " +
-          "is any path under LOOM_HOME regardless of which project binding admitted it. `label` defaults " +
-          "to the file's own basename. Everything else " +
-          "(kind/size/image dimensions/availability) is DERIVED server-side from the file itself at send " +
-          "time — you cannot mislabel a type or claim a file exists that doesn't. Rejected OUTRIGHT (the " +
-          "whole call fails, nothing filed) if any path is outside the allowed roots, doesn't exist, is a " +
-          "directory, or if the count/size exceeds this project's human-set caps.",
+          "LIVE-CHECKABLE profile field that would prove the authorized human-only write actually happened (an " +
+          "approval is an AUTHORIZATION, not evidence the write landed), so the read side " +
+          "(question_pull/requests_list/task_request_get) can tell the difference. `key` must name a real " +
+          "Profile field; `expectedValue`, if given, is the exact value that counts as fulfilled (omit for a " +
+          "\"no longer at its empty/off default\" presence check). It NEVER performs or enables the write — the " +
+          "field stays human-only; it only tells the read side WHAT to observe. Omit it and fulfilment reads " +
+          "\"unknown\" (see question_pull for the {state, detail} shape). \"credential\" — ask for a secret " +
+          "(API key/token) under a NEVER-ECHO model: you NEVER receive the plaintext, only an ack once it's " +
+          "provided; `envVar` (optional) names the env var/config key you'd like it stored under. It is NOT " +
+          "auto-injected into any session; wiring it in is a separate human-only step. " +
+          "`taskId` (optional) softly links this to a board task. `supersedes` (optional): the questionId of a " +
+          "still-PENDING ask of yours that this new ask replaces — atomically cancels it via the SAME machinery " +
+          "as `question_cancel` (your own agent lineage only; pending-only), landing `cancelled` with a reason " +
+          "linking the new ask. The NEW ask is filed regardless of whether the supersede succeeds: if the named " +
+          "ask was already answered/cancelled, unknown, or isn't yours, the cancel is refused (an answer the " +
+          "human already gave is NEVER discarded) and the failure is reported in the response's `supersede` " +
+          "field. You'll get a one-time push nudge when the human answers; call question_pull to fetch it. " +
+          "Returns {questionId} — or, when `supersedes` was passed, {questionId, supersede: " +
+          "{cancelled:true, questionId} | {error}}. A recycle predecessor stuck past its own settle timeout " +
+          "(every OTHER fleet tool refused) is let through HERE ONLY, and the response ALSO carries {note} " +
+          "naming the stuck successor + the human action that resolves it; such a question is auto-CANCELLED if " +
+          "that successor later reaches ready on its own. OPTIONAL `attachments: [{path, label?}]` — files to " +
+          "show the human alongside this ask (every type, including \"notice\"). `path` MUST be an ABSOLUTE " +
+          "path under one of: the project repo root, this project's worker worktrees, work dir, vault root, or " +
+          "registered multi-repo `repos[]` paths; a relative path is refused, as is any path under LOOM_HOME. " +
+          "`label` defaults to the file's basename; kind/size/image dimensions/availability are DERIVED " +
+          "server-side from the file itself. The whole call is rejected (nothing filed) if any path is outside " +
+          "the allowed roots, doesn't exist, is a directory, or the count/size exceeds this project's " +
+          "human-set caps.",
         inputSchema: strictShape(QUESTION_ASK_INPUT_SHAPE),
       },
       async (input) => {
@@ -5818,71 +5599,49 @@ export class OrchestrationMcpRouter {
           "Withdraw/cancel ONE of your OWN project's gate ops, by the `opId` a `run_gate`/" +
           "`worker_merge_confirm` pending response or `gate_queue` entry already named (full id or an " +
           "unambiguous prefix). Use this for a case firing `worker_merge_confirm` doesn't already cover — " +
-          "e.g. you've learned the branch's base is known-failing, its last self-check settled " +
-          "`headCurrent:false` (self-reported UNVERIFIED), it was superseded by a new commit, or the worker " +
-          "was recycled mid-run — with no merge decision in sight to auto-reclaim it. Cancellable EITHER " +
-          "queued or running for a worker's own `run_gate` self-check (gateType `worker`). A `merge` gate " +
-          "(gateType `merge`) is cancellable ONLY while QUEUED — zero process risk, nothing was ever " +
-          "spawned for it, same as a queued self-check; a RUNNING merge gate is refused (interrupting one " +
-          "risks leaving staged residue in the canonical checkout that fails closed and needs a HUMAN to " +
-          "clear it by hand before any further merge on that repo succeeds — these two phases are " +
-          "deliberately NOT the same). A `deploy` gate is refused in EITHER phase (no `GateCancelledError` " +
-          "catch exists for it yet, so cancelling one would surface as a misleading crash-shaped failure " +
-          "instead of a clean outcome). " +
+          "e.g. the branch's base is known-failing, its last self-check settled `headCurrent:false` (UNVERIFIED), " +
+          "it was superseded by a new commit, or the worker was recycled mid-run — with no merge decision in " +
+          "sight to auto-reclaim it. A worker's own `run_gate` self-check (gateType `worker`) is cancellable " +
+          "queued OR running. A `merge` gate is cancellable ONLY while QUEUED (nothing was spawned for it); a " +
+          "RUNNING merge gate is refused, because interrupting it can leave staged residue in the canonical " +
+          "checkout that fails closed and needs a HUMAN to clear before any further merge on that repo " +
+          "succeeds. A `deploy` gate is refused in EITHER phase (it has no clean cancelled outcome). " +
           "Returns {outcome:\"cancelled\", phase:\"queued\"|\"running\", opId, gateType, note?} on success " +
-          "(`note` is present ONLY for the waiting-on-self-check branch below). A " +
-          "cancelled QUEUED merge settles its `worker_merge_confirm` op as a distinct `cancelled` outcome — " +
-          "not merged, not rejected — via a `[loom:merge-cancelled]` nudge, never `[loom:merge-failed]`. A " +
-          "cancelled QUEUED `merge_batch` gate likewise settles as `cancelled` (`[loom:merge-batch-cancelled]`) and " +
-          "starts NO per-candidate fallback merges. " +
-          "{outcome:\"refused\", reason} means the op belongs to a DIFFERENT project — you cannot cancel " +
-          "another project's gate op. {outcome:\"not_found\"} means there is nothing LIVE to cancel — this " +
-          "tool only ever acts on the live GateSemaphore registry (plus the two fallbacks below), never the " +
-          "durable op history, so it can't itself tell you whether that's because the op already settled or " +
-          "never existed at all; call `gate_status(opId)` separately if you need to tell those apart (it now " +
-          "distinguishes `settled` from `never_existed`) — rely on the `[loom:gate-*]`/`[loom:merge-*]` " +
-          "nudge for a settled op's real pass/fail outcome either way. If a merge may be waiting on its " +
-          "worker's self-check (see the waiting-on-self-check branch below), pass the MERGE's own opId " +
-          "(`gate_queue`'s `waitingOnSelfCheck` array) to cancel that wait, or the self-check's own opId to " +
-          "cancel it directly. " +
-          "{outcome:\"ambiguous\", reason} means your opId prefix matches more than one op WITHIN YOUR OWN " +
-          "PROJECT — pass more characters. {outcome:\"not_cancelled\", reason} covers every other miss: it " +
-          "left the queue/finished running in the moments before this call landed (a genuine race with " +
-          "natural completion — never fabricated as cancelled over a real result), a RUNNING merge gate or a " +
-          "deploy gate in either phase (unsupported, see above), or — the one hazard this tool takes " +
-          "seriously — a RUNNING self-check where the kill was issued but the process tree's death could not " +
-          "be VERIFIED within a bounded window: that is reported as NOT cancelled on purpose (the run " +
-          "continues under its own existing timeout) rather than risking a freed slot over work that may " +
-          "still be running. A cancelled worker self-check or QUEUED merge settles as a distinct `cancelled` " +
-          "outcome, never a failure — the `[loom:gate-cancelled]`/`[loom:merge-cancelled]` nudge says so " +
-          "explicitly, so don't read one as a red to chase. " +
-          "ALSO REACHES a repo-guard-only wait (an inert-diff-skip merge waiting on a " +
-          "same-repo sibling's guard, surfaced in gate_queue's separate repoGuardOnly array, never in " +
-          "running/queued): tried automatically when the opId doesn't match anything in the ordinary " +
-          "gate registry, same unscoped-then-project-scoped ambiguity handling as above. A QUEUED one " +
-          "cancels with zero process risk exactly like a queued merge; a currently-HOLDING one is refused " +
-          "for the same reason a RUNNING merge gate is (interrupting it risks the same staged-residue " +
-          "hazard) - gateType on a successful cancel here always reads \"merge\" (this IS a merge op, " +
-          "just one that never reached the ordinary gate registry). " +
-          "ALSO REACHES a merge waiting on its worker's self-check (`gate_queue`'s " +
-          "`waitingOnSelfCheck` array, surfaced because `confirmWorkerMerge`'s pre-admission reuse-check " +
-          "wait is now abortable): tried automatically when the opId doesn't match the ordinary gate " +
-          "registry OR a repo-guard-only wait, same unscoped-then-project-scoped ambiguity handling as " +
-          "above. Pass the MERGE's own opId (never the self-check's) — cancelling it ends the merge's wait " +
-          "with zero process risk (nothing was ever spawned for THIS merge's own gate) and settles the " +
-          "merge as a clean `cancelled` outcome, exactly like a QUEUED merge gate withdrawn before " +
-          "admission. The self-check itself is LEFT RUNNING, untouched — its own verdict may still be " +
-          "wanted — so `note` on the success response names its opId; cancel that one too, separately, if " +
-          "you want it stopped as well. `gateType` on a successful cancel here always reads \"merge\". " +
-          "`intent`/`reason` (both optional) are rendered straight into the SAME `reason` " +
-          "text this call returns AND into the cancelled op's own settle text — which is what the " +
-          "`[loom:gate-cancelled]`/`[loom:merge-cancelled]` nudge reads out to whoever is parked on that " +
-          "op, worker or manager. `intent` is a one-word next-step signal: `refire-when-clear` (re-fire " +
-          "once whatever you're clearing makes way — e.g. a merge is about to land), " +
-          "`hold-for-instructions` (don't re-fire yet, wait for direction), or `superseded` (a newer run " +
-          "already replaces this one, nothing to do). `reason` is free text for anything the intent alone " +
-          "doesn't say. Omitting both still cancels — the nudge just falls back to the SAME generic " +
-          "wording it always used.",
+          "(`note` ONLY for the waiting-on-self-check branch below). A cancelled QUEUED merge settles its " +
+          "`worker_merge_confirm` op as a distinct `cancelled` outcome — not merged, not rejected — via a " +
+          "`[loom:merge-cancelled]` nudge, never `[loom:merge-failed]`; a cancelled QUEUED `merge_batch` gate " +
+          "likewise settles `cancelled` (`[loom:merge-batch-cancelled]`) and starts NO per-candidate fallback " +
+          "merges. A cancelled worker self-check or queued merge is never a failure: the " +
+          "`[loom:gate-cancelled]`/`[loom:merge-cancelled]` nudge says so, so don't read one as a red to chase. " +
+          "{outcome:\"refused\", reason} means the op belongs to a DIFFERENT project. {outcome:\"not_found\"} " +
+          "means nothing LIVE to cancel — this tool acts only on the live GateSemaphore registry (plus the two " +
+          "fallbacks below), never durable history, so it can't say whether the op already settled or never " +
+          "existed; call `gate_status(opId)` (which distinguishes `settled` from `never_existed`) and rely on the " +
+          "`[loom:gate-*]`/`[loom:merge-*]` nudge for a settled op's real outcome. " +
+          "{outcome:\"ambiguous\", reason} means your opId prefix matches more than one op in YOUR project — " +
+          "pass more characters. {outcome:\"not_cancelled\", reason} covers every other miss: the op left the " +
+          "queue or finished in the moments before this call (a genuine race, never fabricated as cancelled), " +
+          "a RUNNING merge gate or a deploy gate (unsupported), or a RUNNING self-check whose kill was issued " +
+          "but whose process tree's death could not be VERIFIED within a bounded window — reported NOT " +
+          "cancelled on purpose (the run continues under its own timeout) rather than freeing a slot over work " +
+          "that may still run. " +
+          "ALSO REACHES a repo-guard-only wait (an inert-diff-skip merge waiting on a same-repo sibling's guard, " +
+          "in gate_queue's `repoGuardOnly` array): tried automatically when the opId matches nothing in the " +
+          "ordinary registry, same ambiguity handling. A QUEUED one cancels like a queued merge; a " +
+          "currently-HOLDING one is refused like a RUNNING merge gate (same staged-residue hazard). `gateType` on " +
+          "a successful cancel here always reads \"merge\". " +
+          "ALSO REACHES a merge waiting on its worker's self-check (`gate_queue`'s `waitingOnSelfCheck` array): " +
+          "tried automatically when the opId matches neither the ordinary registry nor a repo-guard-only wait. " +
+          "Pass the MERGE's own opId (never the self-check's): that ends the wait with zero process risk and " +
+          "settles the merge as a clean `cancelled`. The self-check is LEFT RUNNING untouched (its verdict may " +
+          "still be wanted), so `note` names its opId; cancel that separately if you want it stopped too. " +
+          "`gateType` there also reads \"merge\". " +
+          "`intent`/`reason` (both optional) are rendered into the `reason` text this call returns AND into the " +
+          "cancelled op's settle text, which the `[loom:gate-cancelled]`/`[loom:merge-cancelled]` nudge reads out " +
+          "to whoever is parked on that op. `intent` is a one-word next-step signal: `refire-when-clear` (re-fire " +
+          "once whatever you're clearing makes way, e.g. a merge about to land), `hold-for-instructions` (don't " +
+          "re-fire yet), or `superseded` (a newer run replaces this one). `reason` is free text for anything the " +
+          "intent doesn't say. Omitting both still cancels, with the generic nudge wording.",
         inputSchema: strictShape({
           opId: z.string(),
           intent: z.enum(["refire-when-clear", "hold-for-instructions", "superseded"]).optional(),
