@@ -21,6 +21,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, finishAndExit, useOwnLoomHome } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
+import { writeNpmCodexShim } from "./_codex-npm-shim.mjs";
 
 let failures = 0;
 const check = (label, cond, diag) => {
@@ -33,10 +34,8 @@ const tmpHome = mkdtempManaged("loom-codex-resume-restore-chokepoint-");
 useOwnLoomHome("loom-codex-resume-restore-chokepoint-loomhome-"); // scopes codexRolloutArchiveRoot() to a fresh temp LOOM_HOME
 const tmpCodexHome = mkdtempManaged("loom-codex-resume-restore-chokepoint-codexhome-");
 process.env.CODEX_HOME = tmpCodexHome; // scopes codexSessionsRoot() to a fresh temp CODEX_HOME — never the real ~/.codex
-const wrapperPath = process.platform === "win32" ? path.join(tmpHome, "fake-codex.cmd") : path.join(tmpHome, "fake-codex.sh");
-if (process.platform === "win32") {
-  fs.writeFileSync(wrapperPath, `@"${process.execPath}" "${FIXTURE_PATH}" %*\r\n`);
-} else {
+const wrapperPath = process.platform === "win32" ? writeNpmCodexShim(tmpHome, FIXTURE_PATH) : path.join(tmpHome, "fake-codex.sh"); // card e92cd4a3: win32 = a real npm-shim shape
+if (process.platform !== "win32") {
   fs.writeFileSync(wrapperPath, `#!/bin/sh\nexec "${process.execPath}" "${FIXTURE_PATH}" "$@"\n`);
   fs.chmodSync(wrapperPath, 0o755);
 }

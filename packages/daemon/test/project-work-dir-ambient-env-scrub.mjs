@@ -34,6 +34,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, registerForCleanup, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
+import { writeNpmCodexShim } from "./_codex-npm-shim.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -160,24 +161,32 @@ if (process.platform !== "win32") {
   // =====================================================================================================
   // PART 3 — the identical pair of proofs for createCodexPty.
   // =====================================================================================================
-  process.env.LOOM_CODEX_BIN = wrapperPath("fake-codex-pwd-scrub.cmd");
+  // Card e92cd4a3: createCodexPty resolves a .cmd bin through winCmdShimSpawnTarget and FAILS CLOSED on a
+  // non-npm-shim wrapper, so the codex fixture must be a real npm-shim shape.
+  process.env.LOOM_CODEX_BIN = writeNpmCodexShim(fs.mkdtempSync(path.join(tmpHome, "codex-shim-")), FIXTURE_PATH);
+  // The spawn call sits INSIDE each try: a throw there used to escape top-level, skip finishAndExit's
+  // process.exit, and leave the earlier PARTS' live ptys holding the event loop open (a hang until the
+  // suite timeout). Now a spawn failure is a counted FAIL and the file still reaches finishAndExit.
   {
     const sid = "pwd-scrub-codex-noproj";
     const dumpPath = path.join(tmpHome, `${sid}-env.json`);
     process.env.FIXTURE_ENV_OUTPUT_FILE = dumpPath;
     const cwd = fs.mkdtempSync(path.join(tmpHome, "cwd-"));
     const host = new PtyHost(events);
-    const pty = host.createCodexPty({
-      sessionId: sid, cwd, permission: {}, geometry: { cols: 120, rows: 40 },
-      sessionEnv: {}, role: "worker", harness: "codex",
-    });
+    let pty;
     try {
+      pty = host.createCodexPty({
+        sessionId: sid, cwd, permission: {}, geometry: { cols: 120, rows: 40 },
+        sessionEnv: {}, role: "worker", harness: "codex",
+      });
       await waitUntil(() => fs.existsSync(dumpPath), { label: `${sid} fixture env dump` });
       const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
       check("(PART 3, codex, no projectId) ambient LOOM_PROJECT_WORK_DIR pollution never reaches the real child env",
         !("LOOM_PROJECT_WORK_DIR" in dump));
+    } catch (err) {
+      check(`(PART 3, codex, no projectId) spawn/dump did not throw: ${err?.message ?? err}`, false);
     } finally {
-      try { pty.kill(); } catch { /* best-effort */ }
+      try { pty?.kill(); } catch { /* best-effort */ }
     }
   }
   {
@@ -187,11 +196,12 @@ if (process.platform !== "win32") {
     const cwd = fs.mkdtempSync(path.join(tmpHome, "cwd-"));
     const PROJECT_ID = "pwd-scrub-codex-project-id";
     const host = new PtyHost(events);
-    const pty = host.createCodexPty({
-      sessionId: sid, cwd, permission: {}, geometry: { cols: 120, rows: 40 },
-      sessionEnv: {}, role: "worker", harness: "codex", projectId: PROJECT_ID,
-    });
+    let pty;
     try {
+      pty = host.createCodexPty({
+        sessionId: sid, cwd, permission: {}, geometry: { cols: 120, rows: 40 },
+        sessionEnv: {}, role: "worker", harness: "codex", projectId: PROJECT_ID,
+      });
       await waitUntil(() => fs.existsSync(dumpPath), { label: `${sid} fixture env dump` });
       const dump = JSON.parse(fs.readFileSync(dumpPath, "utf8"));
       const expected = projectWorkDir(PROJECT_ID);
@@ -199,8 +209,10 @@ if (process.platform !== "win32") {
         dump.LOOM_PROJECT_WORK_DIR === expected);
       check("(PART 3, codex, WITH projectId) child's value is NOT the polluted ambient string",
         dump.LOOM_PROJECT_WORK_DIR !== POLLUTED_VALUE);
+    } catch (err) {
+      check(`(PART 3, codex, WITH projectId) spawn/dump did not throw: ${err?.message ?? err}`, false);
     } finally {
-      try { pty.kill(); } catch { /* best-effort */ }
+      try { pty?.kill(); } catch { /* best-effort */ }
     }
   }
 }

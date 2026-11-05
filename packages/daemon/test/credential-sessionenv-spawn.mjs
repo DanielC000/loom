@@ -48,6 +48,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil } from "./_wait.mjs";
+import { writeNpmCodexShim } from "./_codex-npm-shim.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -64,8 +65,7 @@ const FIXTURE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "fi
 const tmpHome = mkdtempManaged("loom-credential-sessionenv-spawn-");
 process.env.LOOM_HOME = tmpHome;
 
-const wrapperPath = path.join(tmpHome, "fake-codex.cmd");
-fs.writeFileSync(wrapperPath, `@"${process.execPath}" "${FIXTURE_PATH}" %*\r\n`);
+const wrapperPath = writeNpmCodexShim(tmpHome, FIXTURE_PATH); // card e92cd4a3: a real npm-shim shape
 process.env.LOOM_CODEX_BIN = wrapperPath;
 
 const { Db } = await import("../dist/db.js");

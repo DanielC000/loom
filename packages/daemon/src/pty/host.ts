@@ -10,7 +10,7 @@ import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, Capabi
 import { CODEX_PROVIDER_KEY_ENV_VAR, isBuiltinCodexProviderId, codexProviderBindingError } from "../profiles/codex-provider.js";
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveProfileCapabilities, usesOrchestrationMcp, mountsTaskMcp, LOOM_DRIVEN_ROLES, BOOT_DIALOG_DETECTOR_ROLES, isLoomDrivenRole } from "@loom/shared";
-import { resolveExecutable } from "./resolve-bin.js";
+import { resolveExecutable, winCmdShimSpawnTarget } from "./resolve-bin.js";
 import { wrapStdioMountWithEnvIsolation } from "./env-isolation.js";
 import {
   type OrphanSweepRow, parseWin32SweepTicks, parseOrphanSweepLine, WIN32_SWEEP_PS_COMMAND,
@@ -7226,8 +7226,26 @@ export class PtyHost {
     return codexProviderArgs;
   }
 
-  protected createCodexPty(opts: SpawnOpts, mcpToken?: string): IPty {
+  /**
+   * Resolve the codex binary and its launch target. Same shared resolver as codescape/usage-status
+   * (`winCmdShimSpawnTarget`): with `args` empty, `launch.args` is just the shim's real entry script (or `[]`
+   * for a passthrough), and the real codex argv is appended at the spawn. FAIL CLOSED: an unparsable shim
+   * throws, never falling back to the implicit cmd.exe. Pure of side effects, so callers run it first.
+   * @decision e92cd4a3 — do not add a cmd.exe/implicit-shell fallback for an unparsable codex shim.
+   */
+  private resolveCodexLaunch(): { bin: string; launch: { command: string; args: string[] } } {
     const bin = resolveExecutable(process.env.LOOM_CODEX_BIN || CODEX_BINARY_NAME);
+    try {
+      return { bin, launch: winCmdShimSpawnTarget(bin, []) };
+    } catch (err) {
+      throw new Error(`cannot spawn codex: found "${bin}", but it is not a standard npm shim, and Loom refuses to run it through cmd.exe. Install codex as an npm global (npm i -g @openai/codex) so that %APPDATA%\\npm\\codex.cmd is a standard npm shim (a pnpm-global or hand-written codex.cmd is not supported). Cause: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
+  protected createCodexPty(opts: SpawnOpts, mcpToken?: string): IPty {
+    // Card e92cd4a3: resolve the launch target FIRST, before any side effect (rollout restore, provider-secret
+    // decrypt, scratch dirs) — a refused shim must leave nothing behind.
+    const { bin, launch } = this.resolveCodexLaunch();
     // Card 8d828fa4: was a bare `process.env` copy — silently dropped opts.sessionEnv (despite
     // buildMcpServers, below, READING opts.sessionEnv?.LOOM_PYTHON_INTERPRETER on the very next lines) plus
     // the git-safety/worktree-anchor/Python-encoding vars createPty's own spawn already gets. Route through
@@ -7415,7 +7433,10 @@ export class PtyHost {
     const args = [...resumeArgs, "-a", "never", "-s", "workspace-write", "--no-alt-screen", ...CODEX_UPDATE_CHECK_OVERRIDE_ARGS, ...mcpArgs, ...buildCodexModelArgs(opts.model), ...codexProviderArgs];
     // eslint-disable-next-line no-console
     console.log(`[pty] spawnCodex ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${isCodexResume ? opts.resumeId : "none"} mcpServers=${Object.keys(mcpServers).join(",")}`);
-    return spawn(bin, args, {
+    // Card e92cd4a3: on Windows an npm-global codex is a `.cmd` shim that node-pty would hand to cmd.exe
+    // IMPLICITLY (`%VAR%` expansion, `^` stripping on every argv element). `launch` (resolved at the top of
+    // this method) is node + the shim's real entry, so argv arrives literally; a passthrough off win32.
+    return spawn(launch.command, [...launch.args, ...args], {
       name: "xterm-256color",
       cols: opts.geometry.cols,
       rows: opts.geometry.rows,
@@ -7458,6 +7479,9 @@ export class PtyHost {
    * `drainCodexPending`, never a caller convention any `enqueueStdin` site could bypass.
    */
   private spawnCodexProcess(opts: SpawnOpts): void {
+    // Card e92cd4a3: refuse an unparsable codex shim BEFORE the first side effect below (AGENTS.md doctrine
+    // write). createCodexPty re-resolves (cheap, side-effect-free) so direct callers get the same refusal.
+    this.resolveCodexLaunch();
     // Card 887e10b8 Item 1: deliver the condensed worker doctrine into <cwd>/AGENTS.md BEFORE the real
     // process starts — codex reads its project-instructions file at boot, so this must land on disk ahead
     // of createCodexPty, not raced in afterward. Best-effort + role-gated (worker only); see

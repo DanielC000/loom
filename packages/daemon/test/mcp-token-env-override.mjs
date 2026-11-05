@@ -25,6 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, registerForCleanup, finishAndExit } from "./_tmp-fixture.mjs";
 import { waitUntil, waitForJsonFile } from "./_wait.mjs";
+import { writeNpmCodexShim } from "./_codex-npm-shim.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -140,20 +141,23 @@ if (process.platform !== "win32") {
   // PART 3 — a REAL codex spawn (fake binary): the SAME guarantee for createCodexPty
   // =====================================================================================================
   {
-    process.env.LOOM_CODEX_BIN = wrapperPath("fake-codex-part3.cmd");
+    // Card e92cd4a3: a codex .cmd bin must be a real npm-shim shape (createCodexPty fails closed otherwise).
+    process.env.LOOM_CODEX_BIN = writeNpmCodexShim(fs.mkdtempSync(path.join(tmpHome, "codex-shim-")), FIXTURE_PATH);
     const sid = "mtenv-part3-codex";
     const dumpPath = path.join(tmpHome, `${sid}-env-dump.json`);
     const outputPath = path.join(tmpHome, `${sid}-fixture-output`);
     const host = new PtyHost(events);
-    host.spawn({
-      sessionId: sid, cwd: tmpHome, permission: {}, geometry: { cols: 120, rows: 40 }, role: undefined, harness: "codex",
-      sessionEnv: {
-        FIXTURE_OUTPUT_FILE: outputPath,
-        FIXTURE_ENV_DUMP_FILE: dumpPath,
-        [MCP_TOKEN_ENV_VAR]: "attacker-controlled-via-sessionenv-codex",
-      },
-    });
     try {
+      // The spawn sits INSIDE the try: a throw (e.g. a refused shim) is a counted FAIL, not an uncaught
+      // top-level error that silently skips PART 4+.
+      host.spawn({
+        sessionId: sid, cwd: tmpHome, permission: {}, geometry: { cols: 120, rows: 40 }, role: undefined, harness: "codex",
+        sessionEnv: {
+          FIXTURE_OUTPUT_FILE: outputPath,
+          FIXTURE_ENV_DUMP_FILE: dumpPath,
+          [MCP_TOKEN_ENV_VAR]: "attacker-controlled-via-sessionenv-codex",
+        },
+      });
       const liveToken = host.liveCodex?.get(sid)?.mcpToken;
       check("(PART 3 setup) the live codex session has a real, non-empty minted mcpToken", typeof liveToken === "string" && liveToken.length > 0);
       const dump = await waitForJsonFile(dumpPath, { label: `${sid} fixture env dump`, timeoutMs: 15000 });
@@ -161,6 +165,8 @@ if (process.platform !== "win32") {
         dump[MCP_TOKEN_ENV_VAR] === liveToken);
       check("(PART 3 negative control) the attacker-controlled sessionEnv value does NOT survive into the real codex spawn's env",
         dump[MCP_TOKEN_ENV_VAR] !== "attacker-controlled-via-sessionenv-codex");
+    } catch (err) {
+      check(`(PART 3) codex spawn/dump did not throw: ${err?.message ?? err}`, false);
     } finally {
       try { host.stop(sid, "hard"); } catch { /* best-effort */ }
     }

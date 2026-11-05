@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { requireHermeticEnv, assertUnderOsTmpdir } from "./_guard.mjs"; // arms the Db backstop (LOOM_TEST=1) too
 import { mkdtempManaged, finishAndExit, registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitForJsonFile } from "./_wait.mjs";
+import { writeNpmCodexShim } from "./_codex-npm-shim.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -52,8 +53,7 @@ requireHermeticEnv(); // confirms LOOM_HOME (and, now, LOOM_PROJECT_WORK_ROOT if
 // A .cmd wrapper so node-pty (which spawns `bin` directly with an args ARRAY, no shell/interpreter
 // indirection) can launch `node env-dump-cli.mjs` as the substitute "codex" binary — mirrors
 // kickoff-real-spawn.mjs's identical LOOM_CLAUDE_BIN wrapper.
-const wrapperPath = path.join(tmpHome, "fake-codex.cmd");
-fs.writeFileSync(wrapperPath, `@"${process.execPath}" "${FIXTURE_PATH}" %*\r\n`);
+const wrapperPath = writeNpmCodexShim(tmpHome, FIXTURE_PATH); // card e92cd4a3: a real npm-shim shape
 process.env.LOOM_CODEX_BIN = wrapperPath;
 
 const envOutputFile = path.join(tmpHome, "spawned-env.json");
