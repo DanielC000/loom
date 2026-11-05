@@ -2725,88 +2725,53 @@ export class PlatformMcpRouter {
       "resume_doc_check",
       {
         description:
-          "Check YOUR OWN resume doc's rotation integrity against the Platform project's " +
-          "configured protected-marker set (orchestration.rotationMarkers) and, if configured, its " +
-          "LIVE-COMMITMENTS-style numbered-section floor (orchestration.rotationLiveCommitmentsHeading/" +
-          "rotationLiveCommitmentsFloor). Resolves and reads your lineage's ACTIVE resume doc ITSELF — " +
-          "there is NO path argument for it, so you can never check the wrong file (the optional " +
-          "`archivePath` below IS a path argument, for a DIFFERENT file — see its own note). Call with no arguments any time " +
-          "(lint-mode: markers + floor only, no rotation implied). ⚠️ `configured:false` means this seat " +
-          "has NOT set up any protection yet — an unconfigured seat's `ok:true` is VACUOUS (nothing was " +
-          "actually checked), never mistake it for 'checked and passed.' You (as the human-equivalent " +
-          "elevated role) can freely add, remove, or re-point ANY of rotationMarkers (an array of " +
-          "`{token: string, caseSensitive?: boolean, note?: string}` objects, NOT bare strings)/" +
-          "rotationLiveCommitmentsHeading/rotationLiveCommitmentsFloor via project_configure on the " +
-          "Platform project — unlike a manager's project_update, which can only GROW its own project's " +
-          "set (see project_configure's own note on the asymmetry). " +
-          "The LIVE-COMMITMENTS section is normally located by matching " +
-          "`rotationLiveCommitmentsHeading` against the first heading line that CONTAINS it — a heading " +
-          "elsewhere that merely CITES that text (and happens to appear earlier) can silently win over " +
-          "the real section. Set `orchestration.rotationLiveCommitmentsMarker` (e.g. an HTML comment like " +
-          "`<!-- loom:live-commitments -->`, placed on its own line above the section heading or inline " +
-          "on it) to anchor on that explicit token instead — once set, there is NO fallback to " +
-          "heading-text search if the marker is missing from a given text. If the marker's literal text " +
-          "occurs more than once, the response carries `liveCommitments.markerAmbiguous`/" +
-          "`markerOccurrences` plus a top-level `markerAmbiguityWarning` — never a silent first-match. " +
-          "⚠️ HONEST LIMIT: every check here is an " +
-          "exact-substring grep — it proves literal text survived, not that no meaning was lost to " +
-          "rewording. A green is a candidate set ('nothing was blatantly deleted'), never a verdict that " +
-          "no meaning was lost — still read the real diff for a rewrite that changed words but kept (or " +
-          "lost) the idea. At an actual ROTATION: pass `archivePath` to also verify the archive file this " +
-          "rotation is producing exists and is non-empty — it must resolve INSIDE this project's " +
-          "vaultPath (refused otherwise), mirroring where the rotation doctrine already puts an archive " +
-          "(a `<name>.archive/<date>.md` sibling of the active doc). Pass `preEditBytes` (a byte count " +
-          "YOU measured before editing) to verify the doc actually shrank — this is CUT-scoped, not " +
-          "rotation-scoped (a rotation is a replacement, not a cut; omit this for an ordinary rotation). " +
-          "Pass `rulesPath` to also union-check markers against a NON-ROTATING rules " +
-          "file (e.g. an Orchestrator Rules.md) — a marker is satisfied if present in the ACTIVE doc OR " +
-          "the rules file, mirroring the rotation-gate.mjs script's own --rules semantics; this " +
-          "is a union, NEVER a replacement — a marker present in NEITHER still fails. `rulesPath` NOW " +
-          "ALSO unions the LIVE-COMMITMENTS-style floor itself: the numbered section is " +
-          "counted wherever its heading is actually found — the active doc first (so nothing changes " +
-          "while it stays there), the rules file only when the active doc has no such heading at all — " +
-          "so this section can move OUT of the rotating doc into a rules file without ever going blind. " +
-          "`liveCommitments.source` (\"active\"|\"rules\"|null) names which file the count actually came " +
-          "from; null only alongside a hard failure (the heading was in NEITHER file). Like `archivePath`, " +
-          "`rulesPath` must resolve INSIDE this project's vaultPath (refused otherwise) — omit it and " +
-          "behavior is byte-identical to a call with no rules file at all. ⚠️ If `rulesPath` IS supplied " +
-          "but cannot be read (e.g. a wrong base — vault-ROOT-relative instead of this project's own " +
-          "vaultPath), the union degrades to active-only for BOTH markers and the commitments floor — " +
-          "the overall `ok` is UNAFFECTED only when the active doc alone already satisfies everything " +
-          "(the common case while the LIVE COMMITMENTS section still lives there). It is NOT unaffected " +
-          "once that section has moved: with no readable rules file to fall back to, the floor check (and " +
-          "so the overall `ok`) genuinely FAILS — this is the same 'nothing durable protects it' outcome " +
-          "as the section being missing outright, by design. Always check the returned `rulesCheck` field " +
-          "when you pass this argument: `rulesCheck.ok:false` names the exact resolved " +
-          "path that could not be read, so a red `ok` is diagnosable as 'rulesPath unreadable', not 'the " +
-          "section is actually gone.' ⚠️ If the LIVE COMMITMENTS heading is found in BOTH the active doc " +
-          "AND the rules file (the active doc's count wins by precedence, never the rules file's), the " +
-          "response carries a loud top-level `ambiguityWarning` — this shape is the expected transient " +
-          "residue of a doc mid-migration into the rules file (a leftover heading where only a plain " +
-          "prose pointer should remain) and should be resolved, not left standing. " +
-          "Pass `rulesPaths` (an array) instead of/alongside `rulesPath` to union-check " +
-          "against MULTIPLE non-rotating rules files at once (e.g. a seat with more than one doctrine " +
-          "file) — `rulesPath` alone is UNCHANGED and byte-identical to before this card; passing " +
-          "`rulesPaths` (even a single-entry array) switches to an EXTENDED response shape that names " +
-          "WHICH file satisfied each marker/the commitments floor by its own resolved path instead of the " +
-          "generic \"rules\" label: `markerSources` values become that path, `liveCommitments.source` can " +
-          "be that path too, and on ambiguity (the heading found in more than one place) the response " +
-          "carries `liveCommitments.otherSources` (an array of every OTHER place it was found) instead of " +
-          "the single-file `otherCount`/`otherDiagnostic` pair. Each entry of `rulesPaths` is independently " +
-          "vault-contained exactly like `rulesPath` (refused if any resolves outside this project's " +
-          "vaultPath) and independently reported in the response's `rulesChecks` array (mirrors " +
-          "`rulesCheck` per-file) — a file that does not exist or cannot be read is a REAL entry there " +
-          "with `ok:false`, never silently dropped from the union. " +
-          "A marker being FOUND is NOT evidence its content survived — a marker satisfied " +
-          "by a line that merely NAMES it (a marker list, a doctrine note warning 'keep this so the " +
-          "marker resolves') reads identical to one satisfied by real content in `markerSources`/`ok` " +
-          "alone. The response also carries `markerHits` (per FOUND marker: every line in its winning " +
-          "source containing the token, each with a match-centered excerpt — NEVER head-anchored, since " +
-          "a real doc can have matches past any fixed head window — and `sharedLineMarkers`, naming any " +
-          "OTHER configured marker also on that exact line) and a top-level `markersNeedingReview` (marker " +
-          "tokens whose hits carry `multipleHits` or a non-empty `sharedLineMarkers` — 'inspect these', " +
-          "never a verdict, never folded into `ok`). Read the excerpts yourself to tell a meta-mention " +
-          "from real content; this module still cannot classify that automatically.",
+          "Check YOUR OWN resume doc's rotation integrity against the Platform project's protected-marker set " +
+          "(orchestration.rotationMarkers) and, if configured, its LIVE-COMMITMENTS-style numbered-section " +
+          "floor (orchestration.rotationLiveCommitmentsHeading/rotationLiveCommitmentsFloor). It resolves and " +
+          "reads your lineage's ACTIVE resume doc itself (no path argument for it, so it can't check the " +
+          "wrong file). Call with no arguments any time (lint-mode: markers + floor, no rotation implied). " +
+          "⚠️ `configured:false` means no protection is set up: that seat's `ok:true` is VACUOUS, not " +
+          "'checked and passed.' You may freely add, remove or re-point rotationMarkers (an array of " +
+          "`{token: string, caseSensitive?: boolean, note?: string}` objects, NOT bare strings), " +
+          "rotationLiveCommitmentsHeading and rotationLiveCommitmentsFloor via project_configure on the " +
+          "Platform project, unlike a manager's project_update, which can only GROW the set. " +
+          "The LIVE-COMMITMENTS section is located by the first heading line CONTAINING " +
+          "`rotationLiveCommitmentsHeading`, so an earlier heading that merely CITES that text can win. Set " +
+          "`orchestration.rotationLiveCommitmentsMarker` (e.g. `<!-- loom:live-commitments -->` on its own " +
+          "line above the heading, or inline on it) to anchor on that token instead; once set there is NO " +
+          "fallback to heading search if it is missing. A marker occurring more than once yields " +
+          "`liveCommitments.markerAmbiguous`/`markerOccurrences` and a top-level `markerAmbiguityWarning`. " +
+          "⚠️ HONEST LIMIT: every check is an exact-substring grep. It proves literal text survived, not that " +
+          "no meaning was lost to rewording; a green is a candidate set, so still read the real diff. " +
+          "At a ROTATION: pass `archivePath` to also verify the archive file exists and is non-empty (it " +
+          "must resolve INSIDE this project's vaultPath, else refused; by convention a " +
+          "`<name>.archive/<date>.md` sibling of the active doc). Pass `preEditBytes` (a byte count you " +
+          "measured before editing) to verify the doc shrank; this is CUT-scoped, so omit it for an ordinary " +
+          "rotation. Pass `rulesPath` to also union-check markers against a NON-ROTATING rules file (e.g. " +
+          "an Orchestrator Rules.md): a marker is satisfied if present in the ACTIVE doc OR the rules file " +
+          "(mirrors rotation-gate.mjs --rules); a marker in NEITHER still fails. `rulesPath` also unions the " +
+          "LIVE-COMMITMENTS floor: the section is counted in the active doc first, and in the rules file " +
+          "only when the active doc has no such heading, so the section can move out of the rotating doc. " +
+          "`liveCommitments.source` (\"active\"|\"rules\"|null) names where the count came from; null only " +
+          "with a hard failure (heading in NEITHER file). `rulesPath` must resolve INSIDE this project's " +
+          "vaultPath (else refused). ⚠️ If `rulesPath` is supplied but unreadable (e.g. vault-ROOT-relative " +
+          "instead of vaultPath-relative), the union degrades to active-only for markers and floor: `ok` is " +
+          "unaffected only while the active doc alone satisfies everything, and genuinely FAILS once the " +
+          "section has moved. Always check `rulesCheck` when passing it: `rulesCheck.ok:false` names the " +
+          "exact path that could not be read. ⚠️ A LIVE COMMITMENTS heading found in BOTH the active doc and " +
+          "the rules file (the active doc's count wins) yields a top-level `ambiguityWarning`, the transient " +
+          "residue of a mid-migration doc; resolve it. Pass `rulesPaths` (an array) instead of/alongside " +
+          "`rulesPath` to union-check MULTIPLE rules files; even a single-entry array switches to an " +
+          "EXTENDED response that names the satisfying file by resolved path: `markerSources` values and " +
+          "`liveCommitments.source` become that path, and on ambiguity `liveCommitments.otherSources` lists " +
+          "every other place found (instead of `otherCount`/`otherDiagnostic`). Each entry is " +
+          "vault-contained like `rulesPath` and reported in `rulesChecks`; a missing or unreadable file is a " +
+          "real entry with `ok:false`, never dropped. A marker being FOUND is not evidence its content " +
+          "survived (a line that merely NAMES it reads the same). The response carries `markerHits` (per " +
+          "FOUND marker: every line in its winning source containing the token, with a match-centered " +
+          "excerpt, plus `sharedLineMarkers` naming other markers on that line) and a top-level " +
+          "`markersNeedingReview` (markers with `multipleHits` or `sharedLineMarkers`: 'inspect these', " +
+          "never folded into `ok`). Read the excerpts yourself to tell a meta-mention from real content.",
         inputSchema: strictShape({
           archivePath: z.string().optional(),
           rulesPath: z.string().optional(),
@@ -3233,121 +3198,63 @@ export class PlatformMcpRouter {
         description:
           "Update a card on ANOTHER project's board by explicit projectId + taskId — the Lead's cross-project " +
           "move/edit/re-prioritize (PATCH: only the keys you pass are applied). title?, body?, columnKey? (a " +
-          "MOVE — validated to be an EXISTING column on that project's board, rejected otherwise so a move can " +
-          "never orphan the card), position?, priority? (p0|p1|p2|p3), held? (the owner-gated 'don't nag' flag " +
-          "the idle watchdog discounts — this is the sanctioned cross-project path to SET it on a card that " +
-          "isn't on the Lead's own home board; omit to leave it untouched). held:false CLEARS it, but only if " +
-          "held wasn't set by the owner — clearing an owner-set hold is REFUSED here (returns {error}, nothing " +
-          "written, not even other fields in the same patch), same as the in-project tasks_update: only the " +
-          "owner can release their own hold, via the board UI. deferred? (a manager's own " +
-          "sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but " +
-          "unlike held it never blocks worker_spawn; omit to leave it untouched). deferred:true on THIS route " +
-          "always lands on the MANUAL path (this router has no deferredUntilTaskId): it REQUIRES " +
-          "deferredReason (a short string: why it's parked and what would release it), refused otherwise (whole " +
-          "patch rejected, nothing written) so a cross-project deferral can never go byte-identical-to-forgotten. " +
-          "deferred:false CLEARS deferredReason/deferredAt to null (same as the in-project tasks_update) — but " +
-          "before that clear, a recorded reason is folded into the card's body as its own " +
-          "\"**Previously deferred:**\" paragraph (idempotently replacing any earlier one), so the reasoning " +
-          "survives even though the field is reset. " +
-          "repoKey? (multi-repo epic) " +
-          "re-targets the card to a different entry in the destination project's `repos` registry, or " +
-          "null/\"primary\" to reset it to that project's primary repo — an unknown key is REFUSED (whole patch " +
-          "rejected, nothing written), same convention as an unknown columnKey. Reuses the SAME backing path + " +
-          "column validation as the in-project loom-tasks tasks_update — INCLUDING its trimmed-ack behavior: a " +
-          "patch that doesn't touch body returns a small ack ({id,title,columnKey,priority,position,held," +
-          "deferred,heldBy,repoKey,deferredUntilTaskId,deferredAt,deferredReason,deferredUntilEvent,updatedAt," +
-          "version,changed}, no body) instead of the full card; pass body to intentionally edit it " +
-          "and get the full updated Task row back. A taskId not on the named project " +
-          "resolves to not-found. projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors " +
-          "project_get). Error if the project is unknown or an ambiguous prefix " +
-          "(the error names the candidate ids).\n" +
-          "BATCH MOVE: pass `taskIds` (up to 200) instead of `taskId` to apply the SAME " +
-          "patch to MANY cards in one call — the fix for an audit wave's per-card sequential moves (e.g. " +
-          "15 cards dispatched→done, one columnKey each). Exactly one of `taskId`/`taskIds` is required; " +
-          "passing both or neither is an error. `title`/`body` are REJECTED alongside `taskIds` (whole call " +
-          "rejected, nothing written) — applying one literal title/body string identically across many " +
-          "different cards is never intentional; edit those one card at a time via `taskId`. Every other " +
-          "field (columnKey/position/priority/held/deferred/deferredReason/repoKey) IS batchable. Mirrors agent_clone_batch's " +
-          "convention EXACTLY: each id is resolved and updated INDEPENDENTLY through this SAME backing path " +
-          "— its own prefix resolution, its own column-existence/held-clear/repoKey-authority guards — so a " +
-          "bad id (unknown, ambiguous, wrong project, a refused held-clear) surfaces its own `{taskId, " +
-          "error}` and does NOT block the other ids; nothing is transactional, and the overall call still " +
-          "returns ok even when some entries carry an error. Returns one result per id, in the given order: " +
-          "`{taskId, task}` (the ack/full row updateProjectTask would return) on success, `{taskId, error}` " +
-          "on failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare ack/row, not wrapped. " +
-          "SPILL: the batch array is bare when it fits, but when the AGGREGATE of many " +
-          "results is too large to inline safely, it is proactively rendered as NDJSON (one " +
-          "`{taskId,task|error}` result per line, real line breaks, UTF-8) and written to your own scratch " +
-          "dir — the response becomes a small `{resultsFile, resultsChars, resultsCount, note}` pointer " +
-          "instead of the bare array; page the file with Read (offset/limit are LINE-based) or grep it.\n" +
-          "TERMINAL-LANE PENDING-REQUEST WARNING: this " +
-          "reuses the SAME backing path as the in-project tasks_update, so a `columnKey` move into the " +
-          "destination board's terminal (done) lane is ADDITIVELY flagged with `pendingRequestWarning: " +
-          "[{id, title}, ...]` when that task still has one or more `state:\"pending\"` owner Requests " +
-          "connected to it (the same connected-Requests set project_task_get's own `requests` summary " +
-          "surfaces — there is no cross-project task_requests_list/task_request_get equivalent on this " +
-          "router) — never a bare count, always the specific request id(s) + their actual question " +
-          "title(s). This NEVER blocks the move — same reasoning as the in-project tasks_update: a " +
-          "terminal close can be CORRECT despite a still-pending Request (it shipped one " +
-          "option and deliberately left another to the owner), so refusing the move would have blocked a " +
-          "correct action — and the field is OMITTED entirely for a non-terminal move or when nothing is " +
-          "pending. On the single-`taskId` path it lands directly on the returned ack/Task row; on the " +
-          "`taskIds` BATCH path it lands per-id, inside that id's own `{taskId, task}` result — each card " +
-          "in the batch is checked independently, so a mixed batch can carry the warning on some entries " +
-          "and not others.\n" +
-          "OPTIMISTIC CONCURRENCY: on the single-`taskId` path, writing `title` and/or `body` " +
-          "on an existing task REQUIRES `baseVersion` — the `version` you last read for it (project_task_get/ " +
-          "a prior project_task_update response). A stale-or-omitted `baseVersion` on a title/body write is " +
-          "REJECTED with {error, conflict:true, current} instead of overwriting — re-read and retry, merging " +
-          "your change into the current body (mirrors the in-project tasks_update / memory_write exactly). " +
-          "This is a PLAIN COMPARISON against the task's current `version`, not a separate read-tracker " +
-          "— the error text says which of the two actual causes fired: `baseVersion` " +
-          "omitted entirely (the more common real cause), or a genuinely stale value. If `current` is " +
-          "byte-identical to what you already read, nobody wrote it in between. " +
-          "Every other field needs no baseVersion. `version` advances ONLY when title/body actually change — " +
-          "a field-only move (columnKey/priority/held/deferred/repoKey) leaves it unchanged. `baseVersion` is " +
-          "meaningless (and ignored) on the `taskIds` batch path, since that path already refuses title/body outright.\n" +
-          "⚠️ `body` is a FULL REPLACE, not a merge or append — whatever string you pass BECOMES the entire body, " +
-          "with NO undo; read the current body first (project_task_get) and fold your edit into the whole thing " +
-          "if you only mean to change part of it. DESTRUCTIVE-TRUNCATION GUARD: on the single-" +
-          "`taskId` path, a `body` write that would discard the large majority of an existing SUBSTANTIAL body " +
-          "(≥1024 characters, keeping <25% of it) is REFUSED — {error naming the current/proposed lengths, " +
-          "truncation:true, current, currentLength, proposedLength} — same mechanism as the in-project " +
-          "tasks_update. A short body, or a rewrite that stays a comparable size, is untouched by this. Pass " +
-          "allowTruncate:true to bypass it for a genuinely intentional large discard. The SAME guard (same " +
-          "thresholds, same allowTruncate override, same shape) also covers `deferredReason` " +
-          "on BOTH the single-taskId and taskIds batch paths — a substantial existing reason replaced by a " +
-          "sliver is refused the same way, even though deferredReason is otherwise a field-only patch needing " +
-          "no baseVersion; pass deferredReason:null to clear one deliberately (never guarded) or " +
-          "allowTruncate:true for a genuinely intentional large discard. ⚠️ NEVER write a placeholder into " +
-          "deferredReason (or body) just to read a task's `version` back — project_task_get and " +
-          "project_task_update's own response already return `version` directly; there is no read-only way " +
-          "to get it that requires a write.\n" +
-          "`appendBody` (single-`taskId` path only) is the ADDITIVE alternative to `body`: " +
-          "appends a timestamped \"## Triage note — <ts>\" section instead of replacing the whole thing — use " +
-          "this for a triage verdict on an escalation card (or any card) so your note can never clobber the " +
-          "reporter's original evidence, which is exactly what a `body` write used to do here. Passing both " +
-          "`body` and `appendBody` is REJECTED (whole patch, nothing written) — they're different intents. " +
-          "`appendBody` needs NO `baseVersion` (unlike `body`): an append can't destructively clobber a " +
-          "concurrent edit the way a full replace can, so there's nothing to gate — worst case under a race " +
-          "is two sections landing in a nondeterministic order, never lost content. The destructive-truncation " +
-          "guard above still applies to the resulting write (it can never fire on a correct append, but stays " +
-          "as a backstop against a buggy one). Returns the full updated Task row, same as a `body` write.\n" +
-          "`resolvesEscalation` (single-`taskId` path only) is the AFTER-CREATION counterpart " +
-          "to `project_task_create`'s param of the same name: pass an escalation's taskId (full id or " +
-          "unambiguous prefix, resolved on YOUR OWN platform home board — never a task on " +
-          "the destination board) to STRUCTURALLY link THIS existing card as that escalation's fix, exactly " +
-          "as if you'd passed it at create time. Exists because the create-time-only param left no way to " +
-          "link a SECOND escalation to a fix that already exists — the link had to be conveyed in prose or " +
-          "lost otherwise. Re-linking an escalation that already has a link REPLACES it (latest write " +
-          "wins) — same as re-filing `resolvesEscalation` on a fresh create would. Validated + resolved " +
-          "BEFORE the rest of the patch is written: an unknown/ambiguous/out-of-scope escalation id is " +
-          "REJECTED with {error} and the WHOLE update is refused, nothing written — same discipline as the " +
-          "create-time param (a card claiming to resolve an escalation it isn't actually linked to would be " +
-          "worse than no link at all). The response carries `escalationLinked:true` ONLY when the link was " +
-          "actually written — never on a patch that also failed for some other reason (a stale baseVersion, " +
-          "an unknown column) or on the `taskIds` batch path, which REJECTS `resolvesEscalation` outright " +
-          "(linking one escalation to many destination cards at once is never a legitimate ask)." + TASK_STRUCTURE_DOC +
+          "MOVE — must be an EXISTING column on that board, rejected otherwise), position?, priority? " +
+          "(p0|p1|p2|p3), held? (the owner-gated 'don't nag' flag the idle watchdog discounts; this is the " +
+          "cross-project path to SET it). held:false CLEARS it, but clearing an owner-set hold is REFUSED " +
+          "(returns {error}, nothing written, not even other fields in the patch): only the owner can release " +
+          "it, via the board UI. deferred? (a manager's sequencing marker, also discounted from the idle " +
+          "watchdog; unlike held it never blocks worker_spawn). deferred:true here is always MANUAL (no " +
+          "deferredUntilTaskId) and REQUIRES deferredReason (why it's parked and what releases it), else the " +
+          "whole patch is refused. deferred:false clears deferredReason/deferredAt, first folding a recorded " +
+          "reason into the body as a \"**Previously deferred:**\" paragraph. repoKey? re-targets the card to " +
+          "another entry in the project's `repos` registry, or null/\"primary\" for the primary repo; an " +
+          "unknown key is REFUSED (whole patch, nothing written). Same backing path as the in-project " +
+          "tasks_update, including its trimmed ack: a patch that doesn't touch body returns a small ack " +
+          "({id,title,columnKey,priority,position,held,deferred,heldBy,repoKey,deferredUntilTaskId," +
+          "deferredAt,deferredReason,deferredUntilEvent,updatedAt,version,changed}, no body); pass body to " +
+          "get the full updated Task row. A taskId not on the named project is not-found. projectId accepts " +
+          "the full id or an unambiguous 8-char prefix; an unknown project or ambiguous prefix errors " +
+          "(naming the candidates).\n" +
+          "BATCH MOVE: pass `taskIds` (up to 200) instead of `taskId` to apply the SAME patch to many cards. " +
+          "Exactly one of `taskId`/`taskIds` is required. `title`/`body` are REJECTED alongside `taskIds` " +
+          "(whole call, nothing written); every other field (columnKey/position/priority/held/deferred/" +
+          "deferredReason/repoKey) is batchable. Each id is resolved and updated independently through the " +
+          "same guards, so a bad id surfaces its own `{taskId, error}` without blocking the others; nothing " +
+          "is transactional and the call still returns ok. Returns one result per id in order: `{taskId, " +
+          "task}` or `{taskId, error}`. The single-`taskId` path returns the bare ack/row, not wrapped. " +
+          "SPILL: when the aggregate is too large to inline, the response becomes a small " +
+          "`{resultsFile, resultsChars, resultsCount, note}` pointer to an NDJSON file (one result per line) " +
+          "in your scratch dir; page it with Read (LINE-based offset/limit) or grep it.\n" +
+          "TERMINAL-LANE PENDING-REQUEST WARNING: a `columnKey` move into the terminal (done) lane is flagged " +
+          "with `pendingRequestWarning: [{id, title}, ...]` when the task still has `state:\"pending\"` owner " +
+          "Requests connected to it (the set project_task_get's `requests` summary shows; this router has no " +
+          "cross-project task_requests_list). It NEVER blocks the move, and is omitted for a non-terminal " +
+          "move or when nothing is pending. On the batch path it appears per-id inside that id's result.\n" +
+          "OPTIMISTIC CONCURRENCY: on the single-`taskId` path, writing `title` and/or `body` on an existing " +
+          "task REQUIRES `baseVersion` (the `version` from project_task_get or a prior update). A " +
+          "stale-or-omitted `baseVersion` is REJECTED with {error, conflict:true, current}; re-read and " +
+          "retry, merging into the current body. It is a plain comparison against the task's `version`, and " +
+          "the error text says whether it was omitted or stale. Other fields need no baseVersion; `version` " +
+          "advances ONLY when title/body change. `baseVersion` is ignored on the `taskIds` path.\n" +
+          "⚠️ `body` is a FULL REPLACE with NO undo: read the current body first and fold your edit into the " +
+          "whole. DESTRUCTIVE-TRUNCATION GUARD: a single-`taskId` `body` write that would discard most of a " +
+          "SUBSTANTIAL existing body (≥1024 chars, keeping <25%) is REFUSED with {error, truncation:true, " +
+          "current, currentLength, proposedLength}; pass allowTruncate:true for a deliberate large discard. " +
+          "The same guard (same thresholds and override) covers `deferredReason` on both the single and " +
+          "batch paths; deferredReason:null clears one deliberately and is never guarded. ⚠️ NEVER write a " +
+          "placeholder into deferredReason or body just to read `version`: project_task_get and this tool's " +
+          "response already return it.\n" +
+          "`appendBody` (single-`taskId` only) is the ADDITIVE alternative to `body`: it appends a timestamped " +
+          "\"## Triage note — <ts>\" section, so a triage verdict on an escalation card can never clobber the " +
+          "reporter's evidence. Passing both `body` and `appendBody` is REJECTED. It needs NO `baseVersion`; " +
+          "the truncation guard still applies as a backstop. Returns the full updated Task row.\n" +
+          "`resolvesEscalation` (single-`taskId` only) is the after-creation counterpart to " +
+          "`project_task_create`'s param: pass an escalation's taskId (full id or unambiguous prefix, resolved " +
+          "on YOUR OWN platform home board, never the destination board) to structurally link THIS card as " +
+          "that escalation's fix. Re-linking REPLACES an existing link. It is validated BEFORE the rest of " +
+          "the patch: an unknown/ambiguous/out-of-scope id is REJECTED with {error} and the WHOLE update " +
+          "refused. The response carries `escalationLinked:true` ONLY when the link was written. The " +
+          "`taskIds` path REJECTS `resolvesEscalation` outright." + TASK_STRUCTURE_DOC +
           " parentId/blockedBy/blocks/related/discoveredFrom are single-`taskId` only: the `taskIds` batch path REJECTS them (whole call, nothing written).",
         inputSchema: strictShape({
           ...TASK_STRUCTURE_SHAPE,
@@ -3446,67 +3353,40 @@ export class PlatformMcpRouter {
       {
         description:
           "List board tasks across the platform — the cross-project aggregate mirroring list_all_agents. " +
-          "Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix " +
-          "(mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no " +
-          "filter, aggregates the non-terminal cards of every live project (incl. the reserved home) — pass " +
-          "includeDone:true to include terminal/done cards too, and/or columns to narrow to specific column " +
-          "keys (mirrors tasks_list's excludeDone/columns filters). DEFAULT returns a lightweight SUMMARY per " +
-          "card (id, title, columnKey, position, priority, updatedAt, merged, repoKey, deferred, " +
-          "deferredUntilTaskId, deferredStuck, deferredAt, deferredReason, held, heldBy — the SAME " +
-          "projection tasks_list uses) so the aggregate stays bounded; the " +
-          "unbounded body is DROPPED. Pass includeBody:true for full Task rows (use sparingly — page it). " +
-          "`held` is the owner's SOLE brake — `worker_spawn` refuses to dispatch onto a held:true card — " +
-          "and `heldBy` (`\"human\"|\"agent\"|null`) is server-stamped provenance of who set it; both are " +
-          "now projected here, so a cross-project survey no longer requires a per-card " +
-          "tasks_get to see a hold. " +
-          "`merged` is each card's git-derived ship state — {sha,date,verification?} of its squash-merge commit " +
-          "on that card's project repo, else null. null means NOT PROVEN merged (never merged, landed outside " +
-          "the scan window, or a git read failure), never an authoritative 'never merged' — this is the field " +
-          "that kills a stale handoff claiming a card is unbuilt when it's actually already shipped; check it " +
-          "before relaying such a claim as fact. `verification` names WHICH check answered it: \"content\" " +
-          "(byte-verified against a still-live branch tip — the strongest), \"pathset\" (verified from the " +
-          "landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, " +
-          "not the same content), \"trailer-only\" (pre-fix history — trailer PRESENCE alone, weaker), or " +
-          "\"ledger\" (a read-time match against Loom's own merge ledger, re-verified reachable — the sha " +
-          "WAS content-verified when it landed; typically answers this once the worker's branch is already " +
-          "gone, e.g. on an `orchestration.commitTrailers:\"off\"` project, where the other three tiers " +
-          "never can). " +
-          "Absent means unknown, not unverified — treat it the same as a confident match, never as a red flag. " +
-          "`merged.verification` is recomputed FRESH on every read — a full row (includeBody:true) ALSO " +
-          "carries `mergedVerificationAtMerge` — the verification mode recorded ONCE when " +
-          "that card's merge landed and never re-derived since; the two can legitimately disagree once the " +
-          "branch is later deleted (live content-verification then degrades to pathset/trailer-only/ledger, " +
-          "while the frozen at-merge value doesn't move) — never treat a disagreement between them as a bug. " +
-          "`mergedVerificationAtMerge:null` on a MERGED card means one of: a solo " +
-          "ALREADY_MERGED/boot-reconcile landing, a `noop` batch landing (content already present elsewhere " +
-          "in the batch), a batch landing on a project with `orchestration.commitTrailers:\"off\"` " +
-          "(no reserved trailer was ever written, so there is nothing to verify), or pre-fix " +
-          "history — NEVER an anomaly to chase. The web board drawer's lazy backfill (human-triggered, not " +
-          "agent-facing) CAN fill this in on a later read, but ONLY when its own scan resolves the SAME " +
-          "sha already recorded on the row (never a different one — that writes nothing); for a " +
-          "`commitTrailers:\"off\"` repo the scan can still converge via a durable, Loom-written landing " +
-          "record when no trailer exists to find one by — but that is a best-effort recovery, not a " +
-          "guarantee the way a trailer-carrying landing is. A " +
-          "freshly-landed batch branch on a `commitTrailers:\"on\"` project (the default) still stamps " +
-          "\"pathset\"/\"trailer-only\" eagerly AT LANDING TIME, same as a solo squash-confirm stamps " +
-          "\"content\". " +
-          "Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by " +
-          "default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, " +
-          "returns the bare tasks array (today's shape, unchanged) — otherwise, or whenever you pass " +
-          "offset/limit explicitly, it returns a page envelope {tasks, total, returned, offset, nextOffset}, " +
-          "the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is " +
-          "offset+returned while more remains, else null. Page deterministically by calling again with " +
-          "offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake " +
-          "a bare array at the cap for 'that's everything'. A genuine no-match returns an explicit " +
-          "{ tasks: [], total, returned: 0, offset, nextOffset: null, message } payload, never a bare empty. " +
-          "ABOVE " + SPILL_INLINE_BUDGET_CHARS + " chars, the `tasks` rows are proactively written to a scratch " +
-          "file as NEWLINE-DELIMITED JSON (mirrors tasks_list's own spill) instead of inlining one giant " +
-          "JSON-escaped line — the response becomes {rowsFile,rowsChars,rowCount,note,total,returned,offset," +
-          "nextOffset}; page rowsFile with Read (offset/limit are LINE-based) or grep it, or re-call with a " +
-          "narrower filter/limit/offset to inline fewer rows instead. Pass countsOnly:true to answer \"how many " +
-          "cards, by column/priority\" WITHOUT fetching any row bodies — returns {total, byColumn, byPriority} " +
-          "(summed across every matching project when projectId is omitted) instead of the row set; includeBody/" +
-          "limit/offset are ignored in this mode.",
+          "Optional projectId narrows to one project (full id or unambiguous 8-char prefix); an unknown/" +
+          "ambiguous id is an EXPLICIT error, never a silent []. With no filter, aggregates the " +
+          "non-terminal cards of every live project (incl. the reserved home); includeDone:true adds " +
+          "terminal cards, and columns narrows to column keys. DEFAULT returns a lightweight SUMMARY per card " +
+          "(id, title, columnKey, position, priority, updatedAt, merged, repoKey, deferred, " +
+          "deferredUntilTaskId, deferredStuck, deferredAt, deferredReason, held, heldBy — the same " +
+          "projection as tasks_list); the body is DROPPED. Pass includeBody:true for full Task rows (use " +
+          "sparingly; page it). `held` is the owner's SOLE brake — `worker_spawn` refuses to dispatch onto a " +
+          "held:true card — and `heldBy` (`\"human\"|\"agent\"|null`) is server-stamped provenance of who set " +
+          "it. `merged` is the card's git-derived ship state, {sha,date,verification?} of its squash-merge " +
+          "commit on that project's repo, else null. null means NOT PROVEN merged (never merged, outside the " +
+          "scan window, or a git read failure), never an authoritative 'never merged'; check it before " +
+          "relaying a claim that a card is unbuilt. `verification` names WHICH check answered: \"content\" " +
+          "(byte-verified against a still-live branch tip; strongest), \"pathset\" (the same FILES landed, " +
+          "not necessarily the same content), \"trailer-only\" (trailer presence alone; weaker), or " +
+          "\"ledger\" (matched against Loom's merge ledger and re-verified reachable; typically answers once " +
+          "the branch is gone, e.g. on an `orchestration.commitTrailers:\"off\"` project). Absent means " +
+          "unknown, not unverified; never a red flag. `merged.verification` is recomputed on every read; a " +
+          "full row (includeBody:true) also carries `mergedVerificationAtMerge`, recorded once at landing. " +
+          "They can legitimately disagree once the branch is deleted; not a bug. " +
+          "`mergedVerificationAtMerge:null` on a MERGED card means a solo ALREADY_MERGED/boot-reconcile " +
+          "landing, a `noop` batch landing, a batch landing on a `commitTrailers:\"off\"` project, or " +
+          "pre-fix history; NEVER an anomaly to chase. Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP +
+          " rows by default. PAGINATION: with NO offset/limit and the whole set fitting one page, returns " +
+          "the bare tasks array; otherwise, or whenever you pass offset/limit, a page envelope {tasks, " +
+          "total, returned, offset, nextOffset} (the shape session_transcript uses): total is the true " +
+          "match count, nextOffset is offset+returned while more remains, else null. Page by calling again " +
+          "with offset:nextOffset until null; never mistake a bare array at the cap for 'everything'. A " +
+          "no-match returns { tasks: [], total, returned: 0, offset, nextOffset: null, message }. ABOVE " +
+          SPILL_INLINE_BUDGET_CHARS + " chars the `tasks` rows are written to a scratch file as NDJSON and " +
+          "the response becomes {rowsFile,rowsChars,rowCount,note,total,returned,offset,nextOffset}; page " +
+          "rowsFile with Read (LINE-based offset/limit) or grep it, or narrow the filter/limit. Pass " +
+          "countsOnly:true for {total, byColumn, byPriority} (summed across matching projects) without any " +
+          "rows; includeBody/limit/offset are ignored in this mode.",
         inputSchema: strictShape({
           projectId: z.string().optional(),
           includeBody: z.boolean().optional(),
@@ -3755,69 +3635,46 @@ export class PlatformMcpRouter {
       "question_ask",
       {
         description:
-          "Ask the HUMAN something you need them for — NON-BLOCKING: creates a durable, answerable " +
-          "request and returns IMMEDIATELY, so you keep working instead of blocking this turn on a " +
-          "reply. `title`+`body` frame the ask (`body` is the canonical param; `detail` — " +
-          "platform_escalate's name for the same concept — is accepted as an ALIAS for it, pass either " +
-          "one, if both body wins). `type` picks the shape (defaults to \"decision\"): " +
-          "\"decision\" — `options` is an OPTIONAL array of choices for the human to pick between (omit " +
-          "for a pure blocker — free-text note only) and `recommendation` is an OPTIONAL suggested " +
-          "answer shown as a nudge, not enforced. \"input\" — a freeform-text ask, no options. " +
-          "\"notice\" — an FYI/status update that needs NO answer: it lands in the inbox immediately in " +
-          "its OWN terminal 'notice' state — it is NEVER 'pending', NEVER 'answered', and NEVER returned " +
-          "by question_pull (there's nothing to pull back, and you get no push nudge for it either — " +
-          "that nudge only ever fires for a real human answer). Rate-limited per agent lineage (a " +
-          "human-only, per-project cap — you cannot raise your own limit) — exceeding it REFUSES loudly, " +
-          "naming the limit; consolidate repeated status updates into fewer, more meaningful notices " +
-          "rather than filing one per increment. " +
-          "\"permission\" — ask the human to authorize/deny an irreversible/outward/spend action; " +
-          "`action` (REQUIRED) describes it, `scope` (\"once\"|\"standing\", optional) is the requested " +
-          "grant lifetime, `expiresAt` (optional ISO timestamp) is a requested expiry — this is an " +
-          "ask/answer channel, not a second gate: it does not itself block anything, so if the action " +
-          "must actually WAIT on the answer, hold it yourself. These are your ASK-TIME REQUEST only — the " +
-          "human may grant a different scope/expiry, or none; see question_pull's permission-entry shape " +
-          "for what was actually decided. ADVISORY ONLY: Loom persists + surfaces the decided grant (and " +
-          "flags it once its expiry has passed) but never itself enforces, blocks, or revokes it — you " +
-          "must read the answer and honor it yourself (this tool's `provisionTo`/`fulfillmentTarget`, " +
-          "below, are the same STATES-INTENT-ONLY posture for credentials/observability). OPTIONAL " +
-          "`fulfillmentTarget: {profileId, key, expectedValue?}` (\"permission\" only) declares a " +
-          "LIVE-CHECKABLE profile field that would prove the authorized human-only write actually " +
-          "happened — an approval is an AUTHORIZATION, not evidence the write landed, and this is how you " +
-          "let the read side (question_pull/requests_list/task_request_get) tell the difference instead of " +
-          "you re-checking a profile by hand. `key` must name a real Profile field; `expectedValue`, if " +
-          "given, is the exact value that counts as fulfilled (omit for a generic \"no longer at its " +
-          "empty/off default\" presence check). NEVER itself performs or enables the write — the profile " +
-          "field it names stays human-only exactly as before; declaring this only tells the read side WHAT " +
-          "to observe. Omit it and fulfilment reads \"unknown\" (today's exact behavior, unconditionally) " +
-          "— see question_pull's own doc for the resulting {state, detail} shape. \"credential\" — ask for a secret (API " +
-          "key/token) under a NEVER-ECHO model: you will NEVER receive the plaintext, only an ack once " +
-          "it's provided; `envVar` (optional) names the env var/config key you'd like it stored under. " +
-          "It is NOT auto-injected into any session — wiring it in is a separate, human-only step " +
-          "(outside this tool) that must happen before an agent session can use it. " +
-          "`taskId` (optional) softly links this to a board task. `supersedes` (optional): the questionId " +
-          "of a still-PENDING ask (asked by you) that this new ask replaces — atomically cancels it via " +
-          "the SAME machinery as `question_cancel` (your own agent lineage only; pending-only) and lands " +
-          "it `cancelled` with a reason linking this new ask, so a moot/superseded Request never has to " +
-          "sit in the human's inbox waiting on a separate cancel call. This NEW ask is filed regardless " +
-          "of whether the supersede succeeds — if the named ask was already answered/cancelled, unknown, " +
-          "or isn't yours, the cancel is refused (an answer the human already gave is NEVER discarded) " +
-          "and that failure is reported back in the response's `supersede` field, never silently " +
-          "swallowed. You'll get a one-time push nudge into " +
-          "your own session when the human answers; call question_pull (e.g. when you reach the point " +
-          "this was blocking) to fetch the answer. Returns {questionId} — or, when `supersedes` was " +
-          "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}. OPTIONAL " +
-          "`attachments: [{path, label?}]` — files to show the human alongside this ask (valid on every " +
-          "type, including \"notice\"). `path` MUST be an ABSOLUTE path under one of: the project repo " +
-          "root, this project's worker worktrees, this project's work dir, this project's vault root, " +
-          "or any of this project's registered multi-repo `repos[]` paths — a relative path is refused, " +
-          "and so is any path under LOOM_HOME regardless of which project binding admitted it (this " +
-          "matters for YOUR OWN project, whose repoPath/vaultPath ARE LOOM_HOME — you cannot attach " +
-          "secret.key/loom.db/anything else LOOM_HOME-rooted this way, by design). `label` defaults to " +
-          "the file's own basename. Everything else " +
-          "(kind/size/image dimensions/availability) is DERIVED server-side from the file itself at send " +
-          "time — you cannot mislabel a type or claim a file exists that doesn't. Rejected OUTRIGHT (the " +
-          "whole call fails, nothing filed) if any path is outside the allowed roots, doesn't exist, is a " +
-          "directory, or if the count/size exceeds this project's human-set caps.",
+          "Ask the HUMAN something you need them for — NON-BLOCKING: creates a durable, answerable request " +
+          "and returns IMMEDIATELY. `title`+`body` frame the ask (`detail`, platform_escalate's name, is an " +
+          "ALIAS for `body`; if both, body wins). `type` picks the shape (default \"decision\"): " +
+          "\"decision\" — `options` is an OPTIONAL array of choices (omit for a pure blocker) and " +
+          "`recommendation` an OPTIONAL suggested answer, shown as a nudge, not enforced. \"input\" — a " +
+          "freeform-text ask, no options. \"notice\" — an FYI needing NO answer: it lands in its OWN " +
+          "terminal 'notice' state, never 'pending' or 'answered', is never returned by question_pull, and " +
+          "triggers no push nudge. Notices are rate-limited per agent lineage (a human-only per-project cap " +
+          "you cannot raise); exceeding it REFUSES loudly, so consolidate status updates. \"permission\" — " +
+          "ask the human to authorize/deny an irreversible/outward/spend action; `action` (REQUIRED) " +
+          "describes it, `scope` (\"once\"|\"standing\") and `expiresAt` (ISO timestamp) are optional " +
+          "requested grant lifetime/expiry. This is an ask/answer channel, not a gate: if the action must " +
+          "WAIT on the answer, hold it yourself. The human may grant a different scope/expiry, or none " +
+          "(see question_pull's permission-entry shape). ADVISORY ONLY: Loom persists and surfaces the " +
+          "decided grant (flagging it once expired) but never enforces or revokes it; you must read the " +
+          "answer and honor it. OPTIONAL `fulfillmentTarget: {profileId, key, expectedValue?}` " +
+          "(\"permission\" only) declares a LIVE-CHECKABLE profile field that would prove the authorized " +
+          "human-only write actually happened (an approval is an authorization, not evidence the write " +
+          "landed), so question_pull/requests_list/task_request_get can report it. `key` must name a real " +
+          "Profile field; `expectedValue` is the exact value that counts as fulfilled (omit for a " +
+          "'no longer at its empty/off default' check). It never performs or enables the write; the " +
+          "field stays human-only. Omitted, fulfilment reads \"unknown\" (see question_pull for the " +
+          "{state, detail} shape). \"credential\" — ask for a secret (API key/token) under a NEVER-ECHO " +
+          "model: you never receive the plaintext, only an ack; `envVar` (optional) names the env var/" +
+          "config key to store it under. It is NOT auto-injected into any session; wiring it in is a " +
+          "separate human-only step. `taskId` (optional) softly links this to a board task. `supersedes` " +
+          "(optional): the questionId of a still-PENDING ask of yours that this one replaces; it is " +
+          "cancelled as by `question_cancel` (own lineage, pending-only) with a reason linking this ask. " +
+          "The NEW ask is filed regardless; if the cancel is refused (already answered/cancelled, unknown, " +
+          "not yours; an answer already given is NEVER discarded) the failure is reported in the " +
+          "response's `supersede` field. You get a one-time push nudge when the human answers; call " +
+          "question_pull to fetch it. Returns {questionId}, or with `supersedes` {questionId, supersede: " +
+          "{cancelled:true, questionId} | {error}}. OPTIONAL `attachments: [{path, label?}]` — files to " +
+          "show the human (valid on every type). `path` MUST be ABSOLUTE under the project repo root, its " +
+          "worker worktrees, its work dir, its vault root, or a registered `repos[]` path; a relative path " +
+          "is refused, as is any path under LOOM_HOME (so you cannot attach secret.key/loom.db even where " +
+          "your project's repoPath/vaultPath ARE LOOM_HOME). `label` defaults to the basename; kind/size/" +
+          "dimensions/availability are derived server-side. The WHOLE call is rejected (nothing filed) if " +
+          "any path is outside the allowed roots, missing, a directory, or the count/size exceeds the " +
+          "human-set caps.",
         inputSchema: strictShape(QUESTION_ASK_INPUT_SHAPE),
       },
       async (input) => {
