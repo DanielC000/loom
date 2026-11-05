@@ -76,13 +76,13 @@ for (const t of WORKFLOW_TEMPLATES) {
 db.close();
 check("(setup) collected all 10 seeded doctrine-skill prompts (2 setup home + 2 platform home + 6 template agents)", seeded.size === 10);
 
-// --- (A) CLAUDE half: pre-change sha256 of each seeded prompt (captured on unmodified main before this card) --
+// --- (A) CLAUDE half: pinned sha256 of each seeded prompt (the codex rewrite must not change the claude text;
+// re-pin a hash here whenever its seeded prompt's text is deliberately edited) --
 const PRE_CHANGE_SHA256 = {
-  // Re-pinned for commit 2b739ec8 (intentional tightening of SETUP_ASSISTANT_PROMPT; the prior text is kept in SETUP_ASSISTANT_PROMPT_PRIOR_VALUES).
   "Platform/Platform": "f91a19d6dfe71ce8cd700eef5cc87b2618d4e7cd0b3d7daf590b81ef8f98db09",
-  "Platform/Workspace Auditor": "b90846cb7e157db458fa5da5b63ded7b26eb558301a5cab686a14301a839ffe3",
-  "Loom Platform/Platform Lead": "30473c61a1b7f116effa4d434409ea7ba0e445feaa0f7e0bcfe1a7403791649a",
-  "Loom Platform/Platform Auditor": "e51c083b17ece2ba5fdf80736e7e4a841f404ab189b13cc0824e1111d8bd04cf",
+  "Platform/Workspace Auditor": "72fb45e616df586269502e4e2e4f428dd3a7b3960deaf2199f73c62409840bc1",
+  "Loom Platform/Platform Lead": "88864d326b55fb155877a60ff927fed6c8290f6422ac41a00bed0c3e194a6e47",
+  "Loom Platform/Platform Auditor": "0207b6c431e5ac83aa927f68025dd7bf65c2b25666da0e513bb97c99378f672b",
   "template/Orchestrator": "1c600ab46acb7011418f5e6c5c8153492e21fc2b0df96ac26ce6f91591456a25",
   "template/Dev": "42aa1e782860590f96962840c9f2681df5dce92b9c7aa576ad24d31141e79037",
   "template/Bugfix": "066d4f1115b4ea56a8ddeb0b8ddc863f269c72561d5c843c7077c93563bbd774",

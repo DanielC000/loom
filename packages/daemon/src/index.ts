@@ -20,8 +20,8 @@ import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
 import { seedDefaultCapabilities, migrateGithubCapabilityToBinary, migrateImageGenCapabilityToNpmPinned, migrateImageGenNpmPinnedVersionBump } from "./capabilities/seed.js";
 import { prewarmNpmPinnedForProfilesAtBoot } from "./capabilities/prewarm.js";
-import { seedPlatformHome, migratePlatformPrompts, getPlatformHomePaths } from "./platform/seed.js";
-import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent, migrateSetupHomeToLead, fileCredentialGrantFanoutNoticeOnce } from "./setup/seed.js";
+import { seedPlatformHome, migratePlatformPrompts, refreshPlatformPromptsPristine, getPlatformHomePaths } from "./platform/seed.js";
+import { refreshSetupHomePromptsPristine, seedSetupHome,seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent, migrateSetupHomeToLead, fileCredentialGrantFanoutNoticeOnce } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath, shouldPrewarmCompanionVoice } from "./python/prewarm.js";
@@ -321,6 +321,15 @@ async function main(): Promise<void> {
   // agent is not spawning a session (that stays human-REST-only via startOperator).
   const seededOperatorAgent = seedOperatorAgent(db);
   if (seededOperatorAgent) console.log(`[boot] seeded elevated operator agent: ${seededOperatorAgent}`);
+  // Pristine-only prompt refresh for the reserved setup home's bundled agents: a stored prompt byte-identical
+  // to a PRIOR shipped value moves to the current text; a customized prompt is never touched. Marker-less and
+  // idempotent (each future edit adds a prior entry). Best-effort: a throw must NEVER gate boot.
+  try {
+    const refreshed = refreshSetupHomePromptsPristine(db);
+    if (refreshed.length) console.log(`[boot] refreshed pristine setup-home prompt(s): ${refreshed.join(", ")}`);
+  } catch (err) {
+    console.warn(`[boot] setup-home prompt refresh failed (continuing boot): ${(err as Error).message}`);
+  }
   // Platform Manager P1: seed the reserved "Loom Platform" home + its Platform Lead / Platform Auditor
   // agents, seed-if-absent (idempotent; runs AFTER seedDefaultProfiles so the bundled platform profiles
   // exist to assign). Hidden from the project picker (db.listProjects), still Mission-Control visible.
@@ -337,6 +346,15 @@ async function main(): Promise<void> {
     if (promptMig.migrated) console.log(`[boot] refreshed ${promptMig.migrated} platform agent prompt(s) (stripped phase-gated NOTE)`);
   } catch (err) {
     console.warn(`[boot] platform-prompt migration failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Pristine-only refresh of the platform home's agents to the current prompt text (see the setup-home twin
+  // above). Runs AFTER the one-shot phase-note migration so a note-bearing row is cleaned first. The platform
+  // home exists only under LOOM_DEV, so this is a no-op elsewhere. Best-effort: never gates boot.
+  try {
+    const refreshed = refreshPlatformPromptsPristine(db);
+    if (refreshed.length) console.log(`[boot] refreshed pristine platform prompt(s): ${refreshed.join(", ")}`);
+  } catch (err) {
+    console.warn(`[boot] platform-prompt refresh failed (continuing boot): ${(err as Error).message}`);
   }
   // Task B: one-time backfill of `role` onto legacy stored project configs (pre-role boards). Triple-
   // guarded one-shot (app_meta marker + explicit-columns-only + assign-if-absent), so it fires exactly
