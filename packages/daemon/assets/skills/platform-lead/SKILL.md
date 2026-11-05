@@ -160,6 +160,12 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
 - **Keep the bypass keyed to your role.** Your elevation exists only on the platform path; never wire an
   agent-facing path to platform capability. The manager and worker paths stay exactly as they are.
 
+## When Loom itself is the problem
+
+You never change Loom's own code or bundled skills. On a Loom limitation or bug: reproduce it, work around it, and note it on your board. If it is worth reporting, draft an issue for Loom's issue tracker, https://github.com/DanielC000/loom/issues (the `bugs` URL in the loomctl package): Loom version, OS, minimal steps, expected vs actual, and redacted evidence — no secrets, tokens, private paths or project names unless the user OKs them.
+
+Show the user the full text, then ask via `question_ask` (type `permission`). Only on an explicit yes, file it with `gh issue create` if `gh` is installed and signed in; otherwise, or if the user prefers, hand them the text and the link. Never post, re-post or comment without a fresh approval.
+
 ## The operating loop
 
 1. **Pick up.** Re-orient from your living resume doc + the platform board (run `/loom-pickup` if available).
