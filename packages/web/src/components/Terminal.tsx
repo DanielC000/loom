@@ -50,7 +50,14 @@ import "./Terminal.css";
  * mount and outlives every attempt: only the socket is rebuilt, so a reconnect costs no remount, no
  * scrollback teardown, and no font re-derivation.
  */
-export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyProp = false, heightBudget }: { sessionId: string; resizable?: boolean; readOnly?: boolean; heightBudget?: number }) {
+export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyProp = false, heightBudget, onGridWidth }: {
+  sessionId: string; resizable?: boolean; readOnly?: boolean; heightBudget?: number;
+  /** HUG only (card 80c4e758): called with the widest the pinned grid can ever render at this height
+   *  budget, in px, whenever the HEIGHT axis is what binds the font — and with `null` when that answer is
+   *  void (the budget or the pinned grid changed). A caller can cap its card to it so a wide card never
+   *  shows an empty strip right of the grid. Omitted ⇒ never called, nothing else changes. */
+  onGridWidth?: (px: number | null) => void;
+}) {
   // COMPANION GUARD (card 5c87f4b6) — the structural half of the "a companion is driven ONLY through its
   // chat surface" invariant, placed HERE because this is the real transport chokepoint: `disableStdin`
   // and the `ws.send({type:"stdin"})` below both live in this component, and anything that renders a
@@ -76,6 +83,9 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   // (which would tear down + re-attach the websocket). It's constant per page in practice.
   const budgetRef = useRef(heightBudget);
   budgetRef.current = heightBudget;
+  // Same ref discipline as the budget: a new callback identity must never re-run the attach effect.
+  const gridWidthRef = useRef(onGridWidth);
+  gridWidthRef.current = onGridWidth;
   // applyFontSize lives inside the attach effect (it closes over the live xterm + the pinned grid).
   // Expose it via a ref so the budget-change effect below can re-invoke it WITHOUT re-running the
   // attach effect (which would tear down + rebuild the websocket).
@@ -273,6 +283,20 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
         const cell = readCell();
         const realH = cell?.height ? rows * cell.height : rows * 1.2 * (term.options.fontSize ?? 13);
         el.style.height = `${Math.min(budget, Math.ceil(realH))}px`;
+        // Card 80c4e758 — report the grid's width once something OTHER than width binds the font. A
+        // width-bound solve leaves less spare width than one 0.1 font step would consume (it floors to
+        // that quantum), so more spare than a step means the height won, and the rendered width is the
+        // widest this budget gives. Never predicted from the height axis instead: xterm rounds the cell
+        // height to whole px, and one 0.1 step can jump it by 2px (measured 16→18 at 14.7→14.8), so no
+        // row-count margin is exact. A card capped to this width (+1px) re-solves to the SAME font — its
+        // width term is then ≥ the current font by construction — so the cap is a fixed point, not a loop.
+        const report = gridWidthRef.current;
+        const curFont = term.options.fontSize ?? 13;
+        if (report && cell?.width) {
+          const gridW = cols * cell.width;
+          const stepW = cols * (cell.width / curFont) * 0.1;
+          if (cw - gridW > stepW) report(Math.ceil(gridW) + 1);
+        }
       }
     };
     // Publish for the heightBudget-change effect (below), which re-scales grow-back explicitly.
@@ -448,6 +472,8 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             fitAndReport();
           } else {
             // Claude: honor the pinned grid, then scale the font to fill the tile.
+            // A new pinned grid voids any width reported for the old one (card 80c4e758).
+            if (msg.cols !== cols || msg.rows !== rows) gridWidthRef.current?.(null);
             cols = msg.cols;
             rows = msg.rows;
             term.resize(cols, rows);
@@ -580,6 +606,9 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   // in one pass (card ebbc4a70: it is not, and that was itself an at-rest oscillation). It is safe
   // structurally: this fires on a PROP change, and applyFontSize now settles before it returns.
   useLayoutEffect(() => {
+    // A new budget voids the width reported for the old one (card 80c4e758): release the caller's cap
+    // first, so a grown budget is solved against the card's full width rather than the stale cap.
+    gridWidthRef.current?.(null);
     applyFontSizeRef.current?.();
   }, [heightBudget]);
 

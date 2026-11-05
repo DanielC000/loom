@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem, Wake } from "@loom/shared";
@@ -175,6 +175,7 @@ export function TerminalCard({
   session,
   height,
   maxWidth,
+  capWidthToGrid,
   showProject,
   title,
   readOnly = false,
@@ -197,6 +198,11 @@ export function TerminalCard({
   session: TerminalCardSession;
   height: number | string;
   maxWidth?: number | string;
+  /** HUG only (card 80c4e758): `true` caps the card's width to the widest its terminal grid can render
+   *  at the height budget, so a wide 1-column card leaves no empty strip right of the grid; heights are
+   *  untouched. `false` keeps tracking that width without applying it, so flipping to `true` (a grid
+   *  dropping to one track) caps at once. Omitted ⇒ nothing is measured and the card is unchanged. */
+  capWidthToGrid?: boolean;
   showProject?: boolean;
   /** Override the default status+identity title node (a variant with a non-busy status source). */
   title?: ReactNode;
@@ -264,6 +270,21 @@ export function TerminalCard({
   // settle would repeatedly cross the maxHeight clamp boundary and oscillate.
   const queueRef = useRef<HTMLDivElement>(null);
   const [queueChromeH, setQueueChromeH] = useState(0);
+
+  // Card 80c4e758 — the card width at which its terminal grid fills the pane edge to edge: the grid
+  // width TerminalPane reports (only once the height axis binds) plus this card's own horizontal chrome
+  // (padding + border), measured rather than assumed. A cap may only grow by the report or stay within
+  // 1px ABOVE it: a cap even 1px under the grid would make the pane step its font down and shrink the
+  // terminal's height, which is exactly what capping exists to avoid.
+  const [gridCap, setGridCap] = useState<number | null>(null);
+  const onGridWidth = useCallback((px: number | null) => {
+    if (px == null) { setGridCap(null); return; }
+    const wrap = paneWrapRef.current;
+    const panelEl = wrap?.parentElement;
+    if (!wrap || !panelEl) return;
+    const next = px + (panelEl.offsetWidth - wrap.clientWidth);
+    setGridCap((cur) => (cur != null && cur >= next && cur - next <= 1 ? cur : next));
+  }, []);
 
   // Role-scoped tab bar (opt-in via `tabs`). Terminal + Transcript are always offered; Timeline/Diff
   // appear only when the caller supplies that panel node. `activeTab` guards against a stale selection
@@ -424,7 +445,8 @@ export function TerminalCard({
   // the Composer's `key` are invariants this file is the single owner of, and a second literal of
   // either is a second place for one of them to be forgotten.
   const terminalPane = (heightBudget?: number) => (
-    <TerminalPane sessionId={session.id} readOnly={watchOnly} resizable={resizable} heightBudget={heightBudget} />
+    <TerminalPane sessionId={session.id} readOnly={watchOnly} resizable={resizable} heightBudget={heightBudget}
+      onGridWidth={capWidthToGrid !== undefined && heightBudget != null ? onGridWidth : undefined} />
   );
   // `key` is LOAD-BEARING, not a list-reconciliation hint (card 14c68c62). The Composer seeds its
   // draft from the per-session store with a LAZY useState initializer, which runs on MOUNT only — so a
@@ -576,8 +598,10 @@ export function TerminalCard({
     );
   }
 
+  // The grid cap applies only on the terminal tab of a HUG card (a Transcript pane has no grid to hug).
+  const appliedMaxWidth = capWidthToGrid && hug && gridCap != null && (!tabs || activeTab === "terminal") ? gridCap : maxWidth;
   return (
-    <Panel style={{ ...(hug ? { maxHeight: (height as number) + (queueChromeH > 0 ? queueChromeH + BUDGET_SLACK : 0) } : { height }), padding: 6, display: "flex", flexDirection: "column", ...(maxWidth != null ? { maxWidth } : null) }}>
+    <Panel style={{ ...(hug ? { maxHeight: (height as number) + (queueChromeH > 0 ? queueChromeH + BUDGET_SLACK : 0) } : { height }), padding: 6, display: "flex", flexDirection: "column", ...(appliedMaxWidth != null ? { maxWidth: appliedMaxWidth } : null) }}>
       {header}
       {body(false)}
     </Panel>

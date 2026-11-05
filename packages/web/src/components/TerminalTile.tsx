@@ -22,7 +22,7 @@ export { ForkButton, StopButton, TileTitle } from "./TerminalCard";
 
 export function TerminalTile({
   s, height, showProject, onFork, forkPending, onStop, stopPending, queueData, wakesData, onQueueMutated, onWakeCancelled,
-  actionsExtra,
+  actionsExtra, capWidthToGrid,
 }: {
   s: SessionListItem;
   height: number | string;
@@ -40,6 +40,8 @@ export function TerminalTile({
   /** Extra header buttons, forwarded verbatim to the base's own action cluster — the Terminals page's
    *  per-tile order controls (card ac0cfe91). Omitted ⇒ every other call site stays byte-identical. */
   actionsExtra?: ReactNode;
+  /** Forwarded to the base (card 80c4e758) — the project Overview's 1-column width cap. */
+  capWidthToGrid?: boolean;
 }) {
   return (
     <TerminalCard
@@ -56,6 +58,7 @@ export function TerminalTile({
       statusMode="busy"
       subPanels={{ queue: true, wakes: true, taskCard: true, queueData, wakesData, onQueueMutated, onWakeCancelled }}
       actionsExtra={actionsExtra}
+      capWidthToGrid={capWidthToGrid}
     />
   );
 }

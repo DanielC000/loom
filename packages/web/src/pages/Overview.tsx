@@ -1,4 +1,4 @@
-import { useState, useMemo, type CSSProperties } from "react";
+import { useState, useMemo, useRef, useLayoutEffect, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import type { Agent, SessionListItem, OrchestrationEvent, SessionRole } from "@loom/shared";
@@ -605,6 +605,23 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
   const queues = useSessionQueuesBulk(liveIds);
   const wakes = useSessionWakesBulk(liveIds);
   const { invalidateQueues, invalidateWakes } = useInvalidateSessionQueueWakesBulk();
+  // Card 80c4e758 — in the 1-column band each tile is capped to its terminal grid's width (left-aligned,
+  // like everything else on this page) so a wide card leaves no empty strip right of the grid. The height
+  // is deliberately NOT raised to fill instead (as /terminals does): the board embed below must not be
+  // pushed down. The track count is read off the resolved grid, so it follows the minmax() below rather
+  // than restating its arithmetic. Multi-column bands never apply the cap.
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [singleColumn, setSingleColumn] = useState(false);
+  const hasLive = live.length > 0;
+  useLayoutEffect(() => {
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+    const read = () => setSingleColumn(getComputedStyle(gridEl).gridTemplateColumns.trim().split(/\s+/).length === 1);
+    read();
+    const ro = new ResizeObserver(read);
+    ro.observe(gridEl);
+    return () => ro.disconnect();
+  }, [hasLive]);
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
 
   // alignItems:"start" so each tile sizes to ITS OWN content — a bare card stays short instead of being
@@ -612,9 +629,9 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
   // now differ in height; that's the intended, owner-requested content-dynamic behavior.
   const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12, alignItems: "start" };
   return (
-    <div style={grid}>
+    <div ref={gridRef} style={grid}>
       {live.map((s) => (
-        <TerminalTile key={s.id} s={s} height={520}
+        <TerminalTile key={s.id} s={s} height={520} capWidthToGrid={singleColumn}
           onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
           onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
           queueData={queues.data?.[s.id] ?? []} wakesData={wakes.data?.[s.id] ?? []}
