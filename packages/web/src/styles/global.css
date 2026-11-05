@@ -108,9 +108,12 @@ body {
    titles to one character per row on a many-column board at a narrow-but-wide window. The 240px floor
    is what makes the horizontal scroll actually kick in. */
 .loom-board-grid {
+  /* The per-lane floor, as a variable so a board with a COLLAPSED lane (card 67c43038) can write an
+     explicit track list inline and still get the right floor at each breakpoint. */
+  --loom-lane-min: 240px;
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(240px, 1fr);
+  grid-auto-columns: minmax(var(--loom-lane-min), 1fr);
   gap: 10px;
   flex: 1;
   min-width: 0;
@@ -121,8 +124,56 @@ body {
 @media (max-width: 560px) {
   /* Phone: a tighter min so a full lane plus a peek of the next fits a ~380px viewport. */
   .loom-board-grid {
-    grid-auto-columns: minmax(200px, 1fr);
+    --loom-lane-min: 200px;
   }
+}
+
+/* ── Board lane controls (card 67c43038) ─────────────────────────────────────────
+   The header is the drag handle (grip + label); the grip is revealed on hover / keyboard focus inside the
+   header so a resting board stays quiet. The ⋯ menu button is always present (dim at rest) because it is
+   the keyboard path, and a control that only appears on hover is unreachable to a keyboard user. */
+.loom-lane-handle { cursor: grab; }
+.loom-lane-grip { width: 10px; color: var(--loom-text-muted); opacity: 0; transition: opacity 120ms ease; }
+.loom-lane-head:hover .loom-lane-grip,
+.loom-lane-head:focus-within .loom-lane-grip { opacity: 1; }
+.loom-lane-more {
+  display: grid; place-items: center; width: 24px; height: 24px; padding: 0;
+  background: transparent; border: 1px solid transparent; border-radius: var(--loom-radius-sm);
+  color: var(--loom-text-muted); font-size: 14px; line-height: 1; cursor: pointer;
+}
+.loom-lane-head:hover .loom-lane-more,
+.loom-lane-more[aria-expanded="true"] { border-color: var(--loom-border-strong); color: var(--loom-text-dim); }
+.loom-lane-more:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: 1px; color: var(--loom-text); }
+/* Portalled to <body> and positioned inline (fixed, from the trigger's rect) by LaneMenu. */
+.loom-lane-menu {
+  z-index: 60;
+  min-width: 228px; padding: 4px; display: flex; flex-direction: column;
+  background: var(--loom-panel); border: 1px solid var(--loom-border-strong); border-radius: var(--loom-radius);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.6);
+}
+.loom-lane-menu-item {
+  display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 6px 8px;
+  background: transparent; border: 0; border-radius: var(--loom-radius-sm); text-align: left; text-decoration: none;
+  font-family: var(--loom-font-mono); font-size: 12px; color: var(--loom-text); cursor: pointer; white-space: nowrap;
+}
+.loom-lane-menu-item.is-quiet { color: var(--loom-text-dim); }
+.loom-lane-menu-item:hover { background: var(--loom-panel-2); }
+.loom-lane-menu-item:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
+.loom-lane-menu-item[aria-disabled="true"] { color: var(--loom-text-muted); cursor: default; }
+.loom-lane-menu-item[aria-disabled="true"]:hover { background: transparent; }
+.loom-lane-menu-hint { margin-left: auto; color: var(--loom-text-muted); font-size: 10px; }
+.loom-lane-menu-sep { height: 1px; margin: 4px 2px; background: var(--loom-border); }
+/* A collapsed lane: the whole slim rail is the expand button, label running bottom-to-top. */
+.loom-lane-rail {
+  flex: 1; display: flex; justify-content: center; padding: 10px 0; width: 100%;
+  background: transparent; border: 0; cursor: pointer;
+  font-family: var(--loom-font-head); font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+}
+.loom-lane-rail:hover { background: var(--loom-panel-2); }
+.loom-lane-rail:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
+.loom-lane-rail-label { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) {
+  .loom-lane-grip { transition: none; }
 }
 
 /* ── Settings field grids ────────────────────────────────────────────────────────

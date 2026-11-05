@@ -1278,6 +1278,18 @@ export function validateColumnLayout(
   return { ok: true, value: r.data };
 }
 
+/** Body shape of the reorder-only PUT /api/projects/:id/columns/order (card 67c43038): the column keys in
+ *  their new order. SHAPE only; whether they are a permutation of the current board is the service's call. */
+const columnOrderSchema = z.object({ keys: z.array(z.string().min(1)).min(1) }).strict();
+
+export function validateColumnOrder(
+  raw: unknown,
+): { ok: true; value: { keys: string[] } } | { ok: false; error: string } {
+  const r = columnOrderSchema.safeParse(raw ?? {});
+  if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
+  return { ok: true, value: r.data };
+}
+
 /**
  * Platform MCP server (phase-2 Pillar C) — a platform-lead's surface for creating + configuring
  * projects/agents, so the autonomous queue can stand up NEW work, not just drain an existing board.

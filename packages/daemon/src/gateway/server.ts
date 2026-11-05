@@ -57,7 +57,7 @@ import { validateSonarQubeCredential } from "../connections/sonarqube.js";
 import { fetchHostKeyFingerprint } from "../connections/ssh.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer, updateCapabilityDefPassEnv, requirePassEnvKey, resetCapabilityProvisionStatus } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
-import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, mergeConfigOverride, unsetConfigPath, findConfigPatchUnsetCollisions } from "../mcp/platform.js";
+import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, validateColumnOrder, mergeConfigOverride, unsetConfigPath, findConfigPatchUnsetCollisions } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
@@ -5735,6 +5735,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const result = deps.sessions.updateBoardColumns(id, v.value.columns);
     if (!result.ok) return reply.code(400).send({ error: result.error });
     return { ok: true, columns: result.columns, warnings: result.warnings };
+  });
+
+  // Reorder-only twin of the PUT above (card 67c43038), used by the board's lane drag + Move left/right.
+  // Body `{keys}` = every current column key, once, in the new order; anything else is a 409 with the board
+  // left untouched (a stale client must never be able to drop a newer column the way a whole-array PUT can).
+  // HUMAN/REST-only like its sibling: Tier 0 by omission from TIER_1_ROUTES, loopback-bearer guarded as a
+  // non-GET /api/* write, and no MCP tool calls it.
+  app.put("/api/projects/:id/columns/order", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    const v = validateColumnOrder(req.body);
+    if (!v.ok) return reply.code(400).send({ error: `invalid column order: ${v.error}` });
+    const result = deps.sessions.reorderBoardColumns(id, v.value.keys);
+    if (!result.ok) return reply.code(result.conflict ? 409 : 400).send({ error: result.error });
+    return { ok: true, columns: result.columns };
   });
 
   // --- Daemon-GLOBAL platform tuning (rate-limit numbers / watcher cadences / op timeouts) ---

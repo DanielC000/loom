@@ -783,6 +783,11 @@ export const api = {
   // (e.g. dropping a non-required role lane) — shown but non-blocking.
   updateProjectColumns: (id: string, columns: DesiredColumn[]) =>
     putErr<{ ok: boolean; columns: KanbanColumn[]; warnings: string[] }>(`/api/projects/${id}/columns`, { columns }),
+  // Reorder-only twin (card 67c43038), for the board's lane drag + Move left/right. Sends just the keys in
+  // their new order; the server 409s unless they are exactly the CURRENT key set, so a reorder from a stale
+  // poll can never drop a column created since (which the whole-array PUT above would).
+  reorderProjectColumns: (id: string, keys: string[]) =>
+    putErr<{ ok: boolean; columns: KanbanColumn[] }>(`/api/projects/${id}/columns/order`, { keys }),
   // `repoKey` retargets which registered repo the card lands on. postErr (not post) because BOTH repoKey
   // guards 400 with a reason the drawer must show verbatim: `resolveRepoKeyOrError` (unknown key, listing
   // the registered ones) and `checkTaskRepoKeyRebind` (fails CLOSED while any session ever bound to this

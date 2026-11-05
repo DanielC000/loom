@@ -296,6 +296,34 @@ export function planColumnLayout(
   return { ok: true, warnings, columns, rekeys, defaultLandingKey };
 }
 
+/** The outcome of planning a reorder: the reordered columns, or why the requested order was refused. */
+export type ColumnReorderPlan =
+  | { ok: true; columns: KanbanColumn[] }
+  | { ok: false; error: string };
+
+/**
+ * Plan a REORDER-ONLY change (card 67c43038): `keys` must name exactly the current column keys, each once,
+ * in the new order. PURE. Every column is carried through byte-for-byte; only its index changes, so no card
+ * can ever move. Anything other than an exact permutation is refused rather than repaired, because the
+ * caller's view is a polled snapshot: a key it lacks is a column created since that poll, and the whole-array
+ * planColumnLayout would treat it as removed and re-home its cards. Refusing is what lets a stale client
+ * reorder without that risk.
+ */
+export function planColumnReorder(current: readonly KanbanColumn[], keys: readonly string[]): ColumnReorderPlan {
+  const byKey = new Map(current.map((c) => [c.key, c]));
+  const seen = new Set<string>();
+  for (const k of keys) {
+    if (seen.has(k)) return { ok: false, error: `column '${k}' is listed more than once` };
+    seen.add(k);
+    if (!byKey.has(k)) return { ok: false, error: `no column '${k}' on this board (it may have been removed or renamed); reload and try again` };
+  }
+  const missing = current.filter((c) => !seen.has(c.key)).map((c) => c.label || c.key);
+  if (missing.length) {
+    return { ok: false, error: `the board changed since it was loaded: the order omits ${missing.map((m) => `'${m}'`).join(", ")}; reload and try again` };
+  }
+  return { ok: true, columns: keys.map((k) => byKey.get(k)!) };
+}
+
 /**
  * Convenience used by the daemon + tests: resolve a project's CURRENT resolved columns. Kept here so the
  * lifecycle API + its tests share one source for "what the board looks like right now".

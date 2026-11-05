@@ -107,7 +107,7 @@ import { resolveLivePlatformHome } from "../platform/seed.js";
 import { resolveLiveLeadHome, resolveHomeLeadAgent, isSanctionedPlatformLeadAgent, liveOtherPlatformLead } from "../projects/live-lead-home.js";
 import { resolveLiveSetupHome } from "../setup/seed.js";
 import { checkPeerMessageRateLimit, checkNotifyLeadRateLimit } from "./peer-message-guard.js";
-import { planColumnLayout, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
+import { planColumnLayout, planColumnReorder, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
 import { resolveIdPrefix, getByIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
@@ -14850,6 +14850,26 @@ export class SessionService {
     }
     this.db.applyBoardColumnLayout(projectId, plan.columns, plan.rekeys, plan.defaultLandingKey);
     return { ok: true, columns: plan.columns, warnings: plan.warnings };
+  }
+
+  /**
+   * Reorder-only board-column change (card 67c43038), behind PUT /api/projects/:id/columns/order. `keys` must
+   * be an exact permutation of the CURRENT keys (planColumnReorder), else `{ok:false, conflict:true}` and
+   * nothing is written. Synchronous read-check-write, so no other request can interleave between the check
+   * and the write. Persists through the same transactional writer as updateBoardColumns with zero re-keys.
+   */
+  reorderBoardColumns(
+    projectId: string, keys: string[],
+  ): { ok: true; columns: KanbanColumn[] } | { ok: false; error: string; conflict?: boolean } {
+    const project = this.db.getProject(projectId);
+    if (!project) return { ok: false, error: "project not found" };
+    const current = resolveConfig(project.config).kanbanColumns;
+    const plan = planColumnReorder(current, keys);
+    if (!plan.ok) return { ok: false, error: plan.error, conflict: true };
+    const landing = columnKeyForRole(plan.columns, "defaultLanding");
+    if (!landing) return { ok: false, error: "the board has no landing column" }; // defensive: ≥1 column ⇒ defined
+    this.db.applyBoardColumnLayout(projectId, plan.columns, [], landing);
+    return { ok: true, columns: plan.columns };
   }
 
   /**

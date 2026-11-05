@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
+import { DndContext, DragOverlay, useDraggable, useDroppable, type DragEndEvent, type DragOverEvent, type DragStartEvent, type Announcements } from "@dnd-kit/core";
+import { LaneMenu, boardCollision, laneDragId, movedKeys, useCollapsedLanes, type BoardDragData } from "../components/boardLanes";
 import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge, RepoRegistryEntry } from "@loom/shared";
 // The done lane's order lives in shared, not here: the server picks WHICH cards a `?doneLimit=` window
 // contains by this same comparator, so a second copy would be a window that disagrees with its lane.
@@ -179,8 +180,106 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     onSuccess: () => { setOpenTaskId(null); qc.invalidateQueries({ queryKey: ["board", projectId] }); },
   });
 
+  // ── Lane order + collapse (card 67c43038) ────────────────────────────────────
+  // A reorder writes ONLY the order, through the permutation-only route, so a reorder computed from a stale
+  // 4s poll is refused (409) rather than silently dropping a column created since. Optimistic across every
+  // cached window of this board (the key prefix), rolled back on failure; the refetch then shows the truth.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [collapsedLanes, setLaneCollapsed] = useCollapsedLanes(projectId);
+  const [announcement, setAnnouncement] = useState("");
+  const [laneError, setLaneError] = useState<string | null>(null);
+  // After a menu/shortcut move the lane's DOM node is re-inserted, which drops focus; put it back on that
+  // lane's ⋯ button so a keyboard user can keep pressing Alt+→.
+  const [refocusLane, setRefocusLane] = useState<string | null>(null);
+  type BoardData = NonNullable<typeof board.data>;
+  const reorder = useMutation({
+    meta: { inlineError: true }, // surfaced beside the board, never a blocking alert
+    mutationFn: (keys: string[]) => api.reorderProjectColumns(projectId, keys),
+    onMutate: async (keys) => {
+      await qc.cancelQueries({ queryKey: ["board", projectId] });
+      const snapshot = qc.getQueriesData<BoardData>({ queryKey: ["board", projectId] });
+      qc.setQueriesData<BoardData>({ queryKey: ["board", projectId] }, (old) => {
+        if (!old) return old;
+        const byKey = new Map(old.columns.map((c) => [c.key, c]));
+        const next = keys.map((k) => byKey.get(k)).filter((c): c is KanbanColumn => !!c);
+        return next.length === old.columns.length ? { ...old, columns: next } : old;
+      });
+      setLaneError(null);
+      return { snapshot };
+    },
+    onError: (err, _keys, ctx) => {
+      for (const [key, data] of ctx?.snapshot ?? []) qc.setQueryData(key, data);
+      setLaneError(errorText(err));
+      setAnnouncement(`Lane not moved: ${errorText(err)}`);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["board", projectId] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+  const moveLane = (key: string, toIndex: number, refocus: boolean) => {
+    const cols = board.data?.columns ?? [];
+    const keys = movedKeys(cols, key, toIndex);
+    if (!keys) return;
+    const label = cols.find((c) => c.key === key)?.label ?? key;
+    setAnnouncement(`${label} moved to position ${keys.indexOf(key) + 1} of ${keys.length}`);
+    if (refocus) setRefocusLane(key);
+    reorder.mutate(keys);
+  };
+  const setCollapsed = (col: KanbanColumn, on: boolean) => {
+    setLaneCollapsed(col.key, on);
+    setAnnouncement(`${col.label} lane ${on ? "collapsed" : "expanded"}`);
+    // Focus follows the control that replaced the one just used, scoped to THIS board (a hidden tab can
+    // mount a second one).
+    requestAnimationFrame(() => {
+      const sel = on ? `[data-lane-expand="${CSS.escape(col.key)}"]` : `[data-lane-more="${CSS.escape(col.key)}"]`;
+      rootRef.current?.querySelector<HTMLElement>(sel)?.focus();
+    });
+  };
+  useEffect(() => {
+    if (!refocusLane) return;
+    rootRef.current?.querySelector<HTMLElement>(`[data-lane-more="${CSS.escape(refocusLane)}"]`)?.focus();
+    setRefocusLane(null);
+  }, [refocusLane, board.data?.columns]);
+
+  // Which lane is being dragged, and which lane it is over — drives the drag preview, the insertion edge
+  // on the target lane, and the "Release to place…" hint. Card drags leave both null.
+  const [dragLane, setDragLane] = useState<string | null>(null);
+  const [overLane, setOverLane] = useState<string | null>(null);
+  const dataOf = (d: { data: { current?: unknown } } | null | undefined) => d?.data.current as BoardDragData | undefined;
+  const onDragStart = (e: DragStartEvent) => {
+    const d = dataOf(e.active);
+    if (d?.type === "lane") { setDragLane(d.key); setOverLane(d.key); }
+  };
+  const onDragOver = (e: DragOverEvent) => {
+    if (dataOf(e.active)?.type === "lane") setOverLane(e.over ? String(e.over.id) : null);
+  };
+  const clearLaneDrag = () => { setDragLane(null); setOverLane(null); };
   const onDragEnd = (e: DragEndEvent) => {
+    const d = dataOf(e.active);
+    clearLaneDrag();
+    if (d?.type === "lane") {
+      const cols = board.data?.columns ?? [];
+      const to = e.over ? cols.findIndex((c) => c.key === String(e.over!.id)) : -1;
+      if (to >= 0) moveLane(d.key, to, false);
+      return;
+    }
     if (e.over && e.active.id !== e.over.id) move.mutate({ id: String(e.active.id), columnKey: String(e.over.id) });
+  };
+  // Screen-reader narration for the drag itself, in lane LABELS and card TITLES rather than dnd-kit's
+  // default raw ids ("Picked up draggable item lane:in_progress").
+  const dragName = (id: string | number) => {
+    const s = String(id);
+    const cols = board.data?.columns ?? [];
+    if (s.startsWith("lane:")) return `lane ${cols.find((c) => `lane:${c.key}` === s)?.label ?? s.slice(5)}`;
+    return `card ${board.data?.tasks.find((t) => t.id === s)?.title ?? s.slice(0, 8)}`;
+  };
+  const laneName = (id: string | number) => board.data?.columns.find((c) => c.key === String(id))?.label ?? String(id);
+  const announcements: Announcements = {
+    onDragStart: ({ active }) => `Picked up ${dragName(active.id)}.`,
+    onDragOver: ({ active, over }) => (over ? `${dragName(active.id)} is over the ${laneName(over.id)} lane.` : `${dragName(active.id)} is not over a lane.`),
+    onDragEnd: ({ active, over }) => (over ? `${dragName(active.id)} dropped on the ${laneName(over.id)} lane.` : `${dragName(active.id)} dropped.`),
+    onDragCancel: ({ active }) => `Moving ${dragName(active.id)} was cancelled.`,
   };
 
   // Deep-link into a specific card's drawer via `?task=<id>` — used by a Request's reverse "linked task"
@@ -280,7 +379,12 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     : windowedTotal - allTasks.filter((t) => t.columnKey === windowedLaneKey).length;
 
   return (
-    <div>
+    <div ref={rootRef}>
+      {/* Polite narration of lane moves / collapses (the visible change is the lane itself). */}
+      <div aria-live="polite" role="status" data-testid="lane-announcer"
+        style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap" }}>
+        {announcement}
+      </div>
       {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
       {/* First-load placeholder: lane shells so the layout settles in, not a blank flash. keepPreviousData
           keeps this from re-appearing on the 4s refetch — it shows only before the very first response. */}
@@ -301,13 +405,26 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
             priFilter={priFilter} onTogglePri={togglePri} colFilter={colFilter} onToggleCol={toggleCol}
             shown={shownTasks.length + unfetchedDone} total={allTasks.length + unfetchedDone}
             active={filterActive} onClear={clearFilters} />
+          {laneError && (
+            <div role="alert" data-testid="lane-reorder-error"
+              style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: color.amber, fontFamily: font.mono, fontSize: 12 }}>
+              <span style={{ flex: 1 }}>Couldn’t move the lane: {laneError}</span>
+              <Button variant="ghost" onClick={() => setLaneError(null)}>Dismiss</Button>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "stretch" }}>
-            <DndContext onDragEnd={onDragEnd}>
+            <DndContext onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={clearLaneDrag}
+              collisionDetection={boardCollision} accessibility={{ announcements }}>
               {/* Responsive lane grid (.loom-board-grid): equal 1fr lanes when they fit, horizontal
                   scroll with a usable per-lane min width when they don't (narrow viewport / many lanes)
-                  — so the board degrades gracefully instead of crushing every lane. */}
-              <div className="loom-board-grid">
-                {board.data.columns.map((col) => (
+                  — so the board degrades gracefully instead of crushing every lane. A collapsed lane
+                  takes a fixed slim track; the inline template is set only then, so an all-expanded
+                  board keeps the stylesheet's auto tracks untouched. */}
+              <div className="loom-board-grid"
+                style={board.data.columns.some((c) => collapsedLanes.has(c.key))
+                  ? { gridTemplateColumns: board.data.columns.map((c) => (collapsedLanes.has(c.key) ? "44px" : "minmax(var(--loom-lane-min), 1fr)")).join(" ") }
+                  : undefined}>
+                {board.data.columns.map((col, colIndex) => (
                   // The project id rides in the key ON PURPOSE (card 7da27eb5): it keeps Column's
                   // done-lane reveal state alive across the 4s poll (same key ⇒ re-render, not remount)
                   // while a project switch remounts the lane and collapses it back to one page.
@@ -323,11 +440,37 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                     laneTotal={laneTotalFor(col)}
                     onRevealMore={() => setDoneWindow((n) => n + DONE_LANE_PAGE)}
                     revealPending={windowPending}
-                    cardCount={allTasks.filter((t) => t.columnKey === col.key).length} />
+                    cardCount={allTasks.filter((t) => t.columnKey === col.key).length}
+                    index={colIndex} laneCount={board.data!.columns.length}
+                    collapsed={collapsedLanes.has(col.key)} onCollapse={(on) => setCollapsed(col, on)}
+                    onMoveLane={(to) => moveLane(col.key, to, true)} reordering={reorder.isPending}
+                    laneDragging={dragLane === col.key}
+                    dropEdge={dragLane && overLane === col.key && overLane !== dragLane
+                      ? (board.data!.columns.findIndex((c) => c.key === dragLane) > colIndex ? "before" : "after")
+                      : null} />
                 ))}
               </div>
+              {/* The lifted lane's preview: its header only, so it reads as "this lane" without dragging a
+                  4,000-card list across the screen. No drop animation: the lane snaps into its new slot. */}
+              <DragOverlay dropAnimation={null}>
+                {dragLane ? <LaneDragPreview col={board.data.columns.find((c) => c.key === dragLane)} /> : null}
+              </DragOverlay>
             </DndContext>
           </div>
+          {dragLane && (
+            <div data-testid="lane-drag-hint" aria-hidden
+              style={{ marginTop: 8, color: color.textDim, fontFamily: font.mono, fontSize: 11 }}>
+              {(() => {
+                const cols = board.data.columns;
+                const from = cols.findIndex((c) => c.key === dragLane);
+                const to = overLane ? cols.findIndex((c) => c.key === overLane) : -1;
+                const name = cols[from]?.label ?? dragLane;
+                if (to < 0 || to === from) return <>Drag over another lane to move <b style={{ color: color.text, fontWeight: 500 }}>{name}</b> · Esc cancels</>;
+                return <>Release to place <b style={{ color: color.text, fontWeight: 500 }}>{name}</b> {to < from ? "before" : "after"}{" "}
+                  <b style={{ color: color.text, fontWeight: 500 }}>{cols[to]?.label}</b> · Esc cancels</>;
+              })()}
+            </div>
+          )}
         </>
       )}
       {/* A live card's full row already rode along on the board response, so its drawer opens instantly;
@@ -349,6 +492,8 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
           saveError={edit.error as TaskUpdateConflictError | null}
           onDismissConflict={() => edit.reset()}
+          onMoveLane={(columnKey) => move.mutate({ id: openTask.id, columnKey })}
+          moving={move.isPending && move.variables?.id === openTask.id}
           onDelete={() => del.mutate(openTask.id)} deleting={del.isPending}
           deleteError={del.error ? errorText(del.error) : null} />
       )}
@@ -399,12 +544,43 @@ function labelColorFor(accent: string | null): string {
   return accent;
 }
 
-function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, primaryRepoPath, titleById, cardCount, laneTotal, onRevealMore, revealPending }:
+// The lifted lane's DragOverlay preview — the lane's own header, so the thing under the pointer is
+// recognisably the lane being moved.
+function LaneDragPreview({ col }: { col: KanbanColumn | undefined }) {
+  if (!col) return null;
+  const accent = columnAccent(col);
+  return (
+    <div data-testid="lane-drag-preview"
+      style={{ width: 220, background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: 4,
+        boxShadow: "0 10px 28px rgba(0,0,0,.55)", transform: "rotate(-1deg)", cursor: "grabbing" }}>
+      <div aria-hidden style={{ height: 3, background: accent ?? "transparent", borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
+      <SectionLabel style={{ color: labelColorFor(accent), margin: 0, padding: "10px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+        <span aria-hidden style={{ color: color.textDim }}>⠿</span>
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
+      </SectionLabel>
+    </div>
+  );
+}
+
+function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, primaryRepoPath, titleById, cardCount, laneTotal, onRevealMore, revealPending,
+  index, laneCount, collapsed, onCollapse, onMoveLane, reordering, laneDragging, dropEdge }:
   { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void; multiRepo: boolean;
     repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; cardCount: number;
     /** Card a483cbec — the server's TRUE lane length when THIS lane came back windowed, else undefined. */
-    laneTotal?: number; onRevealMore?: () => void; revealPending?: boolean }) {
-  const { setNodeRef, isOver } = useDroppable({ id: col.key });
+    laneTotal?: number; onRevealMore?: () => void; revealPending?: boolean;
+    /** Card 67c43038 — this lane's position, collapse state, and the order/collapse actions. */
+    index: number; laneCount: number; collapsed: boolean; onCollapse: (on: boolean) => void;
+    onMoveLane: (toIndex: number) => void; reordering: boolean;
+    /** This lane is the one being dragged (it stays in place, ghosted, while its preview follows the pointer). */
+    laneDragging: boolean;
+    /** This lane is the current lane-drag target: the dragged lane lands on this side of it. */
+    dropEdge: "before" | "after" | null }) {
+  const { setNodeRef, isOver, active } = useDroppable({ id: col.key, data: { type: "lane", key: col.key } satisfies BoardDragData });
+  // A lane is ALSO draggable, by its header (card 67c43038). Only the header's handle carries the
+  // listeners; the ⋯ button sits outside it so a click there never starts a drag.
+  const laneDrag = useDraggable({ id: laneDragId(col.key), data: { type: "lane", key: col.key } satisfies BoardDragData });
+  // The card-drop highlight is for CARD drags only; a lane drag shows an insertion edge instead.
+  const cardOver = isOver && (active?.data.current as BoardDragData | undefined)?.type !== "lane";
   const doneLane = isDoneColumn(col);
   // Two ways this lane can be showing one page, and they are not interchangeable (card a483cbec):
   //  · SERVER-WINDOWED (`laneTotal` set, i.e. no filter is active) — `tasks` already IS the page, so
@@ -443,25 +619,54 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
   const hasWipLimit = col.wipLimit !== undefined;
   const atOrOverWip = hasWipLimit && wipCount >= col.wipLimit!;
 
-  // The board header is plain, non-editable display — column CRUD (add/rename/delete/reorder/role/
-  // accent/WIP) lives ONLY in Settings › Board Columns (ColumnManager). Here we render the label, its
-  // resolved role tint, and the card count / soft-WIP readout.
+  // The header shows the label, its resolved role tint and the card count / soft-WIP readout, plus the
+  // two ORDER/VIEW controls (card 67c43038): drag by the header to reorder, and the ⋯ lane menu. Column
+  // CRUD (add/rename/delete/role/accent/WIP) still lives ONLY in Settings › Board Columns (ColumnManager).
   //
+  // The insertion edge for a lane drag: an inset phosphor bar on the side the dragged lane will land.
+  const dropShadow = dropEdge === "before" ? `inset 3px 0 0 ${color.phosphor}` : dropEdge === "after" ? `inset -3px 0 0 ${color.phosphor}` : undefined;
+
+  // Collapsed: a slim rail with the label + count, still a drop target for cards. The whole rail is the
+  // expand control; reorder needs the lane expanded (its menu lives in the full header).
+  if (collapsed) {
+    return (
+      <div ref={setNodeRef} data-testid={`lane-${col.key}`} data-lane-key={col.key} data-collapsed=""
+        style={{ background: cardOver ? color.phosphorDim : color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
+          display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh", boxShadow: dropShadow,
+          opacity: laneDragging ? 0.35 : 1 }}>
+        <div aria-hidden style={{ height: 3, background: accent ?? "transparent", flexShrink: 0, borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
+        <button type="button" className="loom-lane-rail" data-lane-expand={col.key} data-testid={`lane-expand-${col.key}`}
+          aria-expanded={false} aria-label={`Expand the ${col.label} lane (${laneLength} card${laneLength === 1 ? "" : "s"})`}
+          title={`Expand ${col.label}`} onClick={() => onCollapse(false)} style={{ color: labelColor }}>
+          <span className="loom-lane-rail-label">{col.label} <span style={{ fontWeight: 500 }}>({laneLength})</span></span>
+        </button>
+      </div>
+    );
+  }
+
   // Bounded, viewport-relative height so a long column scrolls internally instead of stretching the
   // page. Flex column: header stays pinned; the card list is the lone flex:1 scroll region. The
   // droppable ref stays on this outer wrapper, so a drop lands anywhere over the column (incl. when
   // scrolled — dnd-kit measures this wrapper's rect, and its auto-scroll drives the inner list).
   return (
-    <div ref={setNodeRef} className="loom-grid"
-      style={{ background: isOver ? color.phosphorDim : color.panel, border: `1px solid ${color.border}`, borderRadius: 4,
-        display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh" }}>
+    <div ref={setNodeRef} className="loom-grid" data-testid={`lane-${col.key}`} data-lane-key={col.key}
+      style={{ background: cardOver ? color.phosphorDim : color.panel, border: `1px ${laneDragging ? "dashed" : "solid"} ${laneDragging ? color.borderStrong : color.border}`, borderRadius: 4,
+        display: "flex", flexDirection: "column", minHeight: 200, maxHeight: "75vh", boxShadow: dropShadow,
+        opacity: laneDragging ? 0.35 : 1 }}>
       {/* Restrained per-column header accent: a thin top bar in the lane's resolved color. The 3px height
           is ALWAYS reserved (transparent when un-accented) so accented and un-accented lanes share one
           label baseline. Top corners rounded to nest inside the wrapper's radius. */}
       <div aria-hidden style={{ height: 3, background: accent ?? "transparent", flexShrink: 0,
         borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
-      <SectionLabel style={{ color: labelColor, margin: 0, padding: "12px 12px 8px", display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
+      <SectionLabel className="loom-lane-head" style={{ color: labelColor, margin: 0, padding: "12px 8px 8px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+        {/* The drag handle: grip + label. Pointer-only by design: the keyboard path is the ⋯ menu below
+            (a dnd-kit keyboard drag would nudge the lane 25px per keypress, which is no way to reorder). */}
+        <span ref={laneDrag.setNodeRef} {...laneDrag.listeners} data-testid={`lane-handle-${col.key}`}
+          className="loom-lane-handle" title="Drag to reorder this lane"
+          style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0, touchAction: "none" }}>
+          <span aria-hidden className="loom-lane-grip">⠿</span>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
+        </span>
         {hasWipLimit ? (
           <span aria-label={`${wipCount} of ${col.wipLimit} cards${atOrOverWip ? ", at or over the soft WIP limit" : ""}`}
             title={atOrOverWip
@@ -473,6 +678,8 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
         ) : (
           <span style={{ marginLeft: "auto", flexShrink: 0, color: "inherit" }}>({laneLength})</span>
         )}
+        <LaneMenu col={col} index={index} count={laneCount} disabled={reordering}
+          onMove={onMoveLane} onCollapse={() => onCollapse(true)} />
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
         {visible.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} />)}
@@ -507,10 +714,10 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
             empty column reads as intentional rather than a broken blank — and lights up when dragged over. */}
         {laneLength === 0 && !filterActive && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: 72, textAlign: "center",
-            color: isOver ? color.phosphor : color.textMuted, fontFamily: font.mono, fontSize: 11,
-            border: `1px dashed ${isOver ? color.phosphor : color.border}`, borderRadius: 4,
+            color: cardOver ? color.phosphor : color.textMuted, fontFamily: font.mono, fontSize: 11,
+            border: `1px dashed ${cardOver ? color.phosphor : color.border}`, borderRadius: 4,
             transition: "color 120ms ease, border-color 120ms ease" }}>
-            {isOver ? "drop to move here" : "no cards yet"}
+            {cardOver ? "drop to move here" : "no cards yet"}
           </div>
         )}
       </div>
@@ -711,7 +918,7 @@ function MergeTrack({ merge }: { merge: MergeDisplay }) {
 
 function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen }:
   { task: BoardTask; accent: string; worker?: SessionListItem; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id, data: { type: "card" } satisfies BoardDragData });
   const st = worker ? workerStatus(worker) : null;
   const merge = worker ? mergeDisplay(worker.pendingMerge) : null;
   const hasBody = task.hasBody;
@@ -964,8 +1171,11 @@ function shipVerificationStyle(verification: Task["mergedVerification"]): { colo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, cards, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError }:
+function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, cards, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError, onMoveLane, moving }:
   { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string;
+    /** Card 67c43038 — move this card to another lane NOW (the keyboard twin of dragging it). Not part of
+     *  the staged Save: a lane move is the same immediate action the drag already is. */
+    onMoveLane: (columnKey: string) => void; moving: boolean;
     /** Whether this project writes NO reserved merge trailers, so a missing landing proves nothing. */
     trailersOff: boolean;
     links: TaskLinks; linksUnavailable: boolean; columns: KanbanColumn[]; titleById: Map<string, string>;
@@ -1184,7 +1394,18 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <SectionLabel style={{ margin: 0 }}>Task · {task.id.slice(0, 8)}</SectionLabel>
           <PriorityChip priority={priority} />
-          {column && <Badge tone={columnTone(column) ?? "muted"}>{column.label}</Badge>}
+          {/* The lane chip doubles as the "Move to lane" control: a native select, so it is fully keyboard
+              operable, tinted on its left edge by the lane's own resolved accent. Moves immediately. */}
+          {column && (
+            <Select value={column.key} aria-label="Move to lane" title="Move to lane" data-testid="task-move-lane"
+              disabled={moving} onChange={(e) => { if (e.target.value !== column.key) onMoveLane(e.target.value); }}
+              style={{ width: "auto", padding: "2px 6px", fontSize: 11, fontFamily: font.head, fontWeight: 700,
+                letterSpacing: "0.06em", textTransform: "uppercase", color: labelColorFor(columnAccent(column)),
+                borderLeft: `3px solid ${columnAccent(column) ?? color.border}` }}>
+              {columns.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+            </Select>
+          )}
+          {moving && <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11 }} aria-live="polite">moving…</span>}
           <span style={{ flex: 1 }} />
           <Button onClick={requestClose} title="Close (Esc)">✕</Button>
         </div>
