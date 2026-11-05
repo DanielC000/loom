@@ -37,7 +37,7 @@ const sectionLabel: CSSProperties = {
  * track on either side sizes from that side's own labels alone and the values stop lining up.
  *
  * Sized to clear the widest label this column ever carries (`EDIT_RELATION_LABEL` uppercased, plus
- * "Parent") with headroom for the fallback face that renders before Space Grotesk loads. A label is
+ * "Parent") with headroom for the fallback face that renders before the head face (`--loom-font-head`) loads. A label is
  * `nowrap`, so one wider than this overflows into the value column rather than wrapping;
  * `board-relations-grid-align.spec.ts` asserts none does, so a label that needs more room fails
  * there rather than colliding silently on screen.

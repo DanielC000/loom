@@ -214,7 +214,7 @@ async function assertSharedRule(
   for (const kind of EDITOR_KINDS) {
     await expect(dialog.getByTestId(`relations-edit-${kind}`), `${opts.label}: the ${kind} row`).toBeVisible();
   }
-  // Space Grotesk loads with `display: swap`, so the labels re-measure when the face lands. The shared
+  // The head face loads with `display: swap`, so the labels re-measure when the face lands. The shared
   // column is a fixed width and the two values move together regardless — this only keeps the captured
   // screenshots from showing the fallback face.
   await page.evaluate(() => document.fonts.ready.then(() => undefined));

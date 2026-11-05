@@ -82,8 +82,20 @@ export const shadow = {
 export const wash = (c: string, pct: number): string => `color-mix(in oklab, ${c} ${pct}%, transparent)`;
 
 export const font = {
-  head: "var(--loom-font-head)", // Space Grotesk — uppercase section labels
-  mono: "var(--loom-font-mono)", // JetBrains Mono — all data / IDs / code
+  ui: "var(--loom-font-ui)", // Instrument Sans — prose, labels, buttons
+  head: "var(--loom-font-head)", // alias of the UI face
+  mono: "var(--loom-font-mono)", // Geist Mono — data / IDs / code
+} as const;
+
+// Graphite type scale, as CSS lengths: `fontSize: fs.body`. Mirrors the --loom-fs-* tokens.
+export const fs = {
+  xs: "var(--loom-fs-xs)", // 11 — densest mono ids only
+  sm: "var(--loom-fs-sm)", // 12 — small text, labels
+  mono: "var(--loom-fs-mono)", // 12.5 — data
+  body: "var(--loom-fs-body)", // 14
+  lg: "var(--loom-fs-lg)", // 17.5 — sub-head
+  h1: "var(--loom-fs-h1)", // 22
+  kpi: "var(--loom-fs-kpi)", // 27.5 — semibold, tabular
 } as const;
 
 export const radius = {

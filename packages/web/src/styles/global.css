@@ -152,8 +152,18 @@
   --loom-text-muted: var(--loom-text-3);
 
   /* Type */
-  --loom-font-head: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
-  --loom-font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+  --loom-font-ui: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --loom-font-mono: "Geist Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+  --loom-font-head: var(--loom-font-ui);
+
+  /* Type scale (Graphite). xs is for the densest mono ids only, so those rows don't grow and wrap. */
+  --loom-fs-xs: 11px;
+  --loom-fs-sm: 12px;
+  --loom-fs-mono: 12.5px;
+  --loom-fs-body: 14px;
+  --loom-fs-lg: 17.5px;
+  --loom-fs-h1: 22px;
+  --loom-fs-kpi: 27.5px;
 
   /* Shape */
   --loom-radius: 4px;
@@ -186,9 +196,12 @@ body {
   margin: 0;
   background: var(--loom-bg);
   color: var(--loom-text);
-  font-family: var(--loom-font-mono);
-  font-size: 13px;
-  line-height: 1.5;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-body);
+  line-height: 1.45;
+  /* Tabular figures everywhere: mono and number cells inherit it, so a column of counts, ids or
+     timestamps never jitters as digits change. */
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }

@@ -731,7 +731,7 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
 }
 
 // ── Filter bar ─────────────────────────────────────────────────────────────────
-// Tiny uppercase group label (Space Grotesk) preceding a row of toggle chips. aria-hidden — each
+// Tiny uppercase group label (font.head) preceding a row of toggle chips. aria-hidden — each
 // toggle carries its own descriptive aria-label, so the visual label would only be redundant noise
 // to a screen reader.
 const groupLabel = { fontFamily: font.head, fontSize: 10, fontWeight: 700, textTransform: "uppercase",
