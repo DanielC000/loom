@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button, Dot } from "./ui";
-import { color, font } from "../theme";
+import { color, font, wash } from "../theme";
 import { api } from "../lib/api";
 import { WEB_BUNDLE_QUERY_KEY, isDismissed, isSuperseded, markDismissed, ownBundle } from "../lib/newBuild";
 
@@ -44,7 +44,7 @@ export function NewBuildNotice() {
   return (
     <div role="status" data-testid="new-build-notice"
       style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, padding: "7px 20px",
-        background: "rgba(91,200,255,0.08)", borderBottom: `1px solid ${color.cyan}`,
+        background: wash(color.info, 8), borderBottom: `1px solid ${color.cyan}`,
         fontFamily: font.mono, fontSize: 12.5 }}>
       <Dot tone="cyan" glow />
       {/* Flexes rather than sitting at its natural width so that at narrow widths it keeps the Dot

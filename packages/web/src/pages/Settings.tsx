@@ -38,6 +38,7 @@ import {
 } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAtlasUi } from "../lib/atlasUi";
+import { useThemePref, type ThemePref } from "../lib/themePref";
 import { useAllAgentLabels, useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
@@ -256,8 +257,27 @@ export function WorkspaceSettings() {
 // pick a side, affects nobody else on this daemon, and no agent can reach it.
 function InterfacePanel() {
   const [atlasUi, setAtlasUi] = useAtlasUi();
+  const [theme, setTheme] = useThemePref();
   return (
     <Panel>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
+        <span style={fieldLabel}>Theme</span>
+        <Segmented
+          data-testid="theme-switch"
+          ariaLabel="Theme"
+          value={theme}
+          onChange={setTheme}
+          items={[
+            { key: "system" as ThemePref, label: "System" },
+            { key: "light" as ThemePref, label: "Light" },
+            { key: "dark" as ThemePref, label: "Dark" },
+          ]}
+        />
+        <Hint style={{ display: "block", maxWidth: "68ch", lineHeight: 1.6 }}>
+          System follows your operating system's setting. Applies at once and is stored in this browser
+          alone. Terminals stay dark in every theme.
+        </Hint>
+      </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <span style={fieldLabel}>Which UI this browser renders</span>
         <Segmented

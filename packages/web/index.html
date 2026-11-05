@@ -3,6 +3,27 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <!-- Sets the colour theme before first paint, so the page never flashes the wrong one. Mirrors
+         src/lib/themePref.ts (key "loom.theme", default "dark"); test/theme-pref.mjs checks they agree. -->
+    <script>
+      (function () {
+        var pref = "dark";
+        try {
+          var v = localStorage.getItem("loom.theme");
+          if (v === "system" || v === "light" || v === "dark") pref = v;
+        } catch (e) {}
+        var t = pref;
+        if (pref === "system") {
+          t = "dark";
+          try {
+            t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          } catch (e) {}
+        }
+        document.documentElement.setAttribute("data-theme", t);
+        document.documentElement.style.colorScheme = t;
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>loom · cockpit</title>
     <meta

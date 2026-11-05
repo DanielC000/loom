@@ -336,55 +336,55 @@ export default function Markdown({ source, files, currentPath = "", onOpen, Asse
 }
 
 const MD_CSS = `
-.loom-md { color: #e6e6e6; font-size: 14px; line-height: 1.6; word-wrap: break-word; }
-.loom-md h1, .loom-md h2, .loom-md h3, .loom-md h4 { color: #fff; line-height: 1.3; margin: 1.2em 0 0.5em; }
-.loom-md h1 { font-size: 1.7em; border-bottom: 1px solid #2a2a2e; padding-bottom: 0.2em; }
-.loom-md h2 { font-size: 1.4em; border-bottom: 1px solid #2a2a2e; padding-bottom: 0.2em; }
+.loom-md { color: var(--loom-text); font-size: 14px; line-height: 1.6; word-wrap: break-word; }
+.loom-md h1, .loom-md h2, .loom-md h3, .loom-md h4 { color: var(--loom-text); line-height: 1.3; margin: 1.2em 0 0.5em; }
+.loom-md h1 { font-size: 1.7em; border-bottom: 1px solid var(--loom-line); padding-bottom: 0.2em; }
+.loom-md h2 { font-size: 1.4em; border-bottom: 1px solid var(--loom-line); padding-bottom: 0.2em; }
 .loom-md h3 { font-size: 1.2em; } .loom-md h4 { font-size: 1.05em; }
 .loom-md p { margin: 0.6em 0; }
-.loom-md a { color: #9ad; text-decoration: none; } .loom-md a:hover { text-decoration: underline; }
+.loom-md a { color: var(--loom-accent-fg); text-decoration: none; } .loom-md a:hover { text-decoration: underline; }
 .loom-md ul, .loom-md ol { padding-left: 1.6em; margin: 0.5em 0; }
 .loom-md li { margin: 0.2em 0; }
-.loom-md code { background: #161618; border: 1px solid #2a2a2e; border-radius: 4px; padding: 0.1em 0.35em; font-family: ui-monospace, Consolas, monospace; font-size: 0.9em; }
-.loom-md pre { background: #161618; border: 1px solid #2a2a2e; border-radius: 6px; padding: 12px; overflow: auto; }
+.loom-md code { background: var(--loom-inset); border: 1px solid var(--loom-line); border-radius: 4px; padding: 0.1em 0.35em; font-family: ui-monospace, Consolas, monospace; font-size: 0.9em; }
+.loom-md pre { background: var(--loom-inset); border: 1px solid var(--loom-line); border-radius: 6px; padding: 12px; overflow: auto; }
 .loom-md pre code { background: none; border: none; padding: 0; }
-.loom-md blockquote { border-left: 3px solid #3a3a40; margin: 0.6em 0; padding: 0.1em 0 0.1em 1em; color: #b9b9bf; }
+.loom-md blockquote { border-left: 3px solid var(--loom-line-strong); margin: 0.6em 0; padding: 0.1em 0 0.1em 1em; color: var(--loom-text-2); }
 .loom-md table { border-collapse: collapse; margin: 0.6em 0; }
-.loom-md th, .loom-md td { border: 1px solid #2a2a2e; padding: 5px 10px; }
-.loom-md th { background: #161618; color: #fff; }
-.loom-md hr { border: none; border-top: 1px solid #2a2a2e; margin: 1.2em 0; }
+.loom-md th, .loom-md td { border: 1px solid var(--loom-line); padding: 5px 10px; }
+.loom-md th { background: var(--loom-inset); color: var(--loom-text); }
+.loom-md hr { border: none; border-top: 1px solid var(--loom-line); margin: 1.2em 0; }
 .loom-md img, .loom-md .md-img { max-width: 100%; }
-.loom-md .md-img { display: block; max-height: 70vh; height: auto; margin: 0.6em 0; border: 1px solid #2a2a2e; border-radius: 6px; background: #131316; }
-.loom-md .md-props { border-collapse: collapse; margin-bottom: 1em; background: #131316; border: 1px solid #2a2a2e; border-radius: 6px; }
-.loom-md .md-props-k { color: #9aa; padding: 3px 12px; font-size: 12px; vertical-align: top; white-space: nowrap; }
-.loom-md .md-props-v { color: #ddd; padding: 3px 12px; font-size: 12px; }
-.loom-md .md-wikilink { color: #b39ddb; cursor: pointer; }
-.loom-md .md-embed { display: inline-block; color: #9ad; cursor: pointer; background: #161618; border: 1px solid #2a2a2e; border-radius: 4px; padding: 0 6px; font-size: 0.92em; }
-.loom-md .md-broken { color: #c77; cursor: default; text-decoration: none; }
-.loom-md .md-ext-img { display: inline-block; color: #8a8a92; background: #161618; border: 1px dashed #3a3a40; border-radius: 4px; padding: 0 6px; font-size: 0.85em; font-family: ui-monospace, Consolas, monospace; }
-.loom-md .md-callout { border: 1px solid #2a2a2e; border-left: 4px solid #5a8dee; border-radius: 6px; padding: 8px 12px; margin: 0.8em 0; background: rgba(90,141,238,0.07); }
-.loom-md .md-callout-title { font-weight: 600; color: #fff; margin-bottom: 0.2em; }
+.loom-md .md-img { display: block; max-height: 70vh; height: auto; margin: 0.6em 0; border: 1px solid var(--loom-line); border-radius: 6px; background: var(--loom-inset); }
+.loom-md .md-props { border-collapse: collapse; margin-bottom: 1em; background: var(--loom-inset); border: 1px solid var(--loom-line); border-radius: 6px; }
+.loom-md .md-props-k { color: var(--loom-text-3); padding: 3px 12px; font-size: 12px; vertical-align: top; white-space: nowrap; }
+.loom-md .md-props-v { color: var(--loom-text); padding: 3px 12px; font-size: 12px; }
+.loom-md .md-wikilink { color: var(--loom-md-wikilink); cursor: pointer; }
+.loom-md .md-embed { display: inline-block; color: var(--loom-accent-fg); cursor: pointer; background: var(--loom-inset); border: 1px solid var(--loom-line); border-radius: 4px; padding: 0 6px; font-size: 0.92em; }
+.loom-md .md-broken { color: var(--loom-danger); cursor: default; text-decoration: none; }
+.loom-md .md-ext-img { display: inline-block; color: var(--loom-text-3); background: var(--loom-inset); border: 1px dashed var(--loom-line-strong); border-radius: 4px; padding: 0 6px; font-size: 0.85em; font-family: ui-monospace, Consolas, monospace; }
+.loom-md .md-callout { --md-callout: var(--loom-md-callout-note); border: 1px solid var(--loom-line); border-left: 4px solid var(--md-callout); border-radius: 6px; padding: 8px 12px; margin: 0.8em 0; background: color-mix(in oklab, var(--md-callout) 7%, transparent); }
+.loom-md .md-callout-title { font-weight: 600; color: var(--loom-text); margin-bottom: 0.2em; }
 .loom-md .md-callout-body > :first-child { margin-top: 0; } .loom-md .md-callout-body > :last-child { margin-bottom: 0; }
-.loom-md .md-callout-tip, .loom-md .md-callout-success, .loom-md .md-callout-hint, .loom-md .md-callout-done { border-left-color: #4caf6a; background: rgba(76,175,106,0.07); }
-.loom-md .md-callout-warning, .loom-md .md-callout-caution, .loom-md .md-callout-attention { border-left-color: #e0a72e; background: rgba(224,167,46,0.07); }
-.loom-md .md-callout-danger, .loom-md .md-callout-error, .loom-md .md-callout-bug, .loom-md .md-callout-failure { border-left-color: #e05a5a; background: rgba(224,90,90,0.07); }
-.loom-md .md-callout-question, .loom-md .md-callout-help, .loom-md .md-callout-faq, .loom-md .md-callout-example { border-left-color: #a36ce0; background: rgba(163,108,224,0.07); }
-.loom-md .md-callout-quote, .loom-md .md-callout-cite, .loom-md .md-callout-abstract, .loom-md .md-callout-summary { border-left-color: #8a8a92; background: rgba(138,138,146,0.07); }
+.loom-md .md-callout-tip, .loom-md .md-callout-success, .loom-md .md-callout-hint, .loom-md .md-callout-done { --md-callout: var(--loom-live); }
+.loom-md .md-callout-warning, .loom-md .md-callout-caution, .loom-md .md-callout-attention { --md-callout: var(--loom-busy); }
+.loom-md .md-callout-danger, .loom-md .md-callout-error, .loom-md .md-callout-bug, .loom-md .md-callout-failure { --md-callout: var(--loom-danger); }
+.loom-md .md-callout-question, .loom-md .md-callout-help, .loom-md .md-callout-faq, .loom-md .md-callout-example { --md-callout: var(--loom-md-callout-question); }
+.loom-md .md-callout-quote, .loom-md .md-callout-cite, .loom-md .md-callout-abstract, .loom-md .md-callout-summary { --md-callout: var(--loom-text-3); }
 .loom-md .md-section { margin: 0; }
 /* Collapsed: hide everything after the heading (the section body) without unmounting it, so the
    in-doc find bar can still see the text nodes and expand the section to reveal a match. */
 .loom-md .md-section[data-collapsed="true"] > :not(:first-child) { display: none; }
 /* In-doc find (CSS Custom Highlight API): all matches read as a quiet amber wash; the active match
    is a solid amber so prev/next is obvious. Names match the registry keys in DocFind.tsx. */
-::highlight(loom-find) { background-color: rgba(255, 178, 62, 0.30); color: #0a0b0c; }
-::highlight(loom-find-active) { background-color: var(--loom-amber); color: #0a0b0c; }
+::highlight(loom-find) { background-color: color-mix(in oklab, var(--loom-busy) 30%, transparent); color: var(--loom-text); }
+::highlight(loom-find-active) { background-color: var(--loom-busy); color: var(--loom-on-busy); }
 .loom-md .md-heading-collapsible { cursor: pointer; }
 .loom-md .md-collapse-toggle {
   display: inline-flex; align-items: center; justify-content: center;
   width: 1em; height: 1em; margin-right: 0.34em; margin-left: -0.1em; padding: 0;
   vertical-align: -0.06em; background: none; border: none; border-radius: 3px;
-  color: #8a8a92; cursor: pointer; flex-shrink: 0; -webkit-appearance: none; appearance: none;
+  color: var(--loom-text-3); cursor: pointer; flex-shrink: 0; -webkit-appearance: none; appearance: none;
 }
-.loom-md .md-heading-collapsible:hover .md-collapse-toggle { color: #cfcfd4; }
-.loom-md .md-collapse-toggle:focus-visible { outline: 2px solid #5a8dee; outline-offset: 1px; color: #cfcfd4; }
+.loom-md .md-heading-collapsible:hover .md-collapse-toggle { color: var(--loom-text-2); }
+.loom-md .md-collapse-toggle:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: 1px; color: var(--loom-text-2); }
 `;

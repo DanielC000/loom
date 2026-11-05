@@ -8,6 +8,8 @@ import { createReconnectBackoff, createRefusalEpisode, handleSocketClose, type S
 import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCredential";
 import { useIsCompanionSession } from "../lib/companionGuard";
+import { getResolvedTheme, subscribeResolvedTheme } from "../lib/themePref";
+import { xtermTheme } from "../lib/xtermTheme";
 import { Dot } from "./ui";
 import { color, font, space } from "../theme";
 import "@xterm/xterm/css/xterm.css";
@@ -103,7 +105,8 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       cursorBlink: !readOnly,
       disableStdin: readOnly,
       scrollback: 5000,
-      theme: { background: "#0b0b0c" },
+      // Dark in both app themes (see lib/xtermTheme.ts); the subscription below re-themes it live.
+      theme: xtermTheme(getResolvedTheme()),
       // xterm maintains a visually-hidden `.xterm-accessibility-tree` (one row element per grid row, kept
       // in sync with the rendered buffer) ONLY when this is on — an always-in-sync extra DOM tree per
       // terminal, which the cockpit can render MANY of live, so PROD stays byte-identical (off) rather
@@ -116,6 +119,10 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
     const fit = resizable ? new FitAddon() : null;
     if (fit) term.loadAddon(fit);
     term.open(el);
+    // A theme switch re-themes this terminal in place. Re-creating it would drop the pty attach.
+    const unsubscribeTheme = subscribeResolvedTheme((t) => {
+      term.options.theme = xtermTheme(t);
+    });
 
     // Scroll-hijack gate: a terminal must consume wheel scroll ONLY when it's "clicked in".
     // xterm focus lives on its hidden textarea (focused on click, blurred when you click away), so
@@ -554,6 +561,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
         if (ws.readyState === WebSocket.CONNECTING) ws.onopen = () => ws.close();
         else ws.close();
       }
+      unsubscribeTheme();
       term.dispose();
     };
   }, [sessionId, resizable, readOnly, reattachNonce]);

@@ -8,7 +8,7 @@ import { api, orchStatusQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAllAgentLabels } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill } from "../components/ui";
-import { color, font, radius } from "../theme";
+import { color, font, radius, wash } from "../theme";
 
 // A 5-field cron is the daemon's contract (Schedule.cron). Cheap client-side gate for the raw-cron
 // escape hatch: exactly five whitespace-separated fields — enough to catch a fat-fingered expression
@@ -105,7 +105,7 @@ export default function Schedules() {
         <div role="status" style={{
           marginTop: 12, display: "flex", alignItems: "flex-start", gap: 10, flexWrap: "wrap",
           padding: "10px 12px", border: `1px solid ${color.amber}`, borderRadius: radius.base,
-          background: "rgba(232,168,68,0.06)",
+          background: wash(color.busy, 6),
         }}>
           <Badge tone="amber">scheduler off</Badge>
           <p style={{ margin: 0, flex: 1, minWidth: 260, color: color.textDim, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6 }}>

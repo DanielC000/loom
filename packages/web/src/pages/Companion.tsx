@@ -26,7 +26,7 @@ import { CompanionChatPanel } from "../components/CompanionChat";
 import { TerminalCard } from "../components/TerminalCard";
 import { useAtlasUi } from "../lib/atlasUi";
 import { IN_APP_CHANNEL, isArmedInApp } from "../lib/companionChat";
-import { color, font, radius } from "../theme";
+import { color, font, radius, wash } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 
 // Loom Companion management (Companion epic Phase 3). The HUMAN-only cockpit surface over the loopback
@@ -43,11 +43,11 @@ const fieldLabel: CSSProperties = {
 const hint: CSSProperties = { fontSize: 11, color: color.textMuted, fontFamily: font.mono, lineHeight: 1.5 };
 const errStyle: CSSProperties = { color: color.red, fontSize: 12, fontFamily: font.mono };
 
-// Danger/attention fill washes for the elevated lead-mode surfaces — single-sourced to the actual --loom-red
-// (#ff5c5c) / --loom-amber tokens rather than new hex, matching how the existing grant banners inline rgba.
-const RED_WASH = "rgba(255,92,92,0.06)";
-const RED_WASH_2 = "rgba(255,92,92,0.14)";
-const AMBER_WASH = "rgba(232,168,68,0.07)";
+// Danger/attention fill washes for the elevated lead-mode surfaces. Mixed from the danger/busy tokens, so
+// they follow the light/dark theme with the colour itself.
+const RED_WASH = wash(color.danger, 6);
+const RED_WASH_2 = wash(color.danger, 14);
+const AMBER_WASH = wash(color.busy, 7);
 
 function Field({ label, sub, children }: { label: string; sub?: string; children: ReactNode }) {
   return (
@@ -1819,14 +1819,14 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
         background: leadMode
           ? `linear-gradient(180deg, ${RED_WASH_2}, transparent 55%), ${color.panel2}`
           : `linear-gradient(180deg, ${RED_WASH}, transparent 60%), ${color.panel2}`,
-        ...(leadMode ? { boxShadow: "inset 0 0 0 1px rgba(255,92,92,0.28), 0 0 40px rgba(255,92,92,0.05)" } : null),
+        ...(leadMode ? { boxShadow: `inset 0 0 0 1px ${wash(color.danger, 28)}, 0 0 40px ${wash(color.danger, 5)}` } : null),
       }}
     >
       {/* ── Header: mark + titles + the physical switch ── */}
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
         <span style={{
           width: 34, height: 34, flex: "none", borderRadius: radius.base, border: leadRedBorder,
-          display: "grid", placeItems: "center", color: color.red, background: "rgba(255,92,92,0.06)",
+          display: "grid", placeItems: "center", color: color.red, background: RED_WASH,
         }} aria-hidden>
           <ShieldBolt />
         </span>
@@ -1858,7 +1858,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
               position: "relative", width: 52, height: 28, borderRadius: 999, padding: 0, flex: "none",
               cursor: setLead.isPending ? "wait" : "pointer",
               border: `1px solid ${leadMode ? color.red : color.borderStrong}`,
-              background: leadMode ? "rgba(255,92,92,0.22)" : color.panel,
+              background: leadMode ? wash(color.danger, 22) : color.panel,
               transition: "background 120ms linear, border-color 120ms linear",
             }}
           >
@@ -1867,7 +1867,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
               background: leadMode ? color.red : color.textMuted,
               transform: leadMode ? "translateX(24px)" : "translateX(0)",
               transition: "transform 140ms cubic-bezier(0.2,0.8,0.2,1), background 140ms linear",
-              ...(leadMode ? { boxShadow: "0 0 8px rgba(255,92,92,0.7)" } : null),
+              ...(leadMode ? { boxShadow: `0 0 8px ${wash(color.danger, 70)}` } : null),
             }} />
           </button>
         </div>
@@ -1900,7 +1900,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
           </p>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: "1px solid rgba(255,92,92,0.35)", background: "rgba(255,92,92,0.04)" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: `1px solid ${wash(color.danger, 35)}`, background: wash(color.danger, 4) }}>
               <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: color.red }}>What lead mode grants</span>
               <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
                 <DiscItem tone="red"><strong style={{ color: color.text }}>Full act-scope on every lever</strong>, in every project — including any project you create later.</DiscItem>
@@ -1908,7 +1908,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
                 <DiscItem tone="red">That reach <strong style={{ color: color.text }}>includes Loom's own infrastructure sessions</strong> — Platform Lead, Operator, Setup. Fleet-wide, no exclusions.</DiscItem>
               </ul>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: "1px solid rgba(232,168,68,0.35)", background: AMBER_WASH }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: `1px solid ${wash(color.busy, 35)}`, background: AMBER_WASH }}>
               <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: color.amber }}>What still asks you first</span>
               <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
                 <DiscItem tone="amber"><strong style={{ color: color.text }}>Deploy &amp; irreversible decisions</strong> still require a fresh confirmation each time.</DiscItem>
@@ -2040,7 +2040,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
                 data-testid="companion-grants-superseded"
                 style={{
                   position: "absolute", top: 8, right: 8, zIndex: 5, display: "inline-flex", alignItems: "center", gap: 7,
-                  padding: "5px 10px", border: `1px solid ${color.red}`, borderRadius: 999, background: "rgba(20,10,11,0.92)",
+                  padding: "5px 10px", border: `1px solid ${color.red}`, borderRadius: 999, background: wash(color.dangerSoft, 92),
                   fontFamily: font.mono, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.08em", color: color.red,
                 }}
               >
@@ -2059,7 +2059,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
               data-testid="companion-grants-apply"
               style={{
                 display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 10px",
-                border: `1px solid ${color.amber}`, borderRadius: radius.base, background: "rgba(232,168,68,0.06)",
+                border: `1px solid ${color.amber}`, borderRadius: radius.base, background: wash(color.busy, 6),
               }}
             >
               <Badge tone="amber">restart to apply</Badge>
@@ -2089,7 +2089,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
               role="alert"
               style={{
                 display: "flex", flexDirection: "column", gap: 10, padding: "10px 12px",
-                border: `1px solid ${color.amber}`, borderRadius: radius.base, background: "rgba(232,168,68,0.07)",
+                border: `1px solid ${color.amber}`, borderRadius: radius.base, background: AMBER_WASH,
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -2313,7 +2313,7 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
               role="alertdialog"
               aria-label={`Grant ${meta.name}`}
               data-testid={`companion-grant-confirm-${meta.slug}`}
-              style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${color.red}`, borderRadius: radius.base, background: "rgba(224,90,90,0.06)" }}
+              style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${color.red}`, borderRadius: radius.base, background: RED_WASH }}
             >
               <StatusPill tone="red" label="Elevated grant" glow />
               <span style={{ ...hint, margin: 0 }}>
@@ -2370,7 +2370,7 @@ function GrantScopeRow({ meta, grant, projectName, busy, onSetMode, onSetConfig,
                   onClick={() => { if (!on) onSetMode(m); }}
                   className="loom-toggle"
                   style={{
-                    background: on ? (elevated ? "rgba(224,90,90,0.14)" : color.phosphorDim) : "transparent",
+                    background: on ? (elevated ? RED_WASH_2 : color.phosphorDim) : "transparent",
                     color: on ? (elevated ? color.red : color.text) : color.textDim,
                     border: "none", padding: "3px 12px", fontFamily: font.mono, fontSize: 12, cursor: busy ? "default" : "pointer",
                     textTransform: "uppercase", letterSpacing: "0.06em",
@@ -2739,7 +2739,7 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
 function Callout({ tone, children, testId }: { tone: "amber"; children: ReactNode; testId?: string }) {
   const c = tone === "amber" ? color.amber : color.cyan;
   return (
-    <div data-testid={testId} style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: "rgba(232,168,68,0.06)" }}>
+    <div data-testid={testId} style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: wash(color.busy, 6) }}>
       <span aria-hidden style={{ color: c }}>▲</span>
       <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, lineHeight: 1.5 }}>{children}</span>
     </div>

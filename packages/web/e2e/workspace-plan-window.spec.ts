@@ -19,6 +19,7 @@
 // real OAuth credentials, so a hermetic fixture daemon has no seed path for it AND an un-intercepted
 // read would render the operator's live account. Intercepting is what makes this spec hermetic.
 import { expect, test, type Page } from "./fixtures/daemon";
+import { cssColor } from "./helpers/themeToken";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding. Hardcoded rather than imported: the e2e
 // tsconfig covers `e2e/` only (tsconfig.e2e.json).
@@ -46,12 +47,8 @@ const OPUS_PCT = 12;
 const FIVE_HOUR_RESET_MS = (2 * 60 + 10) * 60 * 1000;             // ~2h10m → "in 2h 9m"
 const SEVEN_DAY_RESET_MS = ((3 * 24 + 1) * 60 + 10) * 60 * 1000;  // ~3d1h10m → "in 3d 1h"
 
-// `--loom-phosphor: #2ee66e` / `--loom-amber: #ffb23e` (styles/global.css), as the browser reports
-// them back. One theme, no `prefers-color-scheme` block, so these are unconditional.
-const tone = {
-  phosphor: "rgb(46, 230, 110)",
-  amber: "rgb(255, 178, 62)",
-} as const;
+// The tile's tones are `--loom-phosphor` and `--loom-amber`, resolved from the live tokens at the
+// assertion (`cssColor`): they differ per theme, so a literal would pin one theme only.
 
 /** The two plan shapes, both `available:true`. `withFiveHour:false` is the owner's own account. */
 function usagePayload(withFiveHour: boolean) {
@@ -112,7 +109,7 @@ test.describe("Workspace plan tile — both plan shapes (card 9ccad269)", () => 
     // weekly reset ("in 3d 1h") cannot satisfy this.
     await expect(tile.locator(".loom-kpi-sub")).toHaveText(/^resets in 2h \d+m$/);
     // 41% is under 80, so the figure stays phosphor and the fill is the 5h ratio, not the weekly one.
-    await expect(tile.locator(".loom-kpi-value")).toHaveCSS("color", tone.phosphor);
+    await expect(tile.locator(".loom-kpi-value")).toHaveCSS("color", await cssColor(page, "--loom-phosphor"));
     expect(await fillPct(page)).toBeCloseTo(FIVE_HOUR_PCT, 3);
 
     // The pop-over lists every window the plan reports, 5h first, and names the 5h reset.
@@ -137,7 +134,7 @@ test.describe("Workspace plan tile — both plan shapes (card 9ccad269)", () => 
     await expect(tile.locator(".loom-kpi-sub")).not.toContainText("loading");
     // 87% is in the amber band — so this also proves the tone is derived from the window actually
     // shown, not left muted the way the absent-5h branch used to leave it.
-    await expect(tile.locator(".loom-kpi-value")).toHaveCSS("color", tone.amber);
+    await expect(tile.locator(".loom-kpi-value")).toHaveCSS("color", await cssColor(page, "--loom-amber"));
     expect(await fillPct(page)).toBeCloseTo(SEVEN_DAY_PCT, 3);
 
     // The pop-over omits the 5h row (there is no such window) and still names a reset — the weekly

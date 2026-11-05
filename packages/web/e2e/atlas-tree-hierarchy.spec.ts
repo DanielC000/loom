@@ -32,6 +32,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
+import { cssColor } from "./helpers/themeToken";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
@@ -284,7 +285,7 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
       // edge — which is the whole reason `is-open` is mirrored onto the row now that the twist has
       // been hoisted out of the button that used to draw it.
       expect(await rowChrome(alpha.name), "the selected branch row has no phosphor left edge")
-        .toBe("rgb(46, 230, 110)");
+        .toBe(await cssColor(page, "--loom-phosphor"));
       // Positive control in the same breath: an unselected row reads transparent, so the above is
       // not simply "every branch row has a coloured border".
       expect(await rowChrome(bravo.name), "an unselected branch row also carries the phosphor edge")

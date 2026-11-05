@@ -5,7 +5,7 @@ import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useFrameOwnsNodeIdentity } from "../lib/atlasNodeHead";
 import { SectionLabel, Segmented, Meter, Chip, Badge } from "../components/ui";
-import { color, font, radius, tone, type Tone } from "../theme";
+import { color, font, radius, tone, wash, type Tone } from "../theme";
 
 // Memory — the read-only, per-project window into project_memory: the durable knowledge the fleet writes
 // and recalls via the `memory` MCP (memory_write/read/list/forget). Wired to the real read surface
@@ -73,7 +73,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
       // [[wikilink]] — a read-only visual affordance (no resolvable target in this view).
       nodes.push(
         <span key={`${keyPrefix}-w${i}`} title="wikilink"
-          style={{ color: color.cyan, borderBottom: `1px dotted rgba(91,200,255,0.5)` }}>
+          style={{ color: color.cyan, borderBottom: `1px dotted ${wash(color.info, 50)}` }}>
           <span aria-hidden style={{ opacity: 0.5 }}>[[</span>{m[1]}<span aria-hidden style={{ opacity: 0.5 }}>]]</span>
         </span>,
       );
@@ -133,7 +133,7 @@ function PinCard({ entry, max, selected, onOpen }: { entry: ProjectMemoryEntry; 
         <Meter value={entry.retrievalCount} max={max} tone={magTone(entry.retrievalCount, max)} width={64} />
         <span style={{ flex: 1 }} />
         <span title="Injected into every agent kickoff"
-          style={{ fontFamily: font.mono, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.07em", color: color.amber, border: `1px solid rgba(255,178,62,0.4)`, borderRadius: radius.sm, padding: "1px 5px", whiteSpace: "nowrap" }}>always</span>
+          style={{ fontFamily: font.mono, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.07em", color: color.amber, border: `1px solid ${wash(color.busy, 40)}`, borderRadius: radius.sm, padding: "1px 5px", whiteSpace: "nowrap" }}>always</span>
       </div>
     </div>
   );
@@ -247,7 +247,7 @@ const MEMORY_CSS = `
 .memory-row:hover { background: var(--loom-panel-2); }
 .memory-row:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
 .memory-pincard { transition: border-color 90ms linear, background 90ms linear; }
-.memory-pincard:hover { border-color: var(--loom-border-strong); background: #12161a; }
+.memory-pincard:hover { border-color: var(--loom-border-strong); background: var(--loom-hover); }
 @media (max-width: 640px) {
   .memory-body-grid { grid-template-columns: 1fr !important; }
   .memory-pinned-row { grid-template-columns: 1fr !important; }

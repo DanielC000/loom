@@ -17,7 +17,7 @@ import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionO
 import { useDismissable } from "./lib/useDismissable";
 import { ActiveProjectProvider } from "./lib/activeProject";
 import { useAtlasUi } from "./lib/atlasUi";
-import { color, font, radius, tone } from "./theme";
+import { color, font, radius, shadow, tone, wash } from "./theme";
 import { Dot } from "./components/ui";
 import { page } from "./ui";
 import { errorText } from "./lib/loopbackCredential";
@@ -51,7 +51,7 @@ function UpdateBanner() {
 
   return (
     <div role="status" style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 20px",
-      background: "rgba(232,168,68,0.08)", borderBottom: `1px solid ${color.amber}`, fontFamily: font.mono, fontSize: 12.5 }}>
+      background: wash(color.busy, 8), borderBottom: `1px solid ${color.amber}`, fontFamily: font.mono, fontSize: 12.5 }}>
       <Dot tone="amber" glow />
       {started ? (
         <span style={{ color: color.amber }}>
@@ -198,7 +198,7 @@ function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen:
       style={{
         display: "flex", alignItems: "center", gap: 8,
         background: color.panel, border: `1px solid ${color.borderStrong}`, borderLeft: `3px solid ${c}`,
-        borderRadius: radius.base, padding: "7px 11px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
+        borderRadius: radius.base, padding: "7px 11px", boxShadow: shadow.pop,
         cursor: "pointer", fontFamily: font.mono, fontSize: 12,
         opacity: shown ? 1 : 0, transform: shown ? "translateY(0)" : "translateY(8px)",
         transition: "opacity 160ms ease, transform 160ms ease",
@@ -227,7 +227,7 @@ function Toast({ item, onDismiss, onOpen }: { item: AttentionItem; onDismiss: ()
       style={{
         display: "flex", alignItems: "flex-start", gap: 10, width: 360,
         background: color.panel, border: `1px solid ${color.borderStrong}`, borderLeft: `3px solid ${c}`,
-        borderRadius: radius.base, padding: "10px 12px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
+        borderRadius: radius.base, padding: "10px 12px", boxShadow: shadow.pop,
         cursor: openable ? "pointer" : "default",
         opacity: shown ? 1 : 0, transform: shown ? "translateY(0)" : "translateY(8px)",
         transition: "opacity 160ms ease, transform 160ms ease",
@@ -273,10 +273,10 @@ function FirstRunWelcome() {
   const goSetup = () => { navigate("/platform"); dismiss(); };
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center",
-      background: "rgba(0,0,0,0.55)", backdropFilter: "blur(2px)" }}>
+      background: color.scrim, backdropFilter: "blur(2px)" }}>
       <div ref={ref} role="dialog" aria-modal="true" aria-label="Welcome to Loom"
         style={{ width: 480, maxWidth: "92vw", background: color.panel, border: `1px solid ${color.borderStrong}`,
-          borderRadius: radius.base, padding: "26px 26px 22px", boxShadow: "0 12px 48px rgba(0,0,0,0.6)",
+          borderRadius: radius.base, padding: "26px 26px 22px", boxShadow: shadow.pop,
           borderTop: `3px solid ${color.phosphor}` }}>
         <div style={{ fontFamily: font.head, fontSize: 20, color: color.text, letterSpacing: "0.01em" }}>Welcome to Loom</div>
         <p style={{ color: color.textDim, fontFamily: font.mono, fontSize: 13, lineHeight: 1.6, margin: "12px 0 22px" }}>

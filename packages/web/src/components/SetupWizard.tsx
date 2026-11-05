@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import type { Profile, RepoRegistryEntry } from "@loom/shared";
 import { api, type SetupTemplate, type TemplateApplyResult } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { color, font, radius } from "../theme";
+import { color, font, radius, wash } from "../theme";
 import { Button, Input } from "./ui";
 import { LogoMark } from "./Logo";
 import { roleDisplay, roleColor } from "../lib/roleDisplay";
@@ -657,7 +657,7 @@ function StepReview({
         )}
 
         {needsBrowserInstall && (
-          <div style={{ padding: "14px 22px", borderTop: `1px solid ${color.border}`, background: "rgba(96,181,255,0.06)" }}>
+          <div style={{ padding: "14px 22px", borderTop: `1px solid ${color.border}`, background: wash(color.info, 6) }}>
             <p style={{ fontFamily: font.mono, fontSize: 12, color: color.cyan, margin: 0, lineHeight: 1.55 }}>
               <b>Browser rigs</b> — {browserRigs.join(" + ")} drive a headless browser. They need a one-time{" "}
               <code style={{ background: color.panel2, padding: "1px 5px", borderRadius: radius.sm, color: color.text }}>npx playwright install chromium</code>{" "}

@@ -10,6 +10,7 @@
 // The ACTIVE lane-hero reads the in-memory GateSemaphore registry, which has no seed path — with no real
 // gate in flight it correctly renders its empty state, which this spec also asserts.
 import { expect, test } from "./fixtures/daemon";
+import { cssColor } from "./helpers/themeToken";
 
 test.describe("Gates page (card a1c86452)", () => {
   test("renders the hybrid layout; history reads the real endpoint with enriched rows; the per-project filter scopes it", async ({ page, loomDaemon }) => {
@@ -296,8 +297,8 @@ test.describe("Gates page (card a1c86452)", () => {
   // tooltip fragment that cannot drift as the 1s clock ticks during the assertions — a percentage-based
   // locator would go stale mid-test.
   test("the long-run cue scales to each row's own gate timeout, and never warns on an unknown bound", async ({ page, loomDaemon }) => {
-    const AMBER = "rgb(255, 178, 62)"; // --loom-amber #ffb23e — running, healthy
-    const RED = "rgb(255, 92, 92)";    // --loom-red   #ff5c5c — close to this row's own bound
+    // AMBER (--loom-amber) is running and healthy; RED (--loom-red) is close to this row's own bound.
+    // Both are resolved from the live tokens once the page has loaded, below.
     const since = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000).toISOString();
     const base = {
       gateType: "merge" as const, phase: "running" as const, taskId: null, priority: null,
@@ -333,6 +334,9 @@ test.describe("Gates page (card a1c86452)", () => {
     }));
 
     await page.goto(`${loomDaemon.baseURL}/gates`);
+    const AMBER = await cssColor(page, "--loom-amber");
+    const RED = await cssColor(page, "--loom-red");
+    expect(RED, "the two tones are distinguishable").not.toBe(AMBER);
     const activeSection = page.locator("section").filter({ hasText: "Lane occupancy" }).first();
     // FIXTURE IDENTITY: this payload is on screen, not the real (empty) registry or a sibling spec's rows.
     await expect(activeSection.getByText("loom/lane-wide-healthy", { exact: true })).toBeVisible();

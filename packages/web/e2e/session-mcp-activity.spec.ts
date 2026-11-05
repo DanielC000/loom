@@ -6,6 +6,7 @@
 //
 // Record: docs/decisions/a9a7140c-session-mcp-activity.md
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
+import { cssColor } from "./helpers/themeToken";
 
 const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
@@ -96,14 +97,16 @@ test.describe("session Loom MCP activity strip", () => {
     const errRow = page.getByTestId("mcp-call-3");
     await expect(errRow).toHaveAttribute("data-outcome", "error");
     await expect(errRow).toContainText("Tried to redirect worker 1c07b3e5");
-    await expect(errRow.getByRole("img", { name: "error" })).toHaveCSS("color", "rgb(255, 92, 92)");
-    await expect(page.getByTestId("mcp-call-5").getByRole("img", { name: "ok" })).toHaveCSS("color", "rgb(46, 230, 110)");
+    // Colours resolved from the live tokens (helpers/themeToken.ts), never typed as literals.
+    const red = await cssColor(page, "--loom-red");
+    await expect(errRow.getByRole("img", { name: "error" })).toHaveCSS("color", red);
+    await expect(page.getByTestId("mcp-call-5").getByRole("img", { name: "ok" })).toHaveCSS("color", await cssColor(page, "--loom-phosphor"));
     await errRow.click();
     await expect(errRow).toHaveAttribute("aria-expanded", "true");
     const detail = page.getByTestId("mcp-call-3-detail");
     await expect(detail).toContainText("Asked Loom");
     await expect(page.getByTestId("mcp-call-3-answer")).toHaveText("MCP error -32602: session 1c07b3e5 is not live (processState=exited)");
-    await expect(page.getByTestId("mcp-call-3-answer")).toHaveCSS("color", "rgb(255, 92, 92)");
+    await expect(page.getByTestId("mcp-call-3-answer")).toHaveCSS("color", red);
     // Agent-authored argument text is shown as text, never parsed as HTML.
     await expect(detail).toContainText("Stop: <b>rebase</b> first.");
     await expect(detail.locator("pre b")).toHaveCount(0);

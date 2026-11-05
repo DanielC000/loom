@@ -14,6 +14,7 @@
 // board.spec.ts is the board-interaction template this follows.
 import { expect, test } from "./fixtures/daemon";
 import type { Locator, Page } from "@playwright/test";
+import { cssColor } from "./helpers/themeToken";
 import path from "node:path";
 
 async function pinActiveProject(page: Page, projectId: string) {
@@ -30,12 +31,13 @@ function cardByTitle(page: Page, title: string) {
   return page.locator(".loom-board-card").filter({ has: page.getByText(title, { exact: true }) });
 }
 
-// Token rgb values (styles/global.css :root) — asserting the fill's computed color is the strongest
-// observable that the card actually switched terminal state, not merely that some bar is present.
-const AMBER_RGB = "255, 178, 62"; // --loom-amber #ffb23e (the running sweep gradient AND the rejected fill)
-const PHOSPHOR_RGB = "46, 230, 110"; // --loom-phosphor #2ee66e (merged fill)
-const RED_RGB = "255, 92, 92"; // --loom-red #ff5c5c (failed fill)
-const MUTED_RGB = "90, 99, 108"; // --loom-text-muted #5a636c (the queued fill — card 53ad9ed3)
+// Asserting the fill's computed color is the strongest observable that the card actually switched
+// terminal state, not merely that some bar is present. The expected colours are resolved from the live
+// tokens inside the test (`cssColor`), never typed as literals:
+//   --loom-amber        the running sweep gradient AND the rejected fill
+//   --loom-phosphor     the merged fill
+//   --loom-red          the failed fill
+//   --loom-text-muted   the queued fill (card 53ad9ed3)
 
 // `state` is the raw op state; `outcome` (only meaningful once `state !== "running"`) is what actually
 // distinguishes a merge SUCCESS from a gate REJECTION — both settle to `state:"done"` (see PendingMerge's
@@ -85,12 +87,16 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
 
   // ── RUNNING: the oscilloscope sweep is present (settled fill is NOT), the pill reads "merging", the
   //    branch chip yields to the merge pill (compactness), and the sweep is drawn with the amber token. ──
+  const AMBER = await cssColor(page, "--loom-amber");
+  const PHOSPHOR = await cssColor(page, "--loom-phosphor");
+  const RED = await cssColor(page, "--loom-red");
+  const MUTED = await cssColor(page, "--loom-text-muted");
   const sweep = card.locator(".loom-merge-sweep");
   await expect(sweep).toBeVisible();
   await expect(card.locator(".loom-merge-fill")).toHaveCount(0);
   await expect(card.getByText("merging", { exact: true })).toBeVisible();
   await expect(card.getByText("loom/mrg1", { exact: true })).toHaveCount(0); // branch hidden during merge
-  expect(await sweep.evaluate((el) => getComputedStyle(el).backgroundImage)).toContain(AMBER_RGB);
+  expect(await sweep.evaluate((el) => getComputedStyle(el).backgroundImage)).toContain(AMBER);
 
   // The live timer ticks: capture M:SS, wait past a second boundary, and assert it ADVANCED.
   const timer = card.getByText(/^\d+:\d{2}$/);
@@ -115,7 +121,7 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   await expect(queuedFill).toBeVisible();
   await expect(card.getByText("queued", { exact: true })).toBeVisible();
   await expect(card.getByText("merging", { exact: true })).toHaveCount(0);
-  expect(await queuedFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toContain(MUTED_RGB);
+  expect(await queuedFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(MUTED);
   await shoot(card, "merge-queued.png");
 
   // Flip back to actively running (no gatePhase) before the footprint comparison and the settle sequence
@@ -140,7 +146,7 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   await expect(fill).toBeVisible();
   await expect(card.locator(".loom-merge-sweep")).toHaveCount(0);
   await expect(card.getByText("merged", { exact: true })).toBeVisible();
-  expect(await fill.evaluate((el) => getComputedStyle(el).backgroundColor)).toContain(PHOSPHOR_RGB);
+  expect(await fill.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(PHOSPHOR);
   await shoot(card, "merge-merged.png");
 
   // ── REJECTED (op-state "done", outcome "rejected" — a gate/stranded-work/empty-stage refusal that
@@ -155,7 +161,7 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   await expect(card.locator(".loom-merge-sweep")).toHaveCount(0);
   await expect(card.getByText("rejected", { exact: true })).toBeVisible();
   await expect(card.getByText("merged", { exact: true })).toHaveCount(0);
-  expect(await rejectedFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toContain(AMBER_RGB);
+  expect(await rejectedFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(AMBER);
   await shoot(card, "merge-rejected.png");
 
   // ── FAILED (op-state "failed" — a genuine exception during confirm): a solid RED fill + "failed"
@@ -165,7 +171,7 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   const failFill = card.locator(".loom-merge-fill");
   await expect(failFill).toBeVisible();
   await expect(card.getByText("failed", { exact: true })).toBeVisible();
-  expect(await failFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toContain(RED_RGB);
+  expect(await failFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(RED);
   await shoot(card, "merge-failed.png");
 
   // ── SETTLE-EVICTION: once the RETAINED terminal view expires (or the op is gone from the registry

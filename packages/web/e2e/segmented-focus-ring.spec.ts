@@ -30,9 +30,10 @@
 // worth stating once.
 import { expect, test } from "./fixtures/daemon";
 import type { Locator, Page } from "@playwright/test";
+import { cssColor } from "./helpers/themeToken";
 
-/** `--loom-phosphor`, the one ring colour every other `:focus-visible` rule in global.css uses. */
-const PHOSPHOR = "rgb(46, 230, 110)";
+// The ring colour is `--loom-phosphor`, the one every other `:focus-visible` rule in global.css uses. It
+// is resolved from the live token (`cssColor`) at the assertion, never typed as a literal.
 
 interface Ring {
   style: string;
@@ -83,9 +84,10 @@ async function tabOnto(page: Page, from: Locator, target: Locator, key: "ArrowRi
   return readRing(target);
 }
 
-function expectPhosphorRing(ring: Ring, where: string) {
+async function expectPhosphorRing(page: Page, ring: Ring, where: string) {
   expect(ring.focusVisible, `${where}: the segment should match :focus-visible after Tab`).toBe(true);
-  expect(ring, where).toMatchObject({ style: "solid", width: "2px", color: PHOSPHOR, offset: "-2px" });
+  const phosphor = await cssColor(page, "--loom-phosphor");
+  expect(ring, where).toMatchObject({ style: "solid", width: "2px", color: phosphor, offset: "-2px" });
   // The ring's outer edge relative to the border box. <= 0 means it paints inside the segment, so the
   // track's `overflow: hidden` cannot clip it. The pre-fix UA ring (offset 0px + width 1px) is > 0.
   const outerEdge = parseFloat(ring.offset) + parseFloat(ring.width);
@@ -131,7 +133,7 @@ test("Settings' Interface switch rings on keyboard focus and stays clean on clic
   // no-op and the shell never swaps mid-focus-call — see tabOnto's own doc for why the other direction
   // would race a remount here specifically. This is a real atlas→classic focus transition via a genuine
   // keyboard event, so the ring is expected.
-  expectPhosphorRing(await tabOnto(page, atlas, classic, "ArrowLeft"), "settings/atlas-ui-switch");
+  await expectPhosphorRing(page, await tabOnto(page, atlas, classic, "ArrowLeft"), "settings/atlas-ui-switch");
 });
 
 test("the Runs and Actors switches ring on keyboard focus and stay clean on click", async ({ page, loomDaemon }) => {
@@ -143,14 +145,14 @@ test("the Runs and Actors switches ring on keyboard focus and stay clean on clic
   await page.goto(loomDaemon.baseURL + "/runs");
   const runsTabs = page.getByRole("radiogroup", { name: "Runs or Keys & Endpoints" }).locator('button[role="radio"]');
   await expect(runsTabs).toHaveCount(2);
-  expectPhosphorRing(await tabOnto(page, runsTabs.nth(0), runsTabs.nth(1)), "runs");
+  await expectPhosphorRing(page, await tabOnto(page, runsTabs.nth(0), runsTabs.nth(1)), "runs");
   await expectNoRingOnMouseClick(runsTabs.nth(0), "runs");
 
   // ── Actors: Profiles | Skills.
   await page.goto(loomDaemon.baseURL + "/actors");
   const actorsTabs = page.getByRole("radiogroup", { name: "Actors — Profiles or Skills" }).locator('button[role="radio"]');
   await expect(actorsTabs).toHaveCount(2);
-  expectPhosphorRing(await tabOnto(page, actorsTabs.nth(0), actorsTabs.nth(1)), "actors");
+  await expectPhosphorRing(page, await tabOnto(page, actorsTabs.nth(0), actorsTabs.nth(1)), "actors");
   await expectNoRingOnMouseClick(actorsTabs.nth(0), "actors");
 });
 
@@ -178,5 +180,5 @@ test("the Companion mode toggle rings on keyboard focus and stays clean on click
 
   // Tab (not an arrow key) from Chat onto Manage: a plain tablist with no roving tabindex. Tab moves
   // focus without selecting, so the Manage panel never mounts mid-focus-call.
-  expectPhosphorRing(await tabOnto(page, chat, manage, "Tab"), "companion/mode-toggle");
+  await expectPhosphorRing(page, await tabOnto(page, chat, manage, "Tab"), "companion/mode-toggle");
 });

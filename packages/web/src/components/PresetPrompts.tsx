@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { PresetPrompt, PresetPromptSuggestion } from "@loom/shared";
 import { api } from "../lib/api";
 import { Button, SectionLabel } from "./ui";
-import { color, font, radius } from "../theme";
+import { color, font, radius, shadow, wash } from "../theme";
 
 // Preset Prompts — the composer's "Spark" popover. A GLOBAL list of label+prompt presets (one shared
 // store, same on every composer — keyed without the sessionId so the cache is shared). Clicking a preset
@@ -22,7 +22,7 @@ export const SUGGESTIONS_KEY = ["presetPromptSuggestions"] as const;
 // overlay (see TRIGGER_CLUSTER_RESERVE below) and wears this same colour as a chip so it reads as the
 // panel's own corner rather than an icon stranded on top of the content. One declaration, two users:
 // a second literal would drift the moment either is retuned.
-export const PRESET_OVERLAY_SURFACE = "rgba(15,18,21,0.985)";
+export const PRESET_OVERLAY_SURFACE = wash(color.raised, 98.5);
 
 // Bottom padding that keeps this panel's content clear of the composer's corner icon cluster (the Spark
 // trigger + expand button), which paints over the panel so the trigger stays clickable while open. The
@@ -54,7 +54,7 @@ export function PresetPromptsPopover({ onInsert }: { onInsert: (prompt: string) 
       style={{ position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 30, minHeight: "100%",
         maxHeight: 320, overflowY: "auto", background: PRESET_OVERLAY_SURFACE,
         border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
-        boxShadow: `inset 0 0 0 1px ${color.phosphorDim}, 0 12px 40px rgba(0,0,0,0.6)`,
+        boxShadow: `inset 0 0 0 1px ${color.phosphorDim}, ${shadow.pop}`,
         padding: `8px 8px ${TRIGGER_CLUSTER_RESERVE}px`,
         display: "flex", flexDirection: "column", gap: 6, outline: "none",
         transformOrigin: "bottom right" }}>

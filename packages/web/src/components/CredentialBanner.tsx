@@ -1,7 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button, Dot, Input } from "./ui";
-import { color, font, radius } from "../theme";
+import { color, font, radius, wash } from "../theme";
 import {
   clearCredentialLock, credentialLock, dismissLoopbackLinkOutcome, getLoopbackToken, loopbackLinkCopy,
   loopbackLinkOutcome, pendingLoopbackToken, retryPendingLoopbackToken, storeVerifiedLoopbackToken,
@@ -81,7 +81,7 @@ export function CredentialBanner() {
 
   return (
     <div role="status" data-testid="credential-banner" style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "9px 20px",
-      background: "rgba(228,90,90,0.07)", borderBottom: `1px solid ${color.red}`, fontFamily: font.mono, fontSize: 12.5 }}>
+      background: wash(color.danger, 7), borderBottom: `1px solid ${color.red}`, fontFamily: font.mono, fontSize: 12.5 }}>
       <Dot tone="red" glow style={{ marginTop: 4, flex: "0 0 auto" }} />
       <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}>
         <span style={{ color: color.text }}>

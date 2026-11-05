@@ -1,4 +1,4 @@
-import { color, font, radius, tone } from "../theme";
+import { color, font, radius, tone, wash } from "../theme";
 import { type DiffLineKind, type FileDiff, hunkLineKind, rawPatchLineKind, riskTone, statusGlyph } from "../lib/diff";
 import { Dot } from "./ui";
 
@@ -37,7 +37,7 @@ function FileHunks({ file }: { file: FileDiff }) {
     <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: 12, lineHeight: 1.5, padding: "4px 10px 8px" }}>
       {file.hunks.map((h, hi) => (
         <div key={hi}>
-          <div style={{ color: color.cyan, background: "rgba(91,200,255,0.06)", margin: "4px -10px 2px", padding: "1px 10px" }}>{h.header}</div>
+          <div style={{ color: color.cyan, background: wash(color.info, 6), margin: "4px -10px 2px", padding: "1px 10px" }}>{h.header}</div>
           {h.lines.map((ln, i) => (
             <div key={i} style={{ color: KIND_COLOR[hunkLineKind(ln)] }}>{ln || " "}</div>
           ))}

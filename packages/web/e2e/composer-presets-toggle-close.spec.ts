@@ -23,6 +23,7 @@
 // the same rig composer-preset-insert.spec.ts and button-hover-states.spec.ts use.
 import { expect, test } from "./fixtures/daemon";
 import type { Locator } from "@playwright/test";
+import { cssColor } from "./helpers/themeToken";
 
 const LABEL = "E2E · toggle the presets popover";
 const PROMPT = "E2E-TOGGLE-PRESET: nothing is ever sent from this spec.";
@@ -106,8 +107,8 @@ test("the presets popover closes from its own trigger, and Escape / outside-clic
   expect(await isTopmostAtCentre(trigger), "the open popover must NOT cover its own trigger").toBe(true);
 
   // Park the pointer OFF the trigger before reading its open REST appearance: the click above left the
-  // pointer sitting on it, so an immediate reading is its HOVER value presented as rest (measured —
-  // rgba(46, 230, 110, 0.28) where rest is 0.15). The dialog's top-left corner is the inert "Preset
+  // pointer sitting on it, so an immediate reading is its HOVER value presented as rest (measured
+  // pre-Graphite as the 0.28 hover fill where rest is 0.15). The dialog's top-left corner is the inert "Preset
   // prompts" section label. ⛔ Never park at a viewport corner: that expands the collapsed nav rail,
   // which then intercepts pointer events and times out the next hover.
   const dialogBox = await dialog.boundingBox();
@@ -116,11 +117,15 @@ test("the presets popover closes from its own trigger, and Escape / outside-clic
 
   // Consequence: `.loom-btn-on`'s own hover rule is reachable by a real pointer while the popover is up,
   // which it provably was not before (global.css `.loom-btn-on:not(:disabled):hover` → 0.28 fill). The
-  // open REST appearance is unchanged — `--loom-phosphor-dim` is rgba(46, 230, 110, 0.15).
+  // open REST appearance is unchanged: `--loom-phosphor-dim`. Both values are resolved from the live
+  // tokens (the hover is the same expression global.css's hover rule uses), never typed as literals.
+  const restFill = await cssColor(page, "--loom-phosphor-dim");
+  const hoverFill = await cssColor(page, "color-mix(in oklab, var(--loom-live) 28%, transparent)");
+  expect(hoverFill, "the open trigger's hover fill differs from its rest fill").not.toBe(restFill);
   await expect(trigger).toHaveClass(/\bloom-btn-on\b/);
-  await expect(trigger).toHaveCSS("background-color", "rgba(46, 230, 110, 0.15)");
+  await expect(trigger).toHaveCSS("background-color", restFill);
   await trigger.hover({ force: true });
-  await expect(trigger).toHaveCSS("background-color", "rgba(46, 230, 110, 0.28)");
+  await expect(trigger).toHaveCSS("background-color", hoverFill);
 
   // ── 4. The panel RESERVES that corner rather than just losing it: its bottom padding must cover the
   // distance from its own bottom edge up past the trigger's top, so a row scrolled to the end of the

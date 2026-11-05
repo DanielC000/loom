@@ -4,7 +4,7 @@ import type { GateRun, GateHistoryRow, GateType, GateOutcome, TaskPriority } fro
 import { api } from "../lib/api";
 import { useFrameOwnsNodeIdentity } from "../lib/atlasNodeHead";
 import { Panel, Button, SectionLabel } from "../components/ui";
-import { color, font, radius, space } from "../theme";
+import { color, font, radius, space, wash } from "../theme";
 
 // Gates page (card a1c86452) — the god-eye view of Loom's daemon-executed gates (merge, worker run_gate,
 // deploy) across every project, all serialized through ONE daemon-global GateSemaphore. Owner-approved
@@ -550,7 +550,7 @@ function LaneHero({
       )}
 
       {holGate && holBlocker && (
-        <div style={{ marginTop: 12, padding: "8px 12px", border: `1px solid ${color.red}`, borderLeftWidth: 3, borderRadius: radius.base, background: "rgba(255,92,92,0.05)", fontSize: 12, color: color.text }}>
+        <div style={{ marginTop: 12, padding: "8px 12px", border: `1px solid ${color.red}`, borderLeftWidth: 3, borderRadius: radius.base, background: wash(color.danger, 5), fontSize: 12, color: color.text }}>
           <b style={{ color: color.red, fontWeight: 500 }}>Head-of-line block.</b>{" "}
           A {(holGate.priority ?? "").toUpperCase()} {KIND_LABEL[holGate.gateType]} gate
           {holGate.projectName ? ` (${holGate.projectName})` : ""} has waited{" "}
@@ -578,7 +578,7 @@ function LaneHero({
         return (
           <div
             key={g.opId}
-            style={{ marginTop: 12, padding: "8px 12px", border: `1px solid ${color.cyan}`, borderLeftWidth: 3, borderRadius: radius.base, background: "rgba(91,200,255,0.05)", fontSize: 12, color: color.text }}
+            style={{ marginTop: 12, padding: "8px 12px", border: `1px solid ${color.cyan}`, borderLeftWidth: 3, borderRadius: radius.base, background: wash(color.info, 5), fontSize: 12, color: color.text }}
           >
             <b style={{ color: color.cyan, fontWeight: 500 }}>Batch fallback.</b>{" "}
             {lead}
@@ -637,7 +637,7 @@ function LaneSlot({
   return (
     <div>
       <div style={slotLblStyle}>{slotLabel}</div>
-      <div style={{ position: "relative", border: `1px solid ${color.amber}`, borderRadius: radius.base, background: "linear-gradient(180deg,rgba(255,178,62,0.05),transparent)", padding: 12, overflow: "hidden" }}>
+      <div style={{ position: "relative", border: `1px solid ${color.amber}`, borderRadius: radius.base, background: `linear-gradient(180deg,${wash(color.busy, 5)},transparent)`, padding: 12, overflow: "hidden" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", color: color.amber }}>
             <span style={{ width: 8, height: 8, borderRadius: 8, background: color.amber, boxShadow: `0 0 6px ${color.amber}` }} />
@@ -682,7 +682,7 @@ function QueueCard({ gate, position, now, isHol }: { gate: GateRun; position: nu
       border: `1px solid ${color.border}`,
       borderLeft: `2px solid ${isHol ? color.red : color.borderStrong}`,
       borderRadius: radius.sm,
-      background: isHol ? "linear-gradient(90deg,rgba(255,92,92,0.06),transparent 60%)" : color.panel,
+      background: isHol ? `linear-gradient(90deg,${wash(color.danger, 6)},transparent 60%)` : color.panel,
     }}>
       <span style={{ fontFamily: font.head, fontWeight: 700, fontSize: 13, color: isHol ? color.red : color.textMuted, width: 20, textAlign: "center", flex: "none" }}>
         {position}

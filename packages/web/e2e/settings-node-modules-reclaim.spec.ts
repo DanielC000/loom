@@ -26,6 +26,7 @@
 //
 // Builds on the shared `loomDaemon` fixture; settings.spec.ts is the template.
 import { expect, test } from "./fixtures/daemon";
+import { cssColor } from "./helpers/themeToken";
 
 type Page = import("@playwright/test").Page;
 type Route = import("@playwright/test").Route;
@@ -275,6 +276,6 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
     await expect(page.getByText(/Cleared 1 of 2 · freed 100 MB · 1 failed to start/)).toBeVisible();
 
     // The run is not clean: the summary pill wears the amber "attention" tone, never the phosphor clean one.
-    await expect(page.getByText("last reclaim", { exact: true })).toHaveCSS("color", "rgb(255, 178, 62)");
+    await expect(page.getByText("last reclaim", { exact: true })).toHaveCSS("color", await cssColor(page, "--loom-amber"));
   });
 });

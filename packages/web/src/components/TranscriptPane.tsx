@@ -124,7 +124,7 @@ function RoleChip({ label, current, onPick }: { label: RoleFilter; current: Role
 // cyan/info (a system/instruction turn — e.g. codex's "developer" role, card 100c523f — is likewise not
 // a speaker, but it's live instruction content rather than inert tool output, so it gets the info tone
 // instead of tool_result's muted one).
-const ROLE_COLOR: Record<TranscriptTurn["role"], string> = { user: "#8c8", assistant: "#9ad", tool_result: color.textMuted, system: color.cyan };
+const ROLE_COLOR: Record<TranscriptTurn["role"], string> = { user: color.liveText, assistant: color.accentFg, tool_result: color.textMuted, system: color.cyan };
 const ROLE_LABEL: Record<TranscriptTurn["role"], string> = { user: "user", assistant: "assistant", tool_result: "tool result", system: "system" };
 
 function Turn({ turn, q }: { turn: TranscriptTurn; q: string }) {

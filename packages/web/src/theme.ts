@@ -23,7 +23,63 @@ export const color = {
   text: "var(--loom-text)",
   textDim: "var(--loom-text-dim)",
   textMuted: "var(--loom-text-muted)",
+
+  // ── Graphite semantic tokens (epic e25fa8a9). Each one follows the light/dark theme. The legacy
+  // keys above are aliases onto these in global.css and move over call site by call site in later
+  // Graphite cards, which then delete them.
+  inset: "var(--loom-inset)",
+  fieldBg: "var(--loom-field-bg)",
+  railBg: "var(--loom-rail-bg)",
+  laneBg: "var(--loom-lane-bg)",
+  surface: "var(--loom-surface)",
+  surface2: "var(--loom-surface-2)",
+  btnBg: "var(--loom-btn-bg)",
+  raised: "var(--loom-raised)",
+  cardBg: "var(--loom-card-bg)",
+  hover: "var(--loom-hover)",
+  pressed: "var(--loom-pressed)",
+  selected: "var(--loom-selected)",
+  line: "var(--loom-line)",
+  lineStrong: "var(--loom-line-strong)",
+  lineHover: "var(--loom-line-hover)",
+  text2: "var(--loom-text-2)",
+  text3: "var(--loom-text-3)",
+  accent: "var(--loom-accent)",
+  accentHover: "var(--loom-accent-hover)",
+  onAccent: "var(--loom-on-accent)",
+  accentFg: "var(--loom-accent-fg)",
+  accentEdge: "var(--loom-accent-edge)",
+  ring: "var(--loom-ring)",
+  ringSoft: "var(--loom-ring-soft)",
+  live: "var(--loom-live)",
+  liveText: "var(--loom-live-text)",
+  liveSoft: "var(--loom-live-soft)",
+  busy: "var(--loom-busy)",
+  busySoft: "var(--loom-busy-soft)",
+  onBusy: "var(--loom-on-busy)",
+  info: "var(--loom-info)",
+  infoSoft: "var(--loom-info-soft)",
+  danger: "var(--loom-danger)",
+  dangerSoft: "var(--loom-danger-soft)",
+  dangerLine: "var(--loom-danger-line)",
+  onDanger: "var(--loom-on-danger)",
+  track: "var(--loom-track)",
+  meterOk: "var(--loom-meter-ok)",
+  scrim: "var(--loom-scrim)",
+  termBg: "var(--loom-term-bg)",
+  termFg: "var(--loom-term-fg)",
 } as const;
+
+// Elevation, per theme: none in dark (tonal surfaces), a hairline ring plus a short shadow in light.
+export const shadow = {
+  panel: "var(--loom-panel-shadow)",
+  card: "var(--loom-card-shadow)",
+  pop: "var(--loom-pop-shadow)",
+} as const;
+
+// A translucent tint of a colour token, for washes and soft borders: `wash(color.danger, 6)`. It mixes
+// the token itself, so the tint follows the theme with the colour (a fixed rgba would not).
+export const wash = (c: string, pct: number): string => `color-mix(in oklab, ${c} ${pct}%, transparent)`;
 
 export const font = {
   head: "var(--loom-font-head)", // Space Grotesk — uppercase section labels

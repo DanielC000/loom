@@ -6,25 +6,150 @@
    leaks nothing to a third party. Fallbacks below keep the layout intact if a face fails to load. */
 @import "./fonts.css";
 
+/* Graphite colour tokens (epic e25fa8a9), one semantic set per theme. Values are the spec's own
+   (vault Mockups/2026-11-05 Atlas Design Language/direction-b.html, .theme-dark / .theme-light).
+   The theme is chosen per browser by lib/themePref.ts, which sets data-theme on <html>; index.html's
+   inline script sets it before first paint. Bare :root carries the dark set too, so a page whose
+   attribute never got set still renders dark rather than unstyled. */
+:root,
+:root[data-theme="dark"] {
+  /* Surfaces, darkest to lightest. */
+  --loom-bg: oklch(0.175 0.005 260);
+  --loom-inset: oklch(0.155 0.005 260);
+  --loom-field-bg: oklch(0.155 0.005 260);
+  --loom-rail-bg: oklch(0.16 0.005 260);
+  --loom-lane-bg: oklch(0.2 0.006 260);
+  --loom-surface: oklch(0.215 0.006 260);
+  --loom-surface-2: oklch(0.25 0.007 260);
+  --loom-btn-bg: oklch(0.25 0.007 260);
+  --loom-raised: oklch(0.255 0.007 260);
+  --loom-card-bg: oklch(0.255 0.007 260);
+  /* State steps. */
+  --loom-hover: oklch(0.25 0.007 260);
+  --loom-pressed: oklch(0.285 0.008 260);
+  --loom-selected: oklch(0.27 0.035 258);
+  /* Lines. */
+  --loom-line: oklch(0.28 0.007 260);
+  --loom-line-strong: oklch(0.52 0.01 260);
+  --loom-line-hover: oklch(0.6 0.01 260);
+  /* Text. */
+  --loom-text: oklch(0.965 0.003 260);
+  --loom-text-2: oklch(0.8 0.008 260);
+  --loom-text-3: oklch(0.69 0.01 260);
+  /* Accent (cobalt) and focus. */
+  --loom-accent: oklch(0.55 0.17 258);
+  --loom-accent-hover: oklch(0.61 0.17 258);
+  --loom-on-accent: oklch(0.99 0 0);
+  --loom-accent-fg: oklch(0.78 0.11 255);
+  --loom-accent-edge: oklch(0.7 0.14 258);
+  --loom-ring: oklch(0.72 0.14 258);
+  --loom-ring-soft: oklch(0.34 0.08 258);
+  /* Signal: each has a soft fill for a tinted background. */
+  --loom-live: oklch(0.76 0.15 155);
+  --loom-live-text: oklch(0.82 0.13 155);
+  --loom-live-soft: oklch(0.29 0.05 155);
+  --loom-busy: oklch(0.83 0.13 78);
+  --loom-busy-soft: oklch(0.3 0.05 78);
+  --loom-on-busy: oklch(0.2 0.03 78);
+  --loom-info: oklch(0.78 0.11 255);
+  --loom-info-soft: oklch(0.29 0.05 258);
+  --loom-danger: oklch(0.73 0.16 22);
+  --loom-danger-soft: oklch(0.3 0.07 22);
+  --loom-danger-line: oklch(0.55 0.14 22);
+  --loom-on-danger: oklch(0.18 0.02 22);
+  /* Meters, overlays and elevation. Dark elevation is tonal, so panels and cards cast nothing. */
+  --loom-track: oklch(0.3 0.008 260);
+  --loom-meter-ok: oklch(0.72 0.12 258);
+  --loom-scrim: oklch(0 0 0 / 0.55);
+  --loom-panel-shadow: none;
+  --loom-card-border: transparent;
+  --loom-card-shadow: none;
+  --loom-pop-shadow: 0 16px 40px oklch(0 0 0 / 0.5);
+  /* The terminal well. It stays dark in BOTH themes (see lib/xtermTheme.ts). */
+  --loom-term-bg: oklch(0.145 0.005 260);
+  --loom-term-fg: oklch(0.92 0.005 260);
+  --loom-diff-add: oklch(0.78 0.14 155);
+  --loom-diff-del: oklch(0.73 0.15 22);
+  /* Markdown reader: wikilinks and the callout hues that have no signal token of their own. */
+  --loom-md-wikilink: oklch(0.76 0.1 300);
+  --loom-md-callout-note: oklch(0.68 0.13 260);
+  --loom-md-callout-question: oklch(0.7 0.13 300);
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --loom-bg: oklch(0.975 0.002 260);
+  --loom-inset: oklch(0.955 0.003 260);
+  --loom-field-bg: oklch(1 0 0);
+  --loom-rail-bg: oklch(0.96 0.003 260);
+  --loom-lane-bg: oklch(0.95 0.003 260);
+  --loom-surface: oklch(1 0 0);
+  --loom-surface-2: oklch(0.955 0.003 260);
+  --loom-btn-bg: oklch(1 0 0);
+  --loom-raised: oklch(1 0 0);
+  --loom-card-bg: oklch(1 0 0);
+  --loom-hover: oklch(0.945 0.004 260);
+  --loom-pressed: oklch(0.915 0.005 260);
+  --loom-selected: oklch(0.94 0.03 258);
+  --loom-line: oklch(0.92 0.004 260);
+  --loom-line-strong: oklch(0.64 0.01 260);
+  --loom-line-hover: oklch(0.52 0.01 260);
+  --loom-text: oklch(0.205 0.008 260);
+  --loom-text-2: oklch(0.4 0.01 260);
+  --loom-text-3: oklch(0.5 0.01 260);
+  --loom-accent: oklch(0.51 0.18 258);
+  --loom-accent-hover: oklch(0.45 0.17 258);
+  --loom-on-accent: oklch(1 0 0);
+  --loom-accent-fg: oklch(0.49 0.17 258);
+  --loom-accent-edge: oklch(0.51 0.18 258);
+  --loom-ring: oklch(0.51 0.18 258);
+  --loom-ring-soft: oklch(0.88 0.06 258);
+  --loom-live: oklch(0.62 0.15 155);
+  --loom-live-text: oklch(0.45 0.12 155);
+  --loom-live-soft: oklch(0.94 0.05 155);
+  --loom-busy: oklch(0.52 0.12 62);
+  --loom-busy-soft: oklch(0.95 0.05 82);
+  --loom-on-busy: oklch(0.99 0 0);
+  --loom-info: oklch(0.49 0.17 258);
+  --loom-info-soft: oklch(0.945 0.03 258);
+  --loom-danger: oklch(0.53 0.19 25);
+  --loom-danger-soft: oklch(0.955 0.03 25);
+  --loom-danger-line: oklch(0.72 0.11 25);
+  --loom-on-danger: oklch(0.99 0 0);
+  --loom-track: oklch(0.92 0.004 260);
+  --loom-meter-ok: oklch(0.51 0.18 258);
+  --loom-scrim: oklch(0.2 0.02 260 / 0.35);
+  /* Light elevation is a hairline ring plus a short shadow. */
+  --loom-panel-shadow: 0 0 0 1px oklch(0.92 0.004 260), 0 1px 2px oklch(0.92 0.004 260);
+  --loom-card-border: oklch(0.92 0.004 260);
+  --loom-card-shadow: 0 1px 2px oklch(0.9 0.005 260);
+  --loom-pop-shadow: 0 16px 40px oklch(0.2 0.02 260 / 0.14);
+  --loom-term-bg: oklch(0.2 0.008 260);
+  --loom-term-fg: oklch(0.93 0.004 260);
+  --loom-diff-add: oklch(0.78 0.14 155);
+  --loom-diff-del: oklch(0.74 0.15 22);
+  --loom-md-wikilink: oklch(0.48 0.14 300);
+  --loom-md-callout-note: oklch(0.55 0.15 260);
+  --loom-md-callout-question: oklch(0.52 0.16 300);
+  color-scheme: light;
+}
+
 :root {
-  /* Surfaces */
-  --loom-bg: #0a0b0c;
-  --loom-panel: #101316;
-  --loom-panel-2: #0d0f11;
-  --loom-border: #1e2329;
-  --loom-border-strong: #2a323a;
-
-  /* Signal */
-  --loom-phosphor: #2ee66e;
-  --loom-phosphor-dim: rgba(46, 230, 110, 0.15);
-  --loom-amber: #ffb23e;
-  --loom-cyan: #5bc8ff;
-  --loom-red: #ff5c5c;
-
-  /* Text */
-  --loom-text: #e6eaed;
-  --loom-text-dim: #8a929b;
-  --loom-text-muted: #5a636c;
+  /* Legacy names, kept as aliases onto the Graphite layer so every existing call site follows the
+     theme with no edit. Later Graphite cards move call sites onto the semantic names and delete these.
+     --loom-phosphor aliases to LIVE (green) on purpose: it also marks primary, focus and selection
+     today, and those move to --loom-accent call site by call site, so nothing changes meaning here. */
+  --loom-panel: var(--loom-surface);
+  --loom-panel-2: var(--loom-inset);
+  --loom-border: var(--loom-line);
+  --loom-border-strong: var(--loom-line-strong);
+  --loom-phosphor: var(--loom-live);
+  --loom-phosphor-dim: var(--loom-live-soft);
+  --loom-amber: var(--loom-busy);
+  --loom-cyan: var(--loom-info);
+  --loom-red: var(--loom-danger);
+  --loom-text-dim: var(--loom-text-2);
+  --loom-text-muted: var(--loom-text-3);
 
   /* Type */
   --loom-font-head: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
@@ -43,8 +168,8 @@
      while the tree is still empty (see .loom-atlas below). */
   --loom-atlas-tree-w: 244px;
 
-  /* Faint grid texture */
-  --loom-grid-line: rgba(255, 255, 255, 0.02);
+  /* Graphite has no grid texture; the .loom-grid class stays, drawing nothing. */
+  --loom-grid-line: transparent;
 }
 
 * {
@@ -69,7 +194,7 @@ body {
 }
 
 ::selection {
-  background: var(--loom-phosphor-dim);
+  background: var(--loom-ring-soft);
 }
 
 /* Scrollbars — thin, instrument-grade, square */
@@ -149,7 +274,7 @@ body {
   z-index: 60;
   min-width: 228px; padding: 4px; display: flex; flex-direction: column;
   background: var(--loom-panel); border: 1px solid var(--loom-border-strong); border-radius: var(--loom-radius);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--loom-pop-shadow);
 }
 .loom-lane-menu-item {
   display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 6px 8px;
@@ -371,7 +496,7 @@ body {
   background: var(--loom-phosphor-dim);
 }
 .loom-btn-danger:not(:disabled):hover {
-  background: rgba(255, 92, 92, 0.12);
+  background: color-mix(in oklab, var(--loom-danger) 12%, transparent);
 }
 .loom-btn-ghost:not(:disabled):hover {
   color: var(--loom-text);
@@ -396,7 +521,7 @@ body {
   color: var(--loom-cyan);
 }
 .loom-btn-accent:not(:disabled):hover {
-  background: rgba(91, 200, 255, 0.12);
+  background: color-mix(in oklab, var(--loom-info) 12%, transparent);
   color: var(--loom-cyan);
 }
 .loom-btn-on {
@@ -404,7 +529,7 @@ body {
   color: var(--loom-phosphor);
 }
 .loom-btn-on:not(:disabled):hover {
-  background: rgba(46, 230, 110, 0.28);
+  background: color-mix(in oklab, var(--loom-live) 28%, transparent);
   color: var(--loom-phosphor);
 }
 
@@ -547,7 +672,7 @@ body {
 .loom-rail.is-pinned,
 .loom-rail.is-open {
   width: var(--loom-rail-open);
-  box-shadow: 12px 0 40px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--loom-pop-shadow);
 }
 /* Label text — hidden (and non-interactive) until the rail opens. */
 .loom-rail-lbl {
@@ -584,6 +709,9 @@ body {
   height: 52px;
   padding: 0 16px;
   flex: none;
+  /* A <button>: the UA border's other three sides drew (dark, under color-scheme light). Keep their 2px
+     width, transparent, because the collapsed mark's -16px centring below is measured against it. */
+  border: 2px solid transparent;
   border-bottom: 1px solid var(--loom-border);
   background: transparent;
   cursor: pointer;
@@ -635,6 +763,7 @@ body {
   height: 48px;
   padding: 0 14px;
   flex: none;
+  border: 2px solid transparent; /* the UA button border's width, minus its colour (see .loom-rail-brand) */
   border-bottom: 1px solid var(--loom-border);
   background: transparent;
   cursor: pointer;
@@ -791,7 +920,7 @@ body {
   padding: 0 5px;
   border-radius: 9px;
   background: var(--loom-amber);
-  color: #231a08;
+  color: var(--loom-on-busy);
   font-size: 10px;
   font-weight: 700;
   display: inline-flex;
@@ -946,8 +1075,8 @@ body {
     45deg,
     transparent,
     transparent 7px,
-    rgba(255, 255, 255, 0.02) 7px,
-    rgba(255, 255, 255, 0.02) 8px
+    color-mix(in oklab, var(--loom-text) 3%, transparent) 7px,
+    color-mix(in oklab, var(--loom-text) 3%, transparent) 8px
   );
 }
 
@@ -1131,8 +1260,8 @@ body {
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
   box-shadow:
-    0 8px 24px rgba(0, 0, 0, 0.55),
-    0 0 0 4px rgba(46, 230, 110, 0.06);
+    var(--loom-pop-shadow),
+    0 0 0 4px color-mix(in oklab, var(--loom-live) 6%, transparent);
   opacity: 0;
   pointer-events: none;
   transition:
@@ -1520,9 +1649,9 @@ button.loom-atlas-node.is-branch.is-open {
   flex: none;
   min-width: 16px;
   padding: 0 4px;
-  border: 1px solid rgba(255, 178, 62, 0.3);
+  border: 1px solid color-mix(in oklab, var(--loom-busy) 30%, transparent);
   border-radius: 7px;
-  background: rgba(255, 178, 62, 0.14);
+  background: color-mix(in oklab, var(--loom-busy) 14%, transparent);
   color: var(--loom-amber);
   font-size: 10px;
   line-height: 15px;
@@ -1630,23 +1759,23 @@ button.loom-atlas-node.is-branch.is-open {
   white-space: nowrap;
 }
 .loom-atlas-headpill.is-phosphor {
-  border-color: rgba(46, 230, 110, 0.4);
-  background: rgba(46, 230, 110, 0.07);
+  border-color: color-mix(in oklab, var(--loom-live) 40%, transparent);
+  background: color-mix(in oklab, var(--loom-live) 7%, transparent);
   color: var(--loom-phosphor);
 }
 .loom-atlas-headpill.is-amber {
-  border-color: rgba(255, 178, 62, 0.4);
-  background: rgba(255, 178, 62, 0.07);
+  border-color: color-mix(in oklab, var(--loom-busy) 40%, transparent);
+  background: color-mix(in oklab, var(--loom-busy) 7%, transparent);
   color: var(--loom-amber);
 }
 .loom-atlas-headpill.is-cyan {
-  border-color: rgba(91, 200, 255, 0.35);
-  background: rgba(91, 200, 255, 0.06);
+  border-color: color-mix(in oklab, var(--loom-info) 35%, transparent);
+  background: color-mix(in oklab, var(--loom-info) 6%, transparent);
   color: var(--loom-cyan);
 }
 .loom-atlas-headpill.is-red {
-  border-color: rgba(255, 92, 92, 0.4);
-  background: rgba(255, 92, 92, 0.07);
+  border-color: color-mix(in oklab, var(--loom-danger) 40%, transparent);
+  background: color-mix(in oklab, var(--loom-danger) 7%, transparent);
   color: var(--loom-red);
 }
 .loom-atlas-content {
@@ -1762,7 +1891,7 @@ button.loom-atlas-node.is-branch.is-open {
     transition:
       transform 180ms cubic-bezier(0.22, 0.61, 0.36, 1),
       visibility 0s linear 0s;
-    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--loom-pop-shadow);
   }
   .loom-atlas-tree:focus-visible {
     outline: none;
@@ -1774,7 +1903,7 @@ button.loom-atlas-node.is-branch.is-open {
     /* Under the drawer, and under the 50-and-up every dialog in this app uses — a board card opened
        from the tree still arrives as the centred dialog ON TOP of this, never behind it. */
     z-index: 44;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--loom-scrim);
   }
   /* 52px of crumb row, matching `.loom-atlas-treehead`'s own 52px exactly — so the toggle sits on the
      SAME centre line as the drawer's logo whether the drawer is open or shut, and the control does not
@@ -2033,7 +2162,7 @@ button.loom-atlas-node.is-branch.is-open {
   border: 1px solid var(--loom-border-strong);
   border-top: 2px solid var(--loom-phosphor);
   border-radius: var(--loom-radius);
-  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--loom-pop-shadow);
 }
 .loom-atlas-tabmenu-item {
   display: flex;
@@ -2662,7 +2791,7 @@ button.loom-kpi.is-open {
   border: 1px solid var(--loom-border-strong);
   border-top: 2px solid var(--loom-phosphor);
   border-radius: var(--loom-radius);
-  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--loom-pop-shadow);
 }
 .loom-orch-pop {
   /* Right-anchored to the chip — in CSS rather than inline, so the narrow-viewport rule below can
@@ -2973,8 +3102,8 @@ button.loom-kpi.is-open {
    and the frame's inset below, which reads without being looked at. */
 .loom-orchchip.is-paused {
   color: var(--loom-red);
-  border-color: rgba(255, 92, 92, 0.5);
-  background: rgba(255, 92, 92, 0.08);
+  border-color: color-mix(in oklab, var(--loom-danger) 50%, transparent);
+  background: color-mix(in oklab, var(--loom-danger) 8%, transparent);
 }
 .loom-atlas-topbar.is-paused {
   box-shadow: inset 0 2px 0 var(--loom-red);
@@ -3980,7 +4109,7 @@ button.loom-ovbrief-cell.is-open {
   font-size: 15px;
   line-height: 1;
   border: 1px solid currentColor;
-  background: rgba(255, 255, 255, 0.02);
+  background: color-mix(in oklab, var(--loom-text) 3%, transparent);
 }
 .loom-baycard-id {
   min-width: 0;

@@ -15,7 +15,7 @@ import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } fro
 import { useOpenRequest, RequestTypeTag, RequestProvenance } from "../components/requests";
 import { DecisionStateChip } from "../components/decisions";
 import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
-import { color, columnTone, font, radius, tone, type Tone } from "../theme";
+import { color, columnTone, font, radius, shadow, tone, type Tone } from "../theme";
 // Board-hierarchy read model + presentation (card 1ae4f88c). The lib reads the daemon's hierarchy fields
 // structurally and defaults every one of them, so a response without them renders exactly as before.
 import { boardHierarchy, hasBoardHierarchy, hasTaskContextLinks, resolveParentInput, taskLinks, type TaskLinks, type TaskRef } from "../lib/taskHierarchy";
@@ -28,6 +28,7 @@ import {
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
 import { useVoiceLang } from "../lib/useVoiceLang";
 import { isDoneColumn } from "../lib/columnSort";
+import { useResolvedTheme, type ResolvedTheme } from "../lib/themePref";
 import { taskMatchesSearch } from "../lib/taskFilter";
 // Priority chip + metadata live in one place so the board and the /terminals task card never drift.
 import { PRIORITY_META, PriorityChip, prio, byPriorityThenPosition } from "../components/priority";
@@ -510,8 +511,8 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
 // for role-bearing lanes (f033daeb added the picker; before this it silently lost to the role tone on
 // the typical all-role board). A preset's accentColor equals its role color, and the DEFAULT board sets
 // no accentColor at all, so default/preset boards look unchanged. A role-less lane with no accent → null
-// (transparent bar + neutral label/border). The "muted" role tone resolves to textDim (#8a929b =
-// 5.92:1), never textMuted (#5a636c = 3.05:1).
+// (transparent bar + neutral label/border). The "muted" role tone resolves to textDim, the stronger of
+// the two secondary text tokens, so a muted lane label is never the weakest text on the board.
 function columnAccent(col: KanbanColumn): string | null {
   if (col.accentColor) return col.accentColor;
   const t = columnTone(col);
@@ -523,9 +524,11 @@ function columnAccent(col: KanbanColumn): string | null {
 // each card's left border are decorative (no contrast floor) and always use the resolved accent; the
 // LABEL uses it ONLY when it clears AA, else falls back to textDim. Only a raw accentColor hex can fail
 // — the role tones are var() refs vetted AA-safe by design — so the guard runs the contrast math on hex
-// accents alone (every ACCENT_PALETTE swatch happens to clear AA; the guard is the floor if one didn't).
-// Panel hex mirrors --loom-panel (global.css :root).
-const PANEL_HEX = "#101316";
+// accents alone. The panel differs per theme, and a swatch that clears AA on the dark panel can fail on
+// the light one (phosphor #2ee66e is 1.66:1 on white), so the guard compares against the panel of the
+// theme IN FORCE. Each hex is --loom-surface (global.css) converted to sRGB; persisted accentColor values
+// are owner data and are never rewritten.
+const PANEL_HEX: Record<ResolvedTheme, string> = { dark: "#181a1c", light: "#ffffff" };
 function relLuminance(hex: string): number {
   const lin = (i: number): number => {
     const v = parseInt(hex.slice(1 + i, 3 + i), 16) / 255;
@@ -533,11 +536,11 @@ function relLuminance(hex: string): number {
   };
   return 0.2126 * lin(0) + 0.7152 * lin(2) + 0.0722 * lin(4);
 }
-function labelColorFor(accent: string | null): string {
+function labelColorFor(accent: string | null, theme: ResolvedTheme): string {
   if (!accent) return color.textDim;
   if (accent.startsWith("#")) {
     const a = relLuminance(accent) + 0.05;
-    const b = relLuminance(PANEL_HEX) + 0.05;
+    const b = relLuminance(PANEL_HEX[theme]) + 0.05;
     const ratio = a > b ? a / b : b / a;
     if (ratio < 4.5) return color.textDim;
   }
@@ -547,14 +550,15 @@ function labelColorFor(accent: string | null): string {
 // The lifted lane's DragOverlay preview — the lane's own header, so the thing under the pointer is
 // recognisably the lane being moved.
 function LaneDragPreview({ col }: { col: KanbanColumn | undefined }) {
+  const theme = useResolvedTheme(); // above the early return: hooks must run on every render
   if (!col) return null;
   const accent = columnAccent(col);
   return (
     <div data-testid="lane-drag-preview"
       style={{ width: 220, background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: 4,
-        boxShadow: "0 10px 28px rgba(0,0,0,.55)", transform: "rotate(-1deg)", cursor: "grabbing" }}>
+        boxShadow: shadow.pop, transform: "rotate(-1deg)", cursor: "grabbing" }}>
       <div aria-hidden style={{ height: 3, background: accent ?? "transparent", borderTopLeftRadius: 3, borderTopRightRadius: 3 }} />
-      <SectionLabel style={{ color: labelColorFor(accent), margin: 0, padding: "10px 12px", display: "flex", alignItems: "center", gap: 6 }}>
+      <SectionLabel style={{ color: labelColorFor(accent, theme), margin: 0, padding: "10px 12px", display: "flex", alignItems: "center", gap: 6 }}>
         <span aria-hidden style={{ color: color.textDim }}>⠿</span>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
       </SectionLabel>
@@ -608,7 +612,8 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, p
   // the header label, and each card's left border so all three agree. null = un-accented: transparent
   // bar, neutral AA-safe label, neutral hairline card border.
   const accent = columnAccent(col);
-  const labelColor = labelColorFor(accent); // resolved accent if it clears AA on the panel, else textDim
+  const theme = useResolvedTheme();
+  const labelColor = labelColorFor(accent, theme); // resolved accent if it clears AA on this theme's panel, else textDim
   const cardAccent = accent ?? color.border; // un-accented lane → a neutral hairline left-border
   // SOFT WIP limit (advisory, never blocks). Shown as "N / limit" WHENEVER a limit is set (so an
   // approaching "2 / 3" is visible, not just a breach) — neutral under, amber AT-or-over. The count is
@@ -1088,7 +1093,7 @@ function TaskDrawerPlaceholder({ onClose, children }: { onClose: () => void; chi
   }, [onClose]);
   return (
     <div onClick={onClose} role="dialog" aria-modal
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
+      style={{ position: "fixed", inset: 0, background: color.scrim, zIndex: 50, display: "flex",
         alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
       <div ref={panelRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}
         // outline:none on the PANEL only — it is a programmatic focus target, not a control a user
@@ -1187,6 +1192,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
   const [body, setBody] = useState(task.body ?? "");
   const [priority, setPriority] = useState<TaskPriority>(prio(task));
   const [held, setHeld] = useState<boolean>(task.held ?? false);
+  const theme = useResolvedTheme();
   const [deferred, setDeferred] = useState<boolean>(task.deferred ?? false);
   // Which registered repo this card targets. "" = primary. Only editable when the project HAS a
   // registry — see the Repo field below.
@@ -1376,7 +1382,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
 
   return (
     <div onClick={requestClose} role="dialog" aria-modal
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
+      style={{ position: "fixed", inset: 0, background: color.scrim, zIndex: 50, display: "flex",
         alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
       <div ref={panelRef} tabIndex={-1} onClick={(e) => e.stopPropagation()}
         // outline:none for the same reason as TaskDrawerPlaceholder's panel above — read it there.
@@ -1400,7 +1406,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             <Select value={column.key} aria-label="Move to lane" title="Move to lane" data-testid="task-move-lane"
               disabled={moving} onChange={(e) => { if (e.target.value !== column.key) onMoveLane(e.target.value); }}
               style={{ width: "auto", padding: "2px 6px", fontSize: 11, fontFamily: font.head, fontWeight: 700,
-                letterSpacing: "0.06em", textTransform: "uppercase", color: labelColorFor(columnAccent(column)),
+                letterSpacing: "0.06em", textTransform: "uppercase", color: labelColorFor(columnAccent(column), theme),
                 borderLeft: `3px solid ${columnAccent(column) ?? color.border}` }}>
               {columns.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
             </Select>

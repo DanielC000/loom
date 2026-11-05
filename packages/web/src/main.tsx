@@ -6,6 +6,11 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { FleetSocketProvider } from "./components/FleetSocketProvider";
 import { isCredentialGuardMessage } from "./lib/loopbackCredential";
+import { initThemePref } from "./lib/themePref";
+
+// Re-apply the colour theme (index.html's inline script already set it before first paint) and start
+// following other tabs and the OS setting.
+initThemePref();
 
 // Surface mutation failures instead of swallowing them — resume/stop/fork/input used to fail
 // silently (a dead-looking button). One global handler covers every mutation; no per-call onError.

@@ -14,7 +14,7 @@ import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCr
 import { createReconnectBackoff, createRefusalEpisode, handleSocketClose } from "../lib/socketReconnect";
 import { useCredentialReattachNonce } from "../lib/useCredentialReattach";
 import { Button, Dot, SectionLabel, StatusPill } from "./ui";
-import { color, font, radius } from "../theme";
+import { color, font, radius, wash } from "../theme";
 
 // Feature-detect mic support ONCE at module load (Companion Voice epic, VOICE-P4 inbound) — Safari/older
 // browsers or a non-HTTPS/non-loopback origin may lack getUserMedia or MediaRecorder entirely; the mic
@@ -759,7 +759,7 @@ function MessageRow({ msg, title, grouped, groupEnd, time, delivery }: {
               {you ? "You" : title}
             </span>
             {badge && (
-              <span style={{ fontFamily: font.mono, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.05em", color: color.cyan, border: `1px solid rgba(91,200,255,0.3)`, borderRadius: 3, padding: "0 5px", background: "rgba(91,200,255,0.1)" }}>
+              <span style={{ fontFamily: font.mono, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.05em", color: color.cyan, border: `1px solid ${wash(color.info, 30)}`, borderRadius: 3, padding: "0 5px", background: wash(color.info, 10) }}>
                 {badge}
               </span>
             )}
@@ -787,7 +787,7 @@ function Bubble({ msg, you, groupEnd }: { msg: ChatMessage; you: boolean; groupE
         maxWidth: "100%", padding: "9px 13px", borderRadius: 12, fontFamily: font.mono, fontSize: 13,
         lineHeight: 1.6, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: color.text,
         background: you ? color.phosphorDim : color.panel2,
-        border: `1px solid ${you ? "rgba(46,230,110,0.22)" : color.border}`,
+        border: `1px solid ${you ? wash(color.live, 22) : color.border}`,
         borderBottomRightRadius: you && groupEnd ? 4 : 12,
         borderBottomLeftRadius: !you && groupEnd ? 4 : 12,
       }}
@@ -837,7 +837,7 @@ function EventLine({ msg, time, title }: { msg: ChatMessage; time: string; title
       <span
         style={{
           display: "inline-flex", alignItems: "center", gap: 9, maxWidth: "82%", padding: "6px 12px",
-          borderRadius: 999, border: `1px solid rgba(255,178,62,0.28)`, background: "rgba(255,178,62,0.09)",
+          borderRadius: 999, border: `1px solid ${wash(color.busy, 28)}`, background: wash(color.busy, 9),
           fontFamily: font.mono, fontSize: 11.5, color: color.textDim, lineHeight: 1.45,
         }}
       >
@@ -886,7 +886,7 @@ function Avatar({ label, blank, rowGap }: { label: string; blank?: boolean; rowG
         letterSpacing: "0.02em",
         ...(blank
           ? { background: "transparent", border: "1px solid transparent", color: "transparent" }
-          : { color: color.phosphor, background: color.phosphorDim, border: "1px solid rgba(46,230,110,0.35)" }),
+          : { color: color.phosphor, background: color.phosphorDim, border: `1px solid ${wash(color.live, 35)}` }),
       }}
     >
       {blank ? "" : label}
@@ -960,7 +960,7 @@ function TypingIndicator({ title }: { title: string }) {
 function EmptyState({ connected, title }: { connected: boolean; title: string }) {
   return (
     <div style={{ margin: "auto", textAlign: "center", display: "flex", flexDirection: "column", gap: 10, alignItems: "center", color: color.textMuted, padding: 40, maxWidth: 340 }}>
-      <span aria-hidden style={{ width: 52, height: 52, borderRadius: 12, display: "grid", placeItems: "center", fontSize: 22, color: color.phosphor, background: color.phosphorDim, border: "1px solid rgba(46,230,110,0.3)" }}>◇</span>
+      <span aria-hidden style={{ width: 52, height: 52, borderRadius: 12, display: "grid", placeItems: "center", fontSize: 22, color: color.phosphor, background: color.phosphorDim, border: `1px solid ${wash(color.live, 30)}` }}>◇</span>
       <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 12, color: color.textDim }}>
         Say hello
       </span>
@@ -982,7 +982,7 @@ function notice(t: "amber" | "muted" | "red"): CSSProperties {
   return {
     display: "flex", gap: 8, alignItems: "center", padding: "8px 12px",
     border: `1px solid ${accent}`, borderRadius: radius.base,
-    background: t === "amber" ? "rgba(255,178,62,0.06)" : t === "red" ? "rgba(255,90,90,0.07)" : color.panel2,
+    background: t === "amber" ? wash(color.busy, 6) : t === "red" ? wash(color.danger, 7) : color.panel2,
     fontFamily: font.mono, fontSize: 12, lineHeight: 1.5, color: t === "muted" ? color.textMuted : color.textDim,
   };
 }

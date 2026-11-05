@@ -25,6 +25,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { assertNoRealClaudeSpawn } from "./fixtures/daemon";
+import { cssColor } from "./helpers/themeToken";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
@@ -417,10 +418,12 @@ test.describe("vault raw assets on a remote (proxied) origin", () => {
 
     const button = page.getByRole("button", { name: "Download file" });
     await expect(button).toBeVisible();
-    // REST, byte-identical to the deleted inline values: --loom-phosphor #2ee66e on a 1px phosphor
-    // border, and `.loom-btn`'s transparent base where the inline `background: "transparent"` was.
-    await expect(button).toHaveCSS("color", "rgb(46, 230, 110)");
-    await expect(button).toHaveCSS("border-top-color", "rgb(46, 230, 110)");
+    // REST, the same tokens the deleted inline values named: --loom-phosphor on a 1px phosphor border,
+    // and `.loom-btn`'s transparent base where the inline `background: "transparent"` was.
+    const phosphor = await cssColor(page, "--loom-phosphor");
+    const phosphorDim = await cssColor(page, "--loom-phosphor-dim");
+    await expect(button).toHaveCSS("color", phosphor);
+    await expect(button).toHaveCSS("border-top-color", phosphor);
     await expect(button).toHaveCSS("border-top-width", "1px");
     await expect(button).toHaveCSS("border-top-style", "solid");
     await expect(button).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
@@ -428,10 +431,10 @@ test.describe("vault raw assets on a remote (proxied) origin", () => {
     // HOVER. `toHaveCSS` retries, so it reads the settled end state past the 80ms `.loom-btn`
     // transition rather than an interpolated frame mid-flight.
     await button.hover();
-    await expect(button).toHaveCSS("background-color", "rgba(46, 230, 110, 0.15)");
+    await expect(button).toHaveCSS("background-color", phosphorDim);
     // The fill is the whole rule — the label and border must not move with it.
-    await expect(button).toHaveCSS("color", "rgb(46, 230, 110)");
-    await expect(button).toHaveCSS("border-top-color", "rgb(46, 230, 110)");
+    await expect(button).toHaveCSS("color", phosphor);
+    await expect(button).toHaveCSS("border-top-color", phosphor);
   });
 
   test("CONTROL: on the SAME daemon's loopback origin the consumers still use the plain raw URL", async ({ page }) => {
@@ -470,10 +473,12 @@ test.describe("vault raw assets on a remote (proxied) origin", () => {
     // of its own, its hover worked before the fix too. Asserting it here is what shows the fix did not
     // disturb the branch that was already correct. (`:not(:disabled)` matches an <a>: `:disabled` only
     // ever matches a form control, so the variant's hover rule reaches this element.)
-    await expect(link).toHaveCSS("color", "rgb(46, 230, 110)");
-    await expect(link).toHaveCSS("border-top-color", "rgb(46, 230, 110)");
+    const phosphor = await cssColor(page, "--loom-phosphor");
+    const phosphorDim = await cssColor(page, "--loom-phosphor-dim");
+    await expect(link).toHaveCSS("color", phosphor);
+    await expect(link).toHaveCSS("border-top-color", phosphor);
     await expect(link).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
     await link.hover();
-    await expect(link).toHaveCSS("background-color", "rgba(46, 230, 110, 0.15)");
+    await expect(link).toHaveCSS("background-color", phosphorDim);
   });
 });

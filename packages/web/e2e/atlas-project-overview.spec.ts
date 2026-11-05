@@ -39,6 +39,7 @@
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
+import { cssColor } from "./helpers/themeToken";
 
 // lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
 // one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
@@ -53,7 +54,7 @@ const NARROW = { width: 900, height: 1000 };
 const CTX_WINDOW = 1_000_000;
 const WARM_PCT = 42;
 const RED_PCT = 96;
-const TONE_RED = "rgb(255, 92, 92)"; // --loom-red #ff5c5c
+// The red tone is read from the live --loom-red token at run time (`cssColor`), never typed as a literal.
 
 // The four readings that carry a breakdown. `merged` is deliberately NOT here — leg 5 is the
 // assertion that it is a plain readout, and listing it would make that leg contradict this list.
@@ -433,6 +434,7 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     // reading is a real `worstContext` derivation and not "whichever session came back first".
     const figure = page.getByTestId("atlas-brief-context").locator(".loom-ovbrief-n");
     await expect(figure).toHaveText(`${RED_PCT}%`);
+    const TONE_RED = await cssColor(page, "--loom-red");
     await expect(figure).toHaveCSS("color", TONE_RED);
 
     // …and the SAME expression, rendered a second way: the roster row's own track fill.
