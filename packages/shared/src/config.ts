@@ -241,6 +241,32 @@ export type PolicyRequirement =
   | { kind: "investigate-checkpoint" };
 export interface CardPolicyMatch { types?: string[]; scopes?: string[]; cardIds?: string[] }
 export interface CardPolicy { id: string; name?: string; match: CardPolicyMatch; require: PolicyRequirement[] }
+/** Write-time caps for `orchestration.tasklessGuardedPaths` (entries are matched in JS, never handed to git). */
+export const TASKLESS_GUARDED_PATHS_LIMITS = { maxEntries: 50, maxEntryLen: 200 } as const;
+export type TasklessGuardedPathsParse = { ok: true; paths: string[] } | { ok: false; error: string };
+/**
+ * The ONE structural validator for `orchestration.tasklessGuardedPaths`: an array of non-empty, bounded glob strings,
+ * repo-relative with forward slashes — so no leading `/`, no backslash, no `..` segment (such an entry could never match
+ * a git path and would silently guard nothing). `undefined` parses as the empty list. Matching semantics live on
+ * {@link OrchestrationConfig.tasklessGuardedPaths}.
+ */
+export function parseTasklessGuardedPaths(raw: unknown): TasklessGuardedPathsParse {
+  if (raw === undefined) return { ok: true, paths: [] };
+  if (!Array.isArray(raw)) return { ok: false, error: "tasklessGuardedPaths must be an array of glob strings" };
+  if (raw.length > TASKLESS_GUARDED_PATHS_LIMITS.maxEntries) return { ok: false, error: `tasklessGuardedPaths has more than ${TASKLESS_GUARDED_PATHS_LIMITS.maxEntries} entries` };
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const g: unknown = raw[i];
+    if (typeof g !== "string" || g.trim() === "") return { ok: false, error: `tasklessGuardedPaths[${i}] must be a non-empty string` };
+    if (g !== g.trim()) return { ok: false, error: `tasklessGuardedPaths[${i}] must not have leading or trailing whitespace` };
+    if (g.length > TASKLESS_GUARDED_PATHS_LIMITS.maxEntryLen) return { ok: false, error: `tasklessGuardedPaths[${i}] is longer than ${TASKLESS_GUARDED_PATHS_LIMITS.maxEntryLen} characters` };
+    if (g.startsWith("/")) return { ok: false, error: `tasklessGuardedPaths[${i}] must be repo-relative (no leading "/")` };
+    if (g.includes("\\")) return { ok: false, error: `tasklessGuardedPaths[${i}] must use forward slashes` };
+    if (g.split("/").includes("..")) return { ok: false, error: `tasklessGuardedPaths[${i}] must not contain a ".." segment` };
+    out.push(g);
+  }
+  return { ok: true, paths: out };
+}
 /** Write-time caps so the list stays bounded in every refusal message and prompt. */
 export const CARD_POLICY_LIMITS = { maxPolicies: 50, maxRequirements: 10, maxMatchEntries: 100, maxIdLen: 64, maxNameLen: 200, maxEntryLen: 200 } as const;
 export type CardPoliciesParse = { ok: true; policies: CardPolicy[] } | { ok: false; error: string };
@@ -576,6 +602,29 @@ export interface OrchestrationConfig {
    * here; enforcement callers must use {@link parseCardPolicies} on the raw override to detect it and fail closed.
    */
   cardPolicies: CardPolicy[];
+  /**
+   * Per-project, HUMAN-only list of repo-relative globs that a TASKLESS worker's landing may not touch. Default `[]`
+   * (no guard, byte-identical to before). A taskless worker has no card, so no card policy can match it; when this list
+   * is non-empty, `worker_merge_confirm` / `merge_batch` REFUSE a taskless branch whose changed-path set (the branch
+   * tip vs its merge-base with the mainline, BOTH sides of a rename) matches any entry, naming the matched paths
+   * (bounded) and telling the manager to re-spawn on a card so its policies apply. It is read from the RAW stored
+   * override at the top of a confirm and again at the pre-squash re-check, so a human edit takes effect without a
+   * restart. Fails CLOSED: an unreadable or over-cap changed-path set (500 paths / 32 KB) or a corrupt stored value
+   * refuses the taskless landing rather than guessing. A tasked worker is never affected (card policies govern it).
+   * Glob semantics are the repo's one deny-glob matcher (`pathGlobToRegExp`, git/worktrees.ts): `*` stays within one
+   * path segment, `**` crosses directories (a `**` segment matches zero or more directories), `?` is one non-`/` character, and a
+   * bare leading `*` with no `/` (e.g. `*.lock`) matches at any depth. Paths are repo-relative with forward slashes,
+   * so an entry may NOT start with `/` and may not contain `\` or a `..` segment (rejected at write time).
+   * Matching is CASE-INSENSITIVE on every platform (a deliberate difference from deny-globs, whose matching is
+   * case-sensitive): over-matching only refuses more, while under-matching on a case-insensitive host filesystem
+   * (win32/macOS) would let `DOCS/x` slip past a `docs/**` guard. Same trust tier as `mergeGate`: on
+   * `HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS` and omitted from the agent validator, so the agent AND the elevated Lead
+   * `project_configure` reject it in both set and unset directions. A corrupt stored value resolves to `[]` here;
+   * enforcement callers must use {@link parseTasklessGuardedPaths} on the raw override to detect it and fail closed.
+   *
+   * @decision a880c391 — never read this via resolveConfig at an enforcement site (a corrupt value must refuse, not degrade to no guard).
+   */
+  tasklessGuardedPaths: string[];
   /**
    * THE CANONICAL DOC for this field (card bd9a483b) — every other mention (mcp/platform.ts's schema,
    * the `worker_merge_confirm`/`merge_batch` tool descriptions, `sessions/service.ts`'s
@@ -1845,7 +1894,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, workerContextWarnRatio: 0.60, workerContextInterruptRatio: 0.85, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, attachmentMaxBytes: 25 * 1024 * 1024, attachmentMaxCount: 10, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "", commitTrailers: "on", commitLogBody: "on", cardPolicies: [] },
+  orchestration: { gateCommand: "", mergeGate: "on", gateCommandTimeoutMs: 600000, ungatedLandingCheckCommand: "", ungatedLandingCheckTimeoutMs: 600000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, emergencyRecycleAtContextRatio: 0.90, workerContextWarnRatio: 0.60, workerContextInterruptRatio: 0.85, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, managerBlindTurnMinutes: 30, recycleAtTurnsNoTelemetry: 150, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, staleRequestMinutes: 1440, maxNoticesPerHour: 6, attachmentMaxBytes: 25 * 1024 * 1024, attachmentMaxCount: 10, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md", rotationMarkers: [], rotationLiveCommitmentsHeading: "", rotationLiveCommitmentsFloor: 0, rotationLiveCommitmentsMarker: "", commitTrailers: "on", commitLogBody: "on", cardPolicies: [], tasklessGuardedPaths: [] },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -2476,6 +2525,7 @@ export function resolveConfig(
       commitLogBody: override.orchestration?.commitLogBody ?? d.orchestration.commitLogBody,
       // Card 78a9ae1c: human-only card policies; a corrupt stored value degrades to the default empty list.
       cardPolicies: (() => { const p = parseCardPolicies(override.orchestration?.cardPolicies); return p.ok ? p.policies : structuredClone(d.orchestration.cardPolicies); })(),
+      tasklessGuardedPaths: (() => { const p = parseTasklessGuardedPaths(override.orchestration?.tasklessGuardedPaths); return p.ok ? p.paths : []; })(),
       // Per-project timeout pairing gateCommand (no env layer). `??` so an explicit value survives.
       gateCommandTimeoutMs: override.orchestration?.gateCommandTimeoutMs ?? d.orchestration.gateCommandTimeoutMs,
       // Card bd9a483b: the interval-skip safety-net check + its paired timeout — same resolution shape as

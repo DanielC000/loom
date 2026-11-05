@@ -4181,7 +4181,7 @@ export function parseNumstatZ(out: string): DiffstatFile[] {
 /** @decision 91d847db — a bare leading `*` with no `/` anywhere (e.g. `*service.ts`) is auto-prefixed with
  *  `**​/` before translation — `*` alone stays within one segment and would silently match 0 files,
  *  indistinguishable from "no changes"; never widen this to a pattern already containing `/` or `**`. */
-function pathGlobToRegExp(rawGlob: string): RegExp {
+export function pathGlobToRegExp(rawGlob: string): RegExp {
   const glob = rawGlob.startsWith("*") && !rawGlob.startsWith("**") && !rawGlob.includes("/")
     ? `**/${rawGlob}`
     : rawGlob;

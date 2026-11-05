@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { TASK_STRUCTURE_SHAPE, TASK_STRUCTURE_DOC, TASK_CREATE_STRUCTURE_SHAPE, TASK_CREATE_STRUCTURE_DOC } from "../tasks/relations.js";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds, RotationMarker } from "@loom/shared";
-import { BROWSER_NOTIFICATION_KINDS, MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, PLATFORM_MS_BOUNDS, harnessFleetScopeAvailable, parseCardPolicies, redactAlertWebhookInConfig, resolveConfig } from "@loom/shared";
+import { BROWSER_NOTIFICATION_KINDS, MEMORY_CONFIG_MAX, MERGE_GATE_INTERVAL_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, PLATFORM_MS_BOUNDS, harnessFleetScopeAvailable, parseCardPolicies, parseTasklessGuardedPaths, redactAlertWebhookInConfig, resolveConfig } from "@loom/shared";
 import { CONVENTIONAL_TYPES } from "../tasks/title-guard.js";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE, CommondirPinConflictError } from "../db.js";
@@ -248,6 +248,13 @@ const orchestrationOverride = z.object({
       if (!(CONVENTIONAL_TYPES as readonly string[]).includes(t)) ctx.addIssue({ code: "custom", message: `cardPolicies "${p.id}": unknown type "${t}" (allowed: ${CONVENTIONAL_TYPES.join(", ")})` });
     }
   }),
+  // HUMAN-only taskless-landing path guard — same trust tier as cardPolicies (omitted from the agent path in
+  // agentOrchestrationOverride AND on HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS). Structure/caps come from the shared parser.
+  tasklessGuardedPaths: z.unknown().optional().superRefine((v, ctx) => {
+    if (v === undefined) return;
+    const r = parseTasklessGuardedPaths(v);
+    if (!r.ok) ctx.addIssue({ code: "custom", message: r.error });
+  }),
   // Per-project, HUMAN-only timeout (ms) capping a gateCommand run. Pairs with gateCommand and is
   // omitted from the agent path with it (see agentOrchestrationOverride). Bounds come from
   // ORCHESTRATION_TIMEOUT_MS_BOUNDS (@loom/shared) — the SAME table the Settings UI reads to state the
@@ -402,6 +409,8 @@ export const HUMAN_ONLY_NESTED_PROJECT_CONFIG_KEYS: readonly string[] = [
   "orchestration.commitTrailers", "orchestration.commitLogBody",
   // Card 78a9ae1c — human-set enforcement rules; the governed party must not write its own rules.
   "orchestration.cardPolicies",
+  // Card a880c391 — the taskless-landing path guard; the governed party must not write its own rules.
+  "orchestration.tasklessGuardedPaths",
   // Card 59fa6403 round 2 (b13df292, owner ruling): the notice rate limit is the SAME trust shape as
   // mergeGate — the party it governs must never be able to loosen its own governor — so it's blocked
   // even from the elevated Lead, not just the top-level omission below.
@@ -565,7 +574,7 @@ const agentOrchestrationOverride = orchestrationOverride
     alertWebhook: true, alertWebhookTimeoutMs: true,
     maxNoticesPerHour: true,
     // Card d9332365/3e92e23b — same trust tier as mergeGate/mergeGateInterval just above.
-    commitTrailers: true, commitLogBody: true, cardPolicies: true,
+    commitTrailers: true, commitLogBody: true, cardPolicies: true, tasklessGuardedPaths: true,
     // Card 432765ab — see maxNoticesPerHour's own comment just above for the reasoning.
     attachmentMaxBytes: true, attachmentMaxCount: true,
   })

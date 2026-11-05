@@ -5,7 +5,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import { mapWithConcurrency } from "../concurrency.js";
 import {
-  resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
+  resolveConfig, parseTasklessGuardedPaths, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
   usesOrchestrationMcp, contextPercentFor, contextWindowForModel, PROFILE_SPAWNABLE_ROLES,
   type Session, type StopMode, type OrchestrationEvent, type OrchestrationEventKind, type Task, type Project, type Profile,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
@@ -31,7 +31,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry, checkCutBaseRestampEligibility, CUT_BASE_RESTAMP_MAX_SCAN, type CutBaseRestampEligibility, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, firstBranchCommitTime, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type WorkerTipLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
+import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry, checkCutBaseRestampEligibility, CUT_BASE_RESTAMP_MAX_SCAN, type CutBaseRestampEligibility, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, firstBranchCommitTime, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, machineReadablePathSet, pathGlobToRegExp, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type WorkerTipLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, fastForwardCanonicalMain, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
@@ -26301,7 +26301,8 @@ export class SessionService {
   /**
    * Card 9623e943 — the ONE merge-phase policy check, called by confirmWorkerMergeTracked (before attach),
    * confirmWorkerMerge (backstop) and mergeBatchTracked (per candidate). Returns the refusal or `null`.
-   * A taskless worker is never refused. A worker whose OWN branch is PROVEN already landed (the same
+   * A taskless worker is refused ONLY by the project's human-only `orchestration.tasklessGuardedPaths` guard
+   * ({@link tasklessGuardRefusal}); with that list empty/absent it is never refused. A worker whose OWN branch is PROVEN already landed (the same
    * `findLandedSquashCommit` proof the ALREADY_MERGED path uses, with the ledger facts) is not refused either — an
    * idempotent re-confirm. The card's sticky `mergedSha` and its terminal COLUMN exempt nothing: a card that landed once
    * and was moved back out of done gets a NEW worker, whose branch has not landed, and that worker is held to the policy.
@@ -26309,7 +26310,8 @@ export class SessionService {
    */
   async mergePolicyRefusal(workerSessionId: string, opts?: { pinnedTip?: string }): Promise<{ text: string; policyId: string; requirement: string } | null> {
     const worker = this.db.getSession(workerSessionId);
-    if (!worker?.taskId) return null;
+    if (!worker) return null;
+    if (!worker.taskId) return this.tasklessGuardRefusal(worker, opts?.pinnedTip);
     const project = this.db.getProject(worker.projectId);
     const task = this.db.getTask(worker.taskId);
     if (!project || !task) return null;
@@ -26317,6 +26319,56 @@ export class SessionService {
     const v: RequirementVerdict | undefined = ev.blocking[0];
     if (v && (await this.workerBranchProvenLanded(worker, project))) return null;
     return v ? { text: describePolicyRefusal(v, { phase: "merge", taskId: task.id }), policyId: v.policyId, requirement: v.kind } : null;
+  }
+
+  /**
+   * Card a880c391 — the taskless arm of {@link mergePolicyRefusal}. A taskless worker has no card, so no card policy can
+   * match it; this is the project's human-only `orchestration.tasklessGuardedPaths` guard instead. Reads the RAW stored
+   * list (never `resolveConfig`, which degrades a corrupt value to "no guard"); an empty/absent list returns null with
+   * ZERO git work. Otherwise it reads the changed-path set of the branch (or `pinnedTip`) against its merge-base with the
+   * mainline watermark via `machineReadablePathSet` (`-z`, both sides of a rename, through `canonicalGit`) and refuses
+   * when any path matches a guard glob. FAILS CLOSED: a corrupt list, an unknown branch/mainline, or an unreadable /
+   * over-cap path set refuses. An already-landed branch (same proof as the card arm) is an idempotent re-confirm, not refused.
+   */
+  private async tasklessGuardRefusal(worker: Session, pinnedTip?: string): Promise<{ text: string; policyId: string; requirement: string } | null> {
+    const project = this.db.getProject(worker.projectId);
+    if (!project) return null;
+    const raw = (project.config as { orchestration?: { tasklessGuardedPaths?: unknown } } | undefined)?.orchestration?.tasklessGuardedPaths;
+    if (raw === undefined || (Array.isArray(raw) && raw.length === 0)) return null;
+    const remedy = "Remedy: re-spawn the work on a card so its policies apply (worker_spawn with a taskId), then confirm that worker. The guarded-path list is part of this project's orchestration config (orchestration.tasklessGuardedPaths).";
+    const refuse = (text: string) => ({ text, policyId: "(taskless-guard)", requirement: "taskless-guarded-paths" });
+    const parsed = parseTasklessGuardedPaths(raw);
+    let refusal: { text: string; policyId: string; requirement: string } | null = null;
+    if (!parsed.ok) {
+      refusal = refuse(`Taskless landing refused: this project's taskless-landing path guard is unreadable (${parsed.error}). ${remedy}`);
+    } else {
+      const unreadable = (why: string) => refuse(`Taskless landing refused: this project guards paths against taskless landings, but the changed-path set could not be checked (${why}). ${remedy}`);
+      if (!worker.branch) refusal = unreadable("worker branch unknown");
+      else {
+        const repo = resolveRepoByKey(project, worker.repoKey ?? null);
+        const wm = this.resolveMainlineWatermarkRef(project.id, worker.repoKey);
+        if (wm.state !== "ok") refusal = unreadable("mainline unresolved");
+        else {
+          // @decision 56c10535 — the tip is resolved by resolveBranchTip's exact refs/heads lookup (or is the caller's pin), NEVER diffed as a bare branch
+          // name: the shared .git is worker-writable and a same-named tag outranks the branch in git's revision search, so a worker could shadow its own branch.
+          const tip = pinnedTip ?? (await resolveBranchTip(repo.path, worker.branch, { timeoutMs: this.gitOpMs }).catch(() => null));
+          const set = tip ? await machineReadablePathSet(repo.path, `${wm.ref ?? "HEAD"}...${tip}`, { timeoutMs: this.gitOpMs }) : null;
+          if (!set) refusal = unreadable("worker branch tip unresolved");
+          else if ("truncated" in set) refusal = unreadable("path set unreadable or over the 500-path / 32 KB cap");
+          else {
+            // Case-INSENSITIVE on purpose (see the key's doc on OrchestrationConfig): the shared glob matcher builds a case-sensitive regex.
+            const res = parsed.paths.map((g) => new RegExp(pathGlobToRegExp(g).source, "i"));
+            const matched = [...new Set(set.paths.filter((p) => res.some((r) => r.test(p))))];
+            if (matched.length > 0) {
+              const shown = matched.slice(0, 10).map((p) => (p.length > 200 ? `${p.slice(0, 200)}…` : p)).join(", ");
+              refusal = refuse(`Taskless landing refused: this worker has no card, and this project guards these paths against taskless landings: ${shown}${matched.length > 10 ? ` (+${matched.length - 10} more)` : ""}. ${remedy}`);
+            }
+          }
+        }
+      }
+    }
+    if (refusal && (await this.workerBranchProvenLanded(worker, project))) return null;
+    return refusal;
   }
 
   /** True only when THIS worker's own branch is proven landed on its repo's mainline (trailer proof or the worker-tip ledger). Fails closed (false) on any doubt. */
