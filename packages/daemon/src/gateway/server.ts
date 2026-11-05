@@ -6560,7 +6560,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!waiverProject || !policyIdIsConfigured(waiverProject, p.policyId)) return reply.code(400).send({ error: `policyId '${p.policyId}' matches no configured card policy on this project` });
     const now = new Date().toISOString();
     deps.db.upsertCardPolicyWaiver({ taskId: task.id, projectId: task.projectId, policyId: p.policyId, requirementKind: p.requirement, reason: p.reason, waivedBy: "human", createdAt: now });
-    deps.db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: "", taskId: task.id, kind: "card_policy_waived", detail: { action: "waive", policyId: p.policyId, requirement: p.requirement, reason: p.reason } });
+    deps.db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: "", taskId: task.id, kind: "card_policy_waived", detail: { action: "waive", projectId: task.projectId, policyId: p.policyId, requirement: p.requirement, reason: p.reason } });
     return { ok: true };
   });
   app.delete("/api/tasks/:id/policy-waivers", async (req, reply) => {
@@ -6569,7 +6569,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const p = parsePolicyWaiverBody((req.body ?? {}) as Record<string, unknown>, false);
     if (typeof p === "string") return reply.code(400).send({ error: p });
     const removed = deps.db.deleteCardPolicyWaiver(task.id, task.projectId, p.policyId, p.requirement);
-    if (removed) deps.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", taskId: task.id, kind: "card_policy_waived", detail: { action: "revoke", policyId: p.policyId, requirement: p.requirement } });
+    if (removed) deps.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", taskId: task.id, kind: "card_policy_waived", detail: { action: "revoke", projectId: task.projectId, policyId: p.policyId, requirement: p.requirement } });
     return { ok: true, removed };
   });
   // Card 61d32daf: the board's card-policy READS. Both render `taskPolicyView`, the SAME evaluation tasks_get exposes

@@ -33,6 +33,7 @@ const card = (title) => { const id = randomUUID(); e.db.insertTask({ id, project
 const cards = {
   human: card("feat(x): human"), agent: card("feat(x): agent"), consumed: card("feat(x): consumed"), lapsed: card("feat(x): lapsed"),
   reject: card("feat(x): reject"), decision: card("feat(x): decision"), legacy: card("feat(x): legacy"), foreignReq: card("feat(x): foreign request"),
+  legacyUpper: card("feat(x): legacy upper"), foreignLegacy: card("feat(x): foreign legacy"),
   foreignWaiver: card("feat(x): foreign waiver"), waived: card("feat(x): waived"), none: card("feat(x): nothing"), plain: card("docs(x): plain"),
 };
 e.setPolicies([policy({ id: "ap", name: "Approve", match: { types: ["feat"] }, require: [{ kind: "approved-request" }] })]);
@@ -46,12 +47,17 @@ e.fileRequest({ taskId: cards.reject, chosenOption: "reject" });
 e.fileRequest({ taskId: cards.decision, type: "decision", chosenOption: "approve" });
 // A legacy Request linked by the 8-char id PREFIX (pre-a3f1319f rows), human-answered.
 e.fileRequest({ taskId: cards.legacy.slice(0, 8) });
+// The same shape with the prefix stored UPPERCASE: the per-card LIKE is case-insensitive, so the batch must match it too.
+e.fileRequest({ taskId: cards.legacyUpper.slice(0, 8).toUpperCase() });
 // A human-authorized Request in ANOTHER project that carries this project's card id: must never count here.
-{
+const fileForeign = (taskId) => {
   const id = `cpsb-q-${randomUUID().slice(0, 8)}`;
-  e.db.insertQuestion({ id, sessionId: e.mgrId, projectId: otherProj, title: "foreign", body: "b", type: "permission", options: null, recommendation: null, taskId: cards.foreignReq, state: "pending", chosenOption: null, note: null, createdAt: e.now, answeredAt: null, consumedAt: null });
+  e.db.insertQuestion({ id, sessionId: e.mgrId, projectId: otherProj, title: "foreign", body: "b", type: "permission", options: null, recommendation: null, taskId, state: "pending", chosenOption: null, note: null, createdAt: e.now, answeredAt: null, consumedAt: null });
   e.db.answerQuestion(id, { chosenOption: "authorize", note: "n", answeredAt: e.now, answeredVia: "human" });
-}
+};
+fileForeign(cards.foreignReq);
+// ...and the same for a legacy 8-char PREFIX Request in another project.
+fileForeign(cards.foreignLegacy.slice(0, 8));
 // A waiver recorded under ANOTHER project for this project's card id: must never count here.
 e.db.upsertCardPolicyWaiver({ taskId: cards.foreignWaiver, projectId: otherProj, policyId: "ap", requirementKind: "approved-request", reason: "r", waivedBy: "owner", createdAt: e.now });
 e.db.upsertCardPolicyWaiver({ taskId: cards.waived, projectId: e.projId, policyId: "ap", requirementKind: "approved-request", reason: "r", waivedBy: "owner", createdAt: e.now });
@@ -73,6 +79,8 @@ check("(T2) an AGENT-written answer does NOT count (blocking 1)", blocking("agen
 check("(T3) a consumed human grant counts", blocking("consumed") === 0);
 check("(T4) a lapsed grant, a reject and a decision-type Request do not count", blocking("lapsed") === 1 && blocking("reject") === 1 && blocking("decision") === 1);
 check("(T5) a legacy 8-char-prefix Request counts for its card", blocking("legacy") === 0);
+check("(T5b) a legacy 8-char-prefix Request stored UPPERCASE counts (case-insensitive like the per-card LIKE)", blocking("legacyUpper") === 0);
+check("(T5c) ANOTHER project's authorized legacy-PREFIX Request does not count", blocking("foreignLegacy") === 1);
 check("(T6) ANOTHER project's authorized Request for the same card id does not count", blocking("foreignReq") === 1);
 check("(T7) ANOTHER project's waiver for the same card id does not waive; this project's does", blocking("foreignWaiver") === 1 && blocking("waived") === 0);
 check("(T8) a card with no Request is unmet, and a card no policy matches is absent", blocking("none") === 1 && !(cards.plain in batched));

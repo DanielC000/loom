@@ -101,7 +101,12 @@ export function batchedDbPolicyEvidence(
   const byTask = db.listAnsweredPermissionQuestionsForProject(projectId);
   const waivers = db.listCardPolicyWaiversForProject(projectId);
   const byLegacyPrefix = new Map<string, PolicyQuestionRow[]>();
-  for (const [k, rows] of byTask) if (k.length === 8) byLegacyPrefix.set(k.toLowerCase(), [...(byLegacyPrefix.get(k.toLowerCase()) ?? []), ...rows]);
+  for (const [k, rows] of byTask) {
+    if (k.length !== 8) continue;
+    const key = k.toLowerCase();
+    const bucket = byLegacyPrefix.get(key);
+    if (bucket) bucket.push(...rows); else byLegacyPrefix.set(key, [...rows]);
+  }
   return {
     authorizedPermissionRequest: (taskId) => {
       const now = nowMs();

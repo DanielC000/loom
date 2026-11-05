@@ -47,6 +47,7 @@ const rows = e.db.listCardPolicyWaivers(t, e.projId);
 check("(W2) one row for exactly (card, policy, requirement) with the reason and a human author", rows.length === 1 && rows[0].policyId === "p1" && rows[0].requirementKind === "approved-request" && rows[0].reason === "owner approved out of band" && rows[0].waivedBy === "human");
 const ev = waivedEvents();
 check("(W2) an audit card_policy_waived event {action:waive} names card, policy, requirement and reason", ev.length === 1 && ev[0].taskId === t && ev[0].detail?.action === "waive" && ev[0].detail?.policyId === "p1" && ev[0].detail?.requirement === "approved-request" && ev[0].detail?.reason === "owner approved out of band");
+check("(W2) the waive event detail records the card's projectId", ev[0].detail?.projectId === e.projId);
 check("(W3) the evaluator reads it: the requirement now shows `waived`", (await viewStatus()) === "waived");
 
 const again = await post({ policyId: "p1", requirement: "approved-request", reason: "updated reason" });
@@ -59,6 +60,7 @@ const gone = await del({ policyId: "p1", requirement: "approved-request" });
 check("(W6) DELETE => 200 removed:true and the requirement is `unmet` again", gone.statusCode === 200 && gone.json().removed === true && (await viewStatus()) === "unmet");
 check("(W6) revoking one kind leaves the sibling waiver", e.db.listCardPolicyWaivers(t, e.projId).length === 1 && e.db.listCardPolicyWaivers(t, e.projId)[0].requirementKind === "code-review-report");
 check("(W6) the revoke wrote an audit event {action:revoke}", waivedEvents().some((x) => x.detail?.action === "revoke" && x.detail?.requirement === "approved-request"));
+check("(W6) the revoke event detail records the card's projectId", waivedEvents().some((x) => x.detail?.action === "revoke" && x.detail?.projectId === e.projId));
 const eventsBefore = waivedEvents().length;
 const noop = await del({ policyId: "p1", requirement: "approved-request" });
 check("(W7) revoking a waiver that does not exist => removed:false and NO event", noop.statusCode === 200 && noop.json().removed === false && waivedEvents().length === eventsBefore);

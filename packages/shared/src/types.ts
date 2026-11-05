@@ -2307,7 +2307,8 @@ export type OrchestrationEventKind =
   // worker/manager lifecycle signal any of those four track.
   | "merge_quarantine_broad_union_cleared"
   // Card-policy waiver audit trail: written ONLY by the human-only REST waiver route (POST/DELETE
-  // /api/tasks/:id/policy-waivers); `detail` = {action:"waive"|"revoke", policyId, requirement, reason}.
+  // /api/tasks/:id/policy-waivers); `detail` = {action:"waive"|"revoke", projectId, policyId, requirement, reason?} (`reason` on waive only;
+  // `projectId` is the card's project at write time, since waivers are project-keyed).
   // Audit-only, same bucket as `codex_auto_commit`: not a lifecycle signal.
   // @decision 9623e943 — waivers are human-REST-only; no agent surface may write or revoke one.
   | "card_policy_waived";
