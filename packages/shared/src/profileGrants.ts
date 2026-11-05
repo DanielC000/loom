@@ -26,8 +26,6 @@ import type { AgentListItem, Profile, ProfileId } from "./types.js";
  * @decision be8be211 — same prohibition, for `vaultWrite`.
  */
 export const AGENT_FORBIDDEN_PROFILE_KEYS = [
-  "connections",
-  "capabilities",
   "vaultWrite",
   "harness",
   "browserTesting",
@@ -36,6 +34,12 @@ export const AGENT_FORBIDDEN_PROFILE_KEYS = [
 ] as const;
 
 export type AgentForbiddenProfileKey = (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number];
+
+/**
+ * Card afe1bc90: `connections`/`capabilities` are no longer PROFILE fields — credential grants live on the
+ * AGENT row only. A profile write naming either is REJECTED (never silently dropped) by every writer.
+ */
+export const RETIRED_PROFILE_CREDENTIAL_KEYS = ["connections", "capabilities"] as const;
 
 /** The slice of a Profile the grant-reach computation reads — nothing else is consulted. */
 export type ProfileGrantFields = Pick<Profile, AgentForbiddenProfileKey>;
@@ -81,12 +85,6 @@ const GRANT_ADDED: Record<
   AgentForbiddenProfileKey,
   (before: ProfileGrantFields, after: ProfileGrantFields) => boolean
 > = {
-  connections: (b, a) => hasNewEntry(b.connections, a.connections),
-  capabilities: (b, a) =>
-    hasNewEntry(
-      (b.capabilities ?? []).map(capabilityGrantKey),
-      (a.capabilities ?? []).map(capabilityGrantKey),
-    ),
   allowDelta: (b, a) => hasNewEntry(b.allowDelta, a.allowDelta),
   vaultWrite: (b, a) => !b.vaultWrite && !!a.vaultWrite,
   browserTesting: (b, a) => !b.browserTesting && !!a.browserTesting,
@@ -226,8 +224,6 @@ export function profileGrantReachOf(
 
 /** Human-facing label for a granted key — used by the pre-save confirm and the audit detail alike. */
 export const AGENT_FORBIDDEN_PROFILE_KEY_LABELS: Record<AgentForbiddenProfileKey, string> = {
-  connections: "authenticated-egress connections",
-  capabilities: "capability grants",
   vaultWrite: "vault write",
   harness: "harness (which CLI binary spawns)",
   browserTesting: "browser testing",

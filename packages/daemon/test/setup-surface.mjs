@@ -583,8 +583,6 @@ try {
   // human-only connections/capabilities/vaultWrite grant — the field check applies regardless of role,
   // and regardless of allowElevatedRoles (which this surface never passes anyway).
   db.insertProfile({ id: "vaultWriteRig", name: "Vault Rig", role: "worker", description: "vault-write rig", allowDelta: [], skills: null, model: null, icon: "📓", vaultWrite: true });
-  db.insertProfile({ id: "connectionsRig", name: "Connections Rig", role: "worker", description: "connections rig", allowDelta: [], skills: null, model: null, icon: "🔌", connections: ["connX"] });
-  db.insertProfile({ id: "capabilitiesRig", name: "Capabilities Rig", role: "worker", description: "capabilities rig", allowDelta: [], skills: null, model: null, icon: "🧩", capabilities: [{ slug: "some-cap" }] });
   const auBeforeField = db.getAgent(agent.id)?.profileId ?? null;
   const auVaultWrite = await call("agent_update", { agentId: agent.id, profileId: "vaultWriteRig" });
   check("(g) agent_update REJECTS a worker-role profile carrying vaultWrite", typeof auVaultWrite.error === "string" && /vaultWrite/i.test(auVaultWrite.error));
@@ -593,23 +591,24 @@ try {
   check("(g) profile_assign REJECTS a worker-role profile carrying vaultWrite", typeof paVaultWrite.error === "string" && /vaultWrite/i.test(paVaultWrite.error));
   const acVaultWrite = await call("agent_create", { projectId: created.id, name: "VaultWriteTarget", profileId: "vaultWriteRig" });
   check("(g) agent_create REJECTS a worker-role profile carrying vaultWrite", typeof acVaultWrite.error === "string" && /vaultWrite/i.test(acVaultWrite.error) && !acVaultWrite.id);
-  const paConnections = await call("profile_assign", { agentId: agent.id, profileId: "connectionsRig" });
-  check("(g) profile_assign REJECTS a worker-role profile carrying a non-empty connections", typeof paConnections.error === "string" && /connections/i.test(paConnections.error));
-  const paCapabilities = await call("profile_assign", { agentId: agent.id, profileId: "capabilitiesRig" });
-  check("(g) profile_assign REJECTS a worker-role profile carrying a non-empty capabilities", typeof paCapabilities.error === "string" && /capabilities/i.test(paCapabilities.error));
-  // Card a06650d2 fix round: connections/capabilities were only exercised above on profile_assign — add
-  // the SAME coverage on agent_update/agent_create (vaultWrite already covered both; connections/
-  // capabilities were not).
-  const auConnections = await call("agent_update", { agentId: agent.id, profileId: "connectionsRig" });
-  check("(g) agent_update REJECTS a worker-role profile carrying a non-empty connections", typeof auConnections.error === "string" && /connections/i.test(auConnections.error));
-  check("(g) agent_update: the rejected connections assign left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === auBeforeField);
-  const auCapabilities = await call("agent_update", { agentId: agent.id, profileId: "capabilitiesRig" });
-  check("(g) agent_update REJECTS a worker-role profile carrying a non-empty capabilities", typeof auCapabilities.error === "string" && /capabilities/i.test(auCapabilities.error));
-  check("(g) agent_update: the rejected capabilities assign left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === auBeforeField);
-  const acConnections = await call("agent_create", { projectId: created.id, name: "ConnectionsTarget", profileId: "connectionsRig" });
-  check("(g) agent_create REJECTS a worker-role profile carrying a non-empty connections", typeof acConnections.error === "string" && /connections/i.test(acConnections.error) && !acConnections.id);
-  const acCapabilities = await call("agent_create", { projectId: created.id, name: "CapabilitiesTarget", profileId: "capabilitiesRig" });
-  check("(g) agent_create REJECTS a worker-role profile carrying a non-empty capabilities", typeof acCapabilities.error === "string" && /capabilities/i.test(acCapabilities.error) && !acCapabilities.id);
+  // @decision afe1bc90 — the 8 "REJECTS a profile carrying connections/capabilities" checks are retired (a
+  // profile carries neither now); the invariant is re-aimed at the AGENT row: no tool key writes a grant.
+  // The strict input schema rejects the unknown keys as an MCP error, so a throw is tolerated alongside {error}.
+  const tryCall = async (n, a) => { try { return await call(n, a); } catch (e) { return { error: String(e?.message ?? e) }; } };
+  const grantBefore = JSON.stringify([db.getAgent(agent.id)?.connections ?? [], db.getAgent(agent.id)?.capabilities ?? []]);
+  // One call PER KEY (a combined call is rejected by the strict schema on whichever key is unknown, which
+  // would mask a regression that opened only the other one — found by the mutant proof).
+  const agentGrantState = () => JSON.stringify([db.getAgent(agent.id)?.connections ?? [], db.getAgent(agent.id)?.capabilities ?? []]);
+  await tryCall("agent_update", { agentId: agent.id, connections: ["connX"] });
+  check("(g) agent_update cannot write connections onto the agent row (human-only grant field)", agentGrantState() === grantBefore && grantBefore === "[[],[]]");
+  await tryCall("agent_update", { agentId: agent.id, capabilities: [{ slug: "some-cap" }] });
+  check("(g) agent_update cannot write capabilities onto the agent row (human-only grant field)", agentGrantState() === grantBefore);
+  const grantRowOf = (r) => (r.id ? db.getAgent(r.id) : null);
+  const acConn = grantRowOf(await tryCall("agent_create", { projectId: created.id, name: "GrantTargetC", connections: ["connX"] }));
+  check("(g) agent_create cannot mint an agent carrying connections", acConn == null || (acConn.connections ?? []).length === 0);
+  const acCap = grantRowOf(await tryCall("agent_create", { projectId: created.id, name: "GrantTargetK", capabilities: [{ slug: "some-cap" }] }));
+  check("(g) agent_create cannot mint an agent carrying capabilities", acCap == null || (acCap.capabilities ?? []).length === 0);
+  check("(g) agent_update: that attempt left the agent's profile assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === auBeforeField);
 
   // Card 1f52bc75: the field axis also covers documentConversion/harness("codex")/allowDelta now —
   // representative coverage (documentConversion) on all 3 binding tools, same shape as vaultWrite/

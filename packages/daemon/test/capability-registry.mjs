@@ -74,12 +74,22 @@ const { unwrapLauncherMount } = await import("./_env-isolation-helpers.mjs");
 fs.mkdirSync(SETTINGS_DIR, { recursive: true });
 
 // ===================== validateProfile / AGENT_FORBIDDEN_PROFILE_KEYS: capabilities is HUMAN-only =====================
-const validCaps = validateProfile({ name: "P", capabilities: [{ slug: "gh-mcp", connectionId: "conn1" }] });
-check("(validate-profile) a well-formed capabilities grant validates ok", validCaps.ok === true && JSON.stringify(validCaps.value.capabilities) === JSON.stringify([{ slug: "gh-mcp", connectionId: "conn1" }]));
-check("(validate-profile) capabilities normalizes to [] when absent", validateProfile({ name: "P" }).ok === true && JSON.stringify(validateProfile({ name: "P" }).value.capabilities) === "[]");
-check("(agent-forbidden) an agent MCP profile writer's payload with 'capabilities' is REJECTED",
-  typeof agentProfileKeyError({ capabilities: [{ slug: "x" }] }) === "string");
-check("(agent-forbidden) 'connections' stays rejected too (no regression)", typeof agentProfileKeyError({ connections: ["c1"] }) === "string");
+// @decision afe1bc90 — credential grants are AGENT-row fields: the well-formed/absent/forbidden legs below
+// are re-aimed at validateAgentPatch (human REST opt-in) + validateProfile's retired-key rejection.
+const { validateAgentPatch } = await import("../dist/agents/validate.js");
+const { explicitRoleGrantCarryoverError } = await import("../dist/profiles/validate.js");
+const humanGrantOpts = { allowEndpointFlags: false, allowCredentialGrants: true };
+const validCaps = validateAgentPatch({ capabilities: [{ slug: "gh-mcp", connectionId: "conn1" }] }, () => true, humanGrantOpts);
+check("(validate-agent) a well-formed capabilities grant validates ok", validCaps.ok === true && JSON.stringify(validCaps.patch.capabilities) === JSON.stringify([{ slug: "gh-mcp", connectionId: "conn1" }]));
+check("(validate-agent) capabilities is left UNTOUCHED (undefined) when absent from the patch", (() => { const r = validateAgentPatch({ name: "A" }, () => true, humanGrantOpts); return r.ok === true && r.patch.capabilities === undefined; })());
+check("(validate-agent) the agent-facing path (no allowCredentialGrants) never sets capabilities or connections", (() => {
+  const r = validateAgentPatch({ capabilities: [{ slug: "x" }], connections: ["c1"] }, () => true, { allowEndpointFlags: false });
+  return r.ok === true && r.patch.capabilities === undefined && r.patch.connections === undefined;
+})());
+check("(profile-retired) a profile payload with 'capabilities' is REJECTED, naming the agent endpoint",
+  (() => { const r = validateProfile({ name: "P", capabilities: [{ slug: "x" }] }); return r.ok === false && /POST \/api\/agents\/:id/.test(r.error); })());
+check("(profile-retired) 'connections' is rejected the same way", (() => { const r = validateProfile({ name: "P", connections: ["c1"] }); return r.ok === false && /POST \/api\/agents\/:id/.test(r.error); })());
+check("(profile-retired) a validated profile carries NO connections/capabilities keys", (() => { const r = validateProfile({ name: "P" }); return r.ok === true && !("capabilities" in r.value) && !("connections" in r.value); })());
 check("(agent-forbidden) a payload with no forbidden key passes", agentProfileKeyError({ name: "P", description: "x" }) === null);
 
 // ===================== card 8c27ae8e: browserTesting/documentConversion/allowDelta join the forbidden list =====================
@@ -93,9 +103,12 @@ check("(agent-forbidden 8c27ae8e) the exact card repro payload (all three + role
 // Per-key reason messages (card 8c27ae8e item 2): one generic "grants access to real external secrets"
 // sentence was misleading for every key but connections/capabilities — each now names its own reason.
 const secretsPhrase = /real external secrets/;
-check("(agent-forbidden reasons) connections cites real external secrets", secretsPhrase.test(agentProfileKeyError({ connections: ["c1"] })));
-check("(agent-forbidden reasons) capabilities cites a host process, NOT the generic secrets phrase",
-  /host process/.test(agentProfileKeyError({ capabilities: [{ slug: "x" }] })) && !secretsPhrase.test(agentProfileKeyError({ capabilities: [{ slug: "x" }] })));
+// The connections/capabilities reasons now live on the AGENT-row side (surfaced by the explicit-role carryover refusal).
+const carriedConn = explicitRoleGrantCarryoverError(null, "worker", {}, { connections: ["c1"] });
+const carriedCap = explicitRoleGrantCarryoverError(null, "worker", {}, { capabilities: [{ slug: "x" }] });
+check("(agent-grant reasons) connections cites real external secrets", secretsPhrase.test(carriedConn ?? ""));
+check("(agent-grant reasons) capabilities cites a host process, NOT the generic secrets phrase",
+  /host process/.test(carriedCap ?? "") && !secretsPhrase.test(carriedCap ?? ""));
 check("(agent-forbidden reasons) vaultWrite cites the vault, NOT the generic secrets phrase",
   /vault/.test(agentProfileKeyError({ vaultWrite: true })) && !secretsPhrase.test(agentProfileKeyError({ vaultWrite: true })));
 check("(agent-forbidden reasons) harness cites gateCommand's trust class, NOT the generic secrets phrase",
@@ -186,21 +199,24 @@ const credDefCollision = {
   ...fakeBundled, id: "cap-collision", slug: "needs-cred-collision", requiresConnection: true, secretEnvVar: "FAKE_TOKEN_COLLISION",
   provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: [] }),
 };
+// @decision afe1bc90 — RETIRED collision leg: a profile can no longer grant a slug, so there is no
+// profile-vs-agent collision to resolve. What replaces it: a stray `capabilities` on a profile ROW (the
+// dormant column / a legacy object) must NOT leak into resolution — the AGENT's binding is the only one.
 const collisionResolved = resolveProfile(
   { startupPrompt: "", capabilities: [{ slug: "needs-cred-collision", connectionId: "connAgent" }] },
   { role: "worker", capabilities: [{ slug: "needs-cred-collision", connectionId: "connProfile" }] },
 );
-check("(collision) resolveProfile's own union already collapsed to ONE entry for the collided slug",
+check("(collision) resolveProfile yields exactly ONE entry for the slug",
   collisionResolved.capabilities.filter((g) => g.slug === "needs-cred-collision").length === 1);
-check("(collision) ...carrying the PROFILE's connectionId, not the agent's",
-  collisionResolved.capabilities.find((g) => g.slug === "needs-cred-collision")?.connectionId === "connProfile");
+check("(collision) ...carrying the AGENT's connectionId (a stray profile-side value is never read)",
+  collisionResolved.capabilities.find((g) => g.slug === "needs-cred-collision")?.connectionId === "connAgent");
 const withCollision = buildMcpServers({
   sessionId: "s6", port: 4317, role: "worker",
   capabilities: collisionResolved.capabilities, capabilityCatalog: [credDefCollision],
   resolveConnectionSecret: (id) => (id === "connProfile" ? "profile-secret" : id === "connAgent" ? "agent-secret" : undefined),
 });
-check("(collision) the mounted server for the collided slug injects the PROFILE's secret",
-  withCollision["needs-cred-collision"]?.env?.FAKE_TOKEN_COLLISION === "profile-secret");
+check("(collision) the mounted server for the slug injects the AGENT's secret",
+  withCollision["needs-cred-collision"]?.env?.FAKE_TOKEN_COLLISION === "agent-secret");
 
 // ===================== CODE-REVIEW FIX: the secret must NEVER ride claude's argv or the spawn log =====================
 // Simulates createPty's EXACT sequence: buildMcpServers → collectMcpEnvSecrets → (conditionally)
@@ -258,12 +274,13 @@ check("(hardening) transport:'http' is rejected in v1 (resolveCapabilityServer h
   validateCapabilityDefInput({ slug: "http-thing", name: "x", description: "", transport: "http", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] }).ok === false);
 
 // ===================== hardening: a PROFILE capabilities grant may not name a reserved legacy slug =====================
-const reservedInProfile = validateProfile({ name: "P", capabilities: [{ slug: "browser-testing" }] });
-check("(hardening) a profile's capabilities array naming 'browser-testing' is rejected (use the boolean instead)", reservedInProfile.ok === false);
-const reservedInProfile2 = validateProfile({ name: "P", capabilities: [{ slug: "document-conversion" }] });
-check("(hardening) a profile's capabilities array naming 'document-conversion' is rejected too", reservedInProfile2.ok === false);
-const nonReservedInProfile = validateProfile({ name: "P", capabilities: [{ slug: "my-custom-thing" }] });
-check("(hardening) a profile's capabilities array naming a NON-reserved slug still validates ok", nonReservedInProfile.ok === true);
+// (re-aimed at the AGENT validator — afe1bc90: the reserved-slug refusal moved with the grant)
+const reservedInAgent = validateAgentPatch({ capabilities: [{ slug: "browser-testing" }] }, () => true, humanGrantOpts);
+check("(hardening) an agent's capabilities array naming 'browser-testing' is rejected (use the boolean instead)", reservedInAgent.ok === false);
+const reservedInAgent2 = validateAgentPatch({ capabilities: [{ slug: "document-conversion" }] }, () => true, humanGrantOpts);
+check("(hardening) an agent's capabilities array naming 'document-conversion' is rejected too", reservedInAgent2.ok === false);
+const nonReservedInAgent = validateAgentPatch({ capabilities: [{ slug: "my-custom-thing" }] }, () => true, humanGrantOpts);
+check("(hardening) an agent's capabilities array naming a NON-reserved slug still validates ok", nonReservedInAgent.ok === true);
 
 // ===================== card a6598c1e: loom-* first-party MCP server ids reserved as capability slugs =====================
 // Sourced from pty/tool-attribution.ts's own constants (never hand-typed) — see that file's own doc.
@@ -281,15 +298,15 @@ for (const id of LOOM_FIRST_PARTY_SERVER_IDS) {
 }
 // Same polarity at the OTHER validation entry point: a profile's capabilities grant array.
 for (const id of LOOM_FIRST_PARTY_SERVER_IDS) {
-  const r = validateProfile({ name: "P", capabilities: [{ slug: id }] });
-  check(`(a6598c1e) a profile capabilities grant naming '${id}' is REJECTED too`, r.ok === false);
+  const r = validateAgentPatch({ capabilities: [{ slug: id }] }, () => true, humanGrantOpts);
+  check(`(a6598c1e) an agent capabilities grant naming '${id}' is REJECTED too`, r.ok === false);
 }
 // Polarity 2: an ORDINARY (non-reserved) slug is still accepted at both entry points — the reservation
 // must not have over-widened into rejecting everything.
 const ordinarySlugOk = validateCapabilityDefInput({ slug: "loom-tasks-helper", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });
 check("(a6598c1e) an ordinary slug that merely STARTS WITH 'loom-' (not an exact first-party id) still validates ok", ordinarySlugOk.ok === true);
-const ordinaryProfileOk = validateProfile({ name: "P", capabilities: [{ slug: "my-other-thing" }] });
-check("(a6598c1e) an ordinary profile capability slug still validates ok (no over-widening)", ordinaryProfileOk.ok === true);
+const ordinaryProfileOk = validateAgentPatch({ capabilities: [{ slug: "my-other-thing" }] }, () => true, humanGrantOpts);
+check("(a6598c1e) an ordinary agent capability slug still validates ok (no over-widening)", ordinaryProfileOk.ok === true);
 
 // The collision case directly: even if a catalog row somehow ends up slugged as a first-party id
 // (bypassing validateCapabilityDefInput entirely — the same shape a pre-existing DB row, or a future

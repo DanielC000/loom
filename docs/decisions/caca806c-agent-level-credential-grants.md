@@ -59,9 +59,10 @@ top of the pre-existing profile-level grant (`resolveProfile`'s `unionConnection
 - Do not apply the rebind role-change refusal to the human-only REST rebind path — human intent on a
   human-only surface is the accepted exemption shape everywhere in `8b236b22`/`acd3c688`.
 - Do not revert `unionCapabilities`'s dedup key to `capabilityGrantKey` (slug + connectionId) — two
-  connections could race for one mounted slug. `profileGrants.ts`'s `hasNewEntry` keeps that key.
-- Do not read `agentCapabilityProfileCollisionError` as checking anything beyond the slug — different
-  slugs coexist fine.
+  connections could race for one mounted slug. Since `afe1bc90` only the fan-out migration calls the
+  union; spawn resolution reads the agent row alone.
+- Do not reintroduce `agentCapabilityProfileCollisionError`: removed by `afe1bc90` — a profile can no
+  longer grant a slug, so there is nothing for an agent grant to collide with.
 - Do not gate the null→worker check on `agentHasNoProfile`/`!profile` again — that is the exact Round 3
   item 1 bypass; read the agent row's own raw grants unconditionally.
 - Do not fold `boundAgentCredentialGrantRoleChangeError` into `roleChangeCapabilityCarryoverError` — they

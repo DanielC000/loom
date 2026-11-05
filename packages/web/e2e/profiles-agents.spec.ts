@@ -205,36 +205,39 @@ test.describe("profiles & agents", () => {
       .toBe(true);
   });
 
-  test("profile Connections multiselect renders a seeded connection and persists a grant", async ({ page, loomDaemon }) => {
-    // Agent-tooling epic P2: the authenticated-request tool's profile-gating surface. A freshly seeded
-    // profile grants NO connections (the secure default); toggling one on + Save persists it — the ONLY
-    // grant path (no agent MCP tool can set this field).
+  test("the profile editor offers no Connections picker (points at the agent), and the AGENT editor grants one", async ({ page, loomDaemon }) => {
+    // Card afe1bc90: credential grants live on the AGENT row only. A profile editor must NOT offer the
+    // picker (and says where it went); the agent editor's grants picker is the ONLY grant path (human REST,
+    // no agent MCP tool can set this field).
     const connection = await seedConnection(loomDaemon.baseURL, { name: `E2E Conn ${Date.now()}`, host: "api.example.com", authScheme: "bearer", secret: "e2e-test-secret-not-real" });
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Connections ${Date.now()}` });
-    // Card 8206994d: connections is a planGrantSave widening key too — same warm-agents-list requirement.
     await openActorsProfile(page, loomDaemon.baseURL, profile.name);
 
-    // The Connections section renders the seeded connection as a toggle button (mirrors the Skills subset
-    // picker's pattern), labelled with its name.
-    const connToggle = page.getByRole("button").filter({ hasText: connection.name });
+    // PROFILE editor: the pointer is shown and the connection is NOT offered as a toggle.
+    await expect(page.getByTestId("profile-credential-grants-moved")).toBeVisible();
+    await expect(page.getByRole("button").filter({ hasText: connection.name })).toHaveCount(0);
+
+    // AGENT editor: bind an agent to the profile, open it, grant the connection, Save grants.
+    const project = await loomDaemon.createProject(`grants-${Date.now()}`);
+    const agent = await seedAgent(loomDaemon.baseURL, project.id, "Granter");
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await agentRow(page, "Granter").click();
+
+    const connToggle = page.getByTestId(`agent-connection-${agent.id}-${connection.id}`);
     await expect(connToggle).toBeVisible();
-
-    // BEFORE: a freshly seeded profile grants nothing — the "none selected" summary is shown.
+    // BEFORE: the agent grants nothing (the secure default).
     await expect(page.getByText(/none selected.*NO authenticated_request access/)).toBeVisible();
-
-    // ACT + AFTER (observable #1 — interactive toggle): clicking the connection selects it, updating the
-    // summary line immediately (local state, no Save needed to observe the toggle itself).
     await connToggle.click();
-    await expect(page.getByText(/1 selected.*authenticated_request may use only these/)).toBeVisible();
+    const saveGrants = page.getByTestId(`agent-grants-save-${agent.id}`);
+    await expect(saveGrants).toBeEnabled();
+    await saveGrants.click();
 
-    // ACT + AFTER (observable #2 — persistence): Save, then read the grant back over REST.
-    const save = page.getByRole("button", { name: "Save", exact: true });
-    await expect(save).toBeEnabled();
-    await save.click();
-
+    // AFTER: read the grant back over REST on the AGENT; the profile gained nothing.
     await expect
-      .poll(async () => (await getProfile(loomDaemon.baseURL, profile.id)).connections)
+      .poll(async () => (await apiJson<{ id: string; connections?: string[] }[]>(`${loomDaemon.baseURL}/api/agents`)).find((a) => a.id === agent.id)?.connections)
       .toEqual([connection.id]);
+    expect(((await getProfile(loomDaemon.baseURL, profile.id)) as { connections?: string[] }).connections ?? []).toEqual([]);
   });
 
   // Card 921e06b0 (from epic f437d4e9's C5 decision 7) — the agent bind-dropdown used to offer EVERY

@@ -122,23 +122,23 @@ check("(b) absent profile (undefined) ⇒ same backstop",
   backstopUndef.role === null && backstopUndef.startupPrompt === "p" &&
   backstopUndef.allow.length === 0 && backstopUndef.skills === null);
 
-// --- (d) resolveProfile connections/capabilities: the UNION of profile + agent grants (card caca806c)
-// Owner correction 2026-11-04: an agent-level grant is ADDITIVE on top of the profile's — a landed
-// commit must never stop honouring an EXISTING profile-level grant. Fan-out migration afe1bc90 retires
-// the profile-level fields later; until then BOTH must resolve. -----------------------------------
+// --- (d) resolveProfile connections/capabilities: AGENT-ONLY (after the caca806c union).
+//
+// @decision afe1bc90 — resolution reads the agent row alone; `unionProfile` below is a deliberately STALE
+// shape still carrying the retired fields, to prove they are never read.
 const unionProfile = {
   id: "profUnion", name: "UnionRig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null,
   connections: ["connProfileOnly", "connShared"],
   capabilities: [{ slug: "cap-profile-only" }, { slug: "cap-shared", connectionId: "connShared" }],
 };
 
-// (i) a profile-level grant reaches EVERY agent on the profile — proven against TWO separate
-// agent-shaped inputs (not a one-agent fluke), each carrying no agent-level grant of its own.
+// (i) RETIRED: "a profile-level grant reaches EVERY agent on the profile" — no profile-level grant exists.
+// Its inverse is the invariant now: a (stale-shaped) profile's grants reach NO sibling agent.
 const sibling1 = resolveProfile({ startupPrompt: "" }, unionProfile);
 const sibling2 = resolveProfile({ startupPrompt: "" }, unionProfile);
-check("(d-i) profile connections reach sibling agent #1", JSON.stringify(sibling1.connections) === JSON.stringify(["connProfileOnly", "connShared"]));
-check("(d-i) profile connections reach sibling agent #2 too (every agent on the profile, not one)", JSON.stringify(sibling2.connections) === JSON.stringify(["connProfileOnly", "connShared"]));
-check("(d-i) profile capabilities reach sibling agents", sibling1.capabilities.some((g) => g.slug === "cap-profile-only") && sibling2.capabilities.some((g) => g.slug === "cap-profile-only"));
+check("(d-i) a stale profile's connections reach NO sibling agent #1", sibling1.connections.length === 0);
+check("(d-i) ...nor sibling agent #2 (resolution never reads the profile's connections)", sibling2.connections.length === 0);
+check("(d-i) a stale profile's capabilities reach no sibling agent", sibling1.capabilities.length === 0 && sibling2.capabilities.length === 0);
 
 // (ii) an agent-level grant reaches ONLY the granted agent — the siblings above (same profile, no
 // agent-level grant) must never see it.
@@ -150,28 +150,21 @@ check("(d-ii) the granted agent's own connection grant resolves", granted.connec
 check("(d-ii) the granted agent's own grant does NOT leak to sibling agents on the same profile", !sibling1.connections.includes("connAgentOnly") && !sibling2.connections.includes("connAgentOnly"));
 check("(d-ii) same for capabilities: the agent-only grant does not leak to siblings", !sibling1.capabilities.some((g) => g.slug === "cap-agent-only") && !sibling2.capabilities.some((g) => g.slug === "cap-agent-only"));
 
-// Union + de-dupe: the granted agent sees BOTH halves (additive, never replacing), profile-order-first,
-// and a grant present on BOTH sides collapses to exactly one entry (never doubled).
-check("(d) the granted agent sees its own grant AND the profile's (additive union)",
-  granted.connections.includes("connAgentOnly") && granted.connections.includes("connProfileOnly"));
-check("(d) a connection id granted on BOTH profile and agent de-duplicates to one entry",
-  granted.connections.filter((c) => c === "connShared").length === 1);
-check("(d) union order is profile-first, then the agent's own",
-  JSON.stringify(granted.connections) === JSON.stringify(["connProfileOnly", "connShared", "connAgentOnly"]));
-check("(d) a capability grant present on BOTH sides with the IDENTICAL connectionId de-duplicates to one entry",
-  granted.capabilities.filter((g) => g.slug === "cap-shared").length === 1);
+// RETIRED (no profile half left to union with): "granted agent sees its own AND the profile's", the profile-
+// first union order, and the profile-wins slug collision. Replaced by: the agent's grants resolve EXACTLY,
+// a stale profile entry never appears or wins, and a shared id/slug is not doubled from a second source.
+check("(d) the granted agent resolves exactly its OWN connections (the stale profile's connProfileOnly is absent)",
+  JSON.stringify(granted.connections) === JSON.stringify(["connAgentOnly", "connShared"]));
+check("(d) the granted agent's capabilities are exactly its own (no profile-only slug appears)",
+  JSON.stringify(granted.capabilities.map((g) => g.slug)) === JSON.stringify(["cap-agent-only", "cap-shared"]));
 
-// Code Review round (card caca806c item 3): capability identity now keys on SLUG ALONE, never
-// slug+connectionId — pty/host.ts mounts one MCP server per slug (last write wins), so an agent grant
-// re-binding the SAME slug to a DIFFERENT connection must collapse to exactly ONE entry, and the
-// PROFILE's own binding wins (profile-first). The OLD behaviour (two distinct entries, keyed on
-// slug+connectionId) is exactly the shape that let the two race for which connection actually mounted.
+// A same-slug capability on a stale profile bound to a DIFFERENT connection must not win over the agent's:
+// the AGENT's binding is the one that mounts (the old "profile wins" rule belonged to the union).
 const rebindProfile = { ...unionProfile, capabilities: [{ slug: "cap-rebind", connectionId: "connA" }] };
 const rebound = resolveProfile({ startupPrompt: "", capabilities: [{ slug: "cap-rebind", connectionId: "connB" }] }, rebindProfile);
-check("(d) a capability re-bound to a DIFFERENT connection on the agent COLLAPSES to ONE entry (slug-only dedup)",
-  rebound.capabilities.filter((g) => g.slug === "cap-rebind").length === 1);
-check("(d) ...and the surviving entry is the PROFILE's own binding (profile-first), not the agent's",
-  rebound.capabilities.find((g) => g.slug === "cap-rebind")?.connectionId === "connA");
+check("(d) a same-slug capability resolves to ONE entry", rebound.capabilities.filter((g) => g.slug === "cap-rebind").length === 1);
+check("(d) ...and it is the AGENT's binding (connB), never the stale profile's (connA)",
+  rebound.capabilities.find((g) => g.slug === "cap-rebind")?.connectionId === "connB");
 
 // Null/absent profile: nothing to union with — the agent's own grants stand alone (pre-existing
 // backstop behaviour, unaffected by this change).
@@ -374,26 +367,21 @@ check("(validator) harness omitted (defaults to claude) + browserTesting:true �
 // validateCapabilityDefInput rejects any other transport at catalog-creation time), so a registry grant can
 // never resolve to {type:"http"} for codex to mount, same defect shape as browserTesting/documentConversion
 // above (folded into the SAME codexStdioCapabilityUnsupportedError, remedy "no-mechanism-reject-or-warn"). ---
-check("(validator) harness:codex + a non-empty capabilities array ⇒ rejected", (() => {
-  const r = validateProfile({ name: "X", harness: "codex", capabilities: [{ slug: "some-capability" }] });
-  return r.ok === false && /capabilities is not supported on harness "codex"/.test(r.error);
+//
+// @decision afe1bc90 — the codex capabilities gate moved to the agent write (agentCapabilitiesCodexProfileError).
+// A profile payload naming `capabilities` is a retired-key rejection whatever the harness.
+//
+const { agentCapabilitiesCodexProfileError: agentCapCodexErr, boundAgentCapabilitiesCodexFlipError: codexFlipErr } = await import("../dist/profiles/validate.js");
+check("(validator) an agent with capabilities bound to a harness:codex profile ⇒ rejected", /capabilities is not supported on harness "codex"/.test(agentCapCodexErr([{ slug: "some-capability" }], "codex") ?? ""));
+check("(validator) harness:codex + browserTesting/documentConversion still ⇒ rejected, names both (profile-side fields)", (() => {
+  const r = validateProfile({ name: "X", harness: "codex", browserTesting: true, documentConversion: true });
+  return r.ok === false && /browserTesting and documentConversion are not supported on harness "codex"/.test(r.error);
 })());
-check("(validator) harness:codex + browserTesting/documentConversion/capabilities all set ⇒ rejected, names all three", (() => {
-  const r = validateProfile({ name: "X", harness: "codex", browserTesting: true, documentConversion: true, capabilities: [{ slug: "some-capability" }] });
-  return r.ok === false && /browserTesting and documentConversion and capabilities are not supported on harness "codex"/.test(r.error);
-})());
-check("(validator) harness:codex + capabilities: [] ⇒ accepted, unaffected (empty grant list)", (() => {
-  const r = validateProfile({ name: "X", harness: "codex", capabilities: [] });
-  return r.ok && r.value.harness === "codex" && Array.isArray(r.value.capabilities) && r.value.capabilities.length === 0;
-})());
-check("(validator) harness:codex + capabilities omitted ⇒ accepted, normalizes to []", (() => {
-  const r = validateProfile({ name: "X", harness: "codex" });
-  return r.ok && Array.isArray(r.value.capabilities) && r.value.capabilities.length === 0;
-})());
-check("(validator) harness:claude + a non-empty capabilities array ⇒ still accepted (the gate is codex-only)", (() => {
-  const r = validateProfile({ name: "X", harness: "claude", capabilities: [{ slug: "some-capability" }] });
-  return r.ok && r.value.capabilities.length === 1;
-})());
+check("(validator) an agent with an empty capabilities list on a codex profile ⇒ accepted", agentCapCodexErr([], "codex") === null);
+check("(validator) an agent with capabilities on a harness:claude profile ⇒ still accepted (the gate is codex-only)", agentCapCodexErr([{ slug: "some-capability" }], "claude") === null);
+check("(validator) flipping a profile to codex while a bound agent carries capabilities ⇒ rejected", typeof codexFlipErr([{ capabilities: [{ slug: "x" }] }], "claude", "codex") === "string");
+check("(validator) harness:codex profile with no grant keys ⇒ accepted", (() => { const r = validateProfile({ name: "X", harness: "codex" }); return r.ok && r.value.harness === "codex"; })());
+check("(validator) a profile payload naming capabilities ⇒ rejected as a retired key (any harness)", ["codex", "claude"].every((h) => { const r = validateProfile({ name: "X", harness: h, capabilities: [{ slug: "s" }] }); return r.ok === false && /no longer profile fields/.test(r.error); }));
 
 // --- (guard) card 7955458e, owner ruling — harness:"codex" is HARD-REJECTED for a role in
 // TRANSCRIPT_ROOT_DENY_ROLES (manager/platform/setup/auditor/workspace-auditor/assistant): that role gets

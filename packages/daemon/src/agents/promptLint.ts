@@ -189,7 +189,7 @@ export function resolveKnownToolSurface(profile: ToolSurfaceProfile): Set<string
 
 /** Resolve the ToolSurfaceProfile for an agent from its assigned profile row (or the profile-less
  *  "plain" default — role:null, matching config.ts's own profile-less resolution). `connections` is
- *  the UNION of the profile's grant + the agent's own (card caca806c) — computed via the SAME
+ *  the AGENT's own grant only (card afe1bc90: a profile no longer carries one) — computed via the SAME
  *  `resolveProfile` the real spawn path uses, so this lint can never drift from what a session would
  *  actually resolve; `agentConnections` is passed in separately since this function only has the
  *  profileId, not the agent row. */

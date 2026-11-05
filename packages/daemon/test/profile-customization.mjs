@@ -210,23 +210,20 @@ try {
   // covering this gap; these assertions tamper the OMITTED-by-'Dev' fields specifically.
   db.updateProfile("pDev", {
     browserTesting: true, documentConversion: true, restrictedTools: true, noCommit: true,
-    connections: ["conn-1"], vaultWrite: true, capabilities: [{ slug: "x", connectionId: "y" }],
+    vaultWrite: true,
   });
-  check("[reset] precondition: all 7 fields customized away from shipped (Dev omits all of them)",
+  // @decision afe1bc90 — connections/capabilities left this set: they are no longer profile fields.
+  check("[reset] precondition: all 5 fields customized away from shipped (Dev omits all of them)",
     db.getProfile("pDev").browserTesting === true && db.getProfile("pDev").documentConversion === true &&
     db.getProfile("pDev").restrictedTools === true && db.getProfile("pDev").noCommit === true &&
-    JSON.stringify(db.getProfile("pDev").connections) === JSON.stringify(["conn-1"]) &&
-    db.getProfile("pDev").vaultWrite === true &&
-    JSON.stringify(db.getProfile("pDev").capabilities) === JSON.stringify([{ slug: "x", connectionId: "y" }]));
-  check("[reset] resetProfileToBundled returns true (7-field precondition)", resetProfileToBundled(db, "pDev") === true);
+    db.getProfile("pDev").vaultWrite === true);
+  check("[reset] resetProfileToBundled returns true (5-field precondition)", resetProfileToBundled(db, "pDev") === true);
   const rsAll = db.getProfile("pDev");
   check("[reset][browserTesting] restored to shipped default (false)", rsAll.browserTesting === false);
   check("[reset][documentConversion] restored to shipped default (false)", rsAll.documentConversion === false);
   check("[reset][restrictedTools] restored to shipped default (false)", rsAll.restrictedTools === false);
   check("[reset][noCommit] restored to shipped default (false)", rsAll.noCommit === false);
-  check("[reset][connections] restored to shipped default ([])", JSON.stringify(rsAll.connections) === JSON.stringify([]));
   check("[reset][vaultWrite] restored to shipped default (false)", rsAll.vaultWrite === false);
-  check("[reset][capabilities] restored to shipped default ([])", JSON.stringify(rsAll.capabilities) === JSON.stringify([]));
 
   check("[reset] reset → false for a non-bundled name", resetProfileToBundled(db, "pCustom") === false);
 

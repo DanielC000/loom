@@ -266,31 +266,10 @@ export interface Profile {
    * Platform Lead's own profile-writing MCP tools (NOT in `AGENT_FORBIDDEN_PROFILE_KEYS`).
    */
   noCommit?: boolean;
-  /**
-   * Opt-in authenticated-egress capability (agent-tooling epic P2): the list of P1 credential-store
-   * Connection ids a session under this rig may use with the `authenticated_request` tool. Default OFF
-   * (absent/empty — UNLIKE `skills`, absent here means NO access, never "all connections") and fully
-   * additive — a rig without it spawns byte-identically to today. HUMAN-set only, via the Profiles UI /
-   * REST `POST`/`PUT /api/profiles`: this field is REJECTED even on the Setup Assistant's and Platform
-   * Lead's own profile-writing MCP tools (see `profiles/validate.ts`'s agent-restriction helper), because
-   * it grants access to REAL external secrets. Never exposed as an agent MCP setter, full stop.
-   */
-  connections?: string[];
-  /**
-   * Agent-tooling P4: registry-capability grants for this rig — each names a catalog capability slug
-   * plus an OPTIONAL bound P1 connection id when that capability needs a credential (the credential is
-   * decrypted server-side at spawn and injected only into the capability's own MCP subprocess env — never
-   * the `claude` process, never a tool argument). Default OFF (absent/empty, like `connections`, NOT
-   * `skills`) and fully additive. HUMAN-set only: unlike `browserTesting`/`documentConversion`, this field
-   * is REJECTED even on the Setup Assistant's/Platform Lead's own profile-writing MCP tools (see
-   * `profiles/validate.ts`'s `AGENT_FORBIDDEN_PROFILE_KEYS`) — a capability grant can launch a host
-   * process and bind egress, so it gets the SAME stricter posture as `connections`, not the milder one.
-   * The legacy `browserTesting`/`documentConversion` booleans above are BRIDGED, not replaced: they stay
-   * two permanently-reserved builtin capability slugs ("browser-testing"/"document-conversion") resolved
-   * alongside this array (see `resolveProfileCapabilities` in `config.ts`) — every existing profile row
-   * keeps working with zero data migration.
-   */
-  capabilities?: CapabilityGrant[];
+  // Card afe1bc90: `connections`/`capabilities` are NOT profile fields any more — credential grants live
+  // on the AGENT row only (`Agent.connections`/`Agent.capabilities`). The profiles.* columns are dormant.
+  // The legacy `browserTesting`/`documentConversion` booleans above still bridge to the two reserved
+  // builtin capability slugs (see `resolveProfileCapabilities` in `config.ts`).
   /**
    * Opt-in confined vault-write capability: when true, a session under this rig may call the
    * `vault_write` tool (loom-tasks MCP) to write (create/overwrite) a UTF-8 text note under ITS OWN
@@ -4470,8 +4449,11 @@ export interface PendingBinding {
   profileId: string;
   /** That Profile's current name; falls back to the raw id if the profile was since deleted. */
   profileName: string;
-  /** True when the connection is ALREADY on the profile's allowlist — the grant is effectively satisfied
-   *  and "Review & grant" is a no-op the owner can dismiss (nothing left to Save). */
+  /** The REQUESTING agent's id (the immutable filer of the credential ask) — the grant target since card
+   *  `afe1bc90` (credential grants are agent-level); null if the filing session/agent was hard-deleted. */
+  agentId: string | null;
+  /** True when the connection is ALREADY on the requesting AGENT's own `connections` — the grant is
+   *  effectively satisfied and "Review & grant" is a no-op the owner can dismiss. */
   alreadyGranted: boolean;
   /** Display name of the agent whose session FILED the credential ask (who requested the grant) — the
    *  IMMUTABLE filer, unaffected by any later recycle-style reparent of the question's routing target

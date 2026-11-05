@@ -1,7 +1,6 @@
 import { z } from "zod";
 import type { Profile, ProfileWideningFields, SessionRole } from "@loom/shared";
-import { AGENT_FORBIDDEN_PROFILE_KEYS } from "@loom/shared";
-import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
+import { AGENT_FORBIDDEN_PROFILE_KEYS, RETIRED_PROFILE_CREDENTIAL_KEYS } from "@loom/shared";
 import { CODEX_RESTRICTED_TOOLS_REASON, codexStdioCapabilityReason, codexStdioOffenders, TRANSCRIPT_ROOT_DENY_ROLES, codexTranscriptRoleUnsupportedReason } from "./codex-compat.js";
 
 /**
@@ -98,27 +97,9 @@ const profileSchema = z
     // Declared no-commit role (default off). Lifecycle-only flag (no spawn-time host capability) — a
     // 0-commit done auto-retires + skips the forgot-to-commit warning.
     noCommit: z.boolean().optional(),
-    // Opt-in authenticated-egress connection-id allowlist (agent-tooling epic P2, default []=no access).
-    // Human-only (AGENT_FORBIDDEN_PROFILE_KEYS below): this field grants access to REAL external secrets,
-    // so it is rejected even on the Setup Assistant's / Platform Lead's own profile-writing MCP tools (see
-    // `agentProfileKeyError` below) — the human REST path (POST/PUT /api/profiles) is the ONLY grant path.
-    connections: z.array(z.string()).optional(),
-    // Registry-capability grants (agent-tooling epic P4, default []=none). Each names a catalog slug plus
-    // an OPTIONAL bound P1 connection id. Human-only, like `connections` above (see
-    // AGENT_FORBIDDEN_PROFILE_KEYS): a grant can launch a host process and bind
-    // egress, so it is rejected even on the elevated Setup Assistant's/Platform Lead's own profile writers.
-    // A grant naming a RESERVED legacy slug (browser-testing/document-conversion) is rejected here too —
-    // those are exclusively conferred via the browserTesting/documentConversion booleans (the bridge in
-    // resolveProfileCapabilities); a profile-array entry naming one would double-mount it and silently
-    // drop any connectionId (the two legacy capabilities never consult a connection).
-    // P4↔P5a interaction: a grant naming a `requiresConnection` slug bound to an OAUTH2 connectionId is
-    // rejected at bind time by `capabilityGrantBindingError` below (called by the REST handler after this
-    // schema passes) — oauth2 connections statically inject nothing (see that function's doc).
-    capabilities: z.array(z.object({ slug: z.string(), connectionId: z.string().optional() }))
-      .refine((grants) => grants.every((g) => !(RESERVED_CAPABILITY_SLUGS as readonly string[]).includes(g.slug)), {
-        message: `capabilities may not name a reserved builtin slug (${RESERVED_CAPABILITY_SLUGS.join(", ")}) — use the browserTesting/documentConversion booleans instead`,
-      })
-      .optional(),
+    // @decision afe1bc90 — `connections`/`capabilities` are NOT profile fields any more: credential
+    // grants live on the AGENT row only. A payload naming either is rejected by
+    // `retiredProfileCredentialKeysError` (named error), and `.strict()` would reject it anyway.
     // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4: which vendor CLI a session under this rig
     // spawns as. Human-only (AGENT_FORBIDDEN_PROFILE_KEYS below): selecting which BINARY gets spawned
     // is the same trust class as gateCommand — rejected even on the elevated Setup Assistant's/Platform
@@ -174,8 +155,6 @@ export const PROFILE_FIELD_NAMES = Object.keys(profileSchema.shape) as (keyof z.
  * and was misleading for harness/vaultWrite/browserTesting/documentConversion/allowDelta.
  */
 const AGENT_FORBIDDEN_PROFILE_KEY_REASONS: Record<(typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number], string> = {
-  connections: "it grants access to real external secrets",
-  capabilities: "a grant can launch a host process and bind egress via a P1 connection",
   vaultWrite: "it grants write access into a human-reviewed vault corpus",
   harness: "it selects which vendor CLI binary a session spawns — the same trust class as gateCommand",
   browserTesting: "it launches a per-session browser-automation capability (arbitrary web navigation)",
@@ -212,8 +191,6 @@ const AGENT_FORBIDDEN_PROFILE_KEY_CARRIED: Record<
   (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number],
   (existing: Pick<Profile, (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number]>) => boolean
 > = {
-  connections: (existing) => !!existing.connections && existing.connections.length > 0,
-  capabilities: (existing) => !!existing.capabilities && existing.capabilities.length > 0,
   vaultWrite: (existing) => !!existing.vaultWrite,
   harness: (existing) => existing.harness != null && existing.harness !== "claude",
   browserTesting: (existing) => !!existing.browserTesting,
@@ -312,6 +289,8 @@ export function explicitRoleGrantCarryoverError(
   explicitRole: SessionRole | undefined,
   existing: Pick<Profile, (typeof AGENT_FORBIDDEN_PROFILE_KEYS)[number]>,
   agentOwnGrants: { connections?: string[] | null; capabilities?: { slug: string; connectionId?: string }[] | null },
+  /** Provenance of grants fanned out from a role:null profile (`Db.getFanoutExemption`); exempts ONLY the null→worker leg. */
+  fanoutExempt?: { connections: string[]; capabilities: string[] },
 ): string | null {
   if (explicitRole === undefined) return null; // no explicit role ⇒ nothing to diverge from; forcePlain drops BOTH the profile's and the agent row's grants upstream (resolveAgentSpawn), so it carries none
   if ((profileRole ?? null) === explicitRole) return null; // no divergence
@@ -319,20 +298,86 @@ export function explicitRoleGrantCarryoverError(
     // @decision caca806c (round 3) — keys on the AGENT ROW's OWN connections/capabilities, regardless of
     // whether a profile is bound at all; a BOUND role-less profile's own grant stays fully exempt
     // (acd3c688) because it is never folded into `agentOwnGrants` here — only the agent row's raw fields are.
-    const carriedByAgent = carriedForbiddenGrants({
-      connections: agentOwnGrants.connections ?? undefined, capabilities: agentOwnGrants.capabilities ?? undefined,
-      vaultWrite: false, harness: undefined, browserTesting: false, documentConversion: false, allowDelta: [],
+    // @decision afe1bc90 — grants fanned out from a role:null profile keep the exemption they had before the
+    // migration; anything else on the agent row (caca806c-era own grants, later human grants) is still refused.
+    const carriedByAgent = agentCarriedCredentialGrants({
+      connections: (agentOwnGrants.connections ?? []).filter((id) => !fanoutExempt?.connections.includes(id)),
+      capabilities: (agentOwnGrants.capabilities ?? []).filter((g) => !fanoutExempt?.capabilities.includes(g.slug)),
     });
     if (carriedByAgent.length > 0) {
-      return `cannot spawn as role "worker": this agent carries its own human-set ${describeCarriedGrants(carriedByAgent)} — ask the human to authorize this spawn, or remove the agent-level grant`;
+      return `cannot spawn as role "worker": this agent carries its own human-set ${carriedByAgent.map((k) => `${k} (${AGENT_CREDENTIAL_GRANT_REASONS[k]})`).join(", ")} — ask the human to authorize this spawn, or remove the agent-level grant`;
     }
     return null;
   }
   const carried = carriedForbiddenGrants(existing).filter(
     (key) => !(key === "harness" && TRANSCRIPT_ROOT_DENY_ROLES.has(explicitRole)),
   );
-  if (carried.length === 0) return null;
-  return `cannot spawn as role "${explicitRole}": the bound profile's own role is "${profileRole ?? "null"}" and it carries human-set ${describeCarriedGrants(carried)} — ask the human to authorize this spawn, or rebind a profile without them`;
+  // Card afe1bc90: credential grants are agent-only now, so the diverging-role leg must read the AGENT
+  // ROW's own grants too (the profile can no longer carry them) — same non-empty check, same wording.
+  const agentCarried = agentCarriedCredentialGrants(agentOwnGrants);
+  if (carried.length === 0 && agentCarried.length === 0) return null;
+  const described = [
+    ...agentCarried.map((k) => `${k} (${AGENT_CREDENTIAL_GRANT_REASONS[k]})`),
+    ...(carried.length > 0 ? [describeCarriedGrants(carried)] : []),
+  ].join(", ");
+  return `cannot spawn as role "${explicitRole}": the bound profile's own role is "${profileRole ?? "null"}" and it (or this agent) carries human-set ${described} — ask the human to authorize this spawn, or rebind a profile without them`;
+}
+
+/** Reasons for the two AGENT-ROW credential grants (card afe1bc90: the only home of these grants now). */
+const AGENT_CREDENTIAL_GRANT_REASONS = {
+  connections: "it grants access to real external secrets",
+  capabilities: "a grant can launch a host process and bind egress via a P1 connection",
+} as const;
+
+/** Which of the two agent-row credential grants `grants` actually carries (non-empty). */
+function agentCarriedCredentialGrants(
+  grants: { connections?: string[] | null; capabilities?: { slug: string; connectionId?: string }[] | null },
+): (keyof typeof AGENT_CREDENTIAL_GRANT_REASONS)[] {
+  const out: (keyof typeof AGENT_CREDENTIAL_GRANT_REASONS)[] = [];
+  if (grants.connections && grants.connections.length > 0) out.push("connections");
+  if (grants.capabilities && grants.capabilities.length > 0) out.push("capabilities");
+  return out;
+}
+
+/**
+ * @decision afe1bc90 — REJECTS (never silently drops) a profile create/update payload naming
+ * `connections` or `capabilities`: credential grants moved onto the AGENT row, and the profile columns
+ * are dormant. Checked on the RAW payload by `validateProfile` (so every REST + MCP profile writer gets
+ * it) and names the agent endpoint so the caller knows where the grant now goes.
+ */
+export function retiredProfileCredentialKeysError(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const hit = RETIRED_PROFILE_CREDENTIAL_KEYS.filter((k) => k in (raw as Record<string, unknown>));
+  if (hit.length === 0) return null;
+  return `${hit.join("/")} are no longer profile fields — credential grants are per-AGENT now: set them on the agent via POST /api/agents/:id (human-only, in the agent editor), not on the profile`;
+}
+
+/**
+ * @decision afe1bc90 — an agent-level `capabilities` grant is stdio-shaped like a profile's was; codex
+ * mounts no stdio server, so a codex-profiled agent must not carry one (it would silently do nothing).
+ */
+export function agentCapabilitiesCodexProfileError(
+  agentCapabilities: readonly { slug: string; connectionId?: string }[] | null | undefined,
+  boundProfileHarness: string | null | undefined,
+): string | null {
+  if (boundProfileHarness !== "codex") return null;
+  if (!agentCapabilities || agentCapabilities.length === 0) return null;
+  const offending = codexStdioOffenders({ capabilities: [...agentCapabilities] });
+  return offending.length === 0 ? null : `cannot grant capabilities to this agent: its bound profile runs the codex harness — ${codexStdioCapabilityReason(offending)}`;
+}
+
+/**
+ * Role/harness flip leg: refuses a profile_update that flips a profile onto codex while ANY bound agent
+ * carries its own capabilities (same helper shape as {@link boundAgentCredentialGrantRoleChangeError}).
+ */
+export function boundAgentCapabilitiesCodexFlipError(
+  boundAgents: readonly { capabilities?: { slug: string; connectionId?: string }[] | null }[],
+  previousHarness: string | null | undefined,
+  newHarness: string | null | undefined,
+): string | null {
+  if (newHarness !== "codex" || previousHarness === "codex") return null;
+  if (!boundAgents.some((a) => a.capabilities && a.capabilities.length > 0)) return null;
+  return "cannot switch this profile to the codex harness: at least one agent bound to it carries its own capabilities grant, and codex mounts no stdio capability servers — remove the agent-level capabilities first (agent editor)";
 }
 
 /**
@@ -402,19 +447,13 @@ export function boundAgentCredentialGrantRoleChangeError(
  * non-empty allowDelta; browserTesting stays deliberately unchecked. See the decision record for why.
  */
 export function agentAssignableProfileError(
-  profile: Pick<Profile, "role" | "connections" | "capabilities" | "vaultWrite" | "documentConversion" | "harness" | "allowDelta">,
+  profile: Pick<Profile, "role" | "vaultWrite" | "documentConversion" | "harness" | "allowDelta">,
   opts?: { allowElevatedRoles?: boolean; skipRoleCheck?: boolean; humanAuthorized?: boolean },
 ): string | null {
   if (!opts?.allowElevatedRoles && !opts?.skipRoleCheck && profile.role != null && LOCKED_PROFILE_ROLES.has(profile.role)) {
     return `cannot assign profile: role "${profile.role}" is elevated/locked — it may not be bound via this tool (human-only, via the Profiles UI / REST)`;
   }
   if (opts?.humanAuthorized) return null; // field checks below are the agent-surface-only axis; skip for the two named REST routes
-  if (profile.connections && profile.connections.length > 0) {
-    return "cannot assign profile: it carries a connections grant (access to real external secrets) — human-only, via the Profiles UI / REST";
-  }
-  if (profile.capabilities && profile.capabilities.length > 0) {
-    return "cannot assign profile: it carries a capabilities grant (can launch a host process / bind egress via a connection) — human-only, via the Profiles UI / REST";
-  }
   if (profile.vaultWrite) {
     return "cannot assign profile: it carries vaultWrite (write access into a human-reviewed vault corpus) — human-only, via the Profiles UI / REST";
   }
@@ -598,6 +637,8 @@ export function validateProfile(
   raw: unknown,
   opts?: { previousRole?: string | null; patch?: unknown },
 ): { ok: true; value: Omit<Profile, "id"> } | { ok: false; error: string } {
+  const retiredKeysError = retiredProfileCredentialKeysError(raw);
+  if (retiredKeysError) return { ok: false, error: retiredKeysError };
   const r = profileSchema.safeParse(raw ?? {});
   if (!r.success) {
     const msg = r.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
@@ -610,7 +651,7 @@ export function validateProfile(
   if (restrictedToolsError) return { ok: false, error: restrictedToolsError };
   const codexRestrictedToolsError = codexRestrictedToolsUnsupportedError(d.harness, d.restrictedTools);
   if (codexRestrictedToolsError) return { ok: false, error: codexRestrictedToolsError };
-  const codexStdioCapabilityError = codexStdioCapabilityUnsupportedError(d.harness, d.browserTesting, d.documentConversion, d.capabilities);
+  const codexStdioCapabilityError = codexStdioCapabilityUnsupportedError(d.harness, d.browserTesting, d.documentConversion, undefined);
   if (codexStdioCapabilityError) return { ok: false, error: codexStdioCapabilityError };
   const codexTranscriptRoleError = codexTranscriptRoleUnsupportedError(d.harness, d.role);
   if (codexTranscriptRoleError) return { ok: false, error: codexTranscriptRoleError };
@@ -641,8 +682,6 @@ export function validateProfile(
       vaultWrite: d.vaultWrite ?? false, // normalize to the stored default (off)
       restrictedTools: d.restrictedTools ?? false, // normalize to the stored default (off)
       noCommit: d.noCommit ?? false, // normalize to the stored default (off)
-      connections: d.connections ?? [], // normalize to the stored default (no access)
-      capabilities: d.capabilities ?? [], // normalize to the stored default (none)
       // Multi-harness epic (df1f94b0) Phase 1. DELIBERATELY not normalized like every sibling above:
       // `Profile.harness` is `?: "claude" | "codex"` with NO null member, so absence — not a null — is
       // how "claude" (the default) is expressed, and `d.harness` already carries exactly that type.

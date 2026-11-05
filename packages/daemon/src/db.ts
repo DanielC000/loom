@@ -128,6 +128,7 @@ import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { edgesAfterPatch, type EdgeBits, type EdgePatch } from "./tasks/edge-state.js";
 import type { MergeGateOutcomeEntry } from "@loom/shared";
 import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-gate-interval.js";
+import { unionConnections, unionCapabilities } from "@loom/shared";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord, redactAlertWebhookInConfig, isProjectMemoryExpired, projectedAttachmentKind } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
@@ -1732,6 +1733,44 @@ const ARCHIVED_AT_BACKFILL_KEY = "archived_at_backfill_done";
 const HELD_BACKFILL_KEY = "task_held_title_backfill_done";
 /** app_meta marker for the one-shot legacy `deferred_until_task_id` column → `task_relations` backfill (card 3df86c87). */
 const DEFERRAL_EDGES_BACKFILL_MARKER = "task_deferral_edges_backfill_done";
+/** app_meta one-shot marker for the profile→agent credential-grant fan-out (card afe1bc90). */
+export const CREDENTIAL_GRANT_FANOUT_MARKER = "profile_credential_grants_fanout_done";
+/** app_meta key holding the fan-out's durable JSON summary ({@link CredentialGrantFanoutSummary}) the notice card reads. */
+export const CREDENTIAL_GRANT_FANOUT_SUMMARY_KEY = "profile_credential_grants_fanout_summary";
+/** app_meta key holding the fan-out's per-agent null→worker exemption provenance ({@link CredentialGrantFanoutExemptions}). */
+export const CREDENTIAL_GRANT_FANOUT_EXEMPT_KEY = "profile_credential_grants_fanout_exempt";
+
+/** Per agent id: the connection ids / capability slugs that arrived from a role:null profile's fan-out (not already on the agent row). */
+export interface CredentialGrantFanoutExemptions {
+  v: 1;
+  agents: Record<string, { connections: string[]; capabilities: string[] }>;
+}
+
+/** One agent's slice of the fan-out summary: what moved onto it and what was dropped as dead. */
+export interface CredentialGrantFanoutAgentEntry {
+  agentId: string;
+  agentName: string;
+  projectId: string;
+  /** Connection ids the agent now carries FROM the profile (after the union with its own). */
+  movedConnections: string[];
+  movedCapabilities: { slug: string; connectionId?: string }[];
+  /** Grants dropped because the connection is scoped to a different project than this agent's. */
+  droppedCrossProject: { kind: "connection"; connectionId: string }[];
+  /** Capabilities whose connection binding is scoped to a different project: the slug is KEPT, only the connectionId is stripped. */
+  strippedCapabilityBindings: { slug: string; connectionId: string }[];
+  /** Connection ids that no longer exist — carried over unchanged (they fail closed at use time, exactly as before). */
+  dangling: string[];
+}
+export interface CredentialGrantFanoutProfileEntry {
+  profileId: string;
+  profileName: string;
+  /** True when no agent is bound to the profile: its grants reached nobody and moved nowhere. */
+  orphaned: boolean;
+  profileConnections: string[];
+  profileCapabilities: { slug: string; connectionId?: string }[];
+  agents: CredentialGrantFanoutAgentEntry[];
+}
+export interface CredentialGrantFanoutSummary { v: 1; at: string; profiles: CredentialGrantFanoutProfileEntry[] }
 
 /**
  * app_meta key PREFIX for a companion's home channel (the proactive/outbound "where to reach the owner"
@@ -3065,6 +3104,11 @@ export class Db {
     this.migrateDeliveredCredentialsAddedColumns();
     this.migrateDeliveredCredentials();
     this.migrateConnections();
+    // Card afe1bc90: fan every profile credential grant out onto its agents. MUST run after
+    // migrateAgents/migrateProfiles/migrateConnections (it reads agents.connections, profiles.connections
+    // and connections.project_id) and before ANY resolveProfile/spawn/prewarm read — resolution is
+    // agent-only from this card on, so a boot where this did not run would leave every agent grant-less.
+    this.backfillProfileCredentialGrantsToAgentsOnce();
     this.migrateCapabilityDefs();
     this.migrateProjectMemory();
     this.migratePurgeLegacySessionEnvHistory();
@@ -3310,6 +3354,106 @@ export class Db {
       console.log(`[db] deferral-edge backfill: ${counts.rows} card(s) with deferred_until_task_id -> ${counts.edges} blocks edge(s), ${counts.skipped} skipped`);
     }
     return counts;
+  }
+
+  /**
+   * @decision afe1bc90 — one-shot fan-out of every PROFILE credential grant onto each bound agent.
+   * Contract: ONE transaction; exemption provenance, then the summary, then the marker (LAST); depends on
+   * nothing but the DB; profile columns are never cleared. Returns the summary, or undefined when done.
+   */
+  backfillProfileCredentialGrantsToAgentsOnce(): CredentialGrantFanoutSummary | undefined {
+    if (this.getMeta(CREDENTIAL_GRANT_FANOUT_MARKER)) return undefined;
+    const parseArr = <T>(s: unknown): T[] => {
+      try { const v = JSON.parse((s as string) || "[]"); return Array.isArray(v) ? (v as T[]) : []; } catch { return []; }
+    };
+    const summary: CredentialGrantFanoutSummary = { v: 1, at: new Date().toISOString(), profiles: [] };
+    this.db.transaction(() => {
+      const connScope = new Map<string, string | null>(
+        (this.db.prepare("SELECT id, project_id FROM connections").all() as Row[]).map((c) => [c.id as string, (c.project_id as string | null) ?? null] as const),
+      );
+      const profiles = this.db.prepare("SELECT id, name, role, connections, capabilities FROM profiles ORDER BY name, id").all() as Row[];
+      const exemptions: CredentialGrantFanoutExemptions = { v: 1, agents: {} };
+      const agentsByProfile = this.db.prepare("SELECT id, project_id, name, connections, capabilities FROM agents WHERE profile_id = ? ORDER BY project_id, position, id");
+      const updAgent = this.db.prepare("UPDATE agents SET connections = ?, capabilities = ? WHERE id = ?");
+      for (const p of profiles) {
+        const pConns = parseArr<string>(p.connections).filter((x) => typeof x === "string");
+        const pCaps = parseArr<CapabilityGrant>(p.capabilities).filter((g) => g && typeof g.slug === "string");
+        if (pConns.length === 0 && pCaps.length === 0) continue;
+        const entry: CredentialGrantFanoutProfileEntry = {
+          profileId: p.id as string, profileName: p.name as string, orphaned: false,
+          profileConnections: pConns, profileCapabilities: pCaps, agents: [],
+        };
+        const agents = agentsByProfile.all(p.id) as Row[];
+        entry.orphaned = agents.length === 0;
+        for (const a of agents) {
+          const projectId = a.project_id as string;
+          const dead = (id: string): boolean => { const s = connScope.get(id); return s !== undefined && s !== null && s !== projectId; };
+          const ownC = parseArr<string>(a.connections);
+          const ownK = parseArr<CapabilityGrant>(a.capabilities);
+          const unionC = unionConnections(pConns, ownC);
+          const unionK = unionCapabilities(pCaps, ownK);
+          const droppedCrossProject: CredentialGrantFanoutAgentEntry["droppedCrossProject"] = [];
+          const strippedCapabilityBindings: CredentialGrantFanoutAgentEntry["strippedCapabilityBindings"] = [];
+          const keptC = unionC.filter((id) => { if (dead(id)) { droppedCrossProject.push({ kind: "connection", connectionId: id }); return false; } return true; });
+          // @decision afe1bc90 — a capability whose binding is cross-project KEEPS its slug (the MCP server still
+          // mounts, with no env, exactly as before); only the connectionId is stripped, and the strip is recorded.
+          const keptK = unionK.map((g): CapabilityGrant => {
+            if (g.connectionId && dead(g.connectionId)) {
+              strippedCapabilityBindings.push({ slug: g.slug, connectionId: g.connectionId });
+              return { slug: g.slug };
+            }
+            return g;
+          });
+          const dangling = [...keptC, ...keptK.map((g) => g.connectionId).filter((x): x is string => !!x)].filter((id) => !connScope.has(id));
+          updAgent.run(JSON.stringify(keptC), JSON.stringify(keptK), a.id);
+          const movedC = keptC.filter((id) => pConns.includes(id));
+          const movedK = keptK.filter((g) => pCaps.some((pg) => pg.slug === g.slug));
+          // @decision afe1bc90 — provenance for the null→worker spawn exemption (acd3c688): only a role:null
+          // profile's grants, and only those the agent row did NOT already carry (an agent-own grant keeps its refusal).
+          if (p.role == null) {
+            const exC = movedC.filter((id) => !ownC.includes(id));
+            const exK = movedK.map((g) => g.slug).filter((s) => !ownK.some((o) => o.slug === s));
+            if (exC.length > 0 || exK.length > 0) exemptions.agents[a.id as string] = { connections: exC, capabilities: exK };
+          }
+          entry.agents.push({
+            agentId: a.id as string, agentName: a.name as string, projectId,
+            movedConnections: movedC, movedCapabilities: movedK,
+            droppedCrossProject, strippedCapabilityBindings, dangling: [...new Set(dangling)],
+          });
+        }
+        summary.profiles.push(entry);
+      }
+      this.setMeta(CREDENTIAL_GRANT_FANOUT_EXEMPT_KEY, JSON.stringify(exemptions));
+      this.setMeta(CREDENTIAL_GRANT_FANOUT_SUMMARY_KEY, JSON.stringify(summary));
+      this.setMeta(CREDENTIAL_GRANT_FANOUT_MARKER, summary.at);
+    })();
+    if (summary.profiles.length > 0) {
+      console.log(`[db] credential-grant fan-out: ${summary.profiles.length} profile(s) with grants -> ${summary.profiles.reduce((n, p) => n + p.agents.length, 0)} agent(s) updated`);
+    }
+    return summary;
+  }
+
+  /**
+   * Card afe1bc90: the connection ids / capability slugs on this agent that arrived from a role:null profile's
+   * fan-out (null→worker spawn exemption provenance). Empty when none or the record is absent/corrupt — a
+   * corrupt record fails CLOSED (no exemption), never throws.
+   */
+  getFanoutExemption(agentId: string): { connections: string[]; capabilities: string[] } {
+    const none = { connections: [], capabilities: [] };
+    const raw = this.getMeta(CREDENTIAL_GRANT_FANOUT_EXEMPT_KEY);
+    if (!raw) return none;
+    try {
+      const v = JSON.parse(raw) as CredentialGrantFanoutExemptions;
+      const e = v && v.v === 1 ? v.agents?.[agentId] : undefined;
+      return e ? { connections: Array.isArray(e.connections) ? e.connections : [], capabilities: Array.isArray(e.capabilities) ? e.capabilities : [] } : none;
+    } catch { return none; }
+  }
+
+  /** Card afe1bc90: the stored fan-out summary, or null if absent/corrupt (never throws). */
+  getCredentialGrantFanoutSummary(): CredentialGrantFanoutSummary | null {
+    const raw = this.getMeta(CREDENTIAL_GRANT_FANOUT_SUMMARY_KEY);
+    if (!raw) return null;
+    try { const v = JSON.parse(raw) as CredentialGrantFanoutSummary; return v && v.v === 1 && Array.isArray(v.profiles) ? v : null; } catch { return null; }
   }
 
   /**
@@ -7017,8 +7161,8 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,connections,capabilities,harness)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@connections,@capabilities,@harness)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,harness)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@harness)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
@@ -7030,8 +7174,6 @@ export class Db {
       vaultWrite: p.vaultWrite ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       restrictedTools: p.restrictedTools ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       noCommit: p.noCommit ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
-      connections: JSON.stringify(p.connections ?? []), // [] = no access (absent ⇒ [], NOT skills' "all")
-      capabilities: JSON.stringify(p.capabilities ?? []), // agent-tooling P4: registry-capability grants, raw
       harness: p.harness ?? null, // NULL = "claude" (absent ⇒ today's only harness)
       // COMPILE-TIME FIELD TOTALITY (card 4dfa3c04, extending 635e347e's write-path coverage down to the
       // DB-binding layer itself): forces every key of Profile (id included — this literal binds it too)
@@ -7063,8 +7205,6 @@ export class Db {
       vaultWrite: { column: "vault_write", value: patch.vaultWrite === undefined ? undefined : patch.vaultWrite ? 1 : 0 },
       restrictedTools: { column: "restricted_tools", value: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0 },
       noCommit: { column: "no_commit", value: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0 },
-      connections: { column: "connections", value: patch.connections === undefined ? undefined : JSON.stringify(patch.connections) },
-      capabilities: { column: "capabilities", value: patch.capabilities === undefined ? undefined : JSON.stringify(patch.capabilities) },
       harness: { column: "harness", value: patch.harness === undefined ? undefined : patch.harness ?? null },
     } satisfies Record<keyof Omit<Profile, "id">, { column: string; value: unknown }>;
     const entries = Object.values(bindings).filter((b) => b.value !== undefined);
@@ -11216,7 +11356,7 @@ export class Db {
       `SELECT q.id AS question_id, q.provision_target, q.provision_connection_id, q.project_id,
               q.created_at, q.answered_at,
               c.name AS connection_name, c.host AS connection_host,
-              a.name AS agent_name, p.name AS project_name
+              a.id AS agent_id, a.name AS agent_name, a.connections AS agent_connections, p.name AS project_name
        FROM questions q
        LEFT JOIN connections c ON q.provision_connection_id = c.id
        LEFT JOIN sessions fs ON q.filed_by_session_id = fs.id
@@ -11240,7 +11380,9 @@ export class Db {
         connectionHost: (r.connection_host as string | null) ?? target?.connection.host ?? null,
         profileId,
         profileName: profile?.name ?? profileId,
-        alreadyGranted: !!profile?.connections?.includes(connectionId),
+        // Card afe1bc90: the grant target is the REQUESTING AGENT (the immutable filer), never the profile.
+        agentId: (r.agent_id as string | null) ?? null,
+        alreadyGranted: (() => { try { return (JSON.parse((r.agent_connections as string) || "[]") as string[]).includes(connectionId); } catch { return false; } })(),
         agentName: (r.agent_name as string | null) ?? "?",
         projectId: r.project_id as string,
         projectName: (r.project_name as string | null) ?? "?",
@@ -11260,21 +11402,16 @@ export class Db {
    * action and never reverts it. Only touches 'pending' rows (idempotent; re-saving an already-applied grant
    * is a no-op). Returns the count flipped. An empty `connectionIds` is a fast no-op.
    */
-  markBindingsApplied(profileId: string, connectionIds: string[]): number {
+  markBindingsAppliedForAgent(agentId: string, connectionIds: string[]): number {
     if (connectionIds.length === 0) return 0;
     const placeholders = connectionIds.map(() => "?").join(",");
-    const rows = this.db.prepare(
-      `SELECT id, provision_target FROM questions
-       WHERE provision_binding_state = 'pending' AND provision_connection_id IN (${placeholders})`,
-    ).all(...connectionIds) as Row[];
-    const flip = this.db.prepare("UPDATE questions SET provision_binding_state = 'applied' WHERE id = ? AND provision_binding_state = 'pending'");
-    let flipped = 0;
-    for (const r of rows) {
-      let target;
-      try { target = r.provision_target ? JSON.parse(r.provision_target as string) : null; } catch { target = null; }
-      if (target?.binding?.profileId === profileId) flipped += flip.run(r.id as string).changes;
-    }
-    return flipped;
+    // Card afe1bc90: keyed on the REQUESTING agent (filed_by_session_id → sessions.agent_id, the immutable
+    // filer — decision e54996a4), not on the requested profile.
+    return this.db.prepare(
+      `UPDATE questions SET provision_binding_state = 'applied'
+       WHERE provision_binding_state = 'pending' AND provision_connection_id IN (${placeholders})
+         AND filed_by_session_id IN (SELECT id FROM sessions WHERE agent_id = ?)`,
+    ).run(...connectionIds, agentId).changes;
   }
   /**
    * The DISTINCT set of connection ids auto-provisioned at a credential-answer boundary (card 193de09e) —
@@ -11671,10 +11808,8 @@ function toProfile(r0: unknown): Profile {
     vaultWrite: (r.vault_write as number) === 1,
     restrictedTools: (r.restricted_tools as number) === 1,
     noCommit: (r.no_commit as number) === 1,
-    // authenticated-egress connection-id allowlist; malformed/absent degrades to [] = no access.
-    connections: (() => { try { return JSON.parse((r.connections as string) || "[]") as string[]; } catch { return []; } })(),
-    // agent-tooling P4: registry-capability grants (raw passthrough); malformed/absent degrades to [] = none.
-    capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
+    // Card afe1bc90: profiles.connections/capabilities are DORMANT — never read here (the fan-out
+    // migration is their last reader; credential grants live on the agent row).
     // multi-harness epic Phase 1 (card 353f6dc4): NULL ⇒ undefined = "claude" (today's only harness).
     harness: (r.harness as "claude" | "codex" | null) ?? undefined,
   };

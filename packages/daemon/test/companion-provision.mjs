@@ -380,9 +380,13 @@ try {
     const first = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
     check("fieldcheck(6i): first (default) provision succeeds", first.statusCode === 201 && rig.spawned.length === 1);
     const companionAgent = rig.db.getAgent(rig.companionAgentId);
-    rig.db.updateProfile(companionAgent.profileId, { capabilities: [{ slug: "acme-tool" }], connections: ["connX"] });
-    check("fieldcheck(6i): the Companion profile now carries capabilities+connections",
-      rig.db.getProfile(companionAgent.profileId).capabilities.length > 0 && rig.db.getProfile(companionAgent.profileId).connections.length > 0);
+    // @decision afe1bc90 — capabilities/connections are AGENT-row grants now (the profile keeps vaultWrite,
+    // the one profile-side field of this trio), so the owner's grant lands on the companion AGENT.
+    rig.db.updateProfile(companionAgent.profileId, { vaultWrite: true });
+    rig.db.updateAgent(companionAgent.id, { capabilities: [{ slug: "acme-tool" }], connections: ["connX"] });
+    check("fieldcheck(6i): the Companion agent now carries capabilities+connections (and its profile vaultWrite)",
+      rig.db.getAgent(companionAgent.id).capabilities.length > 0 && rig.db.getAgent(companionAgent.id).connections.length > 0 &&
+      rig.db.getProfile(companionAgent.profileId).vaultWrite === true);
     const second = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
     check("fieldcheck(6i): a 2nd provision (auto-clone) SUCCEEDS even though the source profile carries capabilities+connections (201, not 403)",
       second.statusCode === 201);

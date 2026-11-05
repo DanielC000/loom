@@ -15,7 +15,6 @@ import {
   PROFILE_WIDENING_KEY_LABELS,
   type AgentListItem,
   type BoundAgentRef,
-  type CapabilityGrant,
   type ProfileWideningFields,
   type ProfileWideningKey,
   type SessionRole,
@@ -32,8 +31,6 @@ import {
  * that pairing is made, and the one place a test can see it.
  */
 export interface ProfileGrantFormValues {
-  connections: string[];
-  capabilities: CapabilityGrant[];
   vaultWrite: boolean;
   harness: "claude" | "codex";
   browserTesting: boolean;
@@ -61,8 +58,6 @@ export const parseAllowDelta = (text: string): string[] =>
  */
 export function grantFieldsOfValues(v: ProfileGrantFormValues): ProfileWideningFields {
   return {
-    connections: v.connections,
-    capabilities: v.capabilities,
     vaultWrite: v.vaultWrite,
     harness: v.harness,
     browserTesting: v.browserTesting,
@@ -82,8 +77,6 @@ export function grantFieldsOfValues(v: ProfileGrantFormValues): ProfileWideningF
  */
 export function grantFieldsOfProfile(p: ProfileWideningFields): ProfileWideningFields {
   return {
-    connections: p.connections,
-    capabilities: p.capabilities,
     vaultWrite: p.vaultWrite,
     harness: p.harness,
     browserTesting: p.browserTesting,

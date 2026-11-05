@@ -710,29 +710,16 @@ const mkHumanSchedule = (e, id, agentId) => {
 // side structurally unreachable through those surfaces today — this proves the shared helper itself is
 // correct (defense-in-depth: a future caller, or a changed entry gate, can't silently reopen it). =====================
 {
-  const fakeDb = { getProfile: () => ({ connections: [], capabilities: [] }) }; // the OLD profile: grant-free
-  const agentGrants = { connections: ["agent-conn-j"], capabilities: [] };
-
-  // WITHOUT the fold (no agentGrants passed): the raw profile-only comparison sees [] -> ["agent-conn-j"]
-  // as a genuine widening — this is the OLD, pre-caca806c shape, kept here as the CONTRAST case.
-  const unfolded = rebindWideningFields(fakeDb, "old", { connections: ["agent-conn-j"], capabilities: [] });
-  check("(J) CONTRAST: without agentGrants, the raw profile-only before/after sees the connection as newly added",
-    JSON.stringify(unfolded.before.connections) === JSON.stringify([]) && JSON.stringify(unfolded.after.connections) === JSON.stringify(["agent-conn-j"]));
-
-  // WITH the fold: the agent ALREADY carries "agent-conn-j" via its own row, so BOTH before and after
-  // must already include it — the delta must disappear.
-  const folded = rebindWideningFields(fakeDb, "old", { connections: ["agent-conn-j"], capabilities: [] }, agentGrants);
-  check("(J) WITH agentGrants: before is folded to include the agent's own connection too",
-    JSON.stringify(folded.before.connections) === JSON.stringify(["agent-conn-j"]));
-  check("(J) ...and after is folded the SAME way, so before === after on this field (no genuine delta)",
-    JSON.stringify(folded.after.connections) === JSON.stringify(["agent-conn-j"]));
-
-  // NEGATIVE CONTROL: the new profile also names a connection the agent does NOT already carry via its
-  // own row — genuinely new reach, and the fold must NOT mask that.
-  const newProfileWithExtra = { connections: ["agent-conn-j", "really-new-conn"], capabilities: [] };
-  const foldedWithGenuineAdd = rebindWideningFields(fakeDb, "old", newProfileWithExtra, agentGrants);
-  check("(J) NEGATIVE CONTROL: a genuinely NEW connection (not carried by the agent) still shows up in 'after' post-fold",
-    foldedWithGenuineAdd.after.connections.includes("really-new-conn") && !foldedWithGenuineAdd.before.connections.includes("really-new-conn"));
+  // @decision afe1bc90 — the agentGrants FOLD this block pinned is REMOVED with the profile-level grant it
+  // existed to cancel. The invariant that remains: a rebind's widening view never models connections/
+  // capabilities at all (stale profile-shaped values included), while a real profile widening still shows.
+  const fakeDb = { getProfile: () => ({ vaultWrite: false, connections: [], capabilities: [] }) };
+  const stale = rebindWideningFields(fakeDb, "old", { vaultWrite: false, connections: ["agent-conn-j"], capabilities: [{ slug: "s" }] });
+  check("(J) a rebind's widening view carries NO connections/capabilities (before side)", !("connections" in stale.before) && !("capabilities" in stale.before));
+  check("(J) ...nor on the after side, even when the new profile object still holds stale values", !("connections" in stale.after) && !("capabilities" in stale.after));
+  const real = rebindWideningFields(fakeDb, "old", { vaultWrite: true });
+  check("(J) NEGATIVE CONTROL: a genuine profile widening (vaultWrite) still shows before=false/after=true",
+    real.before.vaultWrite === false && real.after.vaultWrite === true);
 }
 
 // ===================== (J-REST) card caca806c round 3 item 3: the SAME `rebindWideningFields` fold,
@@ -744,7 +731,7 @@ const mkHumanSchedule = (e, id, agentId) => {
 {
   const e = mkDb("rest-rebind-fold");
   const oldProf = mkProfile(e, "prof-rest-fold-old", { role: "worker" }); // grant-free
-  const newProfSameConn = mkProfile(e, "prof-rest-fold-new", { role: "worker", connections: ["agent-conn-j2"] });
+  const newProfSameConn = mkProfile(e, "prof-rest-fold-new", { role: "worker" }); // grant-free: the agent's own row carries the connection
   mkAgent(e, "agent-rest-fold-a", "proj-rest-fold", "RestFoldA", oldProf, { connections: ["agent-conn-j2"] });
   const app = await mkApp(e);
 
@@ -756,13 +743,13 @@ const mkHumanSchedule = (e, id, agentId) => {
 
   // NEGATIVE CONTROL: a DIFFERENT agent, same starting shape, rebinding onto a profile that ALSO names a
   // connection it does NOT already carry — the fold must not mask a genuinely new grant.
-  const newProfExtra = mkProfile(e, "prof-rest-fold-extra", { role: "worker", connections: ["agent-conn-j2", "really-new-conn-rest"] });
+  const newProfExtra = mkProfile(e, "prof-rest-fold-extra", { role: "worker", vaultWrite: true });
   mkAgent(e, "agent-rest-fold-b", "proj-rest-fold", "RestFoldB", oldProf, { connections: ["agent-conn-j2"] });
   const res2 = await app.inject({ method: "POST", url: "/api/agents/agent-rest-fold-b", payload: { profileId: newProfExtra } });
   check("(J-REST) POST -> 200", res2.statusCode === 200);
   const body2 = JSON.parse(res2.payload);
-  check("(J-REST) NEGATIVE CONTROL: a genuinely new connection (not carried by the agent) still reports via rebindReach",
-    body2.rebindReach?.addedKeys?.includes("connections") === true);
+  check("(J-REST) NEGATIVE CONTROL: a rebind onto a profile that genuinely widens (vaultWrite) still reports via rebindReach",
+    body2.rebindReach?.addedKeys?.includes("vaultWrite") === true);
 
   cleanup(e);
 }

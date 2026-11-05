@@ -198,7 +198,7 @@ export function cloneAgentCore(
  */
 export function cloneSourceFieldError(db: Db, sourceProfileId: string | null): string | null {
   if (sourceProfileId == null) return null;
-  const profile: Pick<Profile, "role" | "connections" | "capabilities" | "vaultWrite" | "documentConversion" | "harness" | "allowDelta"> | undefined = db.getProfile(sourceProfileId);
+  const profile: Pick<Profile, "role" | "vaultWrite" | "documentConversion" | "harness" | "allowDelta"> | undefined = db.getProfile(sourceProfileId);
   if (!profile) return null;
   const assignErr = agentAssignableProfileError(profile, { skipRoleCheck: true });
   return assignErr ? `cannot clone agent: ${assignErr}` : null;

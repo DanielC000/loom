@@ -31,7 +31,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
-const { validateAgentPatch, agentCredentialGrantCrossProjectError, agentCapabilityProfileCollisionError } = await import("../dist/agents/validate.js");
+const { validateAgentPatch, agentCredentialGrantCrossProjectError } = await import("../dist/agents/validate.js");
 const { capabilityGrantBindingError } = await import("../dist/profiles/validate.js");
 const { createConnection, createOAuthConnection, getConnectionMetadata } = await import("../dist/connections/store.js");
 const { RESERVED_CAPABILITY_SLUGS, createCapabilityDef } = await import("../dist/capabilities/registry.js");
@@ -161,28 +161,36 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   const expectedOAuthErr = capabilityGrantBindingError([{ slug: "guard-test-cap", connectionId: connOAuth.id }], db);
   check("(2d) the REST refusal matches capabilityGrantBindingError's own text EXACTLY (shared, not duplicated)", JSON.parse(oauthRes.body).error === expectedOAuthErr);
 
-  // (2e) card caca806c item 3(b): an agent-level capabilities write naming a slug the agent's own BOUND
-  // profile already grants is refused — that grant would be dead on arrival under unionCapabilities'
-  // slug-only, profile-first dedup (section (c2) of test/capability-registry.mjs proves the mount side).
+  // (2e) card afe1bc90 R4 (replaces caca806c's slug-collision case, retired with the profile-level
+  // capabilities field): an agent-level capabilities write is refused when the agent's bound profile runs
+  // the CODEX harness — every registry capability is stdio-shaped and codex mounts nothing for it.
   db.insertProfile({
-    id: "profCollision", name: "Collision Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null,
-    capabilities: [{ slug: "guard-test-cap" }],
+    id: "profCollision", name: "Codex Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null,
+    harness: "codex",
+  });
+  db.insertProfile({
+    id: "profClaudeRig", name: "Claude Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null,
   });
   db.insertAgent({ id: "agentCollision", projectId: "pA", name: "AgentCollision", startupPrompt: "", position: 0, profileId: "profCollision" });
   const collisionRes = await app.inject({ method: "POST", url: "/api/agents/agentCollision", payload: { capabilities: [{ slug: "guard-test-cap" }] } });
-  check("(2e) an agent-level grant for a slug its bound profile already grants: 400", collisionRes.statusCode === 400);
-  const expectedCollisionErr = agentCapabilityProfileCollisionError([{ slug: "guard-test-cap" }], [{ slug: "guard-test-cap" }]);
-  check("(2e) the REST refusal matches agentCapabilityProfileCollisionError's own text EXACTLY", JSON.parse(collisionRes.body).error === expectedCollisionErr);
+  check("(2e) an agent-level capability grant on an agent bound to a codex profile: 400", collisionRes.statusCode === 400);
+  check("(2e) the refusal names codex", /codex/.test(JSON.parse(collisionRes.body).error));
   check("(2e) the refused write did NOT land", JSON.stringify(db.getAgent("agentCollision").capabilities ?? []) === JSON.stringify([]));
-  // NEGATIVE CONTROL: a DIFFERENT slug (no collision) grants fine even with the SAME bound profile.
-  const noCollisionRes = await app.inject({ method: "POST", url: "/api/agents/agentCollision", payload: { capabilities: [{ slug: "some-other-slug" }] } });
-  check("(2e) NEGATIVE CONTROL: a non-colliding slug grant: 200", noCollisionRes.statusCode === 200);
-  check("(2e) ...and it lands", JSON.stringify(db.getAgent("agentCollision").capabilities ?? []) === JSON.stringify([{ slug: "some-other-slug" }]));
+  // NEGATIVE CONTROL: the SAME grant on an agent bound to a claude-harness profile lands.
+  db.insertAgent({ id: "agentClaude", projectId: "pA", name: "AgentClaude", startupPrompt: "", position: 5, profileId: "profClaudeRig" });
+  const noCollisionRes = await app.inject({ method: "POST", url: "/api/agents/agentClaude", payload: { capabilities: [{ slug: "some-other-slug" }] } });
+  check("(2e) NEGATIVE CONTROL: the same grant on a claude-profiled agent: 200", noCollisionRes.statusCode === 200);
+  check("(2e) ...and it lands", JSON.stringify(db.getAgent("agentClaude").capabilities ?? []) === JSON.stringify([{ slug: "some-other-slug" }]));
+  // (2e-rebind) rebinding a capability-carrying agent ONTO a codex profile is refused too.
+  const rebindRes = await app.inject({ method: "POST", url: "/api/agents/agentClaude", payload: { profileId: "profCollision" } });
+  check("(2e) rebinding a capability-carrying agent onto a codex profile: 400", rebindRes.statusCode === 400 && db.getAgent("agentClaude").profileId === "profClaudeRig");
+  // (2e-flip) flipping the CLAUDE profile to codex under that bound capability-carrying agent is refused (REST profile PUT).
+  const flipRes = await app.inject({ method: "PUT", url: "/api/profiles/profClaudeRig", payload: { harness: "codex" } });
+  check("(2e) PUT /api/profiles flipping a profile to codex under a bound capability-carrying agent: 400", flipRes.statusCode === 400 && db.getProfile("profClaudeRig").harness !== "codex");
 
-  // (2f) card caca806c ROUND 3 item 4: a single PATCH carrying BOTH `profileId` and `capabilities` must
-  // check the collision against the POST-patch profile, never the one being replaced. Two agents, each
-  // starting on the OPPOSITE side of the collision from where the patch lands it — the pre-fix code
-  // (checking `existing.profileId`) would get BOTH of these wrong, in opposite directions.
+  // (2f) a single PATCH carrying BOTH `profileId` and `capabilities` must check the codex rule against the
+  // POST-patch profile, never the one being replaced. Two agents, each starting on the OPPOSITE side from
+  // where the patch lands it — checking `existing.profileId` would get BOTH wrong, in opposite directions.
   db.insertAgent({ id: "agentPatchSwitchIn", projectId: "pA", name: "AgentPatchSwitchIn", startupPrompt: "", position: 2, profileId: null });
   const switchInRes = await app.inject({
     method: "POST", url: "/api/agents/agentPatchSwitchIn",

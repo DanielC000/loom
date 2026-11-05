@@ -28,6 +28,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -56,7 +57,7 @@ function mkDb(name) {
     processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
     lastError: null, role: "manager",
   });
-  db.insertProfile({ id: profId, name: "Payments Worker", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: [], capabilities: [] });
+  db.insertProfile({ id: profId, name: "Payments Worker", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
   return { dbFile, db, projId, agentId, mgrId, profId };
 }
 function cleanup(e) {
@@ -160,9 +161,14 @@ async function connections(app) {
 
   // The grant is the EXISTING human-only profile-edit REST (add the connection to the allowlist) — NOT a
   // new write surface, and NOT a side effect of answering. Direction B: binding is a deliberate owner Save.
-  const put = await app.inject({ method: "PUT", url: `/api/profiles/${e.profId}`, payload: { connections: [connId] } });
-  check("(C) granting via PUT /api/profiles/:id -> 200", put.statusCode === 200);
-  check("(C) the connection is now on the profile's allowlist", (e.db.getProfile(e.profId).connections ?? []).includes(connId));
+  // @decision afe1bc90 — the grant now targets the REQUESTING AGENT (POST /api/agents/:id); a profile can't hold it.
+  const put = await app.inject({ method: "POST", url: `/api/agents/${e.agentId}`, payload: { connections: [connId] } });
+  check("(C) granting via POST /api/agents/:id -> 200", put.statusCode === 200);
+  check("(C) the connection is now on the requesting agent's allowlist", (e.db.getAgent(e.agentId).connections ?? []).includes(connId));
+  // Read the RAW profiles column: the Profile read model has no `connections` key any more, so reading it
+  // through getProfile() ("?? []") could never fail.
+  const rawProfileGrant = (() => { const r = new Database(e.dbFile, { readonly: true }); try { return r.prepare("SELECT connections FROM profiles WHERE id = ?").get(e.profId)?.connections; } finally { r.close(); } })();
+  check("(C) the profile named in the ask did NOT gain a grant (least privilege: the agent only) — RAW profiles.connections is still '[]'", rawProfileGrant === "[]");
   // card 298b826e: a save that ADDS a connections grant carries a plain fresh-spawn-only note — the
   // freeze contract stated at the ONE place a human applying a binding actually looks.
   const putBody = JSON.parse(put.body);
@@ -172,7 +178,7 @@ async function connections(app) {
   check("(C) the binding LEFT the queue (listPendingBindings clears)", (await pendingBindings(app)).rows.length === 0);
 
   // 'applied' is terminal — removing the connection again does NOT revert it back to the queue.
-  const putRemove = await app.inject({ method: "PUT", url: `/api/profiles/${e.profId}`, payload: { connections: [] } });
+  const putRemove = await app.inject({ method: "POST", url: `/api/agents/${e.agentId}`, payload: { connections: [] } });
   check("(C) removing the connection is a separate action — the binding stays 'applied', never re-pends", e.db.getQuestion(q.id).provisionBindingState === "applied" && (await pendingBindings(app)).rows.length === 0);
   // A save that NARROWS (removes) connections widens nothing — grantReach is null, and so is the note.
   check("(C) a save that only REMOVES connections carries NO fresh-spawn note (nothing was granted)", !("connectionsFreshSpawnNote" in JSON.parse(putRemove.body)));
@@ -186,8 +192,8 @@ async function connections(app) {
 {
   const e = mkDb("grant-otherprof");
   const app = await mkApp(e);
-  // A second profile that will (wrongly, if the guard were missing) try to claim the same connection.
-  e.db.insertProfile({ id: `${e.projId}-prof2`, name: "Other Worker", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: [], capabilities: [] });
+  // A second AGENT (same project) that will (wrongly, if the guard were missing) try to claim the same connection.
+  e.db.insertAgent({ id: `${e.projId}-agent2`, projectId: e.projId, name: "Other Agent", startupPrompt: "", position: 1 });
   const q = askCredential(e, {
     id: "cred-c2", title: "Need a token",
     provisionTo: { connection: { name: "Shared Conn", host: "api.shared.com" }, binding: { profileId: e.profId } },
@@ -195,14 +201,14 @@ async function connections(app) {
   await answer(app, q.id, "sk_shared");
   const connId = e.db.getQuestion(q.id).provisionConnectionId;
 
-  // The OTHER profile allowlists the connection — the binding targets `e.profId`, so it must stay pending.
-  await app.inject({ method: "PUT", url: `/api/profiles/${e.projId}-prof2`, payload: { connections: [connId] } });
-  check("(C2) a DIFFERENT profile granting the same connection does NOT apply this binding", e.db.getQuestion(q.id).provisionBindingState === "pending");
+  // The OTHER agent allowlists the connection — the binding belongs to the REQUESTING agent, so it stays pending.
+  await app.inject({ method: "POST", url: `/api/agents/${e.projId}-agent2`, payload: { connections: [connId] } });
+  check("(C2) a DIFFERENT agent granting the same connection does NOT apply this binding", e.db.getQuestion(q.id).provisionBindingState === "pending");
   check("(C2) the binding is still in the queue", (await pendingBindings(app)).rows.length === 1);
 
-  // The correct profile grants it — now it applies.
-  await app.inject({ method: "PUT", url: `/api/profiles/${e.profId}`, payload: { connections: [connId] } });
-  check("(C2) the binding's OWN profile granting it applies it", e.db.getQuestion(q.id).provisionBindingState === "applied");
+  // The requesting agent grants it — now it applies.
+  await app.inject({ method: "POST", url: `/api/agents/${e.agentId}`, payload: { connections: [connId] } });
+  check("(C2) the binding's OWN (requesting) agent granting it applies it", e.db.getQuestion(q.id).provisionBindingState === "applied");
   cleanup(e);
 }
 

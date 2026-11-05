@@ -168,18 +168,3 @@ export function agentCredentialGrantCrossProjectError(
   }
   return null;
 }
-
-/**
- * @decision caca806c — refuses a dead-on-arrival agent-level capability grant: a slug the agent's own
- * bound profile already grants would never take effect, since the profile's binding always wins at spawn.
- */
-export function agentCapabilityProfileCollisionError(
-  patchCapabilities: { slug: string; connectionId?: string }[] | undefined,
-  boundProfileCapabilities: { slug: string }[] | null | undefined,
-): string | null {
-  if (!patchCapabilities || patchCapabilities.length === 0) return null;
-  const profileSlugs = new Set((boundProfileCapabilities ?? []).map((g) => g.slug));
-  const collision = patchCapabilities.find((g) => profileSlugs.has(g.slug));
-  if (!collision) return null;
-  return `cannot grant capability '${collision.slug}' at the agent level: this agent's bound profile already grants that slug, and the profile's own binding always wins (capabilities are de-duplicated by slug, profile first) — the agent-level grant would never take effect; drop it, or change the profile's own binding instead`;
-}

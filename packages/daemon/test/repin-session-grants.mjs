@@ -57,7 +57,7 @@ db.insertProject({ id: "pP", name: "P", repoPath: repo, vaultPath: repo, config:
 // Every grant starts EMPTY/OFF — the owner widens the profile AFTER the session already spawned.
 db.insertProfile({
   id: "profMgr", name: "MgrRig", role: "manager", description: "", allowDelta: [], skills: null, model: null, icon: null,
-  connections: [], capabilities: [], browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, vaultWrite: false,
+  browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, vaultWrite: false,
 });
 db.insertAgent({ id: "agentMgr", projectId: "pP", name: "MgrProfiled", startupPrompt: "MGR_PROMPT", position: 0, profileId: "profMgr" });
 
@@ -86,10 +86,12 @@ try {
 
   const captureBefore = host.capture.length;
 
+  // @decision afe1bc90 — connections/capabilities are AGENT-row grants now; the rest stay on the profile.
   db.updateProfile("profMgr", {
-    connections: ["conn-1"], capabilities: [{ slug: "cap-1" }], skills: ["skillA"],
+    skills: ["skillA"],
     browserTesting: true, documentConversion: true, restrictedTools: true, noCommit: true, vaultWrite: true,
   });
+  db.updateAgent("agentMgr", { connections: ["conn-1"], capabilities: [{ slug: "cap-1" }] });
 
   const r1 = svc.repinSessionGrants(mgr.id);
 
@@ -128,8 +130,9 @@ try {
 
   // ===================== 3. REVOCATION — profile narrows again; the row must actually EMPTY, not just stay wide =====================
   db.updateProfile("profMgr", {
-    connections: [], capabilities: [], skills: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, vaultWrite: false,
+    skills: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, vaultWrite: false,
   });
+  db.updateAgent("agentMgr", { connections: [], capabilities: [] });
   const r3 = svc.repinSessionGrants(mgr.id);
   const s3 = db.getSession(mgr.id);
   check("(9) revocation actually EMPTIES `connections` (not left wide from the earlier grant)", JSON.stringify(s3.connections) === "[]");
@@ -169,7 +172,8 @@ try {
   // role:"platform" SESSION deliberately exercises the role-divergence/skills-dropped path
   // (sessionSkillsForRole, card 509176c8): "platform" is a LOCKED_PROFILE_ROLES member whose resolved
   // role ("platform") differs from the bound profile's own role ("manager"), so the subset must drop.
-  db.updateProfile("profMgr", { connections: ["conn-plat-1"], skills: ["skillA-mgr"] });
+  db.updateProfile("profMgr", { skills: ["skillA-mgr"] });
+  db.updateAgent("agentMgr", { connections: ["conn-plat-1"] });
   const r5 = svc.repinSessionGrants("s-platform");
   check("(12) role==='platform' IS re-pinnable, and resolves the SAME explicit role (not clamped to the profile's own role)", JSON.stringify(db.getSession("s-platform").connections) === JSON.stringify(["conn-plat-1"]));
   check("(12) role==='platform' diff carries just the one actually-changed field", JSON.stringify(Object.keys(r5.diff)) === JSON.stringify(["connections"]));
@@ -209,7 +213,7 @@ try {
     processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null,
     role: "worker", parentSessionId: "s-mgr-parent",
   });
-  db.updateProfile("profMgr", { connections: ["conn-worker-1"] });
+  db.updateAgent("agentMgr", { connections: ["conn-worker-1"] });
   svc.repinSessionGrants("s-worker-child");
   check("(14) role==='worker' with a parent manager IS re-pinnable", JSON.stringify(db.getSession("s-worker-child").connections) === JSON.stringify(["conn-worker-1"]));
   const workerEvents = grantsEventsFor("s-worker-child");
@@ -249,7 +253,7 @@ try {
   // sessions/profiles, never mgr's own row). Bind the live profile to something ELSE entirely right
   // before recycling — recycleManager must carry mgr's own [] forward, never this fresh profile value.
   db.setBusy(mgr.id, false);
-  db.updateProfile("profMgr", { connections: ["conn-after-repin"] });
+  db.updateAgent("agentMgr", { connections: ["conn-after-repin"] });
   const mgrRecycled = await svc.recycleManager(mgr.id, "CONTINUE");
   check("(14) 298b826e's freeze is UNCHANGED by this card: recycleManager still carries mgr's OWN pre-recycle row value ([]) forward, never the live profile",
     JSON.stringify(db.getSession(mgrRecycled.id).connections) === "[]");

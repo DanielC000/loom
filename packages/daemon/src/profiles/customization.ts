@@ -33,9 +33,7 @@ const MERGEABLE_INCLUSION = {
   documentConversion: true,
   restrictedTools: true,
   noCommit: true,
-  connections: true,
   vaultWrite: true,
-  capabilities: true,
   // Identity match key — renaming un-bundles a profile (the documented limitation; see this file's
   // header comment). Merging it makes no sense on its own terms, so this is a permanent exclusion —
   // confirmed deliberate (traced to this file's own header comment) at card 1059b3b9, not merely
@@ -61,7 +59,7 @@ type MergeableField = {
 export const MERGEABLE_PROFILE_FIELDS = (Object.keys(MERGEABLE_INCLUSION) as (keyof typeof MERGEABLE_INCLUSION)[])
   .filter((k): k is MergeableField => MERGEABLE_INCLUSION[k]);
 
-// Compile-time check that `MergeableField` hasn't silently drifted from today's known 14-field set — a
+// Compile-time check that `MergeableField` hasn't silently drifted from today's known 12-field set — a
 // wider or narrower union than expected must be caught by the compiler, never left to be re-derived by
 // eye. Asserts type equality (mutual assignability, tuple-wrapped so the union doesn't distribute)
 // against a hand-written expected union: if `MergeableField` ever gains or loses a member, this fails
@@ -69,7 +67,7 @@ export const MERGEABLE_PROFILE_FIELDS = (Object.keys(MERGEABLE_INCLUSION) as (ke
 type _ExpectedMergeableField =
   | "role" | "description" | "allowDelta" | "skills" | "model" | "icon"
   | "browserTesting" | "documentConversion" | "restrictedTools" | "noCommit"
-  | "connections" | "vaultWrite" | "capabilities" | "harness";
+  | "vaultWrite" | "harness";
 type _AssertMergeableFieldUnchanged = [MergeableField] extends [_ExpectedMergeableField]
   ? [_ExpectedMergeableField] extends [MergeableField] ? true : never
   : never;
@@ -124,16 +122,10 @@ function normalizeFields(p: Partial<Profile>): Record<MergeableField, unknown> {
     documentConversion: p.documentConversion ?? false,
     restrictedTools: p.restrictedTools ?? false,
     noCommit: p.noCommit ?? false,
-    // Unlike skills, absent always means [] (no access) — never "all". A shipped bundled profile never
-    // carries connection ids (those are the user's own credential grants), so shipped always normalizes
-    // to [] here, which is what lets the merge rule protect a user's grant across an "adopt".
-    connections: p.connections ?? [],
-    // Same off-by-default direction as connections; no bundled profile seeds vaultWrite, so shipped
-    // always normalizes to false — the merge rule protects a user's own grant across an "adopt".
+    // Off-by-default; no bundled profile seeds vaultWrite, so shipped always normalizes to false — the
+    // merge rule protects a user's own grant across an "adopt". (connections/capabilities are no longer
+    // profile fields — card afe1bc90 — so there is nothing to protect or merge for them.)
     vaultWrite: p.vaultWrite ?? false,
-    // Same off-by-default direction as connections; no bundled profile seeds capabilities, so shipped
-    // always normalizes to [] — the merge rule protects a user's own grants across an "adopt".
-    capabilities: p.capabilities ?? [],
     // DELIBERATELY not normalized like every sibling above (mirrors validate.ts's return-literal
     // comment on the same field): `Profile.harness` is `?: "claude" | "codex"` with NO null member, so
     // absence — not a null — is how "claude" (the shipped default) is expressed.

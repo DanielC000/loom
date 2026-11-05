@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, ProfileGrantReach, SessionRole, CapabilityGrant } from "@loom/shared";
+import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, ProfileGrantReach, SessionRole } from "@loom/shared";
 import type { CapabilitySummary } from "@loom/shared";
 import { api, type ProfileFieldResolution } from "../lib/api";
 import {
@@ -37,14 +37,11 @@ import { useAllAgents } from "../lib/useAllAgents";
 // Loom's field changes onto the user's edits, resolving any all-three-differ conflict per field.
 export default function Profiles() {
   const qc = useQueryClient();
-  // Deep-link support for the Settings "Pending bindings" queue's "Review & grant" (card 12dc7fc9):
-  // /actors?tab=profiles&profile=<id>&grant=<connectionId> opens that profile's editor with the connection
-  // pre-selected in its allowlist (unsaved — the owner commits it with an explicit Save). `profileParam`
-  // drives the selection; `grantParam` is handed to the editor and keyed into its remount so a fresh
-  // deep-link (different grant) re-applies the pre-selection.
+  // Deep-link: /actors?tab=profiles&profile=<id> opens that profile's editor. (The `grant=<connectionId>`
+  // pre-selection the pending-bindings queue used is RETIRED with the profile-level connections — card
+  // afe1bc90: a pending binding now targets the requesting AGENT's editor instead.)
   const [params] = useSearchParams();
   const profileParam = params.get("profile");
-  const grantParam = params.get("grant");
   const [selected, setSelected] = useState<string | null>(profileParam);
   // Apply the deep-link when it changes (mount, or a new "Review & grant" while already on this page).
   // Keyed on the param only — a manual sidebar click doesn't touch the URL, so it's never overridden.
@@ -147,8 +144,7 @@ export default function Profiles() {
 
         <Panel style={{ minHeight: "72vh", padding: 12 }}>
           {selected && current.data ? (
-            <ProfileEditor key={`${selected}:${grantParam ?? ""}:${reloadNonce}`} profile={current.data}
-              grantConnectionId={selected === profileParam ? grantParam : null}
+            <ProfileEditor key={`${selected}:${reloadNonce}`} profile={current.data}
               onSave={(patch) => save.mutate({ id: selected, patch })} saving={save.isPending}
               saveError={save.error as Error | null}
               onDelete={() => remove.mutate({ id: selected, name: current.data!.name })} deleting={remove.isPending}
@@ -348,8 +344,6 @@ interface ProfileFields {
   noCommit: boolean;
   harness: Harness;
   skills: string[];
-  connections: string[];
-  capabilities: CapabilityGrant[];
 }
 
 /** The profile row projected into this editor's field shape — the ONE place the seed is derived. */
@@ -367,8 +361,6 @@ const profileFieldsOf = (p: ProfileSummary): ProfileFields => ({
   noCommit: p.noCommit ?? false,
   harness: harnessOf(p.harness),
   skills: p.skills ?? [],
-  connections: p.connections ?? [],
-  capabilities: p.capabilities ?? [],
 });
 
 // `parseAllowDelta` + the two grant-slice adapters (`grantFieldsOfValues` / `grantFieldsOfProfile`) live
@@ -376,10 +368,6 @@ const profileFieldsOf = (p: ProfileSummary): ProfileFields => ({
 // Both adapters read their fields LIVE; the decision record for that rule is anchored there, not here.
 
 const sortedJson = (xs: readonly string[]) => JSON.stringify([...xs].sort());
-// Canonical per-grant JSON (key-sorted) so {slug,connectionId} order never spuriously trips dirty/save —
-// mirrors the daemon's customization.ts fieldEqual for the same field.
-const capsJson = (xs: readonly CapabilityGrant[]) =>
-  JSON.stringify(xs.map((g) => JSON.stringify(g, Object.keys(g).sort())).sort());
 
 // Each comparer mirrors the NORMALIZATION `submit` applies to that field, so a difference the wire cannot
 // express — a trailing newline, surrounding whitespace, a reordered multiselect — is neither reported as a
@@ -391,14 +379,12 @@ const PROFILE_FIELD_COMPARERS: FieldComparers<ProfileFields> = {
   icon: (a, b) => a.trim() === b.trim(),
   model: (a, b) => a.trim() === b.trim(),
   skills: (a, b) => sortedJson(a) === sortedJson(b),
-  connections: (a, b) => sortedJson(a) === sortedJson(b),
-  capabilities: (a, b) => capsJson(a) === capsJson(b),
 };
 
 // Remounted per profile (key=id:nonce) so the fields reset on switch / revert / adopt; after Save the
 // query updates and `dirty` clears against the new values. Mirrors the Skills / agent-preset editors.
-function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
-  { profile: ProfileSummary; grantConnectionId?: string | null; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean; saveError: Error | null;
+function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
+  { profile: ProfileSummary; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean; saveError: Error | null;
     onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean;
     onAdopt: (resolutions?: Record<string, ProfileFieldResolution>) => void; adopting: boolean; adoptError: Error | null }) {
   const bundled = profile.bundled;
@@ -426,19 +412,6 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   const [harness, setHarness] = useState<Harness>(harnessOf(profile.harness));
   // Skill subset (empty = deliver ALL, the default — null and [] are equivalent, matching the daemon).
   const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
-  // Authenticated-egress connection-id allowlist (empty = NO access, the secure default — UNLIKE skills,
-  // empty here never means "all"). Human-set only, here or via REST — never an agent MCP tool.
-  // A `grantConnectionId` deep-link (from the Settings "Pending bindings" queue, card 12dc7fc9)
-  // PRE-SELECTS that connection here — it lands in local state (making the editor dirty) but is NOT saved
-  // until the owner clicks Save. That deliberate Save is the whole point of Direction B; pre-selection is
-  // never a committed grant. A connection already on the allowlist is left as-is (nothing to grant).
-  const [connections, setConnections] = useState<string[]>(() => {
-    const base = profile.connections ?? [];
-    return grantConnectionId && !base.includes(grantConnectionId) ? [...base, grantConnectionId] : base;
-  });
-  // Registry-capability grants BEYOND browserTesting/documentConversion above (agent-tooling P4) — raw,
-  // never pre-bridged with the two legacy booleans (mirrors the daemon's resolveProfileCapabilities split).
-  const [capabilities, setCapabilities] = useState<CapabilityGrant[]>(profile.capabilities ?? []);
   // A pending save held back by the grant confirm (card 3c4e0df6): the already-built patch plus the plan
   // that explains WHY it is held. Held as ONE object so what the human is shown and what eventually goes
   // on the wire cannot drift apart — the confirm never rebuilds the patch.
@@ -468,19 +441,6 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   const available = (skillList.data ?? []).map((s) => s.name);
   const toggleSkill = (n: string) => setSkills((cur) => (cur.includes(n) ? cur.filter((s) => s !== n) : [...cur, n]));
 
-  // The P1 credential store's connections — the menu of what this rig's egress allowlist can grant.
-  const connectionList = useQuery({ queryKey: ["connections"], queryFn: api.connections });
-  const availableConnections = connectionList.data ?? [];
-  const toggleConnection = (id: string) => setConnections((cur) => (cur.includes(id) ? cur.filter((c) => c !== id) : [...cur, id]));
-  // Pending bindings the owner hasn't granted yet (card 12dc7fc9) → which connections some agent requested
-  // for THIS profile, and who asked. Drives the "requested by <agent>" hint on the matching chip below.
-  const pendingBindings = useQuery({ queryKey: ["pendingBindings"], queryFn: api.pendingBindings });
-  const requestedBy = new Map(
-    (pendingBindings.data ?? [])
-      .filter((b) => b.profileId === profile.id && !b.alreadyGranted)
-      .map((b) => [b.connectionId, b.agentName] as const),
-  );
-
   // The capability registry catalog (agent-tooling P4): builtins + owner-added, ONE unified list — the
   // Profile editor's picker renders every entry as a checkbox, transparently backed by browserTesting/
   // documentConversion for the two reserved slugs and by the `capabilities` array
@@ -501,25 +461,21 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
   // error confirm while a genuinely in-flight first load is the only thing that reads as loading.
   const agentsLoading = allAgents.isPending && allAgents.failureCount === 0;
 
+  // @decision afe1bc90 — only the two RESERVED builtins (browser-testing / document-conversion) are still
+  // profile-level; every other registry capability is granted per AGENT (agent editor), not here.
   const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
-  const availableCapabilities = capabilityList.data ?? [];
+  const availableCapabilities = (capabilityList.data ?? []).filter((c) => c.slug === "browser-testing" || c.slug === "document-conversion");
   const isCapabilityChecked = (slug: string) =>
-    slug === "browser-testing" ? browserTesting
-    : slug === "document-conversion" ? documentConversion
-    : capabilities.some((g) => g.slug === slug);
+    slug === "browser-testing" ? browserTesting : slug === "document-conversion" ? documentConversion : false;
   const toggleCapability = (slug: string) => {
     if (slug === "browser-testing") return setBrowserTesting((v) => !v);
     if (slug === "document-conversion") return setDocumentConversion((v) => !v);
-    setCapabilities((cur) => (cur.some((g) => g.slug === slug) ? cur.filter((g) => g.slug !== slug) : [...cur, { slug }]));
   };
-  const capabilityConnectionId = (slug: string) => capabilities.find((g) => g.slug === slug)?.connectionId ?? "";
-  const setCapabilityConnectionId = (slug: string, connectionId: string) =>
-    setCapabilities((cur) => cur.map((g) => (g.slug === slug ? { ...g, connectionId: connectionId || undefined } : g)));
 
   // The live field values, as ONE record — what gets diffed, reconciled and narrowed into a patch below.
   const values: ProfileFields = {
     name, role, description, allowText, icon, model, browserTesting, documentConversion, vaultWrite,
-    restrictedTools, noCommit, harness, skills, connections, capabilities,
+    restrictedTools, noCommit, harness, skills,
   };
   const applyFields = (v: ProfileFields) => {
     setName(v.name); setRole(v.role); setDescription(v.description); setAllowText(v.allowText);
@@ -527,7 +483,6 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
     setDocumentConversion(v.documentConversion); setVaultWrite(v.vaultWrite);
     setRestrictedTools(v.restrictedTools);
     setNoCommit(v.noCommit); setHarness(v.harness); setSkills(v.skills);
-    setConnections(v.connections); setCapabilities(v.capabilities);
   };
 
   // Seed / delta / re-sync / conflict bookkeeping, shared with Settings' ConfigEditor and AgentEditor
@@ -569,7 +524,6 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
     setRestrictedTools(sent.restrictedTools);
     setBrowserTesting(sent.browserTesting);
     setDocumentConversion(sent.documentConversion);
-    setCapabilities(sent.capabilities);
     // Only what the human actually changed. PUT /api/profiles/:id merges the patch over the stored row
     // before validating, so an omitted field is PRESERVED — including a value an agent wrote after this
     // editor opened. An untouched field is therefore never on the wire at all, which is what makes this
@@ -588,7 +542,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
     //
     // @decision 65aa951c — a field whose SERVER value can make a save invalid must be sent explicitly,
     // never left to the delta: a delta can only know what the human changed, not what the store holds.
-    if (delta.has("harness") && sent.harness === "codex") for (const f of CODEX_REJECTED_FIELDS) delta.add(f);
+    if (delta.has("harness") && sent.harness === "codex") for (const f of CODEX_REJECTED_FIELDS) if (f !== "capabilities") delta.add(f); // `capabilities` is an agent field now (afe1bc90)
     const patch: Partial<Omit<Profile, "id">> = {};
     if (delta.has("name")) patch.name = sent.name.trim();
     if (delta.has("role")) patch.role = sent.role || null;
@@ -603,8 +557,6 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
     if (delta.has("noCommit")) patch.noCommit = sent.noCommit;
     if (delta.has("harness")) patch.harness = sent.harness;
     if (delta.has("skills")) patch.skills = sent.skills.length ? sent.skills : null;
-    if (delta.has("connections")) patch.connections = sent.connections;
-    if (delta.has("capabilities")) patch.capabilities = sent.capabilities;
 
     // Card 3c4e0df6 (grants) + be447b3f (role change / restrictedTools relaxing). Profiles are GLOBAL, so
     // a widening here reaches every agent already bound to this rig, in every project — a trust boundary
@@ -707,7 +659,7 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
         {/* Named BEFORE the Save click, and only while this rig actually holds something codex refuses to
             store — see card 6232fe9d. Sits here rather than beside each field because the loss is a
             consequence of THIS choice, and a reader who has just picked codex is looking right at it. */}
-        <HarnessRejectWarning harness={harness} values={{ restrictedTools, browserTesting, documentConversion, capabilities }} />
+        <HarnessRejectWarning harness={harness} values={{ restrictedTools, browserTesting, documentConversion, capabilities: [] }} />
       </div>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -724,11 +676,13 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
         <HarnessFieldDrop harness={harness} field="allowDelta" />
       </label>
 
-      {/* Agent-tooling P4 capability registry: ONE unified picker over the catalog (the two builtins +
-          any owner-added rows), replacing the old separate browser-testing/document-conversion checkboxes.
-          Each entry launches a host process / MCP server — human-set here only, never via an agent tool.
-          A `requiresConnection` entry reveals an inline P1-connection binding when checked. */}
+      {/* The two BUILTIN capabilities (browser testing / document conversion) — profile-level booleans, human-set
+          here only. Registry capabilities and connections are granted per AGENT (card afe1bc90): see the note below. */}
       <label style={fieldLabel}>Capabilities</label>
+      <div data-testid="profile-credential-grants-moved" style={{ fontSize: 11, color: color.textMuted, fontFamily: font.mono, lineHeight: 1.5, marginBottom: 6 }}>
+        Connections and registry capabilities are granted per AGENT, not per profile. Open the agent in the agent editor
+        (Agents) to grant them.
+      </div>
       <HarnessFieldDrop harness={harness} field="capabilities" />
       <div style={{ display: "flex", flexDirection: "column", gap: 10, ...dropStyle(harness, "capabilities") }}>
         {availableCapabilities.map((c) => {
@@ -760,33 +714,6 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
                 <span style={{ fontWeight: 400, color: color.textMuted, fontSize: 11, fontFamily: font.mono, lineHeight: 1.5 }}>
                   {c.description}
                 </span>
-                {checked && c.requiresConnection && !isLegacy && (
-                  <>
-                    <Select
-                      value={capabilityConnectionId(c.slug)}
-                      disabled={capsDropped}
-                      onChange={(e) => setCapabilityConnectionId(c.slug, e.target.value)}
-                      style={{ marginTop: 4, maxWidth: 260 }}
-                    >
-                      <option value="">— pick a connection —</option>
-                      {/* An api-key/bearer ALLOWLIST (matching the server's own RAW_SECRET_AUTH_SCHEMES in
-                          connections/store.ts), not an oauth2-only denylist: a requiresConnection grant
-                          statically injects a secret at spawn, which only api-key/bearer support — oauth2
-                          refreshes on use via the authenticated_request tool instead, and ssh's secret is
-                          never resolvable through this static-injection seam at all (getSecretForUse fails
-                          closed for it). Listing either here would offer a connection the daemon can only
-                          ever refuse to inject. */}
-                      {availableConnections.filter((conn) => conn.authScheme === "api-key" || conn.authScheme === "bearer").map((conn) => (
-                        <option key={conn.id} value={conn.id}>{conn.name}</option>
-                      ))}
-                    </Select>
-                    {availableConnections.some((conn) => conn.authScheme !== "api-key" && conn.authScheme !== "bearer") && (
-                      <span style={{ fontSize: 11, color: color.textMuted, fontFamily: font.mono }}>
-                        oauth2/ssh connections aren't listed — they can't be statically injected here. Use the authenticated_request tool instead.
-                      </span>
-                    )}
-                  </>
-                )}
               </span>
             </label>
           );
@@ -906,55 +833,6 @@ function ProfileEditor({ profile, grantConnectionId, onSave, saving, saveError, 
         )}
       </div>
       {harness !== "codex" && <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, marginTop: -6 }}>Model + skills apply on the next spawn. Skills delivery is per-session — sessions sharing a repo see the union of their subsets, never each other stripped.</span>}
-
-      {/* Authenticated-egress connection grant (agent-tooling epic P2): which P1 credential-store
-          connections a session under this rig may call the authenticated_request tool with. Human-set
-          HERE ONLY — stricter than every other flag on this page: not even the Setup Assistant / Platform
-          Lead's own profile-writing tools may touch this field (it grants access to real external secrets). */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <span style={fieldLabel}>Connections <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· {connections.length === 0 ? "none selected → NO authenticated_request access (default)" : `${connections.length} selected → authenticated_request may use only these`}</span></span>
-        {/* Review & grant deep-link (card 12dc7fc9): a connection was pre-selected from a pending binding.
-            Highlighted below; the grant only lands when the owner clicks Save. */}
-        {grantConnectionId && !(profile.connections ?? []).includes(grantConnectionId) && (
-          <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber }}>
-            {(availableConnections.find((c) => c.id === grantConnectionId)?.name ?? grantConnectionId)} is pre-selected below — click Save to grant it, or deselect to decline.
-          </span>
-        )}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {availableConnections.map((c) => {
-            const on = connections.includes(c.id);
-            // A pending binding an agent requested for THIS profile (card 12dc7fc9) → amber ring + a
-            // "requested by <agent>" caption, so the owner knows why this connection is here. When it's the
-            // deep-linked grant, `on` is already true (pre-selected) so the chip reads phosphor-✓ with the
-            // caption still shown — selected but not yet saved.
-            const reqBy = requestedBy.get(c.id);
-            return (
-              <span key={c.id} style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
-                <button type="button" onClick={() => toggleConnection(c.id)}
-                  title={reqBy ? `Requested by ${reqBy} — Save to grant` : undefined}
-                  style={{ cursor: "pointer", fontFamily: font.mono, fontSize: 12, padding: "3px 9px", borderRadius: 12,
-                    border: `1px solid ${on ? color.phosphor : reqBy ? color.amber : color.border}`, background: on ? color.panel2 : "transparent",
-                    color: on ? color.phosphor : reqBy ? color.amber : color.textMuted }}>
-                  {on ? "✓ " : ""}{c.name} <span style={{ opacity: 0.7 }}>({c.host})</span>
-                </button>
-                {reqBy && <span style={{ fontFamily: font.mono, fontSize: 10, color: color.amber, paddingLeft: 4 }}>requested by {reqBy}</span>}
-              </span>
-            );
-          })}
-          {availableConnections.length === 0 && <span style={{ color: color.textMuted, fontSize: 12, fontFamily: font.mono }}>No connections in the credential store yet — add one in Settings.</span>}
-        </div>
-        {connections.filter((id) => !availableConnections.some((c) => c.id === id)).length > 0 && (
-          <span style={{ color: color.amber, fontSize: 11, fontFamily: font.mono }}>
-            not in the credential store (will be ignored at spawn): {connections.filter((id) => !availableConnections.some((c) => c.id === id)).join(", ")}
-          </span>
-        )}
-        {/* card 298b826e: connections is pinned on a session row at spawn and stays frozen across resume/
-            fork/recycle, same family as the model+skills note above — a bound agent's live/recycled
-            session will not pick this up until it next spawns fresh. */}
-        <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>
-          Connections apply only to a session spawned fresh after this save — a resumed or recycled session keeps whatever it already had.
-        </span>
-      </div>
 
       <span style={{ flex: 1 }} />
       {/* Card 65aa951c. An UNTOUCHED field silently adopts whatever landed while this editor was open —

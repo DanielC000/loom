@@ -73,8 +73,6 @@ db.insertProfile({ id: "profSetup", name: "Setup Rig", role: "setup", descriptio
 
 // (b) non-elevated (worker) role, each carrying ONE human-only field.
 db.insertProfile({ id: "profVaultWrite", name: "Vault Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, vaultWrite: true });
-db.insertProfile({ id: "profConnections", name: "Connections Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["connX"] });
-db.insertProfile({ id: "profCapabilities", name: "Capabilities Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, capabilities: [{ slug: "some-cap" }] });
 
 // (d) a clean profile with neither an elevated role nor any human-only field — the regression case.
 db.insertProfile({ id: "profClean", name: "Clean Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
@@ -118,12 +116,9 @@ try {
   rejects("assignAgentProfile REJECTS a profile carrying vaultWrite:true",
     () => svc.assignAgentProfile("M", "aMine", "profVaultWrite"), /vaultWrite/);
   check("assignAgentProfile left aMine's profileId UNCHANGED after the vaultWrite rejection", db.getAgent("aMine").profileId === null);
-  rejects("assignAgentProfile REJECTS a profile carrying a non-empty connections",
-    () => svc.assignAgentProfile("M", "aMine", "profConnections"), /connections/);
-  check("assignAgentProfile left aMine's profileId UNCHANGED after the connections rejection", db.getAgent("aMine").profileId === null);
-  rejects("assignAgentProfile REJECTS a profile carrying a non-empty capabilities",
-    () => svc.assignAgentProfile("M", "aMine", "profCapabilities"), /capabilities/);
-  check("assignAgentProfile left aMine's profileId UNCHANGED after the capabilities rejection", db.getAgent("aMine").profileId === null);
+  // Card afe1bc90: a profile can no longer carry connections/capabilities (agent-only grants), so the two
+  // profile-carried-grant rejections that stood here are retired with the fields; the equivalent
+  // agent-row protection is asserted by agent-credential-grant-write.mjs / explicit-role-grant-carryover.mjs.
 
   // ════════ (e) card 1f52bc75: documentConversion / harness("codex") / non-empty allowDelta → REJECTED ════════
   rejects("assignAgentProfile REJECTS a profile carrying documentConversion:true",

@@ -63,7 +63,7 @@ const EXPECTED_AGENT_KEYS = [
 ];
 const EXPECTED_PROFILE_KEYS = [
   "id", "name", "role", "description", "allowDelta", "skills", "model", "icon", "browserTesting",
-  "documentConversion", "restrictedTools", "noCommit", "connections", "capabilities", "vaultWrite",
+  "documentConversion", "restrictedTools", "noCommit", "vaultWrite",
   "harness", // multi-harness epic df1f94b0 Phase 1 (card 353f6dc4)
 ];
 
@@ -87,7 +87,10 @@ check("profileFields drops an unnamed input field (real fixture, real function)"
 // --- value fidelity: behaviour-preserving means the VALUES carry through unchanged, not just the keys.
 check("projectFields preserves values", projected.project.name === "Demo" && projected.project.denyGlobs[0] === "mockups/**");
 check("agentFields preserves values", projected.agent.startupPrompt === "go build things" && projected.agent.profileId === "profile-1");
-check("profileFields preserves values (incl. fields the tool descriptions don't name)", projected.profile.connections[0] === "conn-1" && projected.profile.vaultWrite === true);
+check("profileFields preserves values (incl. fields the tool descriptions don't name)", projected.profile.vaultWrite === true);
+// @decision afe1bc90 — the profileRow fixture still carries a STALE connections/capabilities (the dormant
+// DB columns): they must NOT leak through the projection (credential grants are agent-only now).
+check("profileFields drops the dormant connections/capabilities columns", !("connections" in projected.profile) && !("capabilities" in projected.profile));
 
 // --- undefined pass-through: db.getProject/getAgent/getProfile all return `T | undefined`, and several
 // call sites spread that possibly-undefined value directly (e.g. `{...db.getProject(id)!, extra}`,

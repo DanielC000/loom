@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Agent, Project, Task } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { LOOM_HOME, isLoomDev } from "../paths.js";
-import type { Db } from "../db.js";
+import type { Db, CredentialGrantFanoutSummary } from "../db.js";
 import { isOperatorEnabled } from "../mcp/operator.js";
 import { resolveHomeLeadAgent } from "../projects/live-lead-home.js";
 import {
@@ -394,6 +394,74 @@ function fileLeadUpgradeOfferCardOnce(db: Db, home: Project, agent: Agent | null
   });
   if (!agent) console.warn("[setup] platform-lead upgrade: no resolvable operator agent in the setup home; filed a generic offer card");
   return true;
+}
+
+/** One-shot guard: the credential-grant fan-out NOTICE card (card afe1bc90) has been filed — never re-seeded. */
+export const CREDENTIAL_GRANT_FANOUT_NOTICE_KEY = "setup.credentialGrantFanoutNoticeFiled";
+
+/**
+ * Pure: the notice card body for a stored fan-out summary (moved / dropped / orphaned per profile, plus the
+ * "new agents no longer inherit" and role-change consequences). Exported for the test.
+ */
+export function credentialGrantFanoutNoticeBody(summary: CredentialGrantFanoutSummary, connName: (id: string) => string): string {
+  const lines: string[] = [
+    "Credential grants (connections and capabilities) are now set per AGENT, not per profile. On this upgrade, every grant that a profile carried was copied onto each agent bound to that profile, so every existing agent keeps exactly the reach it had. Nothing was removed from the profile rows themselves; those fields are simply no longer read.",
+    "",
+    "What changes for you:",
+    "- A NEW agent bound to one of these profiles no longer inherits the profile's grants. Grant a connection or capability on the agent itself (agent editor).",
+    "- Agent-facing tools can no longer change these agents' roles; you can, in the agent editor.",
+    "- The profile editor no longer shows connections or capabilities, and the profile API rejects them with an error naming the agent endpoint.",
+    "",
+  ];
+  for (const p of summary.profiles) {
+    lines.push(`## Profile "${p.profileName}"`);
+    if (p.orphaned) {
+      lines.push(`- No agent is bound to this profile, so its grants (${[...p.profileConnections.map(connName), ...p.profileCapabilities.map((g) => g.slug)].join(", ") || "none"}) reached nobody and were not moved anywhere.`);
+    }
+    for (const a of p.agents) {
+      const moved = [...a.movedConnections.map(connName), ...a.movedCapabilities.map((g) => g.slug)];
+      lines.push(`- Agent "${a.agentName}": moved ${moved.length > 0 ? moved.join(", ") : "nothing"}.`);
+      for (const d of a.droppedCrossProject) {
+        lines.push(`  - dropped connection ${connName(d.connectionId)}: it is scoped to a different project than this agent, so it never had reach here.`);
+      }
+      for (const s of a.strippedCapabilityBindings ?? []) {
+        lines.push(`  - capability "${s.slug}" kept, but its binding to connection ${connName(s.connectionId)} was removed: that connection is scoped to a different project than this agent, so it never supplied credentials here (the capability mounts exactly as before, without them).`);
+      }
+      for (const id of a.dangling) lines.push(`  - connection id ${id} no longer exists; carried over unchanged (it cannot be used).`);
+    }
+    lines.push("");
+  }
+  lines.push("This card is filed once; dismissing or deleting it won't bring it back.");
+  return lines.join("\n");
+}
+
+/**
+ * Card afe1bc90 — files the ONE durable notice about the credential-grant fan-out onto the reserved
+ * Platform/Setup home, from the summary the (constructor-chain) fan-out stored. Its OWN marker, filed once
+ * ever; if the home does not exist yet it files NOTHING and stamps NOTHING (retried on a later boot) — the
+ * fan-out itself never depends on the home, so reach is already correct either way. No summary / no grants
+ * anywhere ⇒ nothing to say: stamps the marker without a card.
+ */
+export function fileCredentialGrantFanoutNoticeOnce(db: Db): { filed: boolean; reason: string } {
+  if (db.getMeta(CREDENTIAL_GRANT_FANOUT_NOTICE_KEY)) return { filed: false, reason: "already-done" };
+  const summary = db.getCredentialGrantFanoutSummary();
+  if (!summary) return { filed: false, reason: "no-summary" }; // the fan-out has not stored one; nothing to report on
+  if (summary.profiles.length === 0) { db.setMeta(CREDENTIAL_GRANT_FANOUT_NOTICE_KEY, new Date().toISOString()); return { filed: false, reason: "no-grants" }; }
+  const home = resolveSetupHome(db);
+  if (!home) return { filed: false, reason: "no-home" }; // retry next boot; grants are already fanned out
+  const now = new Date().toISOString();
+  const cols = resolveConfig(home.config).kanbanColumns;
+  const landing = columnKeyForRole(cols, "defaultLanding") ?? cols[0]?.key ?? "backlog";
+  const names = new Map(db.listConnections().map((c) => [c.id, c.name] as const));
+  const task: Task = {
+    id: randomUUID(), projectId: home.id, title: "Credential grants moved onto agents", body: credentialGrantFanoutNoticeBody(summary, (id) => names.get(id) ?? id),
+    columnKey: landing, position: Date.now(), priority: "p2", createdAt: now, updatedAt: now, version: 1,
+  };
+  db.runInTransaction(() => {
+    db.insertTask(task);
+    db.setMeta(CREDENTIAL_GRANT_FANOUT_NOTICE_KEY, now);
+  });
+  return { filed: true, reason: "filed" };
 }
 
 /**

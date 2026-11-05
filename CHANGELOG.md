@@ -5,6 +5,19 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 ## [Unreleased]
 
 ### Changed
+- **Connection and capability grants now live on the agent, not the profile.** A profile no longer
+  carries a list of connections or registry capabilities; each is granted per agent (agent editor), so a
+  grant reaches only the agent it was given to and not every agent sharing a rig. **What moved:** on first
+  boot after upgrading, every grant that was on a profile is copied onto each agent bound to that profile —
+  effective reach is unchanged. A grant on a connection scoped to a different project than the agent is
+  dropped (it never had reach), except a capability's cross-project binding, where the capability is kept and
+  only its connection binding removed; one naming a since-deleted connection is carried over and stays inert.
+  **What to check:** (1) agents that inherited a grant can no longer have their role changed by an agent
+  tool (a human still can, in the agent editor); (2) a profile edit or API call that still sends
+  `connections`/`capabilities` is now rejected, with an error pointing at the agent endpoint; (3) "Review &
+  grant" in Settings → Pending bindings now grants to the requesting agent only, after a confirm; (4) an
+  agent that holds registry capabilities cannot be bound to, or have its profile switched to, a codex-harness
+  profile. A one-time board card on your Platform home summarises what was copied and dropped.
 - **Breaking: Loom no longer forwards `ANTHROPIC_*` variables from the daemon's own environment into
   Claude sessions.** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` and the rest (plus
   `AWS_BEARER_TOKEN_BEDROCK`) are now stripped, so an exported key can no longer silently switch your fleet

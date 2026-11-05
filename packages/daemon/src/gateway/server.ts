@@ -88,10 +88,10 @@ import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/write
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile, stampSkillProvenanceHuman } from "../skills/store.js";
 import { releasedSkillsAt, releasedSkillDiffSummary, releasedSkillDiffFile, reAdoptReleasedSkill } from "../skills/inject.js";
 import { permissionWideningField } from "../skills/permissionWidening.js";
-import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
+import { validateProfile, capabilityGrantBindingError, agentCapabilitiesCodexProfileError, boundAgentCapabilitiesCodexFlipError } from "../profiles/validate.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { recordProfileGrantReach, grantFieldsOf, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
-import { validateAgentPatch, agentCredentialGrantCrossProjectError, agentCapabilityProfileCollisionError } from "../agents/validate.js";
+import { validateAgentPatch, agentCredentialGrantCrossProjectError } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
@@ -4698,10 +4698,6 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/profiles", async (req, reply) => {
     const v = validateProfile(req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
-    // P4↔P5a guard: reject a requiresConnection grant bound to an oauth2 connection (it can't be
-    // statically injected — see capabilityGrantBindingError's doc) BEFORE the profile is persisted.
-    const bindingError = capabilityGrantBindingError(v.value.capabilities ?? [], deps.db);
-    if (bindingError) return reply.code(400).send({ error: bindingError });
     const profile = { id: randomUUID(), ...v.value };
     deps.db.insertProfile(profile);
     // Pre-warm the shared markitdown venv NOW (off the event loop, best-effort) so the first session under
@@ -4728,9 +4724,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // from an unrelated edit to an already-assistant profile (must not be forced to restate it).
     const v = validateProfile({ ...base, ...patch }, { previousRole: existing.role, patch });
     if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
-    // Same P4↔P5a guard as POST — see capabilityGrantBindingError's doc.
-    const bindingError = capabilityGrantBindingError(v.value.capabilities ?? [], deps.db);
-    if (bindingError) return reply.code(400).send({ error: bindingError });
+    // Card afe1bc90 R4: flipping a profile onto codex under a bound agent that carries its own
+    // (stdio-shaped) capabilities would silently mount nothing — refuse, the grant lives on the agent now.
+    const codexFlipErr = boundAgentCapabilitiesCodexFlipError(
+      deps.db.listAllAgents().filter((a) => a.profileId === id), existing.harness, v.value.harness,
+    );
+    if (codexFlipErr) return reply.code(400).send({ error: codexFlipErr });
     deps.db.updateProfile(id, v.value);
     // Blast radius (card 3c4e0df6): if this save ADDED a human-only grant, record which agents — in which
     // projects — were already bound to this GLOBAL profile, and hand the same list back on the response.
@@ -4741,30 +4740,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       profileId: id, profileName: v.value.name,
       before: grantFieldsOf(existing), after: grantFieldsOf(v.value), source: "rest",
     });
-    // Grant-boundary reconcile (card 12dc7fc9): saving a connection onto this profile's allowlist IS the
-    // deliberate owner grant, so any PENDING binding requesting exactly that profile→connection is now
-    // satisfied — flip it 'pending'→'applied' so it leaves the "Pending bindings" queue (listPendingBindings
-    // filters WHERE provision_binding_state='pending'). 'applied' is terminal: removing the connection later
-    // is a separate deliberate action and never reverts it. A no-op when the save granted nothing new.
-    deps.db.markBindingsApplied(id, v.value.connections ?? []);
     // Same cold-skip-window pre-warm as POST: if this save turns documentConversion ON, kick the shared
     // markitdown venv now (deduped async background job; no-op when already warm).
     if (v.value.documentConversion) prewarmMarkitdown(resolvePrewarmInterpreterPath(deps.db.listAllProjects()));
     // `grantReach` is OMITTED entirely when the save granted nothing new, so its mere presence is the
     // signal — a reader never has to tell an empty payload apart from "no grant added".
-    // card 298b826e: `connections` is pinned on a session ROW at spawn and stays frozen across resume/
-    // fork/recycle (the documented contract) — a bound agent's grant reach already says "next session"
-    // (decision 3c4e0df6), but that phrase alone doesn't disambiguate a recycle successor (also a "next"
-    // session row) from a genuinely fresh spawn. Name it explicitly, ONLY when THIS save actually added
-    // `connections` to the grant (never on an unrelated edit — see `addedKeys`).
-    const connectionsFreshSpawnNote = grantReach?.addedKeys.includes("connections")
-      ? "This grant reaches only a session spawned FRESH after this save — a session that is merely " +
-        "resumed or recycled keeps whatever connections it already had."
-      : undefined;
     return {
       ...deps.db.getProfile(id),
       ...(grantReach ? { grantReach } : {}),
-      ...(connectionsFreshSpawnNote ? { connectionsFreshSpawnNote } : {}),
     };
   });
   // Delete is safe in the sense that nothing BREAKS for an assigned agent — a dangling profile_id
@@ -5883,22 +5866,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (scopeErr) return reply.code(400).send({ error: scopeErr });
       const bindingError = capabilityGrantBindingError(v.patch.capabilities ?? [], deps.db);
       if (bindingError) return reply.code(400).send({ error: bindingError });
-      // @decision caca806c (round 3, item 4) — collision-check against the POST-PATCH bound profile, not
-      // the one being replaced: a single PATCH carrying both `profileId` and `capabilities` must check
-      // the NEW binding — see the decision record for why the old binding would be the wrong comparand.
+      // Card afe1bc90 R4: an agent bound (post-patch) to a codex-harness profile cannot carry stdio
+      // capabilities — codex mounts nothing for them, so the grant would silently do nothing.
       const effectiveProfileId = "profileId" in v.patch ? v.patch.profileId : existing.profileId;
-      const boundProfile = effectiveProfileId != null ? deps.db.getProfile(effectiveProfileId) : null;
-      const collisionErr = agentCapabilityProfileCollisionError(v.patch.capabilities, boundProfile?.capabilities);
-      if (collisionErr) return reply.code(400).send({ error: collisionErr });
+      const effectiveProfile = effectiveProfileId != null ? deps.db.getProfile(effectiveProfileId) : null;
+      const codexErr = agentCapabilitiesCodexProfileError(v.patch.capabilities ?? existing.capabilities, effectiveProfile?.harness);
+      if (codexErr) return reply.code(400).send({ error: codexErr });
+    } else if ("profileId" in v.patch && v.patch.profileId != null) {
+      // Rebinding onto a codex profile while the agent already carries capabilities (R4, rebind leg).
+      const codexErr = agentCapabilitiesCodexProfileError(existing.capabilities, deps.db.getProfile(v.patch.profileId)?.harness);
+      if (codexErr) return reply.code(400).send({ error: codexErr });
     }
     // @decision 8b236b22 — human-only, audit-only (no guard, this caller is already trusted): compute
     // the old/new bound profile's widening whenever `profileId` is a patch key at all.
     let rebindReach: ReturnType<typeof recordAgentProfileRebindReach> | undefined;
     if ("profileId" in v.patch) {
       const newProfile = v.patch.profileId != null ? deps.db.getProfile(v.patch.profileId)! : null;
-      // @decision caca806c (round 3, item 3) — pass `existing` (the agent row) as `agentGrants` so the
-      // agent's own connections/capabilities fold into BOTH before/after, same as the 5 agent-facing sites.
-      const { before: beforeFields, after: afterFields } = rebindWideningFields(deps.db, existing.profileId, newProfile, existing);
+      const { before: beforeFields, after: afterFields } = rebindWideningFields(deps.db, existing.profileId, newProfile);
       rebindReach = recordAgentProfileRebindReach(deps.db, {
         agentId: existing.id, agentName: existing.name, projectId: existing.projectId,
         before: beforeFields, after: afterFields, source: "rest",
@@ -5907,8 +5891,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
     const warning = agentUpdatePromptWarning(deps.db, existing, v.patch);
     deps.db.updateAgent(id, v.patch);
+    // Card afe1bc90 R2: a pending credential binding is satisfied when its REQUESTING agent's own grant
+    // now carries the connection (the grant boundary moved from the profile to the agent).
+    if (v.patch.connections) deps.db.markBindingsAppliedForAgent(id, v.patch.connections);
+    // card 298b826e: connections are pinned on a session ROW at spawn and frozen across resume/fork/recycle.
+    const addedConnections = (v.patch.connections ?? []).some((c) => !(existing.connections ?? []).includes(c));
+    const connectionsFreshSpawnNote = addedConnections
+      ? "This grant reaches only a session spawned FRESH after this save — a session that is merely " +
+        "resumed or recycled keeps whatever connections it already had."
+      : undefined;
     const updated = deps.db.getAgent(id);
-    const withWarning = warning ? { ...updated, promptWarning: warning } : updated;
+    const withWarning = {
+      ...updated,
+      ...(warning ? { promptWarning: warning } : {}),
+      ...(connectionsFreshSpawnNote ? { connectionsFreshSpawnNote } : {}),
+    };
     return rebindReach ? { ...withWarning, rebindReach } : withWarning;
   });
 

@@ -27,7 +27,7 @@ const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
 
 // `role`/`restrictedTools` join the widening slice (card be447b3f) — BARE carries the "widens nothing"
 // baseline for both, same posture as the original seven grant keys.
-const BARE = { connections: [], capabilities: [], allowDelta: [], role: null, restrictedTools: false };
+const BARE = { allowDelta: [], role: null, restrictedTools: false };
 const fields = (over = {}) => ({ ...BARE, ...over });
 
 const AGENTS = [
@@ -37,7 +37,7 @@ const AGENTS = [
 ];
 
 check("a grant-free edit plans a plain save, with no prompt", () => {
-  const plan = planGrantSave(fields({ connections: ["c1"] }), fields({ connections: ["c1"] }), "rig", AGENTS);
+  const plan = planGrantSave(fields({ vaultWrite: true }), fields({ vaultWrite: true }), "rig", AGENTS);
   assert.equal(plan.kind, "save");
 });
 
@@ -123,19 +123,25 @@ check("a grant being REMOVED is not a grant, loaded or not", () => {
   assert.equal(planGrantSave(fields({ vaultWrite: true }), fields(), "rig", null).kind, "save");
 });
 
-check("a SECOND connection on a profile that already had one still confirms", () => {
-  // The case a non-empty "is it carried" check cannot see — a new secret reaching every bound agent.
-  const plan = planGrantSave(fields({ connections: ["c1"] }), fields({ connections: ["c1", "c2"] }), "rig", AGENTS);
+// @decision afe1bc90 — the "SECOND connection still confirms" case is retired (connections are an agent
+// field now); the same value-level lesson is pinned on a field the profile still owns: a SECOND allowDelta entry.
+check("a SECOND allowDelta entry on a profile that already had one still confirms", () => {
+  const plan = planGrantSave(fields({ allowDelta: ["Read(*)"] }), fields({ allowDelta: ["Read(*)", "Bash(ls)"] }), "rig", AGENTS);
   assert.equal(plan.kind, "confirm");
-  assert.deepEqual(plan.addedKeys, ["connections"]);
+  assert.deepEqual(plan.addedKeys, ["allowDelta"]);
+});
+
+check("a stale profile-shaped connections change plans a plain save (retired field, not a profile grant)", () => {
+  const plan = planGrantSave(fields({ connections: [] }), fields({ connections: ["c1", "c2"] }), "rig", AGENTS);
+  assert.equal(plan.kind, "save");
 });
 
 check("grantKeyList reads as prose for one, two and three keys", () => {
   assert.equal(grantKeyList(["vaultWrite"]), "vault write");
-  assert.equal(grantKeyList(["connections", "vaultWrite"]), "authenticated-egress connections and vault write");
+  assert.equal(grantKeyList(["harness", "vaultWrite"]), "harness (which CLI binary spawns) and vault write");
   assert.equal(
-    grantKeyList(["connections", "capabilities", "vaultWrite"]),
-    "authenticated-egress connections, capability grants and vault write",
+    grantKeyList(["browserTesting", "documentConversion", "vaultWrite"]),
+    "browser testing, document conversion and vault write",
   );
   assert.equal(grantKeyList([]), "");
 });
@@ -194,8 +200,6 @@ check("ADAPTER: NO grant key is pinned — each one alone is detected as added",
   // AGENT_FORBIDDEN_PROFILE_KEYS, flipping ONLY that field in the FORM must make the adapter pair report
   // exactly that key. A constant anywhere in grantFieldsOfValues fails here rather than in production.
   const FLIP = {
-    connections: { connections: ["c9"] },
-    capabilities: { capabilities: [{ slug: "browser-testing" }] },
     vaultWrite: { vaultWrite: true },
     harness: { harness: "codex" },
     browserTesting: { browserTesting: true },
@@ -222,7 +226,7 @@ check("ADAPTER: allowText is PARSED, so a whitespace-only edit grants nothing", 
 check("ADAPTER: grantFieldsOfProfile narrows to the widening keys and drops computed state", () => {
   // A whole ProfileSummary carries bundled/customized/updateAvailable; none of it is any part of a grant.
   const slice = grantFieldsOfProfile({
-    connections: ["c1"], capabilities: [], allowDelta: ["Read(*)"], vaultWrite: true,
+    allowDelta: ["Read(*)"], vaultWrite: true,
     harness: "codex", browserTesting: false, documentConversion: true,
     role: "worker", restrictedTools: false,
     name: "Rig", bundled: true, customized: true, updateAvailable: true,

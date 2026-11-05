@@ -99,8 +99,9 @@ const worktrees = [];
 {
   // A worker-profiled agent carrying a human-set connections grant — the card's own example of the
   // split: role "worker" matches nothing a manager spawn checks, yet the grant rides along regardless.
-  db.insertProfile({ id: "profWorkerConn", name: "Connections Worker", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["connX"] });
-  db.insertAgent({ id: "aWorkerConn", projectId: "pG", name: "aWorkerConn", startupPrompt: "x", position: 0, profileId: "profWorkerConn" });
+  db.insertProfile({ id: "profWorkerConn", name: "Connections Worker", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
+  // @decision afe1bc90 — the grant is an AGENT-row field now (a profile carries none), set on the agent.
+  db.insertAgent({ id: "aWorkerConn", projectId: "pG", name: "aWorkerConn", startupPrompt: "x", position: 0, profileId: "profWorkerConn", connections: ["connX"] });
 
   const err = await throws(() => svc.spawnSessionAsPlatform("pG", "aWorkerConn", "manager"));
   check("(i-1) session_spawn → spawnSessionAsPlatform(role:manager) on a worker-profiled connections-grant agent THROWS", err instanceof Error);
@@ -141,8 +142,8 @@ const worktrees = [];
   // The 4 roles the PRE-EXISTING profileRole check (spawnWorker's own, unchanged by this card) does NOT
   // block: assistant/setup/operator/workspace-auditor. Pick "assistant" — a companion profile a human
   // gave a capabilities grant, spawned as a worker (the card's own example of vector ii).
-  db.insertProfile({ id: "profAssistantCap", name: "Companion Rig", role: "assistant", description: "", allowDelta: [], skills: null, model: null, icon: null, capabilities: [{ slug: "some-capability" }] });
-  db.insertAgent({ id: "aAssistantCap", projectId: "pG", name: "aAssistantCap", startupPrompt: "x", position: 0, profileId: "profAssistantCap" });
+  db.insertProfile({ id: "profAssistantCap", name: "Companion Rig", role: "assistant", description: "", allowDelta: [], skills: null, model: null, icon: null });
+  db.insertAgent({ id: "aAssistantCap", projectId: "pG", name: "aAssistantCap", startupPrompt: "x", position: 0, profileId: "profAssistantCap", capabilities: [{ slug: "some-capability" }] });
 
   const mgr = svc.startManager("aWorkerPlain", undefined, { spawnHumanAuthorized: true });
   const taskId = "task-ergc-1";
@@ -168,13 +169,17 @@ const worktrees = [];
 
   // LEAD RULING (round 2): a null-role profile spawned as "worker" is NOT a divergence at all — a
   // role-less profile exists to BE a worker profile (e.g. "Planning & Triage" + an allow delta).
-  db.insertProfile({ id: "profNullRoleGrant", name: "Null-role grant rig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["null-conn"] });
+  db.insertProfile({ id: "profNullRoleGrant", name: "Null-role grant rig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null });
   db.insertAgent({ id: "aNullRoleGrant", projectId: "pG", name: "aNullRoleGrant", startupPrompt: "x", position: 0, profileId: "profNullRoleGrant" });
   db.insertTask({ id: "task-ergc-nullrole", projectId: "pG", title: "TN", body: "", columnKey: "todo", position: 4, createdAt: now, updatedAt: now });
   const wNull = await svc.spawnWorker(mgr.id, { taskId: "task-ergc-nullrole", agentId: "aNullRoleGrant", kickoffPrompt: "KICK" });
   worktrees.push(wNull.worktreePath);
-  check("(ii-4) null→worker is NOT a divergence — a grant-carrying null-role profile spawns as worker fine", wNull.role === "worker" && wNull.processState === "live");
+  check("(ii-4) null→worker is NOT a divergence — a grant-free null-role profile spawns as worker fine", wNull.role === "worker" && wNull.processState === "live");
 
+  // @decision afe1bc90 — the null→worker exemption covered a grant on the null-role PROFILE, which no longer
+  // exists; an AGENT-row grant is never exempt (ii-6). So (ii-4) now proves only the grant-free spawn, and the
+  // agent is granted afterwards so (ii-5) keeps proving null→manager is checked.
+  db.updateAgent("aNullRoleGrant", { connections: ["null-conn"] });
   // But the SAME exemption must NOT extend to any OTHER null-role target — only null→worker is exempt.
   const errNullMgr = await throws(() => svc.spawnSessionAsPlatform("pG", "aNullRoleGrant", "manager"));
   check("(ii-5) null→manager is STILL checked (the exemption is scoped to worker only) — REFUSED", errNullMgr instanceof Error && /connections/.test(errNullMgr.message));
@@ -230,6 +235,45 @@ const worktrees = [];
   check("(ii-8) a human-granted agent already bound to a grant-free role:null profile: worker_spawn is REFUSED",
     errBoundThenSpawn instanceof Error && /connections/.test(errBoundThenSpawn.message));
   check("(ii-8) NO new session row was created", db.listAllSessions().length === sessionsBeforeBound);
+
+  // @decision afe1bc90 (CR B1/R9) — (ii-4) at AGENT level: a grant FANNED OUT from a role:null profile keeps the
+  // null→worker exemption it had before the migration. The fan-out is the REAL migration (profile columns seeded
+  // raw, marker cleared, backfill re-run), so the durable provenance is written by the code under test.
+  db.insertProfile({ id: "profNullFan", name: "Null-role fan-out rig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null });
+  db.insertAgent({ id: "aFanOut", projectId: "pG", name: "aFanOut", startupPrompt: "x", position: 0, profileId: "profNullFan" });
+  // The same profile's other agent ALREADY carried its own grant before the migration (caca806c-era): keeps the refusal.
+  db.insertAgent({ id: "aFanOwn", projectId: "pG", name: "aFanOwn", startupPrompt: "x", position: 0, profileId: "profNullFan", connections: ["own-conn"] });
+  // R11: the agent's OWN connection is ALSO on the null-role profile (overlap) — the own grant must keep its refusal.
+  db.insertAgent({ id: "aFanDup", projectId: "pG", name: "aFanDup", startupPrompt: "x", position: 0, profileId: "profNullFan", connections: ["fan-conn"] });
+  db.db.prepare("UPDATE profiles SET connections = ?, capabilities = ? WHERE id = ?").run(JSON.stringify(["fan-conn"]), JSON.stringify([{ slug: "fan-cap" }]), "profNullFan");
+  db.db.prepare("DELETE FROM app_meta WHERE key = ?").run("profile_credential_grants_fanout_done");
+  check("(ii-4b) setup: the real fan-out re-ran", db.backfillProfileCredentialGrantsToAgentsOnce() !== undefined);
+  check("(ii-4b) setup: the fan-out put the profile's grants on BOTH agents' rows", db.getAgent("aFanOut").connections.includes("fan-conn") && db.getAgent("aFanOwn").connections.includes("fan-conn"));
+  db.insertTask({ id: "task-ergc-fanout", projectId: "pG", title: "TFO", body: "", columnKey: "todo", position: 10, createdAt: now, updatedAt: now });
+  let wFan = null;
+  const errFan = await throws(async () => { wFan = await svc.spawnWorker(mgr.id, { taskId: "task-ergc-fanout", agentId: "aFanOut", kickoffPrompt: "KICK" }); });
+  if (wFan) worktrees.push(wFan.worktreePath);
+  check("(ii-4) a FANNED-OUT connection + capability on a role:null-profile agent still spawns as worker (pre-migration reach preserved)",
+    errFan === null && !!wFan && wFan.role === "worker" && wFan.processState === "live");
+  db.insertTask({ id: "task-ergc-fanown", projectId: "pG", title: "TFW", body: "", columnKey: "todo", position: 11, createdAt: now, updatedAt: now });
+  const sessionsBeforeFanOwn = db.listAllSessions().length;
+  const errFanOwn = await throws(() => svc.spawnWorker(mgr.id, { taskId: "task-ergc-fanown", agentId: "aFanOwn", kickoffPrompt: "KICK" }));
+  check("(ii-4c) an agent-OWN pre-existing grant (same agent also got the fan-out) is STILL refused", errFanOwn instanceof Error && /connections/.test(errFanOwn.message));
+  check("(ii-4c) NO new session row was created", db.listAllSessions().length === sessionsBeforeFanOwn);
+  // R11: own connection that is ALSO on the profile is refused at spawn AND absent from the exemption record.
+  const exDup = db.getFanoutExemption("aFanDup");
+  check("(ii-4e) own-AND-profile connection is absent from getFanoutExemption (connections empty; only the fanned-out capability is exempt)",
+    exDup.connections.length === 0 && JSON.stringify(exDup.capabilities) === JSON.stringify(["fan-cap"]));
+  db.insertTask({ id: "task-ergc-fandup", projectId: "pG", title: "TFD", body: "", columnKey: "todo", position: 13, createdAt: now, updatedAt: now });
+  const sessionsBeforeFanDup = db.listAllSessions().length;
+  const errFanDup = await throws(() => svc.spawnWorker(mgr.id, { taskId: "task-ergc-fandup", agentId: "aFanDup", kickoffPrompt: "KICK" }));
+  check("(ii-4e) ...and spawning it as worker is REFUSED (own grant overlapping the profile's keeps its refusal)", errFanDup instanceof Error && /connections/.test(errFanDup.message));
+  check("(ii-4e) NO new session row was created", db.listAllSessions().length === sessionsBeforeFanDup);
+  // A grant a human adds AFTER the migration to the fanned-out agent is not exempt.
+  db.updateAgent("aFanOut", { connections: [...db.getAgent("aFanOut").connections, "later-human-conn"] });
+  db.insertTask({ id: "task-ergc-fanlater", projectId: "pG", title: "TFL", body: "", columnKey: "todo", position: 12, createdAt: now, updatedAt: now });
+  const errFanLater = await throws(() => svc.spawnWorker(mgr.id, { taskId: "task-ergc-fanlater", agentId: "aFanOut", kickoffPrompt: "KICK" }));
+  check("(ii-4d) a connection added to the fanned-out agent AFTER the migration is refused (exemption is per-grant provenance, not per-agent)", errFanLater instanceof Error && /connections/.test(errFanLater.message));
 
   // MUTANT PROOF (lesson 298/319; run BY HAND against this file, same posture as this file's own
   // header RED/GREEN note above — a live in-process monkeypatch is not possible here: ESM named-export
@@ -334,21 +378,22 @@ try {
   const a2 = await svc.recycleManager(a1.id, "handoff baseline");
   check("(recycle-A0) baseline: an on-role, grant-free manager recycles fine", a2.role === "manager");
   // A human now adds a grant to this SAME, still on-role, profile.
-  db.updateProfile("profMgrOnRole", { connections: ["later-added"] });
+  db.updateAgent("aMgrOnRole", { connections: ["later-added"] });
   const a3 = await svc.recycleManager(a2.id, "handoff after-grant-added");
   check("(recycle-A1) an on-role recycle SUCCEEDS after a grant is added to the profile (the CR's exact repro — round 1 threw here)", a3.role === "manager");
   check("(recycle-A1) the successor does NOT carry the newly-added grant (old-row-carry, not profile re-resolution)", !(a3.connections ?? []).includes("later-added"));
 
   // ---- (recycle-B) OFF-role, already grant-carrying manager (human-started) + a SECOND grant added later ----
-  db.insertProfile({ id: "profRecycleConn", name: "Recycle Conn Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["c1"] });
-  db.insertAgent({ id: "aRecycleConn", projectId: "pG", name: "aRecycleConn", startupPrompt: "x", position: 0, profileId: "profRecycleConn" });
+  db.insertProfile({ id: "profRecycleConn", name: "Recycle Conn Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null });
+  db.insertAgent({ id: "aRecycleConn", projectId: "pG", name: "aRecycleConn", startupPrompt: "x", position: 0, profileId: "profRecycleConn", connections: ["c1"] });
   const m1 = svc.startManager("aRecycleConn", undefined, { spawnHumanAuthorized: true });
   check("(recycle-B0) setup: the human-started off-role manager carries the grant on its row", m1.connections?.includes("c1"));
   const m2 = await svc.recycleManager(m1.id, "handoff 1");
   check("(recycle-B1) recycling an UNCHANGED off-role/grant lineage succeeds, carries the original grant", m2.role === "manager" && m2.connections?.includes("c1"));
   // The SAME profile now ALSO gains every OTHER forbidden-key grant (round 3, MINOR 2: the full set, not
   // just capabilities) — round 1 refused the NEXT recycle here; round 2/3 must not.
-  db.updateProfile("profRecycleConn", { capabilities: [{ slug: "newly-added" }], vaultWrite: true, browserTesting: true, documentConversion: true, harness: "codex" });
+  db.updateProfile("profRecycleConn", { vaultWrite: true, browserTesting: true, documentConversion: true, harness: "codex" });
+  db.updateAgent("aRecycleConn", { capabilities: [{ slug: "newly-added" }] });
   const m3 = await svc.recycleManager(m2.id, "handoff 2");
   check("(recycle-B2) a grant ADDED to an already off-role profile no longer refuses the next recycle", m3.role === "manager");
   check("(recycle-B2) the successor still carries the ORIGINAL grant", m3.connections?.includes("c1"));
@@ -363,11 +408,12 @@ try {
   check("(recycle-B2) the successor's harness is NOT \"codex\" despite the newly-added profile harness (role-force, not old-row-carry)", m3.harness !== "codex");
 
   // ---- (recycle-C) platform-lead: the same property, FULL forbidden-key set (round 3, MINOR 2) ----
-  db.insertProfile({ id: "profLeadOnRole", name: "On-role Lead Rig", role: "platform", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["lead-c1"] });
-  db.insertAgent({ id: "aLeadOnRole", projectId: "pG", name: "aLeadOnRole", startupPrompt: "x", position: 0, profileId: "profLeadOnRole" });
+  db.insertProfile({ id: "profLeadOnRole", name: "On-role Lead Rig", role: "platform", description: "", allowDelta: [], skills: null, model: null, icon: null });
+  db.insertAgent({ id: "aLeadOnRole", projectId: "pG", name: "aLeadOnRole", startupPrompt: "x", position: 0, profileId: "profLeadOnRole", connections: ["lead-c1"] });
   const l1 = svc.startPlatformLead("aLeadOnRole", { spawnHumanAuthorized: true });
   check("(recycle-C0) setup: the lead carries the ORIGINAL connections grant on its row", l1.connections?.includes("lead-c1"));
-  db.updateProfile("profLeadOnRole", { capabilities: [{ slug: "newly-added" }], vaultWrite: true, browserTesting: true, documentConversion: true, harness: "codex" });
+  db.updateProfile("profLeadOnRole", { vaultWrite: true, browserTesting: true, documentConversion: true, harness: "codex" });
+  db.updateAgent("aLeadOnRole", { capabilities: [{ slug: "newly-added" }] });
   const l2 = await svc.recyclePlatformLead(l1.id, "handoff");
   check("(recycle-C) platform-lead recycle SUCCEEDS after grants are added", l2.role === "platform");
   check("(recycle-C) the successor still carries the ORIGINAL connections grant", l2.connections?.includes("lead-c1"));
@@ -379,8 +425,8 @@ try {
   check("(recycle-C) the successor's harness is NOT \"codex\" despite the newly-added profile harness (role-force, not old-row-carry)", l2.harness !== "codex");
 
   // ---- (recycle-D) worker: the same property ----
-  db.insertProfile({ id: "profWorkerRecycleConn", name: "Worker Recycle Conn", role: "assistant", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["wc1"] });
-  db.insertAgent({ id: "aWorkerRecycleConn", projectId: "pG", name: "aWorkerRecycleConn", startupPrompt: "x", position: 0, profileId: "profWorkerRecycleConn" });
+  db.insertProfile({ id: "profWorkerRecycleConn", name: "Worker Recycle Conn", role: "assistant", description: "", allowDelta: [], skills: null, model: null, icon: null });
+  db.insertAgent({ id: "aWorkerRecycleConn", projectId: "pG", name: "aWorkerRecycleConn", startupPrompt: "x", position: 0, profileId: "profWorkerRecycleConn", connections: ["wc1"] });
   const mgrForW = svc.startManager("aWorkerPlain", undefined, { spawnHumanAuthorized: true });
   const wTaskId = "task-ergc-recycle-w";
   db.insertTask({ id: wTaskId, projectId: "pG", title: "TW", body: "", columnKey: "todo", position: 3, createdAt: now, updatedAt: now });
@@ -400,7 +446,8 @@ try {
   // The profile now gains the FULL forbidden-key set (round 3, MINOR 2), harness included — a worker's
   // harness is ROW-PINNED (never re-resolved, unlike manager/platform-lead above), so it is old-row-carry
   // just like the other five fields, not the role-force mechanism recycle-B2/C rely on.
-  db.updateProfile("profWorkerRecycleConn", { capabilities: [{ slug: "newly-added" }], vaultWrite: true, browserTesting: true, documentConversion: true, harness: "codex" });
+  db.updateProfile("profWorkerRecycleConn", { vaultWrite: true, browserTesting: true, documentConversion: true, harness: "codex" });
+  db.updateAgent("aWorkerRecycleConn", { capabilities: [{ slug: "newly-added" }] });
   const w3 = await svc.recycleWorker(mgrForW.id, w2.id, "handoff w2");
   worktrees.push(w3.worktreePath);
   check("(recycle-D2) a grant ADDED to the profile no longer refuses the worker's next recycle", w3.role === "worker" && w3.connections?.includes("wc1"));
@@ -415,7 +462,7 @@ try {
 
 // ============================== (plain) forcePlain drops BOTH grant sources (card caca806c round 4) ==============================
 {
-  db.insertProfile({ id: "profPlainGrant", name: "Plain grant rig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["prof-conn"] });
+  db.insertProfile({ id: "profPlainGrant", name: "Plain grant rig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null });
   // Agent-row grants only, no profile (the exact round-4 hole), AND agent-row + profile-conn grants.
   db.insertAgent({ id: "aPlainAgentOnly", projectId: "pG", name: "aPlainAgentOnly", startupPrompt: "x", position: 0, profileId: null, connections: ["agent-conn"], capabilities: [{ slug: "agent-cap" }] });
   db.insertAgent({ id: "aPlainBoth", projectId: "pG", name: "aPlainBoth", startupPrompt: "x", position: 0, profileId: "profPlainGrant", connections: ["agent-conn"], capabilities: [{ slug: "agent-cap" }] });

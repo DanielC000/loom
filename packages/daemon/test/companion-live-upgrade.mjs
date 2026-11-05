@@ -180,7 +180,9 @@ try {
   check("(1) PRE-upgrade: the new capability's tool is NOT yet in the allow-list", !preAllowlist.includes("mcp__acme__do_thing"));
 
   // ===================== simulate the owner granting new capabilities via a Profile edit =====================
-  db.updateProfile(profileId, { browserTesting: true, restrictedTools: true, capabilities: [{ slug: "acme-tool" }] });
+  // @decision afe1bc90 — the capability grant is an AGENT-row field; browserTesting/restrictedTools stay on the profile.
+  db.updateProfile(profileId, { browserTesting: true, restrictedTools: true });
+  db.updateAgent(agentId, { capabilities: [{ slug: "acme-tool" }] });
 
   // ===================== the live upgrade =====================
   host.capture.length = 0;
@@ -685,10 +687,12 @@ try {
     db.insertProfile({
       id: cwProfileId, name: `ConnWrite ${label}`, role: "assistant", description: "", allowDelta: [], skills: null, model: null, icon: null,
       browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false,
-      connections: profileConnections, vaultWrite: profileVaultWrite, capabilities: [],
+      vaultWrite: profileVaultWrite,
     });
     const cwAgentId = randomUUID();
-    db.insertAgent({ id: cwAgentId, projectId: projId, name: `ConnWrite ${label} Companion`, startupPrompt: "", position: 3, profileId: cwProfileId, endpoint: false, ioSchema: null });
+    // `profileConnections` is the AGENT's own grant now (card afe1bc90) — the name is kept so the GRANT/
+    // REVOKE call sites below read unchanged: the live source of truth the row is re-pinned FROM.
+    db.insertAgent({ id: cwAgentId, projectId: projId, name: `ConnWrite ${label} Companion`, startupPrompt: "", position: 3, profileId: cwProfileId, endpoint: false, ioSchema: null, connections: profileConnections });
     const cwSessionId = randomUUID();
     const cwEngineId = `eng-connwrite-${label}`;
     db.insertSession({

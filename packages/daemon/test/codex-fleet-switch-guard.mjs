@@ -104,14 +104,14 @@ profile("profPlain", {});
 profile("profRestricted", { restrictedTools: true });
 profile("profBrowser", { browserTesting: true });
 profile("profDoc", { documentConversion: true });
-profile("profCaps", { capabilities: [{ slug: "somecap" }] });
+profile("profCaps", {}); // @decision afe1bc90 — the capabilities grant is on the AGENT row (agCaps below)
 profile("profExplicitCodex", { harness: "codex" });
-const agent = (id, projectId, profileId, pos) => db.insertAgent({ id, projectId, name: id, startupPrompt: id, position: pos, profileId });
+const agent = (id, projectId, profileId, pos, extra) => db.insertAgent({ id, projectId, name: id, startupPrompt: id, position: pos, profileId, ...extra });
 agent("agPlain", "pC", "profPlain", 0);
 agent("agRestricted", "pC", "profRestricted", 1);
 agent("agBrowser", "pC", "profBrowser", 2);
 agent("agDoc", "pC", "profDoc", 3);
-agent("agCaps", "pC", "profCaps", 4);
+agent("agCaps", "pC", "profCaps", 4, { capabilities: [{ slug: "somecap" }] });
 agent("agExplicit", "pC", "profExplicitCodex", 5);
 agent("agPlainCS", "pCS", "profPlain", 0);
 agent("agPlainPD", "pPD", "profPlain", 0);

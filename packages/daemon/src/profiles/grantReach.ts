@@ -4,10 +4,7 @@ import {
   profileGrantReachOf,
   profileWideningsOf,
   resolveProfile,
-  unionConnections,
-  unionCapabilities,
   type AgentListItem,
-  type CapabilityGrant,
   type ProfileWideningFields,
   type ProfileWideningKey,
   type ProfileGrantReach,
@@ -148,8 +145,6 @@ function fileProfileGrantReachEvent(
 export const PROFILE_DELETE_BACKSTOP_FIELDS: ProfileWideningFields = (() => {
   const backstop = resolveProfile({ startupPrompt: null }, null);
   return {
-    connections: backstop.connections,
-    capabilities: backstop.capabilities,
     vaultWrite: backstop.vaultWrite,
     harness: backstop.harness ?? undefined,
     browserTesting: backstop.browserTesting,
@@ -169,27 +164,16 @@ export interface RebindWideningFieldsDbStore {
  * @decision 8b236b22 — ONE place that resolves an agent rebind's before/after widening-field pair
  * (Code Review nit, round 2) — the OLD bound profile vs. the NEW one, each substituting
  * {@link PROFILE_DELETE_BACKSTOP_FIELDS} when null/dangling. Call this, never re-derive it inline.
- *
- * @decision caca806c — `agentGrants`, when passed, folds the AGENT ROW's own connections/capabilities
- * into BOTH sides via the SAME profile-first union `resolveProfile` uses at spawn, so a rebind is never
- * wrongly credited with "adding" a grant the agent's own row already supplied either side.
  */
 export function rebindWideningFields(
   db: RebindWideningFieldsDbStore,
   oldProfileId: string | null,
   newProfileOrNull: ProfileWideningFields | null,
-  agentGrants?: { connections?: string[] | null; capabilities?: CapabilityGrant[] | null },
 ): { before: ProfileWideningFields; after: ProfileWideningFields } {
   const before = oldProfileId != null ? db.getProfile(oldProfileId) ?? null : null;
   const beforeFields = before ? grantFieldsOf(before) : PROFILE_DELETE_BACKSTOP_FIELDS;
   const afterFields = newProfileOrNull ? grantFieldsOf(newProfileOrNull) : PROFILE_DELETE_BACKSTOP_FIELDS;
-  if (!agentGrants) return { before: beforeFields, after: afterFields };
-  const agentConnections = agentGrants.connections ?? [];
-  const agentCapabilities = agentGrants.capabilities ?? [];
-  return {
-    before: { ...beforeFields, connections: unionConnections(beforeFields.connections ?? [], agentConnections), capabilities: unionCapabilities(beforeFields.capabilities ?? [], agentCapabilities) },
-    after: { ...afterFields, connections: unionConnections(afterFields.connections ?? [], agentConnections), capabilities: unionCapabilities(afterFields.capabilities ?? [], agentCapabilities) },
-  };
+  return { before: beforeFields, after: afterFields };
 }
 
 /**
@@ -212,8 +196,6 @@ export function setupVisibleGrantReach(
 /** Narrow an arbitrary profile-shaped row to just the fields the widening computation reads. */
 export function grantFieldsOf(p: ProfileWideningFields): ProfileWideningFields {
   return {
-    connections: p.connections,
-    capabilities: p.capabilities,
     vaultWrite: p.vaultWrite,
     harness: p.harness,
     browserTesting: p.browserTesting,

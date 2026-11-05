@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   resolveConfig,
@@ -2297,11 +2296,12 @@ function ConnectionsPanel() {
   // list row's scope badge (project id -> name), same pattern as ProjectLinksPanel below.
   const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: () => api.projects() });
   const projectName = (id: string) => projects?.find((p) => p.id === id)?.name ?? id;
-  // Bound/unbound state (card 12dc7fc9): a connection is "bound" once at least one profile allowlists it.
-  // Derived client-side from the profile store (each ProfileSummary carries its `connections` allowlist) —
-  // no dedicated backend surface needed. An auto-provisioned connection reads `unbound` until granted.
-  const { data: profileRows } = useQuery({ queryKey: ["profiles"], queryFn: () => api.profiles() });
-  const boundConnectionIds = new Set((profileRows ?? []).flatMap((p) => p.connections ?? []));
+  // Bound/unbound state (card 12dc7fc9): a connection is "bound" once at least one AGENT allowlists it
+  // (card afe1bc90: grants live on the agent row, not the profile). Derived client-side from the
+  // cross-project agent list — no dedicated backend surface. An auto-provisioned connection reads
+  // `unbound` until granted.
+  const allAgentsForBound = useAllAgents();
+  const boundConnectionIds = new Set((allAgentsForBound.data ?? []).flatMap((a) => a.connections ?? []));
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["connections"] });
   const create = useMutation({
@@ -2442,28 +2442,46 @@ function ConnectionsPanel() {
 // --- Pending bindings (credential auto-provisioning v1 binding UX, card 12dc7fc9 — "Direction B") -------
 // The owner-approval queue: each row is an agent-requested profile→connection grant recorded when a
 // credential Request was answered (the secret was stored + a Connection auto-provisioned, but the binding
-// was DELIBERATELY never applied). "Review & grant" deep-links to the profile's connection allowlist with
-// the connection pre-selected (via ?profile=&grant= query on /actors) — the grant is committed there by an
-// explicit Save, never here. HUMAN-only read (GET /api/pending-bindings); the grant reuses the human-only
-// profile-edit REST. Binding stays the deliberate owner-only trust decision — the whole point of Direction B.
+// was DELIBERATELY never applied). Card afe1bc90: the grant targets the REQUESTING AGENT only (never the
+// whole profile — least privilege). "Review & grant" opens an inline confirm; only its explicit Grant button
+// writes, through the human-only agent REST (POST /api/agents/:id). HUMAN-only read (GET /api/pending-bindings).
+// Binding stays the deliberate owner-only trust decision — the whole point of Direction B.
 function PendingBindingsPanel() {
-  const navigate = useNavigate();
+  const qc = useQueryClient();
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["pendingBindings"],
     queryFn: () => api.pendingBindings(),
   });
   const rows = data ?? [];
+  const allAgentsForGrant = useAllAgents();
+  const [confirming, setConfirming] = useState<string | null>(null); // questionId whose inline confirm is open
+  const grant = useMutation({
+    meta: { inlineError: true },
+    // Refetch-then-write: the write replaces the agent's whole connections list, so build it from the agent's
+    // CURRENT row (a fresh GET), never the cached list — a grant added elsewhere since the page loaded must survive.
+    mutationFn: async ({ agentId, connectionId }: { agentId: string; connectionId: string }) => {
+      const fresh = await api.allAgents();
+      const current = fresh.find((a) => a.id === agentId)?.connections ?? [];
+      return api.updateAgent(agentId, { connections: current.includes(connectionId) ? current : [...current, connectionId] });
+    },
+    onSuccess: () => {
+      setConfirming(null);
+      qc.invalidateQueries({ queryKey: ["pendingBindings"] });
+      qc.invalidateQueries({ queryKey: ["allAgents"] });
+      qc.invalidateQueries({ queryKey: ["connections"] });
+    },
+  });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Panel>
         <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           When you answer a credential an agent asked for, Loom stores the secret and creates a Connection —
-          but it never grants that Connection to a profile on its own. Each grant an agent requested waits
-          here for your explicit approval. "Review &amp; grant" opens the profile's connection allowlist with
-          the connection pre-selected; nothing is granted until you Save there. The grant then reaches only a
-          session spawned fresh afterward — a session that is merely resumed or recycled keeps whatever
-          connections it already had.
+          but it never grants that Connection to an agent on its own. Each grant an agent requested waits
+          here for your explicit approval. "Review &amp; grant" asks you to confirm granting the connection to
+          the REQUESTING agent only (not its whole profile); nothing is granted until you confirm. The grant
+          then reaches only a session spawned fresh afterward — a session that is merely resumed or recycled
+          keeps whatever connections it already had.
         </p>
       </Panel>
 
@@ -2484,16 +2502,29 @@ function PendingBindingsPanel() {
               <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{b.connectionName}</span>
               {b.connectionHost && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{b.connectionHost}</span>}
               <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>→</span>
-              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.cyan }}>{b.profileName}</span>
-              <Badge tone="muted">by {b.agentName}</Badge>
+              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.cyan }}>{b.agentName}</span>
+              <Badge tone="muted">profile {b.profileName}</Badge>
               <Badge tone="cyan">{b.projectName}</Badge>
               {b.alreadyGranted && <Badge tone="phosphor">Granted</Badge>}
               <span style={{ flex: 1 }} />
               <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(b.requestedAt).toLocaleString()}</span>
-              <Button variant={b.alreadyGranted ? "ghost" : "primary"}
-                onClick={() => navigate(`/actors?tab=profiles&profile=${encodeURIComponent(b.profileId)}&grant=${encodeURIComponent(b.connectionId)}`)}>
-                {b.alreadyGranted ? "View profile" : "Review & grant"}
-              </Button>
+              {!b.alreadyGranted && b.agentId && confirming !== b.questionId && (
+                <Button variant="primary" onClick={() => setConfirming(b.questionId)}>Review &amp; grant</Button>
+              )}
+              {!b.alreadyGranted && !b.agentId && (
+                <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>requesting agent was deleted — nothing to grant</span>
+              )}
+              {!b.alreadyGranted && b.agentId && confirming === b.questionId && (
+                <div data-testid={`pending-binding-confirm-${b.questionId}`} style={{ display: "flex", alignItems: "center", gap: 8, flexBasis: "100%", flexWrap: "wrap" }}>
+                  <span style={{ fontFamily: font.mono, fontSize: 12, color: color.amber }}>
+                    Grant {b.connectionName} to agent {b.agentName} only? It reaches only a session spawned fresh afterward.
+                  </span>
+                  <Button variant="primary" disabled={grant.isPending || !allAgentsForGrant.isSuccess}
+                    onClick={() => grant.mutate({ agentId: b.agentId!, connectionId: b.connectionId })}>Grant</Button>
+                  <Button variant="ghost" disabled={grant.isPending} onClick={() => setConfirming(null)}>Cancel</Button>
+                  {grant.isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{errorText(grant.error as Error)}</span>}
+                </div>
+              )}
             </div>
           ))}
         </div>

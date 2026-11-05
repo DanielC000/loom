@@ -20,7 +20,8 @@ import { resolveCapabilityServer, type CapabilityDefRow } from "./registry.js";
  *  test, mirrors `python/prewarm.ts`'s `PrewarmDeps`). */
 export interface NpmPinnedPrewarmDeps {
   listCapabilityDefs(): CapabilityDefRow[];
-  listProfiles(): { capabilities?: CapabilityGrant[] }[];
+  /** Card afe1bc90: capability grants live on the AGENT row now (the profile columns are dormant). */
+  listAllAgents(): { capabilities?: CapabilityGrant[] }[];
 }
 
 /**
@@ -36,7 +37,7 @@ export function prewarmNpmPinnedForProfilesAtBoot(db: NpmPinnedPrewarmDeps): str
   const npmPinnedRows = db.listCapabilityDefs().filter((r) => r.kind === "npm-pinned");
   if (npmPinnedRows.length === 0) return [];
   const grantedSlugs = new Set<string>();
-  for (const p of db.listProfiles()) {
+  for (const p of db.listAllAgents()) {
     for (const g of p.capabilities ?? []) grantedSlugs.add(g.slug);
   }
   const kicked: string[] = [];

@@ -76,7 +76,7 @@ allow("orchestration manager", ["worker_relink"], "SELF: explicit self-heal back
 allow("loom-tasks (manager)", ["wake_cancel", "wake_list"], "SELF: siblings of wake_me, which is named; description is the contract");
 allow("loom-tasks (manager)", ["tasks_defer_item", "tasks_defer_item_ack"], "SELF: structured defer-item hand-off between cards; description is the contract");
 allow("loom-tasks (worker)", ["tasks_defer_item", "tasks_defer_item_ack"], "SELF: structured defer-item hand-off between cards; description is the contract");
-allow("platform", ["agent_create", "agent_delete", "agent_get", "agent_update", "profile_assign",
+allow("platform", ["agent_delete", "agent_get", "profile_assign",
   "profile_delete", "profile_get", "project_archive", "project_create", "project_get", "project_init", "project_update",
   "schedule_create", "schedule_delete", "schedule_get", "schedule_update", "platform_config_get", "project_memory_search",
   "agent_prompt_search", "template_apply", "template_list", "skill_list"], "SELF: admin CRUD/read; tool description is the contract");

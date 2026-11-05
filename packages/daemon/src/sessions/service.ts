@@ -3692,14 +3692,14 @@ export class SessionService {
       : resolvedWithAgentGrants;
     if (!opts?.skipGrantCarryoverCheck && !opts?.spawnHumanAuthorized) {
       const carryoverError = explicitRoleGrantCarryoverError(resolved.role, explicitRole, {
-        connections: resolved.connections, capabilities: resolved.capabilities, vaultWrite: resolved.vaultWrite,
+        vaultWrite: resolved.vaultWrite,
         harness: resolved.harness ?? undefined, browserTesting: resolved.browserTesting,
         documentConversion: resolved.documentConversion, allowDelta: resolved.allow,
       }, {
         // @decision caca806c (round 3) — the AGENT ROW's own raw grants, not the resolved (unioned)
         // fields above — the null→worker check must see the agent's grant regardless of profile presence.
         connections: agent.connections, capabilities: agent.capabilities,
-      });
+      }, this.db.getFanoutExemption(agent.id));
       if (carryoverError) throw new Error(carryoverError);
     }
     // Layer the profile's allowDelta onto the config allow; an empty delta keeps the SAME config
@@ -18514,7 +18514,7 @@ export class SessionService {
       if (reservedErr) throw new Error(reservedErr);
       newProfile = profile;
     }
-    const { before: beforeFields, after: afterFields } = rebindWideningFields(this.db, agent.profileId, newProfile, agent);
+    const { before: beforeFields, after: afterFields } = rebindWideningFields(this.db, agent.profileId, newProfile);
     const restrictedErr = agentRebindRestrictedToolsWideningError(beforeFields, afterFields);
     if (restrictedErr) throw new Error(restrictedErr);
     // @decision caca806c — an agent carrying its own connections/capabilities grant refuses a rebind that

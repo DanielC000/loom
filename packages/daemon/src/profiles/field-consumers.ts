@@ -342,34 +342,6 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
     ],
   },
 
-  capabilities: {
-    kind: "consumed",
-    proofs: [
-      {
-        harnesses: ["claude"],
-        file: "packages/daemon/src/pty/host.ts",
-        region: "claude-create-pty",
-        pattern: `capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,`,
-        note: "createPty passes opts.capabilities into buildMcpServers, which mounts every resolved registry-capability grant.",
-      },
-      {
-        // Card b987f086 CORRECTION: the prior codex proof here pointed at createCodexPty THREADING
-        // opts.capabilities into buildMcpServers — the exact "threading is not mounting" trap this field's
-        // own registry (this file's own header, and createCodexPty's own doc) warns about: EVERY registry
-        // capability is transport:"stdio" structurally (capabilities/registry.ts's validateCapabilityDefInput
-        // rejects any other transport at catalog-creation time; resolveCapabilityServer's own return type
-        // hardcodes type:"stdio"), and codex's mcpServersToCodexArgs can only mount {type:"http"} — so the
-        // threaded value could NEVER actually mount for codex, exactly like browserTesting/documentConversion
-        // before card 7fa73e2c. The real, primary consumer is now the validator rejection (same fix shape).
-        harnesses: ["codex"],
-        file: "packages/daemon/src/profiles/validate.ts",
-        region: "whole file",
-        pattern: `if (harness !== "codex") return null;`,
-        note: "validateProfile rejects harness:\"codex\"+a non-empty capabilities array at save time (codexStdioCapabilityUnsupportedError) rather than silently mounting nothing at spawn — codex has no stdio-MCP-server mechanism to wire this to, and no registry capability can ever resolve to anything but stdio.",
-      },
-    ],
-  },
-
   vaultWrite: {
     kind: "consumed",
     proofs: [
@@ -379,19 +351,6 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         region: "whole file",
         pattern: `if (session?.vaultWrite) {`,
         note: "The loom-tasks MCP router (mounted for every role/harness alike) reads session.vaultWrite LIVE at request time to gate the vault_write tool — not baked into spawn argv, so harness-agnostic by construction.",
-      },
-    ],
-  },
-
-  connections: {
-    kind: "consumed",
-    proofs: [
-      {
-        harnesses: ["claude", "codex"],
-        file: "packages/daemon/src/mcp/server.ts",
-        region: "whole file",
-        pattern: `const sessionConnections = session?.connections ?? [];`,
-        note: "The loom-tasks MCP router reads session.connections LIVE at request time to gate authenticated_request's allowlist — harness-agnostic, same as vaultWrite above.",
       },
     ],
   },

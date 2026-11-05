@@ -97,32 +97,31 @@ const widened = (before, after) => profileWideningsOf({ ...BARE, ...before }, { 
 check("(A) vaultWrite false->true is a grant", added({}, { vaultWrite: true }).join() === "vaultWrite");
 check("(A) browserTesting false->true is a grant", added({}, { browserTesting: true }).join() === "browserTesting");
 check("(A) documentConversion false->true is a grant", added({}, { documentConversion: true }).join() === "documentConversion");
-check("(A) a first connection is a grant", added({}, { connections: ["c1"] }).join() === "connections");
-// The case a non-empty ("is it carried at all") check structurally cannot see — and the whole reason
-// this detector is value-level rather than reusing validate.ts's AGENT_FORBIDDEN_PROFILE_KEY_CARRIED.
-check("(A) a SECOND connection on a profile that already had one is a grant",
-  added({ connections: ["c1"] }, { connections: ["c1", "c2"] }).join() === "connections");
-check("(A) a first capability is a grant", added({}, { capabilities: [{ slug: "s" }] }).join() === "capabilities");
-check("(A) a capability RE-BOUND to a different connection is a grant",
-  added({ capabilities: [{ slug: "s", connectionId: "c1" }] },
-        { capabilities: [{ slug: "s", connectionId: "c2" }] }).join() === "capabilities");
+// @decision afe1bc90 — RETIRED as grants: a first/second connection and a first/re-bound capability.
+// Those are AGENT-row grants now and the profile-level detector must IGNORE a stale profile-shaped value
+// (inverted below); the agent-level reach of a grant is covered by agent-credential-grant-write.mjs.
+check("(A) a stale profile-shaped connections change is NOT a profile grant (retired field)",
+  added({}, { connections: ["c1"] }).length === 0 && added({ connections: ["c1"] }, { connections: ["c1", "c2"] }).length === 0);
+check("(A) a stale profile-shaped capabilities change is NOT a profile grant (retired field)",
+  added({}, { capabilities: [{ slug: "s" }] }).length === 0
+  && added({ capabilities: [{ slug: "s", connectionId: "c1" }] }, { capabilities: [{ slug: "s", connectionId: "c2" }] }).length === 0);
 check("(A) a new allowDelta entry is a grant",
   added({ allowDelta: ["Bash(ls)"] }, { allowDelta: ["Bash(ls)", "Bash(rm)"] }).join() === "allowDelta");
 check("(A) harness unset -> codex is a grant", added({}, { harness: "codex" }).join() === "harness");
 check("(A) harness claude -> codex is a grant", added({ harness: "claude" }, { harness: "codex" }).join() === "harness");
 check("(A) several at once are all reported, in key order",
-  added({}, { vaultWrite: true, connections: ["c1"], browserTesting: true }).join() === "connections,vaultWrite,browserTesting");
+  added({}, { vaultWrite: true, harness: "codex", browserTesting: true }).join() === "vaultWrite,harness,browserTesting");
 
 // ===================== (B) the non-grants (the detector is not always-true) =====================
 check("(B) an unchanged profile grants nothing",
-  added({ connections: ["c1"], vaultWrite: true }, { connections: ["c1"], vaultWrite: true }).length === 0);
-check("(B) REMOVING a connection is not a grant", added({ connections: ["c1"] }, { connections: [] }).length === 0);
+  added({ allowDelta: ["Bash(ls)"], vaultWrite: true }, { allowDelta: ["Bash(ls)"], vaultWrite: true }).length === 0);
+check("(B) REMOVING an allowDelta entry is not a grant", added({ allowDelta: ["Bash(ls)", "Bash(rm)"] }, { allowDelta: ["Bash(ls)"] }).length === 0);
 check("(B) turning vaultWrite OFF is not a grant", added({ vaultWrite: true }, { vaultWrite: false }).length === 0);
-check("(B) reordering connections is not a grant",
-  added({ connections: ["c1", "c2"] }, { connections: ["c2", "c1"] }).length === 0);
+check("(B) reordering allowDelta is not a grant",
+  added({ allowDelta: ["Bash(a)", "Bash(b)"] }, { allowDelta: ["Bash(b)", "Bash(a)"] }).length === 0);
 check("(B) harness codex -> claude is not a grant", added({ harness: "codex" }, { harness: "claude" }).length === 0);
 check("(B) an unrelated save on a rig already pinned to codex is not a grant",
-  added({ harness: "codex", connections: ["c1"] }, { harness: "codex", connections: ["c1"] }).length === 0);
+  added({ harness: "codex", vaultWrite: true }, { harness: "codex", vaultWrite: true }).length === 0);
 
 // ===================== (J) profileWideningsOf: role + restrictedTools (card be447b3f) =====================
 check("(J) profileWideningsOf is a strict superset of addedProfileGrants — a plain grant alone is unchanged",
@@ -676,8 +675,9 @@ const parseMcp = (res) => JSON.parse(res.content[0].text);
     PROFILE_DELETE_BACKSTOP_FIELDS.harness === undefined && backstop.harness === null);
   check("(R) allowDelta matches resolveProfile's allow (the one renamed field)",
     JSON.stringify(PROFILE_DELETE_BACKSTOP_FIELDS.allowDelta) === JSON.stringify(backstop.allow));
-  check("(R) connections matches", JSON.stringify(PROFILE_DELETE_BACKSTOP_FIELDS.connections) === JSON.stringify(backstop.connections));
-  check("(R) capabilities matches", JSON.stringify(PROFILE_DELETE_BACKSTOP_FIELDS.capabilities) === JSON.stringify(backstop.capabilities));
+  // @decision afe1bc90 — the (R) connections/capabilities rows are retired: the backstop no longer models them.
+  check("(R) the backstop no longer carries connections/capabilities (agent-row grants, not profile fields)",
+    !("connections" in PROFILE_DELETE_BACKSTOP_FIELDS) && !("capabilities" in PROFILE_DELETE_BACKSTOP_FIELDS));
 }
 
 console.log(failures === 0 ? "\nAll profile-grant-reach checks passed" : `\n${failures} check(s) FAILED`);

@@ -1960,10 +1960,10 @@ export function resolveProfile(
 ): ResolvedProfile {
   // The injected prompt is sourced from the agent regardless of whether a profile is present.
   const startupPrompt = agent.startupPrompt ?? "";
-  // Card caca806c: connections/capabilities are now the UNION of the profile's grants (the pre-existing
-  // surface) and the agent's own grants (the new, additive surface) — never agent-only. A profile-level
-  // grant must keep reaching every agent on it until card afe1bc90's fan-out migration retires the
-  // profile-level fields; see unionConnections/unionCapabilities above.
+  // Card afe1bc90: connections/capabilities are AGENT-ONLY. The profile no longer carries either (its
+  // columns are dormant); the fan-out migration (db.ts backfillProfileCredentialGrantsToAgentsOnce)
+  // already moved every former profile grant onto its agents. unionConnections/unionCapabilities stay
+  // exported solely for that migration.
   const agentConnections = agent.connections ?? [];
   const agentCapabilities = agent.capabilities ?? [];
   if (!profile) {
@@ -1987,11 +1987,11 @@ export function resolveProfile(
     noCommit: profile.noCommit ?? false,
     // Authenticated-egress connection-id allowlist — the UNION of the profile's + the agent's own (see
     // above). Backstop [] (NOT "all" — the secure default).
-    connections: unionConnections(profile.connections ?? [], agentConnections),
+    connections: agentConnections,
     // Confined vault-write grant for the vault_write tool. Backstop false.
     vaultWrite: profile.vaultWrite ?? false,
     // Registry-capability grants — the UNION of the profile's + the agent's own (see above). Backstop [].
-    capabilities: unionCapabilities(profile.capabilities ?? [], agentCapabilities),
+    capabilities: agentCapabilities,
     // Multi-harness epic (df1f94b0) Phase 1: which vendor CLI to spawn. Backstop null (engine default,
     // "claude") — mirrors model's null-backstop shape, not a boolean-flag backstop.
     harness: profile.harness ?? null,

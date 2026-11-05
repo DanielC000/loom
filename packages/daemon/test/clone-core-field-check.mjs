@@ -69,8 +69,8 @@ try {
   db.insertProject({ id: "pTarget", name: "Target", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
 
   // Non-elevated (worker) role, each carrying ONE human-only field — isolates the FIELD axis from ROLE.
-  db.insertProfile({ id: "profConnections", name: "Connections Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, connections: ["connX"] });
-  db.insertProfile({ id: "profCapabilities", name: "Capabilities Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, capabilities: [{ slug: "some-cap" }] });
+  // @decision afe1bc90 — the connections/capabilities PROFILE cases are retired (a profile carries neither);
+  // the agent-level invariant they stood for is pinned by (g) below.
   db.insertProfile({ id: "profVaultWrite", name: "VaultWrite Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, vaultWrite: true });
   db.insertProfile({ id: "profDocConversion", name: "DocConversion Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, documentConversion: true });
   db.insertProfile({ id: "profHarnessCodex", name: "Codex Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, harness: "codex" });
@@ -82,8 +82,6 @@ try {
   db.insertProfile({ id: "profBrowserTesting", name: "QA Tester Rig", role: "worker", description: "", allowDelta: [], skills: null, model: null, icon: null, browserTesting: true });
 
   const FIELD_CASES = [
-    { profileId: "profConnections", label: "connections", pattern: /connections/i },
-    { profileId: "profCapabilities", label: "capabilities", pattern: /capabilities/i },
     { profileId: "profVaultWrite", label: "vaultWrite", pattern: /vaultWrite/i },
     { profileId: "profDocConversion", label: "documentConversion", pattern: /documentConversion/i },
     { profileId: "profHarnessCodex", label: "harness(codex)", pattern: /codex/i },
@@ -138,7 +136,7 @@ try {
 
   // ============== (e) card 1f52bc75: humanAuthorized:true SKIPS the field check for the 3 NEW fields too
   // (the human-path-still-succeeds shape) ====================================================
-  const NEW_FIELD_CASES = FIELD_CASES.filter((c) => c.label !== "connections" && c.label !== "capabilities" && c.label !== "vaultWrite");
+  const NEW_FIELD_CASES = FIELD_CASES.filter((c) => c.label !== "vaultWrite");
   for (const { profileId, label } of NEW_FIELD_CASES) {
     const haCreateNew = createAgentCore(db, { projectId: "pTarget", name: `HA-Create-${label}`, profileId }, { humanAuthorized: true });
     check(`(e) createAgentCore({ humanAuthorized: true }) SKIPS the field check for a ${label} profile`,

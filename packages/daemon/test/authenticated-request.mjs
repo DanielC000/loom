@@ -262,9 +262,10 @@ try {
 
     // Profile A: no connections (the default/off case). Profile B: grants both connections above.
     db.insertProfile({ id: "profNoConn", name: "NoConnRig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null });
-    db.insertProfile({ id: "profWithConn", name: "WithConnRig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null, connections: [granted.id, weird.id] });
+    // @decision afe1bc90 — the grant lives on the AGENT row now; the profile carries no connections.
+    db.insertProfile({ id: "profWithConn", name: "WithConnRig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null });
     db.insertAgent({ id: "agentNoConn", projectId: PROJECT_ID, name: "NoConn", startupPrompt: "", position: 0, profileId: "profNoConn" });
-    db.insertAgent({ id: "agentWithConn", projectId: PROJECT_ID, name: "WithConn", startupPrompt: "", position: 1, profileId: "profWithConn" });
+    db.insertAgent({ id: "agentWithConn", projectId: PROJECT_ID, name: "WithConn", startupPrompt: "", position: 1, profileId: "profWithConn", connections: [granted.id, weird.id] });
 
     class SeamHost extends createSeamHost(PtyHost) {
       constructor(events) { super(events); this.capture = []; }

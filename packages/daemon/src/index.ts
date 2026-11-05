@@ -21,7 +21,7 @@ import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.j
 import { seedDefaultCapabilities, migrateGithubCapabilityToBinary, migrateImageGenCapabilityToNpmPinned, migrateImageGenNpmPinnedVersionBump } from "./capabilities/seed.js";
 import { prewarmNpmPinnedForProfilesAtBoot } from "./capabilities/prewarm.js";
 import { seedPlatformHome, migratePlatformPrompts, getPlatformHomePaths } from "./platform/seed.js";
-import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent, migrateSetupHomeToLead } from "./setup/seed.js";
+import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent, migrateSetupHomeToLead, fileCredentialGrantFanoutNoticeOnce } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath, shouldPrewarmCompanionVoice } from "./python/prewarm.js";
@@ -289,6 +289,14 @@ async function main(): Promise<void> {
     else if (leadUpgrade.offered) console.log("[boot] filed the one-time Platform Lead upgrade-available card");
   } catch (err) {
     console.warn(`[boot] setup-home Lead upgrade migration failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Card afe1bc90: the one-time notice about the credential-grant fan-out (the fan-out itself already ran
+  // in the Db constructor chain, so reach is correct whether or not this finds a home to file on yet).
+  try {
+    const notice = fileCredentialGrantFanoutNoticeOnce(db);
+    if (notice.filed) console.log("[boot] filed the one-time credential-grant fan-out notice card");
+  } catch (err) {
+    console.warn(`[boot] credential-grant fan-out notice failed (continuing boot): ${(err as Error).message}`);
   }
   // End-User Platform tier B4: seed the bundled Workspace Auditor agent into the SAME reserved "Platform"
   // setup home as the operator (one home, two agents). A SEPARATE boot-time backfill — NOT folded into

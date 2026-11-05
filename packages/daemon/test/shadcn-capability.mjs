@@ -235,14 +235,20 @@ check("(d) no sentinel VALUE leaked under any OTHER key name either (defense in 
   !JSON.stringify(echoed.env).includes("SENTINEL"));
 
 // ===================== (e) codex rejection, named for THIS capability =====================
-check("(e) harness:codex + capabilities:[{slug:'shadcn'}] is rejected", (() => {
-  const r = validateProfile({ name: "X", harness: "codex", capabilities: [{ slug: "shadcn" }] });
-  return r.ok === false && /capabilities is not supported on harness "codex"/.test(r.error);
+// @decision afe1bc90 — `capabilities` is an AGENT-row grant now, so the codex gate is the agent-level
+// `agentCapabilitiesCodexProfileError` (grant vs the BOUND profile's harness), not a profile-payload check.
+const { agentCapabilitiesCodexProfileError } = await import("../dist/profiles/validate.js");
+check("(e) a shadcn capability on an agent bound to a harness:codex profile is rejected", (() => {
+  const e = agentCapabilitiesCodexProfileError([{ slug: "shadcn" }], "codex");
+  return typeof e === "string" && /capabilities is not supported on harness "codex"/.test(e);
 })());
-check("(e) harness:claude + capabilities:[{slug:'shadcn'}] is still accepted (the gate is codex-only)", (() => {
-  const r = validateProfile({ name: "X", harness: "claude", capabilities: [{ slug: "shadcn" }] });
-  return r.ok === true;
-})());
+check("(e) the same grant on an agent bound to a harness:claude profile is still accepted (the gate is codex-only)",
+  agentCapabilitiesCodexProfileError([{ slug: "shadcn" }], "claude") === null);
+check("(e) CONTRAST: a profile payload naming `capabilities` is now rejected as a retired key, whatever the harness",
+  ["claude", "codex"].every((harness) => {
+    const r = validateProfile({ name: "X", harness, capabilities: [{ slug: "shadcn" }] });
+    return r.ok === false && /no longer profile fields/.test(r.error);
+  }));
 
 // ===================== (f) no bundled profile pre-ticks it =====================
 for (const p of BUNDLED_PROFILES) {

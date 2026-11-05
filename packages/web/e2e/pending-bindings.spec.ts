@@ -6,10 +6,11 @@
 //      records the binding as PENDING (never auto-applied).
 //   2. Settings → "Pending bindings" renders that row (connection → profile, "by <agent>"), and the
 //      Connections panel badges the connection "Auto-provisioned" + "Unbound".
-//   3. "Review & grant" deep-links to the profile's connection allowlist with the connection PRE-SELECTED
-//      (a pre-select banner + a "requested by <agent>" hint), but nothing is granted yet.
-//   4. The grant is committed only by an explicit Save — an observable before/after: the profile's
-//      allowlist is empty before, and contains the connection after (REST read-back).
+//   3. "Review & grant" opens an inline confirm naming the REQUESTING agent (card afe1bc90: the grant
+//      is agent-level, never the whole profile); Cancel declines with nothing written.
+//   4. The grant is committed only by the confirm's explicit Grant — an observable before/after: the
+//      agent's allowlist is empty before, contains the connection after (REST read-back), and the
+//      profile named in the ask gains nothing.
 //
 // The binding stays the deliberate owner-only trust decision — the whole point of Direction B.
 import { expect, test } from "./fixtures/daemon";
@@ -54,14 +55,17 @@ test("pending binding surfaces in Settings, then Review & grant commits only on 
   await apiPost(base, `/api/questions/${questionId}/answer`, { secret: `sk_live_${ts}` });
 
   // The pending-binding read surface reflects it (also gives us the provisioned connection id).
-  const bindings = await apiGet<{ questionId: string; connectionId: string; profileId: string }[]>(base, "/api/pending-bindings");
+  const bindings = await apiGet<{ questionId: string; connectionId: string; profileId: string; agentId: string | null }[]>(base, "/api/pending-bindings");
   const mine = bindings.find((b) => b.questionId === questionId);
   expect(mine, "the answered credential produced a pending binding").toBeTruthy();
   const connectionId = mine!.connectionId;
+  const agentId = mine!.agentId!;
+  expect(agentId, "the pending binding names the REQUESTING agent (the grant target)").toBeTruthy();
+  const agentConnections = async () =>
+    (await apiGet<{ id: string; connections?: string[] }[]>(base, "/api/agents")).find((a) => a.id === agentId)?.connections ?? [];
 
-  // Before the grant: the profile's allowlist is EMPTY (nothing auto-applied).
-  const before = await apiGet<{ connections?: string[] }>(base, `/api/profiles/${profile.id}`);
-  expect(before.connections ?? []).not.toContain(connectionId);
+  // Before the grant: the requesting AGENT's allowlist is EMPTY (nothing auto-applied).
+  expect(await agentConnections()).not.toContain(connectionId);
 
   // --- Settings: the Pending bindings queue + the Connections badges ---
   await pinActiveProject(page, seeded.projectId);
@@ -70,37 +74,47 @@ test("pending binding surfaces in Settings, then Review & grant commits only on 
   await expect(page.getByText("Pending bindings", { exact: true }).first()).toBeVisible();
   const reviewBtn = page.getByRole("button", { name: "Review & grant" });
   await expect(reviewBtn).toBeVisible();
-  // The row names who asked and the target profile.
-  await expect(page.getByText(`by Billing Bot ${ts}`, { exact: false })).toBeVisible();
-  await expect(page.getByText(`Payments Worker ${ts}`, { exact: false }).first()).toBeVisible();
+  // The row names the REQUESTING agent (the grant target) and, as context, the profile named in the ask.
+  await expect(page.getByText(`Billing Bot ${ts}`, { exact: true })).toBeVisible();
+  await expect(page.getByText(`profile Payments Worker ${ts}`, { exact: false }).first()).toBeVisible();
 
   // The Connections panel badges the auto-provisioned, not-yet-bound connection. This connection is the
   // only auto-provisioned / api-key row on the daemon, so the first badge of each kind is ours.
   await expect(page.getByText("Auto-provisioned", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Unbound", { exact: true }).first()).toBeVisible();
 
-  // --- Review & grant → the profile's allowlist, pre-selected ---
+  // --- Review & grant → an inline confirm naming the REQUESTING agent; nothing written yet ---
   await reviewBtn.click();
-  await expect(page).toHaveURL(/\/actors\?tab=profiles&profile=.*&grant=/);
+  const confirm = page.getByTestId(`pending-binding-confirm-${questionId}`);
+  await expect(confirm).toBeVisible();
+  await expect(confirm).toContainText(`agent Billing Bot ${ts} only`);
+  expect(await agentConnections(), "opening the confirm grants nothing").not.toContain(connectionId);
 
-  // The pre-select banner + the "requested by" hint prove the deep-link landed and pre-selected — unsaved.
-  await expect(page.getByText(/is pre-selected below/)).toBeVisible();
-  await expect(page.getByText(`requested by Billing Bot ${ts}`, { exact: false })).toBeVisible();
+  // Cancel is a real decline: still nothing granted, the row stays queued.
+  await confirm.getByRole("button", { name: "Cancel" }).click();
+  await expect(confirm).toBeHidden();
+  expect(await agentConnections()).not.toContain(connectionId);
 
-  // Nothing has been granted yet — the allowlist is still empty at rest.
-  const stillEmpty = await apiGet<{ connections?: string[] }>(base, `/api/profiles/${profile.id}`);
-  expect(stillEmpty.connections ?? []).not.toContain(connectionId);
+  // M4 (refetch-then-write): the page's cached agent list is now STALE — another grant lands on the same
+  // agent (agent REST) AFTER the page loaded. The panel's write replaces the whole list, so it must be built
+  // from the agent's CURRENT row or this second grant would be silently erased.
+  const otherConn = await apiPost<{ id: string }>(base, "/api/connections", { name: `E2E Other ${ts}`, host: "other.example.com", authScheme: "bearer", secret: `tok_${ts}` });
+  await apiPost(base, `/api/agents/${agentId}`, { connections: [otherConn.id] });
+  expect(await agentConnections()).toEqual([otherConn.id]);
 
-  // The deliberate Save is what commits the grant.
-  await page.getByRole("button", { name: "Save", exact: true }).click();
+  // The deliberate Grant is what commits it — to the agent, not the profile.
+  await page.getByRole("button", { name: "Review & grant" }).click();
+  await page.getByTestId(`pending-binding-confirm-${questionId}`).getByRole("button", { name: "Grant", exact: true }).click();
 
-  // Observable after-state: the profile's allowlist now contains the connection (REST read-back).
-  await expect.poll(async () => {
-    const after = await apiGet<{ connections?: string[] }>(base, `/api/profiles/${profile.id}`);
-    return after.connections ?? [];
-  }).toContain(connectionId);
+  // Observable after-state: the AGENT's allowlist now contains the connection (REST read-back) …
+  await expect.poll(agentConnections).toContain(connectionId);
+  expect(await agentConnections(), "the grant added elsewhere after page load survives (refetch-then-write)").toContain(otherConn.id);
+  // … and the row left the queue. (That the profile named in the ask gained nothing is asserted against the RAW
+  // column in daemon/test/pending-bindings.mjs — the profile REST body has no grant key, so it cannot show it.)
+  await expect.poll(async () => (await apiGet<{ questionId: string }[]>(base, "/api/pending-bindings")).some((b) => b.questionId === questionId)).toBe(false);
 
   // Clean up the profile + connection so the shared daemon doesn't carry them into later specs.
   await fetch(`${base}/api/profiles/${profile.id}`, { method: "DELETE" });
   await fetch(`${base}/api/connections/${connectionId}`, { method: "DELETE" });
+  await fetch(`${base}/api/connections/${otherConn.id}`, { method: "DELETE" });
 });

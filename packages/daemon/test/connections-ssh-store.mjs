@@ -495,8 +495,9 @@ try {
     const now = new Date().toISOString();
     const PROJECT_ID = "pSshMcp";
     db.insertProject({ id: PROJECT_ID, name: "SshMcpProj", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
-    db.insertProfile({ id: "profSsh", name: "SshRig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null, connections: [createdP4.id] });
-    db.insertAgent({ id: "agentSsh", projectId: PROJECT_ID, name: "SshAgent", startupPrompt: "", position: 0, profileId: "profSsh" });
+    // @decision afe1bc90 — the connection grant lives on the AGENT row, not the profile.
+    db.insertProfile({ id: "profSsh", name: "SshRig", role: null, description: "", allowDelta: [], skills: null, model: null, icon: null });
+    db.insertAgent({ id: "agentSsh", projectId: PROJECT_ID, name: "SshAgent", startupPrompt: "", position: 0, profileId: "profSsh", connections: [createdP4.id] });
     const sSsh = svc.startNew("agentSsh");
     check("core-tasks: session row pins the ssh connection id (so authenticated_request registers)", (db.getSession(sSsh.id).connections ?? []).includes(createdP4.id));
 
