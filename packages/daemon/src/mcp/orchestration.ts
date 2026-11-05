@@ -3488,7 +3488,82 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_status",
       {
-        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once you worker_message/worker_redirect it, it's recycled or stopped, or its merge actually COMPLETES (merely reviewing its diff with worker_merge, or a rejected/cancelled merge, does NOT clear this). Also includes `staleReport` (see worker_list) — non-null once your OWN session has completed several further turns since this report was recorded with it still unresolved; asserts NO cause, only that your session kept turning while this specific report sat unconsumed — pull `worker_report_get(workerSessionId)` to recover it in full, straight from durable event storage — with none of `worker_transcript(lastN:2)`'s caveats (a rotated engine session id; a rendered/truncated transcript). Also includes `ctxPct` (see worker_list) — `ctxInputTokens` pre-divided by this worker's own model context window, rounded to a whole percent; null exactly when `ctxInputTokens` is null, never a measured 0. Also includes `contextTelemetry` (see worker_list) — boolean|null, the field that tells a structurally-unmeasurable-on-this-harness null (codex today) apart from a not-yet-measured one (pair with `neverCompletedTurn`); null means not determinable here. Also includes `neverCompletedTurn` (see worker_list) — `true` while this worker's `turnSeq` is still 0 (it has not finished a single turn yet), which makes a `null` `ctxInputTokens` decidable (\"no data yet\", not a broken measurement) instead of a bare, ambiguous null. ⚠️ `turnSeq` counts LOOM-TURNS (submit → confirmed-idle), never a harness's own internal transcript-record count — see worker_list's own `neverCompletedTurn` entry for the full reasoning and the codex-specific trap (a real pilot misreading). Also includes `archivedWithoutReport` (see worker_list) — true only when this worker's pty EXITED WITHOUT EVER CALLING worker_report and the strand is still unresolved; NEVER true for a worker that reported (even `noChanges`) and cleanly auto-retired. Also includes `directive` (see worker_list) — your most recent worker_message OR worker_redirect's raw resolved state (`\"none\"|\"pending\"|\"delivered\"|\"parked\"|\"confirmed-after-park\"`), whichever you sent most recently. Also includes `staleDirective` (see worker_list) — a delivered worker_message or worker_redirect with no worker_report since, once several of the worker's own real turns have passed with no report. Also includes `parkedDirective` (see worker_list) — a worker_message or HELD worker_redirect Loom gave up redelivering entirely (exhausted its internal retry/re-mint budget with no confirmed hand-off); mutually exclusive with `staleDirective`, STICKY (a worker_report does NOT clear it — only a newer worker_message or worker_redirect does — OR a late confirming hook resolving it to `directive.state:\"confirmed-after-park\"`, see worker_list's own docs for that third state), and the signal that catches a directive that never reached the worker at all — re-send it, UNLESS `directive.state` already reads `\"confirmed-after-park\"`, in which case the original landed and resending would duplicate it. (A worker_redirect is tracked this way on either delivery path — held or immediately-delivered; see worker_redirect's own docs.) Also includes `lastEngineOutputAt`, the intra-turn liveness signal (see worker_list) — recent means the engine is alive and emitting, stale means it may be wedged; neither proves the work is actually converging (see worker_list for why, and what to check instead). Also includes `composerDirtyLen` (see worker_list) — a count of characters possibly still sitting UNSUBMITTED in this worker's composer from an earlier delivery that never confirmed; null when not live in this process, 0 means genuinely clean (never read an absent signal as a measured zero). ⚠️ CONSERVATIVE ONLY (see worker_list for the full reading guide): never assumes a defensive clear-prefix actually landed. Also includes `composerDirtyLenBelieved` (same null-vs-0 discipline) — the OPTIMISTIC counterpart; read the two together — equal means nothing to doubt, `composerDirtyLenBelieved` lower means a clear is unresolved and the gap is how many characters are in doubt. Also includes `unconfirmedDeliveryMs` (see worker_list) — an EARLIER signal than `composerDirtyLen`: milliseconds since this worker's current generation's Enter was written, for as long as it stays unconfirmed by a hook; non-null the instant a write is outstanding, unlike `composerDirtyLen` which needs a give-up/heal to actually fire first. Does NOT by itself distinguish still-retrying from already-gave-up-outcome-unknown — cross-check `composerDirtyLen` (see worker_list for the full reading guide). Also includes `pendingQueueDepth` (see worker_list) — how many messages sit in this worker's FIFO send queue right now, every sender counted, not just yours; null when not live, 0 is a genuine measured empty queue. Only one entry drains per completed turn — a non-zero depth means your own direction may take several more turns to land, not that delivery is stuck. Also includes `currentTurnBusyForMs` (see worker_list) — milliseconds since this worker's current turn went busy, null if idle or not live, always null for a codex worker (no equivalent concept on that harness). A large value here on a busy worker is not by itself evidence of a wedge — pair it with `lastEngineOutputAt` before concluding anything is stuck. Also includes `codexBootStuck` (see worker_list) — CODEX-ONLY, non-null (`{at, timeoutMs, unmet}`) exactly while a codex session's boot-readiness ceiling has fired without ever latching, the discriminator for a wedged-at-boot codex session that otherwise reads identically to a healthy idle one on `processState`/`resumability`/`busy`; `null` for a claude row, a codex row still within its own boot window, or one not live here; cleared automatically if a late marker sighting still latches boot readiness normally. Also includes `kickoffConfirmPending` (see worker_list) — non-null `{composerDirtyLen, windowMs}` only while this worker's turn-1 kickoff is unconfirmed and still inside its size-aware plausible-confirm window; `null` once confirmed/completed a turn, or for an ordinary-sized kickoff that never earned an extended window. Also includes `lastMismatchReplay` (see worker_list) — non-null means this worker's own `[loom:prompt-mismatch]` notice identified a REPLAY of an earlier generation it wrote: a POSSIBLE loss of whatever you last sent it, NOT an established one, which the worker cannot verify itself — a later `lastMismatchFusion` on this same worker naming this `gen` means it was recovered, not lost; check for that before re-sending. Also includes `lastMismatchFusion` (see worker_list) — the FUSED counterpart, with the OPPOSITE contract from `lastMismatchReplay`: non-null means the reported content was a CONFIRMED concatenation of more than one generation this worker wrote (`spanGens` names all of them) — the current turn's own content always arrived intact, so DO NOT re-send; check instead whether an earlier named generation's own directive already ran, to avoid acting on it twice. Also includes `lastMismatchPastedContentWrapReplay` (see worker_list) — a FOURTH, DISTINCT signal from the three `lastMismatch*` fields above: non-null means a late engine echo wrapped an EARLIER generation's own recorded write in the engine's own paste-composer framing, and this turn's own (tag-stripped) intended text is CONTENT-IDENTICAL to it — NOT A LOSS, do not re-send solely because this is non-null; content identity only, never lineage. Also includes `lastMismatchNoticeSuppressed` (see worker_list) — non-null means a byte-identical repeat of this worker's own `[loom:prompt-mismatch]` notice was suppressed rather than delivered as a duplicate turn; `count` tells you how many times, for the current signature. A defensive guard, not evidence the underlying re-mint trigger is understood. Also includes `lastPasteTripwireGiveUp` (see worker_list) — the SENDER pull-surface for the bare-paste-placeholder tripwire's own give-up (its one-shot auto-recovery re-injection ALSO collapsed, and Loom will not retry a third time); a DIFFERENT failure class from `lastMismatchReplay`/`lastMismatchFusion`/`lastMismatch`, additive alongside the existing `console.warn` and session+sender nudge, same PULL-surface mechanics (never cleared once set, overwritten by a later occurrence). Also includes `lastFlushAttribution` (see worker_list) — the sticky `worker_flush` attribution verdict, readable here without re-calling that tool. Also includes `lastMismatch` (see worker_list) — a GENERIC, DERIVED `{kind, gen, at}` view (`kind` one of `\"replay\"|\"fusion\"|\"unmatched\"`) over `lastMismatchReplay`/`lastMismatchFusion`/`lastMismatchUnmatched` above, computed at read time as whichever fired most recently (by `detectedAt`) — NOT a fourth stored field, so \"did any mismatch fire recently, and roughly what kind\" is answerable from this one field without knowing every class name in advance; `null` means none of the three has fired yet, or the session isn't live in this process. Also includes `unresolvedCascade` (see worker_list) — non-null (`{msgId, parkedAt, mismatchKind, mismatchAt, note}`) only when `parkedDirective` AND `lastMismatch` both fired within a bounded window of each other: an exact ambiguous cascade a prior forensic close proved costs a two-file forensic read to rule out. `note` states plainly this is UNRESOLVED (never a guessed verdict) and names the one check that settles it (read this worker's own transcript for a turn acting on the content) — it is NOT a refusal/block and does NOT mean stop or recycle this worker. Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works. OPTIONAL `msgId`: `directive`/`staleDirective`/`parkedDirective` above only ever track your MOST RECENT worker_message/worker_redirect to this worker — the instant you send a newer one, an OLDER directive's own resolution becomes invisible there even though it keeps resolving on its own. Pass the ROOT msgId a PRIOR worker_message/worker_redirect call returned to you (never a re-mint id — you were never handed one) to get `queriedDirective: {msgId, found, state, at}` for THAT SPECIFIC directive regardless of what you've sent since: `found:false` means this worker has no record of that root msgId at all; `found:true` gives its own `state` (`\"pending\"|\"delivered\"|\"parked\"|\"confirmed-after-park\"`) independent of the tracked `directive` field. This is the per-message consumed/not-consumed read — check a specific earlier directive before treating a `parked` notice about it as a reason to recycle or re-spawn, even after you've since sent something newer to the same worker. Also includes `worktreePathAliases` (see worker_list) — the path-keyed count of OTHER session rows sharing this row's exact worktree_path; `gen`/`recycledFrom` are NOT an aliasing check (they track recycle chains only), use this field instead. Same null-vs-0 discipline as `composerDirtyLen`: `0` is measured (nothing else shares this path), `null` means this row has no worktreePath of its own to key on.",
+        description:
+          "Get the full session record for one of your workers, by workerSessionId. Carries the same " +
+          "fields as worker_list (read their definitions there) plus the derived `reportedState` " +
+          "(done|blocked|null) and `awaitingReview`: set when the worker has called worker_report and is idle " +
+          "awaiting your review; cleared when you worker_message/worker_redirect it, it is recycled or " +
+          "stopped, or its merge COMPLETES (reviewing its diff with worker_merge, or a rejected/cancelled " +
+          "merge, does NOT clear it). Differences and reading rules: " +
+          "`staleReport` asserts NO cause, only that your session kept turning while the report sat " +
+          "unconsumed; recover it with `worker_report_get(workerSessionId)` (durable event storage, without " +
+          "`worker_transcript(lastN:2)`'s caveats: a rotated engine session id, a rendered/truncated " +
+          "transcript). `ctxPct` is null exactly when `ctxInputTokens` is null, never a measured 0. " +
+          "`contextTelemetry` (boolean|null) separates a null that is structurally unmeasurable on this " +
+          "harness (codex) from not-yet-measured; pair with `neverCompletedTurn` (`true` while `turnSeq` is " +
+          "0, so a null `ctxInputTokens` means \"no data yet\"). `turnSeq` counts LOOM-TURNS (submit → " +
+          "confirmed-idle), never a harness's transcript-record count. `archivedWithoutReport` is true only " +
+          "when the pty exited without ever calling worker_report and the strand is unresolved; never for a " +
+          "worker that reported (even `noChanges`). " +
+          "`directive` is the state of your latest worker_message/worker_redirect " +
+          "(`\"none\"|\"pending\"|\"delivered\"|\"parked\"|\"confirmed-after-park\"`). `staleDirective`: a " +
+          "delivered directive with no worker_report after several of the worker's real turns. " +
+          "`parkedDirective`: a worker_message or HELD worker_redirect Loom gave up redelivering (retry/re-mint " +
+          "budget exhausted, no confirmed hand-off); mutually exclusive with `staleDirective`, STICKY " +
+          "(a worker_report does not clear it; only a newer worker_message/worker_redirect, or a late " +
+          "confirming hook resolving it to `directive.state:\"confirmed-after-park\"`). Re-send it, UNLESS " +
+          "`directive.state` already reads `\"confirmed-after-park\"` (the original landed; resending would " +
+          "duplicate it). A worker_redirect is tracked this way on either delivery path. " +
+          "`lastEngineOutputAt`: recent means the engine is alive and emitting, stale means it may be wedged; " +
+          "neither proves the work is converging. `composerDirtyLen`: characters possibly still UNSUBMITTED in " +
+          "the worker's composer from a delivery that never confirmed; null = not live here, 0 = measured " +
+          "clean. It is conservative (never assumes a defensive clear-prefix landed); " +
+          "`composerDirtyLenBelieved` is the optimistic counterpart (same null-vs-0 rule): equal = nothing to " +
+          "doubt, lower = an unresolved clear, the gap being the characters in doubt. `unconfirmedDeliveryMs`: " +
+          "ms since the current generation's Enter was written while a hook has not confirmed it; earlier " +
+          "than `composerDirtyLen`, and does NOT distinguish still-retrying from gave-up (cross-check " +
+          "`composerDirtyLen`). `pendingQueueDepth`: messages in the worker's FIFO send queue from every " +
+          "sender; null = not live, 0 = measured empty; one entry drains per completed turn, so non-zero " +
+          "means your direction may take several turns, not that delivery is stuck. `currentTurnBusyForMs`: " +
+          "ms since the current turn went busy; null if idle, not live, or codex. A large value alone is not " +
+          "a wedge; pair with `lastEngineOutputAt`. `codexBootStuck` (CODEX-ONLY): " +
+          "`{at, timeoutMs, unmet}` exactly while the boot-readiness ceiling has fired without latching " +
+          "(otherwise indistinguishable from a healthy idle session); null for claude, a codex row within " +
+          "its boot window, or not live here; cleared if a late marker still latches. `kickoffConfirmPending`: " +
+          "`{composerDirtyLen, windowMs}` only while the turn-1 kickoff is unconfirmed inside its size-aware " +
+          "confirm window, else null. " +
+          "`lastMismatchReplay` non-null = the worker's `[loom:prompt-mismatch]` notice identified a REPLAY of " +
+          "an earlier generation: a POSSIBLE loss of what you last sent, not an established one; a later " +
+          "`lastMismatchFusion` naming this `gen` means it was recovered; check before re-sending. " +
+          "`lastMismatchFusion` (opposite contract) non-null = a CONFIRMED concatenation of several " +
+          "generations (`spanGens`); the current turn's content arrived intact, so DO NOT re-send; check " +
+          "whether an earlier named generation's directive already ran, to avoid acting on it twice. " +
+          "`lastMismatchPastedContentWrapReplay`: a late engine echo wrapped an earlier generation's write in " +
+          "paste-composer framing and this turn's text is CONTENT-IDENTICAL to it; NOT a loss, don't re-send " +
+          "because of it (content identity only, never lineage). `lastMismatchNoticeSuppressed`: a " +
+          "byte-identical repeat of the worker's `[loom:prompt-mismatch]` notice was suppressed (`count` for " +
+          "the current signature); a defensive guard, not evidence the trigger is understood. " +
+          "`lastPasteTripwireGiveUp`: pull-surface for the bare-paste-placeholder tripwire's give-up (its " +
+          "one-shot recovery also collapsed; no third try); a different failure class from the " +
+          "`lastMismatch*` fields; never cleared once set, overwritten by a later occurrence. " +
+          "`lastFlushAttribution`: the sticky `worker_flush` verdict. `lastMismatch`: derived `{kind, gen, " +
+          "at}` (kind `\"replay\"|\"fusion\"|\"unmatched\"`), whichever of those fired most recently by " +
+          "`detectedAt`; null = none fired, or not live here. `unresolvedCascade` " +
+          "`{msgId, parkedAt, mismatchKind, mismatchAt, note}`: non-null only when `parkedDirective` AND " +
+          "`lastMismatch` fired within a bounded window of each other, an ambiguous cascade; `note` states it " +
+          "is UNRESOLVED (never a guessed verdict) and names the one check that settles it (read the worker's " +
+          "transcript for a turn acting on the content). It is NOT a refusal and does NOT mean stop or " +
+          "recycle the worker. `worktreePathAliases`: count of OTHER session rows sharing this row's exact " +
+          "worktree_path (`gen`/`recycledFrom` are not an aliasing check); `0` = measured, `null` = the row " +
+          "has no worktreePath. " +
+          "With NO workerSessionId it returns the fleet view (same as worker_list). Optional `msgId`: " +
+          "`directive`/`staleDirective`/`parkedDirective` track only your MOST RECENT message/redirect, so an " +
+          "older directive's resolution becomes invisible once you send a newer one. Pass the ROOT msgId a " +
+          "prior worker_message/worker_redirect call returned (never a re-mint id) to get `queriedDirective: " +
+          "{msgId, found, state, at}` for that directive: `found:false` = no record of that root msgId; " +
+          "`found:true` gives its own `state` (`\"pending\"|\"delivered\"|\"parked\"|\"confirmed-after-park\"`). " +
+          "This is the per-message consumed/not-consumed read; check it before treating a `parked` notice " +
+          "about an earlier directive as a reason to recycle or re-spawn.",
         inputSchema: strictShape({ workerSessionId: z.string().optional(), msgId: z.string().optional() }),
       },
       async ({ workerSessionId, msgId }) => {
@@ -3772,7 +3847,83 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_spawn",
       {
-        description: "Spawn a worker: creates an isolated git worktree + branch and starts a worker session in it. kickoffPrompt is the canonical param for the worker's kickoff instructions; `kickoff` is accepted as an ALIAS for it — pass either one (if both, kickoffPrompt wins). agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId is OPTIONAL — pass it to bind the worker to a board task (moves the task to in_progress; accepts EITHER the full id OR an unambiguous 8-char id-prefix, resolved within your project; an ambiguous prefix errors naming the candidate ids); OMIT it for a TASKLESS spawn — an ad-hoc spike/no-commit worker that gets its own isolated worktree with no board card to falsify or hijack. A taskless worker reports up via worker_report exactly like a tasked one, just with no card to move — it never lands in a review lane, so retire it yourself with worker_stop once you've read its report. If it produced commits you actually want landed, worker_merge_confirm still works on it (the branch merges onto main; there's just no card to move to done, since it never had one) — task it for real instead if you want the normal review-lane flow. The one-live-worker-per-task guard only ever applies to a REAL taskId — a taskless spawn never competes for it (two taskless spawns never collide with each other either). A SECOND, narrower taskId guard also refuses while a worker_merge_confirm or merge_batch op for that SAME task is still in flight — even while NO live worker holds it (the ordinary shape: a merge targets a worker that has already exited) — because that op is still reading/writing the IDENTICAL deterministic worktree a respawn would reuse; the error names the in-flight opId and says to re-spawn once it settles. The SAME guard applies to worker_recycle (it reuses the predecessor's worktree IN PLACE, with no createWorktree call at all — the identical hazard from a different entry point), and to the REVERSE direction too: a worker_merge_confirm/merge_batch mint itself refuses when a worker_spawn is already in flight for the task, or has just claimed its worktree. The claim releases on the real op's OWN completion (including an op a daemon-internal dead-owner sweep had to evict out from under a now-gone manager — its orphaned run still releases on ITS OWN finish, not left stuck until a restart). CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath}; a slow one (worktree provisioning taking a while) instead returns {opId,status:\"pending\",taskId} — poll via worker_list (a placeholder row) or RE-CALL worker_spawn with the SAME taskId (or the same omission)/agentId/kickoffPrompt (idempotent-retryable for a TASKED retry: while still in flight it attaches to the SAME in-flight spawn rather than starting a second one, and never throws 'already in flight'; a TASKLESS retry has no stable identity to dedupe against and may start a second taskless worker — retire the extra with worker_stop if so). A TASKED re-call landing AFTER it settles, within ~" + sessions.spawnOpRetainMinutes + " min of settle, is ALSO answered from the ORIGINAL worker — the result carries `reused:true` plus a `reusedNote`: the kickoff was NOT re-delivered (it already ran once, at the original spawn), so use worker_message for any new direction. Past that window a same-args retry falls through to the live-worker guard instead of returning anything — read worker_list rather than re-calling blind. HARNESS DEFAULT SKIPPED: when the platform/project default harness is codex but this worker's profile needs something codex cannot honour (restrictedTools, browserTesting, documentConversion, or capabilities), the worker is spawned on claude instead and the result carries `harnessDefaultSkipped:{items,note}` (omitted otherwise). REVIEW SPAWN: pass EITHER `reviewOfWorkerSessionId` (an existing worker session id) OR `reviewOfTaskId` (a task id, resolved to that task's own deterministic branch — works even if its worker has since exited) — mutually exclusive, both OPTIONAL, and orthogonal to `taskId` (the review convention is a TASKLESS spawn: pass a `reviewOf*` and omit `taskId`, e.g. for a Code Reviewer profile). Server-resolves the reviewed branch + its CURRENT tip sha and cuts THIS worker's own fresh branch FROM that tip instead of from the repo's HEAD — so its worktree's content is byte-identical to what's under review at spawn time (ordinary Read/Grep is correct by construction; no `git show`/hand-typed-branch step needed), and the resolved branch+sha is mechanically injected into its kickoff. A bad/unresolvable `reviewOf*` id is a hard `{error}` — it never silently falls back to a HEAD-forked spawn. This is a PINNED SNAPSHOT: a later push to the reviewed branch is not reflected without a fresh review spawn. The result ALSO carries `reviewOf:{branch,headSha}` when this was a review spawn (absent otherwise). WASTED-DISPATCH ADVISORY (tasked spawns only): if the card's title already appears — verbatim, once coerced to a commit subject the same way a squash-merge coerces one — as a commit on the project's mainline within its recent history, the result ALSO carries `shippedMatch:{sha,subject,mainBranch}` plus a human-readable `warning` naming the matching commit; this NEVER blocks the spawn (the worker still starts) — it's a flag for YOU to verify before letting it proceed, since the fix may already be shipped. Absent on a non-match, a taskless spawn, or any other spawn shape. REUSED-DIRTY-WORKTREE FLAG: when this spawn REUSED a worktree retained from a PRIOR hard-stopped or rejected-merge attempt on this task AND it still carries real leftover uncommitted work, the result ALSO carries `reusedDirtyWorktree:true` plus `reusedDirtyWorktreeStatus:{statusSummary,fileCount,truncated}` (a bounded `git status`-derived summary) — the worktree is NEVER auto-cleaned (Loom never silently discards a hard-stopped worker's edits), and the new worker's own kickoff already carries a reconcile note pointing at the same leftover paths, so you don't need to hand-instruct one yourself. Absent for a fresh worktree or a reused-but-clean one. DISCARDED-ON-RECUT FLAG: when this spawn REUSED a worktree whose branch had 0 commits ahead of the mainline (an empty/stale branch), Loom re-cuts it onto current main BEFORE the worker is spawned — a `git reset --hard` that DISCARDS any tracked edits that worktree still carried, rather than leaving them for you or the worker to see. When that reset actually discarded something, the result ALSO carries `discardedOnRecut:true` plus `discardedOnRecutStatus:{statusSummary,fileCount,truncated}` (captured immediately BEFORE the reset, since the files themselves are gone after) and a human-readable `discardedOnRecutWarning` — this is a DIFFERENT fact from REUSED-DIRTY-WORKTREE above and the two never overlap on one spawn: that flag means the leftover work SURVIVED and needs reconciling; this one means it did NOT survive — Loom's own re-cut already destroyed it, so there is nothing left in the tree to reconcile, only a record of what was lost. The worker's own kickoff already carries this same fact. Absent for a fresh worktree, a reattached-branch-only worktree (always a clean checkout), a reused-but-already-clean worktree, or a >0-ahead recovery branch (never recut). STALE BRANCH BASE FLAG: when this spawn reused/reattached a task branch that carries prior-session commits (a recovery branch) AND that branch's base has since fallen behind the project's current mainline, Loom first tries a CLEAN auto-forward (merging the mainline into the branch — never a rebase, never past a conflict); if that succeeds the branch is simply caught up and nothing is surfaced. Only when a clean auto-forward wasn't possible does the result ALSO carry `staleBase:{baseSha,behindBy,changedFiles,truncated}` plus a human-readable `staleBaseWarning` — the worker's own kickoff already carries a matching forward-merge instruction, so you don't need to hand-instruct one yourself, but you may want to factor it into your review. Absent for a fresh branch, a branch that was never behind, or one that auto-forwarded cleanly. LIVE CAPACITY: a SUCCESSFUL spawn's result ALSO carries `capacity:{cap,live,inFlight,free}` — `cap` is this project's RESOLVED (default-or-override) `maxConcurrentWorkers`, `live` is this manager's own current live-worker count (INCLUDING the worker this call just spawned), `inFlight` is any of this manager's OTHER spawn calls still mid-provisioning (not yet a live row), and `free` is how many MORE workers this manager can spawn right now (`max(0, cap-live-inFlight)`). This is the exact moment to decide whether to dispatch again — it is a live read taken at THIS call, not a cached/boot-time value, so don't hand-transcribe it anywhere that outlives the next spawn/retirement; re-read it (or worker_list's own `capacity`) instead of assuming it's still current. Previously the cap was observable ONLY by deliberately provoking a rejection to read its message — that workaround is no longer needed. `capacity` is `null` on the rare occasion this read itself fails right after a successful spawn (the worker is still live either way) — treat `null` as \"unavailable right now\", never as all-zero/no-free-capacity; re-read it via worker_list if you need it. CONCURRENCY-CAP REJECTION: if the cap is full, the result is `{error:\"concurrency cap reached (N)\"}` PLUS `capQueued:{opId,taskId,queuedAt}` — the intent was recorded and is now visible as a placeholder row in worker_list, so it's never silently lost. WHILE THIS DAEMON PROCESS KEEPS RUNNING, it AUTO-FIRES on its own (FIFO) the next time a slot on this manager frees — no re-call needed — or re-call worker_spawn with the same args yourself if you don't want to wait; either clears the marker. To withdraw it instead, `worker_stop({opId})`. ⚠️ IT DOES NOT SURVIVE A DAEMON RESTART OF ANY KIND (a crash, a dev-watch reload, or a deliberate restart (via `daemon_restart` where your surface has it, or a human relaunch otherwise)) — the queue is an in-memory-only record with no persistence, by design; a restart silently discards every entry with no error and no trace on the board. A graceful restart (via `daemon_restart` where your surface has it, or triggered by a human otherwise) notifies EVERY affected manager/platform what was dropped on the other side, not just the one who called it; a crash or dev-watch restart gives no such notice at all — re-`worker_spawn` by hand after ANY restart if a dispatch you made before it still matters.",
+        description:
+          "Spawn a worker: creates an isolated git worktree + branch and starts a worker session in it. " +
+          "kickoffPrompt is the canonical param for the kickoff instructions; `kickoff` is an ALIAS (if both, " +
+          "kickoffPrompt wins). agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs), " +
+          "NEVER your own manager agent; a manager/platform-role agent is rejected. agentId accepts the agent's " +
+          "id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). " +
+          "taskId is OPTIONAL: pass it to bind the worker to a board task (moves it to in_progress; accepts the " +
+          "full id or an unambiguous 8-char prefix; an ambiguous prefix errors naming the candidates). OMIT it " +
+          "for a TASKLESS spawn (an ad-hoc spike/no-commit worker with its own isolated worktree and no card). " +
+          "A taskless worker reports via worker_report like a tasked one but never lands in a review lane, so " +
+          "retire it yourself with worker_stop once you've read its report; worker_merge_confirm still works on " +
+          "it if you want its commits landed (no card moves to done). The one-live-worker-per-task guard applies " +
+          "only to a REAL taskId. A SECOND taskId guard refuses while a worker_merge_confirm or merge_batch op " +
+          "for that SAME task is in flight, even with NO live worker holding it, because that op is still using " +
+          "the identical deterministic worktree a respawn would reuse; the error names the in-flight opId, so " +
+          "re-spawn once it settles. The same guard applies to worker_recycle (it reuses the predecessor's " +
+          "worktree in place) and in REVERSE: a worker_merge_confirm/merge_batch mint refuses when a " +
+          "worker_spawn is in flight for the task or has just claimed its worktree. The claim releases on the " +
+          "real op's OWN completion, including an orphaned run a daemon-internal dead-owner sweep evicted " +
+          "out from under a now-gone manager. " +
+          "CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath}; a slow one " +
+          "returns {opId,status:\"pending\",taskId}. Poll worker_list (a placeholder row) or RE-CALL " +
+          "worker_spawn with the SAME taskId (or omission)/agentId/kickoffPrompt. A TASKED retry is idempotent: " +
+          "while in flight it attaches to the same spawn and never throws 'already in flight'. A TASKLESS retry " +
+          "has no stable identity and may start a second worker (retire the extra with worker_stop). A TASKED " +
+          "re-call after it settles, within ~" + sessions.spawnOpRetainMinutes + " min, is answered from the " +
+          "ORIGINAL worker with `reused:true` plus `reusedNote`: the kickoff was NOT re-delivered, so use " +
+          "worker_message for new direction. Past that window a same-args retry falls through to the " +
+          "live-worker guard; read worker_list rather than re-calling blind. " +
+          "HARNESS DEFAULT SKIPPED: when the platform/project default harness is codex but the worker's profile " +
+          "needs something codex cannot honour (restrictedTools, browserTesting, documentConversion, or " +
+          "capabilities), the worker spawns on claude and the result carries `harnessDefaultSkipped:{items,note}` " +
+          "(omitted otherwise). " +
+          "REVIEW SPAWN: pass EITHER `reviewOfWorkerSessionId` OR `reviewOfTaskId` (resolved to that task's own " +
+          "deterministic branch; works after its worker exited): mutually exclusive, optional, orthogonal to " +
+          "`taskId` (convention: a TASKLESS spawn, e.g. a Code Reviewer profile). The server resolves the " +
+          "reviewed branch + its CURRENT tip and cuts this worker's fresh branch FROM that tip instead of HEAD, " +
+          "so its worktree is byte-identical to what's under review; the branch+sha is injected into its " +
+          "kickoff. An unresolvable `reviewOf*` id is a hard `{error}`, never a silent HEAD-forked spawn. It is " +
+          "a PINNED SNAPSHOT: later pushes to the reviewed branch need a fresh review spawn. The result carries " +
+          "`reviewOf:{branch,headSha}` (absent otherwise). " +
+          "WASTED-DISPATCH ADVISORY (tasked spawns only): if the card's title appears verbatim (coerced to a " +
+          "commit subject as a squash-merge would) as a commit in the mainline's recent history, the result " +
+          "carries `shippedMatch:{sha,subject,mainBranch}` plus a `warning`. It NEVER blocks the spawn; verify " +
+          "before letting it proceed. " +
+          "REUSED-DIRTY-WORKTREE: when the spawn REUSED a worktree retained from a prior hard-stopped or " +
+          "rejected-merge attempt that still has uncommitted work, the result carries " +
+          "`reusedDirtyWorktree:true` plus `reusedDirtyWorktreeStatus:{statusSummary,fileCount,truncated}`. The " +
+          "worktree is NEVER auto-cleaned and the worker's kickoff already carries a reconcile note. " +
+          "DISCARDED-ON-RECUT: when the reused worktree's branch had 0 commits ahead of the mainline, Loom " +
+          "re-cuts it onto current main before the spawn with a `git reset --hard` that DISCARDS its tracked " +
+          "edits. If something was discarded, the result carries `discardedOnRecut:true`, " +
+          "`discardedOnRecutStatus:{statusSummary,fileCount,truncated}` (captured before the reset) and " +
+          "`discardedOnRecutWarning`. The opposite of REUSED-DIRTY-WORKTREE (the two never overlap): that work " +
+          "SURVIVED and needs reconciling; this work is GONE. The kickoff already carries the fact. Absent for " +
+          "a fresh, reattached-branch-only, already-clean, or >0-ahead recovery worktree (never recut). " +
+          "STALE BRANCH BASE: when the spawn reused a task branch with prior-session commits whose base fell " +
+          "behind the mainline, Loom first tries a CLEAN auto-forward (merging the mainline in, never a rebase, " +
+          "never past a conflict); on success nothing is surfaced. Otherwise the result carries " +
+          "`staleBase:{baseSha,behindBy,changedFiles,truncated}` plus `staleBaseWarning`; the kickoff already " +
+          "carries a forward-merge instruction. " +
+          "LIVE CAPACITY: a SUCCESSFUL spawn's result carries `capacity:{cap,live,inFlight,free}`: `cap` is the " +
+          "project's RESOLVED `maxConcurrentWorkers`, `live` your current live-worker count (INCLUDING the " +
+          "worker just spawned), `inFlight` your OTHER spawns still mid-provisioning, `free` = " +
+          "`max(0, cap-live-inFlight)`. It is a live read at THIS call; don't hand-transcribe it anywhere that " +
+          "outlives the next spawn/retirement; re-read it (or worker_list's `capacity`). `capacity` is `null` if " +
+          "that read itself failed after a successful spawn: treat as \"unavailable right now\", never as " +
+          "all-zero/no-free-capacity. " +
+          "CONCURRENCY-CAP REJECTION: if the cap is full the result is `{error:\"concurrency cap reached (N)\"}` " +
+          "PLUS `capQueued:{opId,taskId,queuedAt}`: the intent is recorded as a placeholder row in worker_list. " +
+          "WHILE THIS DAEMON PROCESS KEEPS RUNNING it AUTO-FIRES (FIFO) when a slot on this manager frees, or " +
+          "re-call worker_spawn with the same args yourself; either clears the marker. To withdraw it, " +
+          "`worker_stop({opId})`. ⚠️ IT DOES NOT SURVIVE A DAEMON RESTART OF ANY KIND (a crash, a dev-watch " +
+          "reload, a deliberate restart): the queue is in-memory only and a restart silently discards every " +
+          "entry. A graceful restart notifies EVERY affected manager/platform what was dropped; a crash or " +
+          "dev-watch restart gives no notice. Re-`worker_spawn` by hand after ANY restart if a dispatch you made " +
+          "before it still matters.",
         inputSchema: strictShape({
           taskId: z.string().optional(),
           agentId: z.string(),
@@ -5229,247 +5380,110 @@ export class OrchestrationMcpRouter {
       "gate_history",
       {
         description:
-          "Read-only, PAGINATED history of settled daemon-executed gate runs for YOUR OWN project ONLY " +
-          "(merge/build gates, their transient-kill retries, worker self-checks, and deploys) — INCLUDING " +
-          "REJECTED runs, which carry the same `durationMs`/`gateCap`/`concurrentGates`/`concurrentGatesMax` " +
-          "a passed run does (recorded unconditionally, before any pass/fail branching — the exact data " +
-          "`gate_queue` and `gate_status` cannot give you, since both only ever describe LIVE ops, never " +
-          "settled history). Use this to recover a real gate-duration trend (e.g. \"is the floor climbing\") " +
-          "instead of hand-maintaining a readings table from nudge text. Returns {items: GateHistoryRow[], " +
-          "total, limit, offset, nextOffset} — `items` is newest-first; each row is {id, gateType " +
+          "Read-only, PAGINATED history of settled daemon-executed gate runs (merge/build gates, their " +
+          "transient-kill retries, worker self-checks, deploys) for YOUR OWN project ONLY, REJECTED runs " +
+          "included. `gate_queue`/`gate_status` describe only LIVE ops; use this for duration trends. " +
+          "Returns {items, total, limit, offset, nextOffset}, `items` newest-first; each row is {id, gateType " +
           "(\"merge\"|\"worker\"|\"deploy\"), outcome (\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"|" +
-          "\"skipped\"), " +
-          "passed (the same outcome as a plain boolean — `outcome===\"pass\"`), gateRan, durationMs, gateCap, " +
+          "\"skipped\"), passed (`outcome===\"pass\"`), gateRan, durationMs, gateCap, " +
           "concurrentGates, concurrentGatesMax, endedAt, failingTest, opId, taskId, branch, workerLabel, " +
           "sessionId, projectId, projectName, retriedFile, retryPassed, retryDeclineReason, transientRetried, " +
           "emitCompareReduced, emitCompareNotApplicableKind, emitCompareIdenticalCount, emitCompareTestFiles, fallbackOfBatchOpId}. " +
-          "⭐ `fallbackOfBatchOpId` is the DURABLE, post-hoc counterpart to `gate_queue`'s " +
-          "LIVE-ONLY `fallbackOfBatchOpId`: non-null ONLY on a row from one of " +
-          "`merge_batch`'s own automatic per-branch fallback confirms, naming the batch op's `opId` it fell " +
-          "back FROM — the SAME id `gate_queue` shows only while that row is still live, stamped here so it " +
-          "survives long after the row drains. `null` on the batch's OWN gate row (that one self-identifies " +
-          "via `batched`/`batchBranches` instead — the two are never both non-null on one row), `null` on " +
-          "every ordinary solo merge, and `null` on any row recorded before this field shipped (never " +
-          "backfilled). ⛔ Do NOT re-derive this from `gate_queue` — that instrument only ever shows a LIVE " +
-          "op; this field exists precisely to answer the question after that row is gone. " +
-          "⚠️ `emitCompareReduced`: a duration series built from this table MUST bucket on " +
-          "this field before comparing durations — a `\"merge\"` row's gate can run REDUCED (build + static " +
-          "guards, ± the selected test files — seconds, not minutes) instead of the full daemon test suite, " +
-          "and the two populations differ by an order of magnitude or more. TRI-STATE: `true` = this gate " +
-          "genuinely ran reduced; `false` = a real gate spawned and was PROVEN not reduced (a genuine full " +
-          "run — the positive control, never read as \"nothing to report\"); `null` = no gate spawned for " +
-          "this op, this row predates this field, this is a `\"worker\"`/`\"deploy\"` row (the " +
-          "reduction feature is MERGE-ONLY), OR a real gate spawned and ran the FULL suite " +
-          "on a repo whose layout the reduction predicate can never evaluate at all — structurally, `false` " +
-          "is reachable ONLY on a project shaped like Loom's own daemon package; on every other project " +
-          "this reads `null`, not by coincidence. NEVER pool a `null` row with a `false` row as if both were " +
-          "known full runs — `null` means \"not determinable\", not \"known full run\". " +
-          "`emitCompareNotApplicableKind` is the coarse, PATH-FREE reason `emitCompareReduced` " +
-          "reads `null` FOR THIS ROW specifically because the predicate said `notApplicable:true` — " +
-          "`null` for every OTHER cause of a `null` `emitCompareReduced` (no gate spawned, a row predating " +
-          "this field, a `\"worker\"`/`\"deploy\"` row, or a genuine `false`). One of `\"repo-out-of-domain\"` " +
-          "(a REPO-LEVEL fact, checked via a dedicated `git ls-tree` against the repo's own tree rather than " +
-          "inferred from this diff alone — NONE of the four scope directories exist anywhere in this repo, " +
-          "so the predicate could never decide ANY diff on it) or `\"path-out-of-scope\"` (covers BOTH " +
-          "remaining shapes, sharing the identical actionable fact that the predicate applies to this repo " +
-          "fine, just not — fully, or at all — to THIS diff: either this diff touched an out-of-scope path " +
-          "while the SAME diff also touches an in-scope one elsewhere, or the repo's own tree DOES have one " +
-          "of the four scope directories even though this particular diff doesn't touch it; see " +
-          "`merge_batch`'s own description for the batch-size degradation this specific shape drives), plus the rarer " +
-          "`\"harness-config-unavailable\"`/`\"typescript-unresolvable\"`/`\"git-operation-failed\"`/" +
-          "`\"empty-diff\"`/`\"unparseable-diff\"` mechanism-failure reasons. Before this card every one of " +
-          "these collapsed onto the same bare `null`, indistinguishable without re-running the predicate " +
-          "against the diff by hand. " +
-          "`emitCompareIdenticalCount`/`emitCompareTestFiles` are present (non-null) ONLY alongside " +
-          "`emitCompareReduced:true`, and are ALWAYS read TOGETHER, never one without the other — " +
-          "`emitCompareIdenticalCount:0` is VACUOUS on one of two arms: paired with a NON-EMPTY " +
-          "`emitCompareTestFiles` it means the selected-test-files arm (a test-only diff has no compiled " +
-          "files to compare — `0` means \"nothing to check\", not \"the check found nothing\"); paired with " +
-          "an EMPTY `emitCompareTestFiles` it means the emit-identity arm, fully informative (zero test " +
-          "files ran — build + static guards only). The cheapest way to tell the two arms apart WITHOUT " +
-          "reading either field is the `[loom:merge-done]` nudge text this mirrors: \"…+ N selected test " +
-          "file(s)\" names the selected-test-files arm (N is the already-widened count, " +
-          "changed files plus any pulled in by import/scanner rules, never a literal changed-file count); " +
-          "\"…static guards only, skipped the full daemon test " +
-          "suite\" (no test-file clause) names the emit-identity arm. " +
-          "The bounded single-file retry / the bounded multi-file retry (AND — a batch row, " +
-          "`detail.batched === true`, not just a solo one) — `retriedFile`/`retryPassed`: a " +
-          "`gateType:\"merge\"` row whose test step named UP TO `MULTI_FILE_RETRY_MAX` identifiable, " +
-          "re-runnable files retried together, once, before this row's verdict — `retriedFile` is a " +
-          "comma-joined list of the retried name(s) (a bare single name for the N=1 case, byte-identical " +
-          "to before the multi-file widening), `null` on the overwhelming majority of rows (nothing retried). A " +
-          "`\"pass\"` row " +
-          "carrying a non-null `retriedFile` is WEAKER evidence than an ordinary clean pass (the first " +
-          "attempt failed for real; only the isolated re-run came back green — the exact shape an " +
-          "order-dependent/cross-test-pollution bug can produce) — never read it as an ordinary green. " +
-          "`retryPassed:false` alongside a non-null `retriedFile` means the retry ALSO failed and this row " +
-          "rejected exactly as it would have with no retry mechanism at all. " +
-          "`retryDeclineReason` is present ONLY when a genuine gate failure was eligible " +
-          "for this retry mechanism to even CONSIDER (never on a `\"kill\"`/`\"timeout\"` attempt 1, which " +
-          "the sibling TRANSIENT-KILL retry owns instead) but `identifyRetriableTestFiles` declined it — " +
-          "one of its own decline-reason strings (`\"no-fail-tier-match\"`, `\"count-mismatch\"`, " +
-          "`\"over-cap\"`, `\"harness-not-executed\"`, `\"unparseable-name\"`, `\"file-not-found\"`, " +
-          "`\"duplicate-name\"`) explaining WHY, so a rejection like this is diagnosable after the fact " +
-          "from THIS tool alone, instead of needing a fresh live repro. Mutually exclusive with a non-null " +
-          "`retriedFile` on the same row — a retry is either identified (eligible for `retriedFile`) or " +
-          "declined (eligible for THIS field), never both. `undefined` on the overwhelming majority of " +
-          "rows — either `identifyRetriableTestFiles` was never even called (the outer genuine-failure " +
-          "guard was already false) or this row predates the field; never read `undefined` as \"eligible\". " +
-          "⚠️ THIS FIELD HAS NO `gate_status(opId)` EQUIVALENT — it is durable ONLY here. " +
-          "⚠️ EXCEPTION TO THAT PAIRING: `retriedFile` can now be non-null with " +
-          "`retryPassed: null` (never `true`/`false`) — this is a single-file retry that was IDENTIFIED and " +
-          "attempted, then had its OWN admission cancelled while still queued (HISTORICAL — rows written before a retry stopped re-queuing, when a retry could still queue), before it ever ran to a " +
-          "verdict; the row's `outcome` reads `\"cancelled\"` in this shape (see below), never `\"pass\"`/" +
-          "`\"reject\"`. Every OTHER non-null `retriedFile` row still pairs it with a real `true`/`false`. " +
-          "⚠️ ON A NON-NULL `retriedFile` ROW, `durationMs` AND THE `gateCap`/`concurrentGates`/" +
-          "`concurrentGatesMax` TRIPLE — both describe the SAME single admission: a retry is a link " +
-          "of attempt 1's own admission, never a second one. `durationMs` is still attempt 1's own run time ALONE " +
-          "(bounded to the failure that triggered the retry); `concurrentGates` is attempt 1's admission snapshot and " +
-          "`concurrentGatesMax` the max across the whole chain, while `passed` is the final (retry-inclusive) verdict. " +
-          "HISTORICAL (older rows, before a retry stopped re-queuing): the triple described the RETRY's separate, later admission, so " +
-          "`durationMs` and the triple described two different admissions — except on the cancelled-retry " +
-          "shape, where the retry never ran and both described attempt 1's. " +
-          "On every other row (`retriedFile` null) both describe the same, single admission as usual. " +
-          "⚠️ `\"cancelled\"` IS A DISTINCT OUTCOME, NEVER A REJECTION: a withdrawn run " +
-          "(`gate_cancel`, queued or running) reached NO VERDICT — it was neither a pass nor a failure. " +
-          "Before this, a cancelled `\"worker\"` row (the only gate type whose cancel shared the " +
-          "plain `worker_gate` event kind with a real run — a cancelled MERGE gate emitted a separate " +
-          "excluded event kind and never reached this table at all) silently fell through to " +
-          "`outcome:\"reject\"`. HISTORICAL — rows written before a retry stopped re-queuing (a retry can no longer queue, so this shape is no longer produced): a cancelled MERGE gate COULD also reach this " +
-          "table, in ONE specific shape — the single-file-retry-cancellation just described above, where " +
-          "attempt 1 already genuinely ran and failed before the retry's own (withdrawn) admission — so " +
-          "that real run is recorded as `outcome:\"cancelled\"` instead of vanishing. " +
-          "⚠️ (HISTORICAL — rows written before a retry stopped re-queuing) — THE SIBLING SHAPE, HANDLED DIFFERENTLY: the transient-kill auto-retry's own " +
-          "cancel-while-queued case ALSO now leaves a distinguishable record, but not by reclassifying " +
-          "attempt 1's row — that `build_gate` row was already written, unconditionally, BEFORE this " +
-          "retry ever starts, and stays a real, unmodified `outcome:\"reject\"` (a true, measured fact: " +
-          "attempt 1 genuinely failed a retry-eligible kill/timeout run). Instead, a SEPARATE " +
-          "`build_gate_retry` row is emitted for the SAME `opId`, stamped `outcome:\"cancelled\"` " +
-          "(`gateRan:false` — this retry's own admission never spawned a process), recording that the " +
-          "retry which could have confirmed or salvaged attempt 1's failure never ran. " +
-          "⭐ A CONSUMER COMPUTING A REJECTION RATE MUST READ THIS PAIRING: a `\"reject\"` `build_gate` row " +
-          "immediately followed (same `opId`) by a `\"cancelled\"` `build_gate_retry` row is ONE unresolved " +
-          "op, not a rejection — counting the reject row alone reproduces exactly the inflation fixed " +
-          "above for the single-file-retry shape. A caller " +
-          "computing a pass/fail or REJECTION RATE from this table must filter on `outcome===\"reject\"`, " +
-          "never on `passed===false` alone — `passed` stays `outcome===\"pass\"` exactly as before (so a " +
-          "cancelled row still reads `passed:false`, since it is also not a pass), but `passed:false` on a " +
-          "`\"cancelled\"` row does NOT mean the same thing as `passed:false` on a `\"reject\"` row; only " +
-          "`outcome` carries that distinction. ⚠️ BACKFILL: existing rows are re-classified for FREE the " +
-          "moment this ships — `outcome` is derived live from each row's own stored detail, never stored " +
-          "materialized, so a historical cancelled row that already recorded `cancelled:true` reads " +
-          "`\"cancelled\"` retroactively, not just going forward. A trend spanning the boundary is still " +
-          "SAFE to compare on `outcome` for this reason — unlike `concurrentGatesMax` below, there is no " +
-          "old-encoding-vs-new-encoding mix to account for here. " +
-          "⭐ `transientRetried` NAMES WHICH ROW IS THE RETRY, so you don't have to infer it " +
-          "from the pairing alone: DERIVED from the row's own underlying event kind (never a stored detail " +
-          "field), `true` iff this row IS the transient-kill retry's own `build_gate_retry` row just " +
-          "described (its own `outcome`/`passed` already say whether THAT retry passed or failed); `false` " +
-          "for every `build_gate`/`worker_gate`/`deploy` row, including attempt 1's own `\"reject\"` row in " +
-          "the pairing above. Mutually exclusive with a non-null `retriedFile` on the SAME row (a first " +
-          "attempt is classified either \"genuine\", eligible for the single-file retry, or \"kill\"/" +
-          "\"timeout\", eligible for THIS retry, never both) — never both truthy on one row. " +
-          "⚠️ `gate_status(opId).transientRetried` means something DIFFERENT: there `true` DOES mean the " +
-          "op's merged verdict was reached via the retry (a weaker pass) — don't carry this field's " +
-          "meaning across surfaces. " +
-          "⚠️ `\"skipped\"` IS ALSO A DISTINCT NON-VERDICT, NEVER A `\"pass\"`: a `gateType:" +
-          "\"merge\"` row whose branch's ENTIRE changed-path set was proven inert (docs-only) never spawns a " +
-          "gate at all — the row still stamps `detail.passed:true` (so the merge could proceed to squash), " +
-          "but `outcome` reads `\"skipped\"` here (checked BEFORE `passed`), never `\"pass\"`, and `passed` " +
-          "(the plain boolean below) reads `false` for it too, for the identical reason a `\"cancelled\"` row " +
-          "does: no gate verdict was ever reached, so it must never be counted as a pass OR a rejection when " +
-          "computing a rate — filter on `outcome`, never on `passed` alone, same rule as `\"cancelled\"` " +
-          "above. Always paired with `gateRan:false` (see just below) — but distinct from a REUSED self-check " +
-          "(also `gateRan:false`): a reuse is a REAL prior verdict and stays `outcome:\"pass\"`; only a " +
-          "genuine skip reads `\"skipped\"`. This is the SAME fact `gate_status(opId)` now ALSO reports for " +
-          "this exact row's `opId` — before that, `gate_status` collapsed this into " +
-          "`outcome:\"pass\"`/`passed:true`, disagreeing with THIS tool's own `\"skipped\"` for the identical " +
-          "settled op). " +
-          "`gateRan` answers \"did a gate PROCESS actually spawn for this row\" — `false` " +
-          "for a merge that REUSED an already-green worker self-check (no process spawned at merge time), a " +
-          "merge whose gate was SKIPPED as inert (just above), or " +
-          "a worker self-check cancelled BEFORE it was ever admitted past the queue; `true` for every other " +
-          "row, INCLUDING one cancelled WHILE running that DID spawn a step. Use this to exclude non-runs " +
-          "from a duration series without a per-row pivot to `gate_status(opId)` — a non-run's `durationMs` " +
-          "(when present at all) reflects bookkeeping overhead or admission-to-cancel time, not real gate " +
-          "work, and left in, biases a naive average toward \"getting faster\". Never `null` — but this is a " +
-          "DERIVED field, not a raw stamp on every row: it is EXACT for a `reused` row or one carrying an " +
-          "explicit producer `gateSpawned` stamp (both worker-gate cancel sites stamp this explicitly); for " +
-          "an older cancelled row with neither, it falls back to \"admitted before cancel\" (via " +
-          "`durationMs` presence) — admission is not proof a process spawned (a cancel landing between " +
-          "admission and the gate runner's own first-step check settles with zero steps despite a real " +
-          "`durationMs`), so treat that fallback case as reliable, not guaranteed. " +
-          "⚠️ THIS TOOL IS THE INDEX, NOT THE FULL-DETAIL SURFACE: a `gateType:\"merge\"` row's own `build_gate`/`build_gate_retry` event never carries " +
-          "`failingTest` inline, by construction — but this row's `failingTest` is NOT unconditionally " +
-          "`null` any more. The mapper also reads the SAME `pending_gate_ops.verdict_payload_json` this " +
-          "tool already LEFT JOINs in for `emitCompareReduced` (below), pulling its `gateDetail.failingTest` " +
-          "as a fallback — so \"has test X failed before\" is answerable by scanning `gate_history` pages " +
-          "alone for a real majority of merge rejections, no per-row `gate_status(opId)` pivot required. " +
-          "Still `null` when that payload has nothing to offer (an older row/op predating opId-stamping or " +
-          "the merge-verdict-payload widening, a pass/cancelled/skipped verdict, or a genuine rejection " +
-          "whose output carried no recognizable marker) — for THOSE, and for the fuller diagnostic this " +
-          "field alone never carries (`phase`/`stderrTail`/`outputTail`/`exitCode`/`signal`/`timedOut`), " +
-          "take the row's `opId` and call `gate_status(opId)`, which DOES carry the full `gateDetail`/" +
-          "`outputTail` for a settled merge op. A `\"worker\"` row's `failingTest` IS populated directly (a " +
-          "worker self-check embeds it inline), so no pivot is needed there; its `opId` is `null` for the " +
-          "identical reason. `opId` is also `null` for a `\"deploy\"` row (no `pending_gate_ops` op) and " +
-          "for any row recorded before this field shipped. " +
-          "⚠️ `concurrentGates` vs `concurrentGatesMax` — DO NOT CONFUSE THESE, they answer DIFFERENT " +
-          "questions: `concurrentGates` is a SNAPSHOT AT ADMISSION ONLY — \"how many gates were admitted " +
-          "together the instant this one started\" — and says NOTHING about a second gate joining 30s " +
-          "later; a run that spent 95% of its wall time contended can still read `concurrentGates:1` " +
-          "(uncontended-looking) if it happened to be admitted solo. `concurrentGatesMax` is the TRUE " +
-          "max-over-run figure — how many were ever admitted at once while this run was in flight — and is " +
-          "the field to reach for when the question is \"was this run actually contended\", never " +
-          "`concurrentGates` alone. `concurrentGatesMax` is ALSO NEVER BACKFILLED: it is `null` for every " +
-          "row recorded before that field shipped and populated only from that point forward, INDEPENDENTLY " +
-          "of `concurrentGates`'s own availability — a `null` `concurrentGatesMax` on a row that DOES carry " +
-          "`concurrentGates` is the NORMAL historical shape, not a data-quality problem, and neither field's " +
-          "presence may be assumed from the other's. " +
-          "`durationMs`/`gateCap`/`concurrentGates`/`concurrentGatesMax` are each `null` only for a row " +
-          "recorded before THAT SPECIFIC field was stamped — the four were NOT all added in the same " +
-          "change, so there is no single date/card that scopes all of them at once; a caller that needs to " +
-          "reason about when a particular field became reliable should check that field's own history, not " +
-          "assume the others share it. Never null for a REJECTED row once the field in question is being " +
-          "stamped at all — a rejection carries the same fields a pass does. `limit`/`offset` paginate " +
-          "(default " + DEFAULT_GATE_HISTORY_PAGE + ", clamped to " + MAX_GATE_HISTORY_PAGE + "). The " +
-          "default is sized to fit an UNPROJECTED page inline — an un-projected row is " +
-          "~900 chars, so " + DEFAULT_GATE_HISTORY_PAGE + " rows stays comfortably under the tool-result " +
-          "cap with headroom; the OLD default of 100 did not (it overflowed outright — that failure is " +
-          "the original evidence this default was sized against). Passing an explicit `limit` still opts " +
-          "you past this default, up to " + MAX_GATE_HISTORY_PAGE + " — but if you want MORE rows per " +
-          "page than the default fits, reach for `fields:[...]` (below) FIRST: it shrinks each ROW, while " +
-          "raising `limit` just multiplies the existing ~900-char shape. `fields` is opt-in and rows come " +
-          "back full-shape when it's omitted, so this default is the only thing standing between an " +
-          "un-opted-in caller and that full per-row size. " +
-          "`nextOffset` is `offset+items.length` when more rows remain, else " +
-          "`null` — page deterministically via offset:nextOffset until it is null, same contract as " +
-          "`events_search`. " +
-          "PROJECT-SCOPED SERVER-SIDE, NOT BY ARGUMENT: there is no `projectId` parameter — the project is " +
-          "always the CALLER's own, resolved from this session, exactly like `gate_queue`. A caller cannot " +
-          "request another project's rows through any input this tool accepts, and a foreign-project row " +
-          "is never returned at all (not merely redacted), so this cannot expose anything `gate_queue`'s " +
-          "own cross-project redaction doesn't already allow. Reuses `db.listGateEvents` verbatim — no " +
-          "duplicate query logic. `fields:[...]` (same contract as `tasks_list`'s own " +
-          "`fields`) projects each returned row down to ONLY the given top-level key names, e.g. " +
-          "fields:[\"outcome\",\"durationMs\",\"endedAt\"] for a duration trend read that doesn't need the " +
-          "full diagnostic set — an un-asked-for field is genuinely ABSENT from every row, not merely a " +
-          "smaller preview, and an unmatched/unknown field name is silently ignored rather than erroring. " +
-          "`id` is NOT auto-added. " +
-          "`countsOnly:true` (same contract as `tasks_list`'s own `countsOnly`) SHORT-" +
-          "CIRCUITS before any row fetch, JOIN-enrichment, or `fields` projection and returns " +
-          "{total, byGateType, byOutcome} instead of {items,...} — `byGateType` breaks down by " +
+          "`fallbackOfBatchOpId`: the durable counterpart of `gate_queue`'s live-only field; non-null ONLY on " +
+          "a row from `merge_batch`'s automatic per-branch fallback confirm, naming the batch op's `opId`. " +
+          "`null` on the batch's own row (it self-identifies via `batched`/`batchBranches`), on solo merges, " +
+          "and on rows from before the field shipped. Don't re-derive it from `gate_queue` (live ops only). " +
+          "`emitCompareReduced`: bucket on it BEFORE comparing durations. A `\"merge\"` gate can run REDUCED " +
+          "(build + static guards, ± selected test files: seconds) instead of the full suite, an order of " +
+          "magnitude apart. Tri-state: `true` = ran reduced; `false` = a real gate spawned and was proven " +
+          "NOT reduced (a genuine full run); `null` = no gate spawned, row predates the field, a " +
+          "`\"worker\"`/`\"deploy\"` row (reduction is merge-only), or a full run on a repo layout the " +
+          "predicate can't evaluate (`false` is reachable only on a project shaped like Loom's daemon " +
+          "package). Never pool `null` with `false`: `null` means not determinable, not a known full run. " +
+          "`emitCompareNotApplicableKind`: why `emitCompareReduced` is `null` when the predicate said " +
+          "not-applicable; `null` for every other cause. `\"repo-out-of-domain\"` = none of the four scope " +
+          "directories exist in the repo (checked via `git ls-tree`); `\"path-out-of-scope\"` = the predicate " +
+          "applies to the repo but not (fully) to THIS diff (an out-of-scope path alongside an in-scope one, " +
+          "or the repo has a scope directory this diff doesn't touch; see `merge_batch` for the batch-size " +
+          "degradation); rarer mechanism failures: `\"harness-config-unavailable\"`/" +
+          "`\"typescript-unresolvable\"`/`\"git-operation-failed\"`/`\"empty-diff\"`/`\"unparseable-diff\"`. " +
+          "`emitCompareIdenticalCount`/`emitCompareTestFiles` are non-null ONLY with " +
+          "`emitCompareReduced:true`; read them TOGETHER. `emitCompareIdenticalCount:0` is vacuous with a " +
+          "NON-EMPTY `emitCompareTestFiles` (selected-test-files arm: a test-only diff has no compiled files " +
+          "to compare, so 0 = nothing to check); with an EMPTY one it is the emit-identity arm, fully " +
+          "informative (build + static guards only, no test files ran). The `[loom:merge-done]` nudge tells " +
+          "the arms apart: \"…+ N selected test file(s)\" (N is the widened count, not the changed-file " +
+          "count) vs \"…static guards only, skipped the full daemon test suite\". " +
+          "`retriedFile`/`retryPassed` (bounded single-/multi-file retry, solo AND batch rows): a " +
+          "`gateType:\"merge\"` row whose test step named up to `MULTI_FILE_RETRY_MAX` identifiable, " +
+          "re-runnable files retried together once before the verdict. `retriedFile` is the comma-joined " +
+          "retried name(s), `null` on most rows. A `\"pass\"` with non-null `retriedFile` is WEAKER than a " +
+          "clean pass (the first attempt failed for real; only the isolated re-run was green, the shape an " +
+          "order-dependent/pollution bug produces). `retryPassed:false` = the retry also failed and the row " +
+          "rejected as if no retry existed. `retryDeclineReason` is present ONLY when a genuine failure " +
+          "(never a kill/timeout attempt 1; the transient-kill retry owns those) was eligible but " +
+          "`identifyRetriableTestFiles` declined: `\"no-fail-tier-match\"`|`\"count-mismatch\"`|" +
+          "`\"over-cap\"`|`\"harness-not-executed\"`|`\"unparseable-name\"`|`\"file-not-found\"`|" +
+          "`\"duplicate-name\"`. Mutually exclusive with non-null `retriedFile`; `undefined` on most rows " +
+          "(never read it as \"eligible\"). It has NO `gate_status(opId)` equivalent: durable only here. " +
+          "HISTORICAL exception: `retriedFile` non-null with `retryPassed:null` = a retry whose own " +
+          "admission was cancelled while queued (`outcome:\"cancelled\"`); older rows only. On a non-null " +
+          "`retriedFile` row the retry is a link of attempt 1's single admission: `durationMs` is attempt 1's " +
+          "run time alone, `concurrentGates` its admission snapshot, `concurrentGatesMax` the max across the " +
+          "chain, and `passed` the final retry-inclusive verdict (older rows' triple may describe the " +
+          "retry's separate admission). " +
+          "`\"cancelled\"` is a distinct outcome, NEVER a rejection: a withdrawn run (`gate_cancel`, queued or " +
+          "running) reached no verdict. Compute pass/fail or REJECTION rates by filtering on " +
+          "`outcome===\"reject\"`, never `passed===false` alone (`passed` is false for cancelled and skipped " +
+          "rows too). Historical shape (older rows): a `\"reject\"` `build_gate` row followed (same `opId`) " +
+          "by a `\"cancelled\"` `build_gate_retry` row is ONE unresolved op, not a rejection. `outcome` is " +
+          "derived live from stored detail, so old rows are classified retroactively and trends compare " +
+          "safely on it. `transientRetried`: `true` iff THIS row is the transient-kill retry's own " +
+          "`build_gate_retry` row; `false` on every `build_gate`/`worker_gate`/`deploy` row; never both " +
+          "truthy with `retriedFile`. `gate_status(opId).transientRetried` means something DIFFERENT (the " +
+          "merged verdict was reached via the retry, a weaker pass); don't carry meaning across surfaces. " +
+          "`\"skipped\"` is also a non-verdict, NEVER a pass: a merge whose whole changed-path set was " +
+          "proven inert (docs-only) spawns no gate; `outcome` reads `\"skipped\"` and `passed` reads `false`. " +
+          "Never count it as a pass or a rejection; filter on `outcome`. It pairs with `gateRan:false` but " +
+          "differs from a REUSED self-check (also `gateRan:false`), which is a real prior verdict and stays " +
+          "`\"pass\"`. `gate_status(opId)` reports `\"skipped\"` for the same op. " +
+          "`gateRan`: did a gate PROCESS spawn for this row. `false` for a merge that reused a green worker " +
+          "self-check, a skipped-as-inert merge, or a worker self-check cancelled before admission; `true` " +
+          "otherwise (including cancelled while running). Use it to exclude non-runs from a duration series " +
+          "(a non-run's `durationMs` is bookkeeping and biases averages toward \"faster\"). Never `null`, but " +
+          "derived: exact for a `reused` row or one with an explicit `gateSpawned` stamp; older cancelled " +
+          "rows fall back to `durationMs` presence (reliable, not guaranteed). " +
+          "This tool is the INDEX, not the full-detail surface. A merge row's `failingTest` is read from the " +
+          "settled verdict payload, so \"has test X failed before\" is answerable from these pages for most " +
+          "merge rejections. It is `null` when that payload has nothing (an older row, a pass/cancelled/" +
+          "skipped verdict, or output with no recognizable marker). For those, and for the fuller diagnostic " +
+          "(`phase`/`stderrTail`/`outputTail`/`exitCode`/`signal`/`timedOut`), call `gate_status(opId)`. A " +
+          "`\"worker\"` row's `failingTest` is populated inline and its `opId` is `null`; `opId` is also " +
+          "`null` for `\"deploy\"` rows and rows from before the field shipped. " +
+          "`concurrentGates` vs `concurrentGatesMax` answer DIFFERENT questions. `concurrentGates` is a " +
+          "snapshot AT ADMISSION only (a run contended for 95% of its wall time can still read 1 if admitted " +
+          "solo). `concurrentGatesMax` is the max admitted at once while the run was in flight: use it for " +
+          "\"was this run actually contended\". `concurrentGatesMax` is never backfilled: `null` on rows " +
+          "from before it shipped, independent of `concurrentGates` (a `null` Max beside a present " +
+          "`concurrentGates` is the normal historical shape). `durationMs`/`gateCap`/`concurrentGates`/" +
+          "`concurrentGatesMax` are each `null` only on rows from before THAT field was stamped (they shipped " +
+          "separately, so no single date scopes all four) and never `null` on a REJECTED row once stamped. " +
+          "`limit`/`offset` paginate (default " + DEFAULT_GATE_HISTORY_PAGE + ", clamped to " + MAX_GATE_HISTORY_PAGE + "). " +
+          "The default is sized so an unprojected page (~900 chars/row) fits under the tool-result cap; for " +
+          "more rows per page use `fields` FIRST (it shrinks each row) rather than raising `limit`. " +
+          "`nextOffset` is `offset+items.length` while more rows remain, else `null`; page via " +
+          "offset:nextOffset until null. There is NO `projectId` parameter: the project is always the " +
+          "caller's own, resolved server-side, and foreign rows are never returned. `fields:[...]` (same " +
+          "contract as `tasks_list`'s) keeps ONLY the named top-level keys of each row (others are absent, " +
+          "unknown names are ignored, `id` is NOT auto-added), e.g. [\"outcome\",\"durationMs\",\"endedAt\"]. " +
+          "`countsOnly:true` returns {total, byGateType, byOutcome} instead of {items,...} over the WHOLE " +
+          "project-scoped matching set; `limit`/`offset`/`fields` are ignored. `byGateType`: " +
           "\"merge\"|\"worker\"|\"deploy\"|\"landingCheck\"|\"distImporterCheck\" (the last two are the " +
-          "ungated-landing safety-net check, and the automatic post-ungated-landing " +
-          "dist-importer advisory — neither is a real gate, both tallied separately so " +
-          "they never inflate the \"worker\" bucket), `byOutcome` by " +
-          "\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"|\"skipped\"|\"error\" (\"error\" is " +
-          "the dist-importer check's own mechanism-failure shape — that check's scan/build/run " +
-          "machinery itself broke, never a real test red; see the outcome caveats above — a rejection-" +
-          "rate reader must still pair a \"reject\" with an immediately-following cancelled retry, same " +
-          "rule as scanning `items` directly, and must never fold \"error\" into that rate either). " +
-          "`limit`/`offset`/`fields` are ignored when `countsOnly` is set — this is the WHOLE " +
-          "project-scoped matching set, not one page of it.",
+          "ungated-landing safety-net check and the automatic dist-importer advisory: not real gates, tallied " +
+          "separately so they never inflate \"worker\"). `byOutcome`: " +
+          "\"pass\"|\"reject\"|\"timeout\"|\"kill\"|\"cancelled\"|\"skipped\"|\"error\" (\"error\" = the " +
+          "dist-importer check's own mechanism failure, never a real test red). A rejection-rate reader " +
+          "must apply the cancelled-retry pairing above and never fold \"error\" into the rate.",
         inputSchema: strictShape({
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
@@ -5974,192 +5988,118 @@ export class OrchestrationMcpRouter {
       "served_status",
       {
         description:
-          "Read what THIS daemon process is actually serving right now — for post-restart " +
-          "verification without falling back to curl. Returns {version (the loom/loomctl package version), " +
-          "webBundle (the served assets/index-<hash>.js filename, or null if the web dist isn't built/found " +
-          "— a changed hash after a restart proves the new web build is live), uptimeSeconds (this process's), " +
-          "liveSessionCount (ACROSS ALL projects — a coarse sanity signal; use worker_list for your own " +
-          "fleet), deployStaleness, skillStoreStaleness}. ⚠️ Measured first-hand across a " +
-          "real deploy: `version` and `webBundle` are BOTH byte-identical before/after a daemon-`src`-only " +
-          "deploy (no package bump, no web rebuild) — do NOT use either as a staleness proxy. " +
+          "Read what THIS daemon process is actually serving right now, for post-restart verification " +
+          "without curl. Returns {version (the loom/loomctl package version), webBundle (the served " +
+          "assets/index-<hash>.js filename, or null if the web dist isn't built/found), uptimeSeconds, " +
+          "liveSessionCount (ACROSS ALL projects; use worker_list for your own fleet), deployStaleness, " +
+          "skillStoreStaleness}. `version` and `webBundle` are byte-identical before/after a " +
+          "daemon-`src`-only deploy: do NOT use either as a staleness proxy. " +
           "`deployStaleness` is the real signal for THE DAEMON PROCESS: " +
           "{available, stale, commitsBehind, distBuiltAt, processStartedAt, runningCodeBuiltAt, " +
           "distAheadOfProcess, mainlineHeadSha, mainlineHeadDate, webStale, webCommitsBehind, webDistBuiltAt, " +
           "distBuiltSha, distBuiltDirty, processBuiltSha, processBuiltDirty, distBuiltShaDiffersFromProcess, " +
           "processBuiltShaMatchesHead, deploySignatureMismatch, builtContentMatchesHead, webBuiltSha, " +
-          "webBuiltDirty, reason?}. ⛔ `processBuiltSha`/`mainlineHeadSha` are NOT, on their " +
-          "own, an authoritative \"did my deploy land\" pair — a sha MISMATCH (`processBuiltShaMatchesHead:" +
-          "false`, even `deploySignatureMismatch:true`) can be a FALSE ALARM: a different, non-ancestor " +
-          "commit (e.g. a worker worktree's own union-forward merge commit) whose SHIPPED TREE is byte-" +
-          "identical to mainline HEAD reads exactly like staleness on sha alone, and was observed doing so " +
-          "live on a genuinely-current daemon. `builtContentMatchesHead` is the fix, computed via ONE OF " +
-          "TWO comparisons depending on ancestry: (a) `processBuiltSha` NOT an ancestor of `mainlineHeadSha` " +
-          "— `true` means a BYTE diff (scoped to the shipped paths) came back empty, the mismatch is " +
-          "cosmetic; (b) `processBuiltSha` IS an ancestor AND `stale` is already `true` — a " +
-          "byte diff there would trivially be non-empty, so this instead proves BEHAVIOURAL equivalence " +
-          "(a transpile-identity comparison of every changed restart-relevant `.ts` file) — `true` means a " +
-          "comment-only (or otherwise inert) restart-relevant diff, genuinely NOT stale despite " +
-          "`commitsBehind > 0`. EITHER sub-case's `true` overrides `stale` to `false` in the response you " +
-          "already received — you are not meant to re-derive this yourself. `false` means a case (a)/(b) " +
-          "comparison ran and found a REAL difference (still stale). `null` means undetermined: git/" +
-          "typescript couldn't resolve a side, the diff exceeded the behavioural check's own file cap, the " +
-          "transpile-identity soundness precondition failed to verify, OR the ordinary case NEITHER " +
-          "sub-case applies to (ancestor AND `stale` already `false`) — the existing `stale`/" +
-          "`processBuiltShaMatchesHead` signals already answer that case correctly and no extra check ran. " +
-          "When `processBuiltShaMatchesHead` " +
-          "is `false`, check `builtContentMatchesHead` before concluding the deploy is actually stale. " +
-          "Every field above this point is DERIVED (a clock, or a live git read) — the last eight " +
-          "are the BAKED signal, split into TWO questions on purpose: `distBuiltSha`/`distBuiltDirty` are a " +
-          "FRESH read of `dist/build-info.json` on EVERY call (\"what's on disk right now\" — a rebuild " +
-          "changes it immediately, even with no restart); `processBuiltSha`/`processBuiltDirty` are " +
-          "captured ONCE, at THIS PROCESS's own start (module load, never re-read), and answer \"what is " +
-          "this process actually executing\" — a rebuild with no restart cannot change them, only " +
-          "a real restart (which re-captures them fresh) can. `null` on any when built outside a git " +
-          "checkout (e.g. a packaged install) or unresolvable — NEVER a fabricated/stale value; these four " +
-          "fields survive even a `.git`-unavailable (`available:false`) result, since they need no git at " +
-          "all (a packaged install still ships `dist/build-info.json`). `dirty:true` (or `null`, unknown) " +
-          "means the build ran from an uncommitted-changes checkout — its sha does NOT actually represent " +
-          "what was compiled, so `processBuiltShaMatchesHead` can ONLY read `true` when `processBuiltDirty` " +
-          "is EXACTLY `false` (provably clean), never merely because the sha string happens to match. " +
-          "`distBuiltShaDiffersFromProcess:true` is a direct, CONTENT-based \"a rebuild landed that this " +
-          "process hasn't picked up\" signal — strictly stronger than the mtime-based `distAheadOfProcess`, " +
-          "which infers the same fact from clocks and can be fooled by a cache-replay's mtime bump. " +
-          "`processBuiltShaMatchesHead` is \"is `processBuiltSha` a provably-clean match for " +
-          "`mainlineHeadSha`\" — often `false` in ordinary healthy operation (mainline moves on unrelated " +
-          "docs/web/assets commits constantly), so it is NOT itself a staleness signal. " +
-          "`stale`/`commitsBehind` reading CLEAN (`false`/`0`) in the SAME response where " +
-          "`processBuiltShaMatchesHead` reads `false` is NOT a contradiction — the two answer DIFFERENT " +
-          "questions (restart-relevant paths only, vs. an exact sha match on ANY file) and are not required " +
-          "to agree; it means mainline moved on a non-restart-relevant commit (docs/assets/tests/scripts) " +
-          "after this process's build — the deliberate CRY-WOLF CONTROL case (deploy-staleness.mjs test 20), " +
-          "not a defect. `deploySignatureMismatch` is the field that actually flags disagreement worth acting on. " +
-          "`deploySignatureMismatch:true` is a defect detector, fed from `processBuiltSha` " +
-          "(deliberately, not `distBuiltSha` — the question is what THIS PROCESS is running): the date-" +
-          "based clock claims `stale:false` (caught up) BUT `processBuiltSha`'s own real commit date " +
-          "proves a restart-relevant commit landed after it — i.e. the mtime clock and the baked-sha " +
-          "ground truth disagree. This can ALSO be the cry-wolf case above (a non-ancestor " +
-          "commit with an identical shipped tree) rather than a genuine cache-replay — check " +
-          "`builtContentMatchesHead` before treating a `true` here as confirmed staleness. `webBuiltSha`/" +
-          "`webBuiltDirty` are the WEB analogue of " +
-          "`distBuiltSha`/`distBuiltDirty` (fresh every call, no process/dist split — the served web UI bundle " +
-          "is already served live with no " +
-          "restart needed) — informational only, no mismatch detector for web. ⭐ This same " +
-          "payload is ALSO reachable from OUTSIDE any agent session, on the plain unprivileged loopback " +
-          "`GET /api/deploy-status` — useful specifically when the daemon itself is what's under " +
-          "suspicion and you can't trust a signal that only an agent inside it can read. " +
-          "DERIVED fields are fresh on every call (stat this daemon's own built entry + `git log` mainline, " +
-          "never cached/persisted) — `processBuiltSha`/`processBuiltDirty` alone are captured once at " +
-          "process start by design (never a fresh read; see their own field docs). " +
-          "`processStartedAt` is a SIMILAR, deliberate exception — it reads `performance.timeOrigin`, a " +
-          "value the runtime fixes once at process start, so it is STABLE and safely comparable/joinable " +
-          "across separate reads of the same boot (unlike the mtime/git-derived fields above, which " +
-          "legitimately differ read to read as the tree changes). `stale`/`commitsBehind` are scoped to ONLY this daemon's own " +
-          "backend/shared-contract source commits — this is CORRECT and DELIBERATE for what it answers (\"does the " +
-          "daemon PROCESS need a restart\"), and an assets/docs/vault-only merge correctly never counts " +
-          "toward it. ⛔ Do NOT read that as \"an assets-only merge never needs a restart\" " +
-          "— see `skillStoreStaleness` below, a SEPARATE signal for exactly the assets subtree where that's " +
-          "false. `stale:true` means mainline HEAD carries `commitsBehind` daemon-src/shared commit(s) " +
-          "this running process was not built with AND `builtContentMatchesHead` did not prove them " +
-          "behaviourally inert — a restart (via `daemon_restart` where your surface has it, or " +
-          "a human relaunch of the daemon otherwise) is needed before they take effect, for every project this daemon serves. " +
-          "a `commitsBehind > 0` reading alongside `stale:false` is a LEGITIMATE, expected combination, not " +
-          "a contradiction — it means `builtContentMatchesHead:true` already proved every one of those " +
-          "commits behaviourally inert (e.g. a comment-only `@decision`-anchor addition); the daemon " +
-          "genuinely does not need a restart despite the non-zero count. " +
-          "`distBuiltAt` is an ON-DISK ARTIFACT clock (newest dist mtime) and can be NEWER than the code " +
-          "this process is actually executing — a rebuild that lands without a restart advances it while " +
-          "the process keeps running whatever it loaded at its own start. `stale`/`commitsBehind` are " +
-          "computed against `runningCodeBuiltAt` (= `min(distBuiltAt, processStartedAt)`, the honest bound " +
-          "on what this process could actually be executing), NOT the raw `distBuiltAt` — do not compute " +
-          "your own staleness from `distBuiltAt` alone, it can UNDERSTATE it. `distAheadOfProcess:true` " +
-          "means the on-disk artifact has been rebuilt since this process started and it hasn't picked that " +
-          "rebuild up yet (a restart would additionally pick it up), surfaced as its own field so it's " +
-          "legible even when `commitsBehind` itself still reads 0. `webStale`/`webCommitsBehind` are the SEPARATE web signal — " +
-          "this daemon's own web-UI source commits not yet reflected in the served web UI bundle. `webStale:true` " +
-          "means REBUILD web, NOT restart the daemon: the daemon serves the web UI bundle live from disk, " +
-          "so a rebuilt file is served on the very next request — do not advise a restart for a " +
-          "web-only staleness reading; that drops every live session across ALL projects for no reason. " +
+          "webBuiltDirty, reason?}. ⛔ `processBuiltSha`/`mainlineHeadSha` are NOT on their own an " +
+          "authoritative \"did my deploy land\" pair: a sha MISMATCH (`processBuiltShaMatchesHead:false`, even " +
+          "`deploySignatureMismatch:true`) can be a FALSE ALARM when a different, non-ancestor commit (e.g. a " +
+          "worker worktree's union-forward merge commit) has a SHIPPED TREE byte-identical to mainline HEAD. " +
+          "`builtContentMatchesHead` resolves it, by one of two comparisons: (a) `processBuiltSha` NOT an " +
+          "ancestor of `mainlineHeadSha`: `true` = a byte diff scoped to the shipped paths was empty, the " +
+          "mismatch is cosmetic; (b) `processBuiltSha` IS an ancestor AND `stale` is already `true`: it proves " +
+          "BEHAVIOURAL equivalence (transpile-identity of every changed restart-relevant `.ts` file), so " +
+          "`true` = a comment-only/inert diff, genuinely NOT stale despite `commitsBehind > 0`. Either " +
+          "sub-case's `true` already overrides `stale` to `false` in the response; don't re-derive it. " +
+          "`false` = the comparison ran and found a REAL difference (still stale). `null` = undetermined " +
+          "(git/typescript couldn't resolve a side, the diff exceeded the file cap, or the soundness " +
+          "precondition failed) OR neither sub-case applies (ancestor AND `stale` already `false`; no extra " +
+          "check ran). When `processBuiltShaMatchesHead` is `false`, check `builtContentMatchesHead` before " +
+          "concluding the deploy is stale. " +
+          "The baked signal answers TWO questions: `distBuiltSha`/`distBuiltDirty` are a FRESH read of " +
+          "`dist/build-info.json` on every call (what's on disk now; a rebuild changes it with no restart); " +
+          "`processBuiltSha`/`processBuiltDirty` are captured ONCE at THIS PROCESS's start (what it is " +
+          "executing; only a restart changes them). `null` when built outside a git checkout (e.g. a " +
+          "packaged install) or unresolvable, never fabricated; these four survive `available:false`. " +
+          "`dirty:true` (or `null`) means the build ran from an uncommitted checkout and the sha doesn't " +
+          "represent what was compiled, so `processBuiltShaMatchesHead` reads `true` ONLY when " +
+          "`processBuiltDirty` is exactly `false`. `distBuiltShaDiffersFromProcess:true` is a content-based " +
+          "\"a rebuild landed that this process hasn't picked up\", stronger than the mtime-based " +
+          "`distAheadOfProcess` (which a cache-replay's mtime bump can fool). `processBuiltShaMatchesHead` is " +
+          "often `false` in healthy operation (mainline moves on unrelated docs/web/assets commits), so it is " +
+          "NOT a staleness signal; `stale:false`/`commitsBehind:0` beside it `false` is not a contradiction " +
+          "(restart-relevant paths only vs an exact sha match on any file). `deploySignatureMismatch:true` is " +
+          "the defect detector worth acting on: the date clock says `stale:false` BUT `processBuiltSha`'s " +
+          "commit date proves a restart-relevant commit landed after it. It can also be the false-alarm case " +
+          "above, so check `builtContentMatchesHead` before treating it as confirmed staleness. " +
+          "`webBuiltSha`/`webBuiltDirty` are the web analogue of `distBuiltSha`/`distBuiltDirty` (fresh every " +
+          "call; informational only, no mismatch detector). The same payload is reachable from OUTSIDE any " +
+          "agent session on the unprivileged loopback `GET /api/deploy-status`, for when the daemon itself is " +
+          "under suspicion. Derived fields are fresh on every call (never cached); `processStartedAt` reads " +
+          "`performance.timeOrigin` once per boot, so it is stable and joinable across reads of one boot. " +
+          "`stale`/`commitsBehind` are scoped to ONLY this daemon's backend/shared-contract source commits " +
+          "(\"does the daemon PROCESS need a restart\"). ⛔ Do NOT read that as \"an assets-only merge never " +
+          "needs a restart\": see `skillStoreStaleness` below. `stale:true` = mainline HEAD carries " +
+          "`commitsBehind` daemon-src/shared commit(s) this process was not built with AND " +
+          "`builtContentMatchesHead` did not prove them inert; a restart (`daemon_restart` where your surface " +
+          "has it, else a human relaunch) is needed, affecting every project this daemon serves. " +
+          "`commitsBehind > 0` with `stale:false` is legitimate (`builtContentMatchesHead:true` proved them " +
+          "inert, e.g. a comment-only anchor addition). `distBuiltAt` is an on-disk clock and can be NEWER than " +
+          "the code the process runs; `stale`/`commitsBehind` are computed against `runningCodeBuiltAt` " +
+          "(`min(distBuiltAt, processStartedAt)`), so never compute staleness from `distBuiltAt` alone (it " +
+          "can UNDERSTATE it). `distAheadOfProcess:true` = the artifact was rebuilt since this process " +
+          "started and not yet picked up. `webStale`/`webCommitsBehind` are the SEPARATE web signal: " +
+          "`webStale:true` means REBUILD web, NOT restart the daemon (the bundle is served live from disk, " +
+          "and a restart drops every live session across ALL projects for no reason). " +
           "`available:false` (with `reason`) means this daemon isn't running from a Loom source checkout " +
-          "(e.g. a packaged `loomctl` install) or the check failed — not a claim of freshness either way. " +
-          "`reasonKind` discriminates WHICH of those two — `\"not-applicable\"` (no `.git`, " +
-          "e.g. a packaged install — this signal is never meaningful here) vs `\"could-not-measure\"` (the " +
-          "check was reachable in principle but a step failed, e.g. a build race or a git error); the two " +
-          "are NOT interchangeable — only the first means staying silent is forever correct. " +
-          "It applies to BOTH deployStaleness signals together (never one without the other; " +
-          "`skillStoreStaleness` is unaffected — it never touches git or dist, so it degrades independently). " +
-          "`skillStoreStaleness` is the THIRD, INDEPENDENT signal `deployStaleness` cannot " +
-          "give you: {stale, pendingRestart, pendingAdopt}. A bundled skill is delivered to sessions from " +
-          "the Loom-owned STORE (`<LOOM_HOME>/skills/<name>/SKILL.md`), never read live from `assets/` — " +
-          "the store only re-syncs from a merged change to its bundled skill assets on daemon " +
-          "boot/restart (`seedGlobalSkills()`), so `deployStaleness` reading clean after an assets-only " +
-          "merge does NOT mean nothing needs to happen: the STORE stays on the OLD skill until a restart " +
-          "actually occurs. `pendingRestart` names every PRISTINE bundled skill (never edited by the user) " +
-          "with a shipped update waiting in `assets/` — a restart (via `daemon_restart` where your surface has it, or a human relaunch otherwise) auto-advances " +
-          "these IN THE STORE. `pendingAdopt` names every CUSTOMIZED bundled skill (the user has edited their " +
-          "store copy) with a shipped update — a restart will NOT advance these by design (protecting the " +
-          "user's edit); each needs an explicit adopt (Skills UI or `POST /api/skills/<name>/adopt`) " +
-          "regardless of restarts. ⚠️ Neither list is \"every agent now has it\" — a session " +
-          "already live across the restart only reflects the store's new content on ITS OWN next resume " +
-          "(`skills/inject.ts` refreshes on every resume/fork/recycle, not just first spawn), and `SKILL.md` " +
-          "is read ambiently while `references/**` is read on demand — being current in the store (or a " +
-          "session's own injected copy) doesn't mean any agent has opened a changed reference file. " +
-          "`stale` is true whenever EITHER list is non-empty. Computed fresh on every call, never cached. " +
-          "`skillStoreStaleness` itself never consults git — it compares the store against " +
-          "the shipped asset's WORKING-TREE content, so a live, UNCOMMITTED edit to a shipped SKILL.md " +
-          "(synced into the store some other way — a manual copy, a publish) makes store/base/shipped all " +
-          "agree and reads as a fully clean bill, even though the edit exists in no commit and would be " +
-          "silently destroyed by a `git checkout -- .` / clean clone. `skillAssetsGitStatus` " +
-          "{available, uncommitted, uncommittedPaths, reason?, reasonKind?} is that missing git-aware half: " +
-          "`uncommitted:true` means its bundled skill assets dir has a staged/unstaged change (or a new " +
-          "untracked file) relative to HEAD, right now. `available:false` (a packaged `loomctl` install, or " +
-          "a git failure) never fabricates `uncommitted:false` as a clean claim — check `reasonKind` the " +
-          "same way as `deployStaleness`'s. VISIBILITY ONLY — never a blocking check. `skillAssetsSyncState` " +
-          "collapses both signals into one legible verdict: `\"stale\"` (skillStoreStaleness.stale — the " +
-          "store itself needs a restart/adopt, checked first), `\"uncommitted\"` (store is in sync but the " +
-          "shipped asset it synced from is NOT committed — the exact gap this card closes), `\"clean\"` (in " +
-          "sync and committed), or `\"undetermined\"` (git status couldn't be read — never read as clean). " +
-          "`scratchRootBytes`/`scratchRootOverCeiling` are the shared per-session scratch " +
-          "root's (`~/.loom/tmp/scratch`) total on-disk footprint and whether it exceeds the WARN-only " +
-          "ceiling in `sessions/scratch-gc.ts` — nothing is ever evicted on account of either, and it's a " +
-          "fresh, uncached recursive walk on every call (this surface is called on-demand, never polled " +
-          "on a fixed interval). `scratchGcSweep` is the boot GC's own last-sweep outcome " +
-          "as a four-state record (`not-started`/`in-progress`/`completed`/`failed`, with `scanned`/" +
-          "`reaped`/`wedged` counts once settled) — lets you tell a sweep that scanned everything and " +
-          "genuinely reaped 0 apart from one that threw and was silently swallowed, previously " +
-          "indistinguishable. `scratchLargestDirs` names the largest individual scratch " +
-          "dirs (`sessions/scratch-largest-dirs.ts` for the count) — the missing half `scratchRootBytes`/" +
-          "`scratchRootOverCeiling` can't give you: WHICH dir is driving it. Each entry carries `{id, " +
-          "bytes, ageDays, resumability}`; `resumability` is the SAME classification the real GC sweep " +
-          "uses (`\"no-row\"`/`\"live\"`/`\"no-engine-id\"`/`\"resumable\"`/`\"unresumable\"`) — a " +
-          "`\"resumable\"` dir can be arbitrarily large and arbitrarily old and will NEVER be reaped by " +
-          "the sweep, by design; only a human deleting it removes it. Cached, background-refreshed on a " +
-          "throttle (never a fresh walk on THIS read, unlike `scratchRootBytes` above) — may read `[]` " +
-          "before the first background refresh has landed, an honest \"not computed yet\", never " +
-          "fabricated. `projectsWorkRootBytes`/`projectsWorkRootOverCeiling`/`projectsWorkRootTruncated` " +
-          "are the analogous fleet-wide figure for the Loom-managed PER-PROJECT work root " +
-          "— summed across every KNOWN project's own work dir (active and archived), scoped away from an " +
-          "unrelated bystander directory under the same root. `overCeiling` is PER-PROJECT (any single " +
-          "project exceeding its own ceiling), not a check on the summed total; `truncated:true` means " +
-          "the walk hit its own entry/time bound for at least one project, so the figure is a genuine " +
-          "partial sum, never the complete one. Like `scratchLargestDirs`, this is a cached, background-" +
-          "refreshed figure (never a fresh walk on this read) — may read `0`/`false` before the first " +
-          "refresh has landed. `staleWorktreeLeftovers` counts renamed-aside stale " +
-          "worktree dirs (`<path>.stale-<ts>`) under `WORKTREES_DIR` that were never auto-deleted and " +
-          "that no session row names, so nothing else would surface them — `{count, oldestStaleSinceMs}` " +
-          "(`oldestStaleSinceMs` is `null` when `count` is 0). COUNT-ONLY, deliberately: this field is " +
-          "read on every call, so it never measures byte totals — see `GET /api/worktrees/stale-" +
-          "leftovers` for that, called deliberately rather than on this hot path. `orphanedProjectWorkDirs` " +
-          "is the analogous visibility fix for `PROJECTS_WORK_ROOT` itself: `{count, " +
-          "entries, truncated}` where `entries` is a BOUNDED list of `{dirName}` (this field's own " +
-          "`ORPHANED_PROJECT_WORK_DIRS_LIST_MAX`) for a top-level directory under `PROJECTS_WORK_ROOT` whose " +
-          "name matches NO real project row (active OR archived) — e.g. a permanent project delete whose " +
-          "work-dir removal failed and was never revisited. `count` is the TRUE total and can exceed " +
-          "`entries.length`; `truncated:true` means the scan itself hit its own entry bound, so even " +
-          "`count` may be a partial figure. VISIBILITY ONLY — nothing here is ever auto-deleted; see " +
-          "`sessions/orphaned-project-work-dirs.ts`'s own doc. Like `scratchLargestDirs`/" +
-          "`projectsWorkRootBytes`, this is a cached, background-refreshed figure (never a fresh scan on " +
-          "this read) — may read `{count:0, entries:[], truncated:false}` before the first background " +
-          "refresh has landed, an honest \"not computed yet\", never fabricated.",
+          "(e.g. a packaged `loomctl` install) or the check failed; not a claim of freshness either way. " +
+          "`reasonKind` says which: `\"not-applicable\"` (no `.git`; never meaningful here, so silence is " +
+          "forever correct) vs `\"could-not-measure\"` (a step failed, e.g. a build race or git error); not " +
+          "interchangeable. It applies to BOTH deployStaleness signals together; `skillStoreStaleness` " +
+          "never touches git or dist and degrades independently. " +
+          "`skillStoreStaleness` {stale, pendingRestart, pendingAdopt} is a THIRD, INDEPENDENT signal " +
+          "`deployStaleness` cannot give you. A bundled skill reaches sessions from the Loom-owned STORE " +
+          "(`<LOOM_HOME>/skills/<name>/SKILL.md`), never live from `assets/`, and the store re-syncs from " +
+          "merged assets only on daemon boot/restart, so a clean `deployStaleness` after an assets-only merge " +
+          "does NOT mean nothing needs to happen. `pendingRestart` names every PRISTINE bundled skill with a " +
+          "shipped update waiting; a restart (`daemon_restart` where your surface has it, else a human " +
+          "relaunch) auto-advances these IN THE STORE. `pendingAdopt` names every CUSTOMIZED skill (user-edited " +
+          "store copy) with a shipped update; a restart will NOT advance these (protecting the edit), each " +
+          "needs an explicit adopt (Skills UI or `POST /api/skills/<name>/adopt`). Neither list means \"every " +
+          "agent now has it\": a live session reflects the store only on ITS OWN next resume/fork/recycle, and " +
+          "`SKILL.md` is read ambiently while `references/**` is read on demand, so a current store or " +
+          "injected copy doesn't mean any agent opened a changed reference. `stale` is true whenever EITHER " +
+          "list is non-empty; computed fresh on every call. It compares the store against the shipped " +
+          "asset's WORKING-TREE content, so an UNCOMMITTED edit to a shipped SKILL.md reads as fully clean " +
+          "though it exists in no commit. `skillAssetsGitStatus` {available, uncommitted, uncommittedPaths, " +
+          "reason?, reasonKind?} is the git-aware half: `uncommitted:true` = the bundled skill assets dir has a " +
+          "staged/unstaged change or new untracked file relative to HEAD. `available:false` (packaged " +
+          "install, or git failure) never means clean; check `reasonKind` as for `deployStaleness`. " +
+          "VISIBILITY ONLY, never a blocking check. `skillAssetsSyncState` is one verdict: `\"stale\"` " +
+          "(skillStoreStaleness.stale, checked first), `\"uncommitted\"` (store in sync but the shipped asset " +
+          "isn't committed), `\"clean\"`, or `\"undetermined\"` (git status unreadable; never read as clean). " +
+          "`scratchRootBytes`/`scratchRootOverCeiling`: the shared per-session scratch root's " +
+          "(`~/.loom/tmp/scratch`) on-disk footprint and whether it exceeds a WARN-only ceiling (nothing is " +
+          "evicted for it); a fresh uncached walk on every call. `scratchGcSweep`: the boot GC's last-sweep " +
+          "outcome (`not-started`/`in-progress`/`completed`/`failed`, with `scanned`/`reaped`/`wedged` once " +
+          "settled), telling a sweep that reaped 0 from one that threw. `scratchLargestDirs`: the largest " +
+          "scratch dirs, `{id, bytes, ageDays, resumability}`, naming WHICH dir drives the total. " +
+          "`resumability` is the real GC sweep's classification (`\"no-row\"`/`\"live\"`/`\"no-engine-id\"`/" +
+          "`\"resumable\"`/`\"unresumable\"`); a `\"resumable\"` dir is NEVER reaped, by design; only a human " +
+          "deleting it removes it. Cached and background-refreshed, so it may read `[]` before the first " +
+          "refresh (\"not computed yet\", never fabricated). `projectsWorkRootBytes`/" +
+          "`projectsWorkRootOverCeiling`/`projectsWorkRootTruncated`: the fleet-wide figure for the per-project " +
+          "work root, summed across every KNOWN project (active and archived) and excluding unrelated " +
+          "directories under that root. `overCeiling` is PER-PROJECT (any single project over its own " +
+          "ceiling), not a check on the sum; `truncated:true` = the walk hit its entry/time bound for at least " +
+          "one project, so the figure is a partial sum. Cached; may read `0`/`false` before the first " +
+          "refresh. `staleWorktreeLeftovers` `{count, oldestStaleSinceMs}`: renamed-aside stale worktree dirs " +
+          "(`<path>.stale-<ts>`) under `WORKTREES_DIR` that were never auto-deleted and that no session row " +
+          "names (`oldestStaleSinceMs` is `null` when `count` is 0). COUNT-ONLY (read on every call); for byte " +
+          "totals see `GET /api/worktrees/stale-leftovers`. `orphanedProjectWorkDirs` `{count, entries, " +
+          "truncated}`: a BOUNDED `{dirName}` list of top-level directories under `PROJECTS_WORK_ROOT` whose " +
+          "name matches NO project row (active or archived), e.g. a permanent project delete whose work-dir " +
+          "removal failed. `count` is the TRUE total and can exceed `entries.length`; `truncated:true` = the " +
+          "scan hit its entry bound, so even `count` may be partial. VISIBILITY ONLY, never auto-deleted. " +
+          "Cached; may read `{count:0, entries:[], truncated:false}` before the first refresh.",
         inputSchema: strictShape({}),
       },
       async () => ok(buildServedStatus(db)),
