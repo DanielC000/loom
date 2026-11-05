@@ -10,6 +10,12 @@ import fs from "node:fs";
 if (process.env.FIXTURE_PROBE_HANG === "1") {
   fs.writeFileSync(process.env.FIXTURE_PROBE_PID_FILE, String(process.pid));
   setInterval(() => {}, 1000);
+  // Self-exit so a RED run (or a crashed test) can never leave this orphaned on the host.
+  setTimeout(() => process.exit(0), 30_000);
+} else if (process.env.FIXTURE_PROBE_EXIT) {
+  // Non-zero-exit case: a REAL failure (not ENOENT) with noisy stderr the prewarm log must bound.
+  process.stderr.write("fixture-stderr-line-1\nfixture-stderr-SECRET-LINE-2\n");
+  process.exit(Number(process.env.FIXTURE_PROBE_EXIT));
 } else {
   fs.writeFileSync(
     process.env.FIXTURE_PROBE_OUT,

@@ -44,6 +44,24 @@ const freshDoctrine = () => import(`../dist/pty/codex-doctrine.js?s=${++importN}
   check("[control] LOOM_PASS_OPENAI_ENV=1 forwards the canary (so the scrub above is not vacuous)", passed.OPENAI_API_KEY === "sk-canary");
 }
 
+// ── ENOENT (codex not installed) is SILENT — every OS. Control: a bogus-but-present failure still logs (cases C/E). ──
+{
+  process.env.LOOM_CODEX_BIN = path.join(tmpHome, "definitely-not-installed", "codex");
+  const { prewarmCodexVersionAsync, getCachedCodexVersion } = await freshDoctrine();
+  const warns = [];
+  const origWarn = console.warn;
+  console.warn = (...a) => { warns.push(a.join(" ")); };
+  try {
+    prewarmCodexVersionAsync();
+    // Anchor on the exec callback having run: poll for ENOENT-free settle via a spawn of the same missing path.
+    await new Promise((resolve) => import("node:child_process").then(({ execFile }) => execFile(process.env.LOOM_CODEX_BIN, ["--version"], () => resolve())));
+    await new Promise((r) => setImmediate(r));
+  } finally { console.warn = origWarn; }
+  check("ENOENT (codex not installed) logs NOTHING", warns.length === 0);
+  check("ENOENT leaves the cache unset", getCachedCodexVersion() === null);
+  delete process.env.LOOM_CODEX_BIN;
+}
+
 if (process.platform !== "win32") {
   console.log("WARN  SKIP  codex-version-prewarm-launch.mjs (shim cases) — the .cmd-shim mechanism is Windows-only; off win32 winCmdShimSpawnTarget is a passthrough.");
   finishAndExit(failures);
@@ -102,9 +120,14 @@ if (process.platform !== "win32") {
       check("[control] the hanging child is alive before the timeout", isAlive(pid));
       // The prewarm's 8s timeout fires and its callback logs the failure; anchor on that observable event.
       await waitUntil(() => warns.some((w) => /codex version prewarm failed/.test(w)), { timeoutMs: 15000, label: "prewarm timeout logged" });
-    } finally { console.warn = origWarn; }
-    await waitUntil(() => !isAlive(pid), { timeoutMs: 5000, label: "hanging child gone after timeout" });
-    check("the timeout killed the REAL child process (captured pid no longer alive)", !isAlive(pid));
+      check("a timeout still LOGS (real failure, not ENOENT) with killed in the bounded line", warns.some((w) => /prewarm failed/.test(w) && /killed/.test(w)));
+      await waitUntil(() => !isAlive(pid), { timeoutMs: 5000, label: "hanging child gone after timeout" });
+      check("the timeout killed the REAL child process (captured pid no longer alive)", !isAlive(pid));
+    } finally {
+      console.warn = origWarn;
+      // Leak guard: kill ONLY the captured pid if a RED run left it alive.
+      if (pid && isAlive(pid)) { try { process.kill(pid); } catch { /* already gone */ } }
+    }
     check("a timed-out prewarm leaves the cache unset", getCachedCodexVersion() === null);
     delete process.env.FIXTURE_PROBE_HANG;
   }
@@ -123,6 +146,25 @@ if (process.platform !== "win32") {
     check("an unparsable shim does NOT throw out of the best-effort prewarm", threw === null);
     check("it logs the fail-closed remedy (standard npm shim)", warns.some((w) => /codex version prewarm failed/.test(w) && /standard npm shim/.test(w)));
     check("the cache stays unset", getCachedCodexVersion() === null);
+  }
+
+  // ── E: a non-zero exit is a REAL failure — still logs, bounded to one line (no stderr / command line) ───
+  {
+    process.env.FIXTURE_PROBE_EXIT = "3";
+    process.env.LOOM_CODEX_BIN = writeNpmCodexShim(fs.mkdtempSync(path.join(tmpHome, "shim-e-")), FIXTURE_PATH);
+    const { prewarmCodexVersionAsync, getCachedCodexVersion } = await freshDoctrine();
+    const warns = [];
+    const origWarn = console.warn;
+    console.warn = (...a) => { warns.push(a.join(" ")); };
+    try {
+      prewarmCodexVersionAsync();
+      await waitUntil(() => warns.some((w) => /codex version prewarm failed/.test(w)), { timeoutMs: 8000, label: "non-zero exit logged" });
+    } finally { console.warn = origWarn; delete process.env.FIXTURE_PROBE_EXIT; }
+    const line = warns.find((w) => /prewarm failed/.test(w)) ?? "";
+    check("non-zero exit still LOGS the failure (not silenced like ENOENT)", line.length > 0);
+    check("the log line is bounded: no child stderr line 2, no multi-line dump", !/SECRET-LINE-2/.test(line) && !/\n/.test(line));
+    check("the log line carries the err.code", /code=3/.test(line));
+    check("cache stays unset after a failed exit", getCachedCodexVersion() === null);
   }
 
   finishAndExit(failures);

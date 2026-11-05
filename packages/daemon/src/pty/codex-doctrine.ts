@@ -336,7 +336,9 @@ export function prewarmCodexVersionAsync(): void {
     const target = resolveCodexLaunchTarget(bin, ["--version"]);
     execFile(target.command, target.args, { timeout: 8000, windowsHide: true, env: buildCodexVersionProbeEnv(process.env) }, (err, stdout) => {
       if (err) {
-        console.warn(`[codex-doctrine] codex version prewarm failed (continuing): ${err.message}`);
+        // codex not installed (a claude-only install) is the normal case — stay silent; real failures still log.
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+        console.warn(`[codex-doctrine] codex version prewarm failed (continuing): ${describePrewarmFailure(err)}`);
         return;
       }
       const v = stdout.match(/(\d+\.\d+\.\d+)/)?.[1];
@@ -345,6 +347,17 @@ export function prewarmCodexVersionAsync(): void {
   } catch (err) {
     console.warn(`[codex-doctrine] codex version prewarm failed (continuing): ${(err as Error)?.message ?? String(err)}`);
   }
+}
+
+/** Bounded one-line description of an execFile failure: `code`/`killed` plus the FIRST line of the message only —
+ *  `err.message` for a non-zero exit embeds the full command line and the child's whole stderr. */
+function describePrewarmFailure(err: Error): string {
+  const e = err as NodeJS.ErrnoException & { killed?: boolean };
+  const first = (err.message ?? "").split(/\r?\n/, 1)[0]?.slice(0, 120) ?? "";
+  const parts: string[] = [];
+  if (e.code !== undefined) parts.push(`code=${String(e.code)}`);
+  if (e.killed) parts.push("killed");
+  return parts.length ? `${parts.join(" ")} — ${first}` : first;
 }
 
 /** The env for the `codex --version` exec: the daemon's env minus the OPENAI_ prefix plus CODEX_API_KEY and
