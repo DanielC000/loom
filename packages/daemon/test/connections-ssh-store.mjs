@@ -401,7 +401,7 @@ try {
     // a THROWAWAY loopback ssh2.Server (never a real host). The expected value is computed INDEPENDENTLY from
     // the generated host key, never from the route's own output. It must DISPLAY only: no row is written.
     {
-      const hostKey = sshUtils.generateKeyPairSync("ed25519");
+      const hostKey = generateParseableEd25519(sshUtils);
       const expected = computeHostKeyFingerprint(sshUtils.parseKey(hostKey.public).getPublicSSH());
       const server = new sshDefault.Server({ hostKeys: [hostKey.private] }, (conn) => { conn.on("error", () => {}); });
       await new Promise((r) => server.listen(0, "127.0.0.1", r));

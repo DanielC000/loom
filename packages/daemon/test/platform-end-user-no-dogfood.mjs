@@ -954,7 +954,8 @@ const SHIPPED_END_USER_MCP_SURFACES = [
       // scan below would silently never see it (card a2f2becc round 3).
       // ssh_exec is gated the same way but additionally needs a REAL ssh connection row to resolve.
       const { createSshConnection } = await import("../dist/connections/store.js");
-      const sshKey = (await import("ssh2")).default.utils.generateKeyPairSync("ed25519");
+      const { generateParseableEd25519 } = await import("./_ssh-test-keys.mjs"); // ssh2's ed25519 generator is malformed 1/256 (card 28c304b2)
+      const sshKey = generateParseableEd25519((await import("ssh2")).default.utils);
       const sshConn = createSshConnection(fx.db, {
         name: "render-ssh", host: "ssh.example", port: 22, user: "loom",
         privateKey: sshKey.private, hostKeyFingerprint: "SHA256:" + "A".repeat(43),
