@@ -40,7 +40,7 @@ import { transcriptRootReadDenyRules, otherProjectTranscriptDenyRules } from "./
 import { withLoomHomeWriteDenyForSpawn } from "./loom-home-deny.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, matchEmbeddedPlaceholderToken, PASTE_TRIPWIRE_TOKEN_WINDOW, type PasteLengthLossCandidate, type WrittenLineCountEntry, type SeenPlaceholderTokenEntry } from "../orchestration/paste-tripwire.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled, isPassAnthropicEnvEnabled, ensureProjectWorkDir, projectWorkDirEnv } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled, isLogMessageContentEnabled, isPassAnthropicEnvEnabled, isPassOpenAiEnvEnabled, ensureProjectWorkDir, projectWorkDirEnv } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, RESERVED_CAPABILITY_SLUGS, type CapabilityDefRow } from "../capabilities/registry.js";
@@ -4747,11 +4747,22 @@ export function isAnthropicSpawnEnvKey(key: string): boolean {
   return upper.startsWith("ANTHROPIC_") || upper === "AWS_BEARER_TOKEN_BEDROCK";
 }
 
+/** True for an env-var NAME that can re-bill or reroute a CODEX session: any `OPENAI_*` (case-insensitive) plus
+ * the exact names `CODEX_API_KEY` / `CODEX_ACCESS_TOKEN`. Deliberately NOT the `CODEX_` prefix — `CODEX_HOME`
+ * (where the ChatGPT login lives) and the other CODEX_* knobs must keep flowing. Card 6a94d4f0. */
+export function isOpenAiSpawnEnvKey(key: string): boolean {
+  const upper = key.toUpperCase();
+  return upper.startsWith("OPENAI_") || upper === "CODEX_API_KEY" || upper === "CODEX_ACCESS_TOKEN";
+}
+
 /** Process-lifetime latch for buildSpawnEnv's silent-scrub diagnostic (card c8eeda93): one line per daemon process. */
 let anthropicScrubLogged = false;
+/** Same latch for the codex OPENAI_* scrub (card 6a94d4f0). */
+let openAiScrubLogged = false;
 
-/** Assemble the environment for a `claude` worker pty — extracted as a PURE, testable seam mirroring
- * buildMcpServers / buildSpawnArgs. All vars below are set BEFORE the sessionEnv merge, so a deliberate
+/** Assemble the environment for a `claude` OR `codex` worker pty (createPty / createCodexPty) — extracted as a
+ * PURE, testable seam mirroring buildMcpServers / buildSpawnArgs. The `openAi` mode is codex-only: createCodexPty
+ * passes "scrub"/"pass", claude leaves the default "off" (byte-identical). All vars below are set BEFORE the sessionEnv merge, so a deliberate
  * project override still wins.
  * @decision sha:28985a08 — GIT_PAGER/PAGER/GIT_TERMINAL_PROMPT close the unattended pty pager/auth wedge.
  * @decision sha:6e6399fa — LOOM_WORKTREE is a known-good cwd anchor, not a cwd reset.
@@ -4764,8 +4775,14 @@ export function buildSpawnEnv(
   // The LOOM_PASS_ANTHROPIC_ENV hatch, resolved by the caller via isPassAnthropicEnvEnabled() (a parameter, not
   // an ambient process.env read, so this stays a pure seam). Defaults to the safe value: scrub.
   passAnthropic = false,
+  // @decision 6a94d4f0 — codex-only: "scrub" drops the daemon's inherited OPENAI_*/CODEX_API_KEY/CODEX_ACCESS_TOKEN,
+  // "pass" is the human-only LOOM_PASS_OPENAI_ENV=1 hatch (resolved by createCodexPty), "off" (default, every
+  // claude spawn) leaves the env byte-identical. A project sessionEnv entry still wins in every mode.
+  openAi: "off" | "scrub" | "pass" = "off",
 ): Record<string, string> {
   const env: Record<string, string> = {};
+  const passedOpenAiKeys: string[] = [];
+  const scrubbedOpenAiKeys: string[] = [];
   // @decision c8eeda93 — the DAEMON's inherited ANTHROPIC_* (+ AWS_BEARER_TOKEN_BEDROCK) never reaches a
   // session unless the human-only LOOM_PASS_ANTHROPIC_ENV=1 hatch is set; a project sessionEnv entry still wins.
   const passedAnthropicKeys: string[] = [];
@@ -4777,6 +4794,13 @@ export function buildSpawnEnv(
         continue;
       }
       if (v !== undefined) passedAnthropicKeys.push(k);
+    }
+    if (openAi !== "off" && isOpenAiSpawnEnvKey(k)) {
+      if (openAi === "scrub") {
+        if (v !== undefined) scrubbedOpenAiKeys.push(k);
+        continue;
+      }
+      if (v !== undefined) passedOpenAiKeys.push(k);
     }
     // Card a50b8afd: scrub any LOOM_MCP_TOKEN inherited from the DAEMON's own process env — the only
     // legitimate source of this value is the explicit, per-spawn mint-and-assign line in createPty/
@@ -4816,6 +4840,19 @@ export function buildSpawnEnv(
   if (scrubbedAnthropicKeys.length > 0 && !anthropicScrubLogged) {
     anthropicScrubLogged = true;
     console.warn(`[pty] not forwarding the daemon's inherited ${scrubbedAnthropicKeys.join(", ")} into sessions (subscription login stays in force); set LOOM_PASS_ANTHROPIC_ENV=1 to forward them, or use the project's sessionEnv for a per-project gateway (logged once per daemon process)`);
+  }
+  if (openAi !== "off") {
+    const sessionOpenAiKeys = Object.keys(sessionEnv).filter((k) => isOpenAiSpawnEnvKey(k));
+    if (sessionOpenAiKeys.length > 0) {
+      console.warn(`[pty] cwd=${spawnCwd} project sessionEnv sets ${sessionOpenAiKeys.join(", ")} — this codex session may bill per token and/or use another endpoint instead of the ChatGPT login`);
+    }
+    if (passedOpenAiKeys.length > 0) {
+      console.warn(`[pty] cwd=${spawnCwd} LOOM_PASS_OPENAI_ENV=1 — forwarding the daemon's own ${passedOpenAiKeys.join(", ")} into this codex session (per-token billing and/or a rerouted endpoint)`);
+    }
+    if (scrubbedOpenAiKeys.length > 0 && !openAiScrubLogged) {
+      openAiScrubLogged = true;
+      console.warn(`[pty] not forwarding the daemon's inherited ${scrubbedOpenAiKeys.join(", ")} into codex sessions (the ChatGPT login in CODEX_HOME stays in force); set LOOM_PASS_OPENAI_ENV=1 to forward them, or use the project's sessionEnv (logged once per daemon process)`);
+    }
   }
   // @decision fbb6e8ec — scrub EVERY sessionEnv-sourced key matching CLAUDE_CONFIG_DIR, never just the
   // first (win32's case-insensitivity lets more than one spelling coexist in one sessionEnv object), via
@@ -7257,7 +7294,7 @@ export class PtyHost {
     // so a deliberate `opts.sessionEnv` entry (human/Lead-set) always wins on a name collision — buildSpawnEnv
     // itself stays pure/DB-free; the merge happens here, at the call site, same as createPty's below.
     const credentialEnv = opts.projectId ? this.resolveCredentialSessionEnv(opts.projectId) : {};
-    const env = buildSpawnEnv(process.env, { ...credentialEnv, ...opts.sessionEnv }, opts.cwd, isPassAnthropicEnvEnabled());
+    const env = buildSpawnEnv(process.env, { ...credentialEnv, ...opts.sessionEnv }, opts.cwd, isPassAnthropicEnvEnabled(), isPassOpenAiEnvEnabled() ? "pass" : "scrub");
     // Card 9346ed5b: mirror createPty's obsidian-preflight block (see that method's own comment for the
     // full contract). buildSpawnEnv (since 8d828fa4, above) merges opts.sessionEnv, so LOOM_OBSIDIAN_AUTOSTART
     // now reaches a codex spawn's env where it previously never arrived at all — but createCodexPty never set

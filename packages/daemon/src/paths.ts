@@ -618,6 +618,17 @@ export function isPassAnthropicEnvEnabled(): boolean {
 }
 
 /**
+ * Card 6a94d4f0: the codex-harness analogue of {@link isPassAnthropicEnvEnabled}. Opt-in to forwarding the
+ * DAEMON's own inherited `OPENAI_*` / `CODEX_API_KEY` / `CODEX_ACCESS_TOKEN` into codex sessions (default
+ * OFF; never folded into the Anthropic hatch — different harness, different billing surface). Daemon
+ * `process.env` only, call-time, literal `"1"` only. See
+ * `docs/decisions/6a94d4f0-openai-env-codex-spawn-scrub.md`.
+ */
+export function isPassOpenAiEnvEnabled(): boolean {
+  return process.env.LOOM_PASS_OPENAI_ENV === "1";
+}
+
+/**
  * Card C1 (Codescape fleet-daemon wiring epic `369dde3c`, LOOM_DEV-gated): the ONE shared working
  * directory BOTH `codescape ingest` and `codescape serve` must be spawned from — both commands resolve
  * their `.codescape` state dir relative to `process.cwd()`, so ingest and serve sharing this exact cwd is

@@ -36,6 +36,13 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
   relied on this, set `LOOM_PASS_ANTHROPIC_ENV=1` in the daemon's environment, or set the variable per
   project via `sessionEnv`. Loom logs the variable names (never values) whenever a session is launched with
   them.
+- **Breaking: Loom no longer forwards `OPENAI_*`, `CODEX_API_KEY` or `CODEX_ACCESS_TOKEN` from the daemon's
+  own environment into Codex sessions.** An exported `OPENAI_API_KEY` could silently move your Codex
+  sessions from your ChatGPT login to per-token billing, and `OPENAI_BASE_URL` could reroute them. Claude
+  sessions are unchanged, and `CODEX_HOME` (where your ChatGPT login lives) and every other `CODEX_*`
+  variable still pass through, so the login is unaffected. **Upgrade note:** if you relied on this, set
+  `LOOM_PASS_OPENAI_ENV=1` in the daemon's environment (separate from `LOOM_PASS_ANTHROPIC_ENV`), or set
+  the variable per project via `sessionEnv`. Loom logs the variable names (never values).
 - **Your "Platform" agent is now a full Platform Lead.** The standing "Platform" agent — who already
   creates and configures your projects, agents and profiles — now also spawns and oversees sessions and
   triages your board, cross-project: the same capability as the developer edition's Platform Lead, minus a

@@ -61,6 +61,13 @@ process.env.FIXTURE_ENV_OUTPUT_FILE = envOutputFile;
 // Card c8eeda93: positive-control canary — an inherited ANTHROPIC_API_KEY must NOT reach the real child.
 delete process.env.LOOM_PASS_ANTHROPIC_ENV;
 process.env.ANTHROPIC_API_KEY = "sk-CANARY-real-child-c8eeda93";
+// Card 6a94d4f0: same for the codex-side spend names; CODEX_HOME (a temp dir, never the real ~/.codex) is the
+// positive control that a legitimate CODEX_* var still reaches the child.
+delete process.env.LOOM_PASS_OPENAI_ENV;
+process.env.OPENAI_API_KEY = "sk-CANARY-real-child-6a94d4f0";
+process.env.OPENAI_BASE_URL = "http://canary-openai.invalid/v1";
+process.env.CODEX_API_KEY = "sk-CANARY-real-child-6a94d4f0-codex";
+process.env.CODEX_HOME = path.join(tmpHome, "codex-home-6a94d4f0");
 
 // Positive-control setup for the CLAUDECODE/CLAUDE_CODE_* scrub check below: set them non-empty on THIS
 // process's own env BEFORE spawning, so a later "absent from the child" assertion proves the scrub
@@ -149,7 +156,9 @@ check("the scratch dir was actually created on disk (mirrors createPty's own eag
 // --- the CLAUDECODE/CLAUDE_CODE_* scrub is ALSO now live on the codex path (positive-controlled above) ---
 check("CLAUDECODE is scrubbed from the real codex child env (positive-controlled: was '1' on this process's own env)", !("CLAUDECODE" in spawnedEnv));
 check("CLAUDE_CODE_ENTRYPOINT (a CLAUDE_CODE_* var) is scrubbed from the real codex child env", !("CLAUDE_CODE_ENTRYPOINT" in spawnedEnv));
-check("[c8eeda93] the daemon's inherited ANTHROPIC_API_KEY (canary) is ABSENT from the real codex child env", !("ANTHROPIC_API_KEY" in spawnedEnv) && !JSON.stringify(spawnedEnv).includes("sk-CANARY-real-child"));
+check("[c8eeda93] the daemon's inherited ANTHROPIC_API_KEY (canary) is ABSENT from the real codex child env", !("ANTHROPIC_API_KEY" in spawnedEnv) && !JSON.stringify(spawnedEnv).includes("sk-CANARY-real-child-c8eeda93"));
+check("[6a94d4f0] the daemon's inherited OPENAI_API_KEY/OPENAI_BASE_URL/CODEX_API_KEY (canaries) are ABSENT from the real codex child env", !("OPENAI_API_KEY" in spawnedEnv) && !("OPENAI_BASE_URL" in spawnedEnv) && !("CODEX_API_KEY" in spawnedEnv) && !JSON.stringify(spawnedEnv).includes("CANARY-real-child-6a94d4f0") && !JSON.stringify(spawnedEnv).includes("canary-openai"));
+check("[6a94d4f0] CODEX_HOME (the ChatGPT-login home) STILL reaches the real codex child env", spawnedEnv.CODEX_HOME === process.env.CODEX_HOME);
 
 // --- negative control: LOOM_OBSIDIAN_PREFLIGHT must be ABSENT when autostart is off (this spawn's own opts
 // never set LOOM_OBSIDIAN_AUTOSTART) — proves the obsidian block below only fires when it's meant to ------
