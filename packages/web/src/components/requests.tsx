@@ -137,6 +137,27 @@ function DismissButton({ q }: { q: QuestionInboxItem }) {
   );
 }
 
+// ── Dismiss a NOTICE (card f549a0ae) ─────────────────────────────────────────────────────────────────
+// A `type:"notice"` stays in the inbox after it is opened (opening only marks it read) until the owner
+// presses this. No confirm: nothing is lost — a dismissed notice stays reachable under History. Distinct
+// from DismissButton above (that one cancels a live PENDING ask); this only stamps `dismissed_at`.
+function DismissNoticeButton({ q }: { q: QuestionInboxItem }) {
+  const qc = useQueryClient();
+  const dismiss = useMutation({
+    mutationFn: () => api.dismissNotices([q.id]),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["openQuestions"] }),
+  });
+  // The modal's copy of the row is not refetched by the invalidation above, so the button reports its own
+  // success instead of staying clickable.
+  return (
+    <Button variant="default" disabled={dismiss.isPending || dismiss.isSuccess} data-testid="notice-dismiss"
+      title="Dismiss this notice — it leaves the inbox and stays in History"
+      onClick={() => dismiss.mutate()}>
+      {dismiss.isPending ? "Dismissing…" : dismiss.isSuccess ? "Dismissed" : "Dismiss"}
+    </Button>
+  );
+}
+
 // ── Clear / Revoke an ANSWERED ssh_exec hold (card a56270da) ────────────────────────────────────────
 // The owner's way to take back an ssh answer early: end a deny's 24h cooldown, or revoke a grant before it
 // lapses. Offered only where `sshClearAction` says the answer still governs. A two-step INLINE confirm, not
@@ -582,7 +603,14 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
               )
               : watchdog
                 ? <NudgeMgrButton q={q} />
-                : <Button variant="ghost" onClick={() => onOpen(q.id)} style={{ padding: "0 6px" }}>View</Button>}
+                : q.state === "notice" && q.dismissedAt == null
+                  ? (
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <DismissNoticeButton q={q} />
+                      <Button variant="ghost" onClick={() => onOpen(q.id)} style={{ padding: "0 6px" }}>View</Button>
+                    </div>
+                  )
+                  : <Button variant="ghost" onClick={() => onOpen(q.id)} style={{ padding: "0 6px" }}>View</Button>}
         </div>
       </div>
       {/* second line: the type-colored hint (pending) or the recorded outcome (answered/consumed). */}
@@ -973,6 +1001,9 @@ function AnsweredReadout({ q }: { q: QuestionInboxItem }) {
       <Panel style={{ display: "flex", flexDirection: "column", gap: 6, borderLeft: `3px solid ${tone.muted}` }}>
         <SectionLabel style={{ margin: 0 }}>FYI · no answer needed</SectionLabel>
         <span style={{ color: color.textMuted, fontSize: fs.sm }}>—</span>
+        {q.dismissedAt == null && (
+          <div style={{ display: "flex" }}><DismissNoticeButton q={q} /></div>
+        )}
       </Panel>
     );
   }

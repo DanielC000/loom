@@ -4423,6 +4423,11 @@ export interface Question {
    *  "consumed"/snoozed (same "two different questions on the same row" trap `cb7d6998` already named for
    *  `sessionId` vs. `filedBySessionId`). Never written by any agent MCP tool. */
   readAt: string | null;
+  /** Card f549a0ae — an ISO instant a human explicitly dismissed a `type:"notice"` row, via the human-only
+   *  loopback `POST /api/questions/dismiss-notices`. Null on every non-notice row and on a notice still
+   *  sitting in the inbox. A notice stays in the default inbox until THIS is set (opening it only sets
+   *  `readAt`); a dismissed one stays reachable under History. Never written by any agent MCP tool. */
+  dismissedAt: string | null;
   /** Card 432765ab — files attached at ask time (every type, including "notice"), copied server-side into
    *  a Loom-owned store. `[]` for every row that predates this column or that never attached anything —
    *  never null, so every reader can iterate without a null-check. See `QuestionAttachment`'s own doc for

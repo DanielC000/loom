@@ -104,6 +104,7 @@ function mkCandidate(id, overrides) {
   const stored = mkAttachmentStore(id);
   db.insertQuestion(baseQuestion(id, overrides), stored);
   if (overrides.readAt) db.markQuestionsRead([id], overrides.readAt);
+  if (overrides.dismissedAt) db.dismissNotices([id], overrides.dismissedAt);
   return questionAttachmentDir(id);
 }
 
@@ -149,9 +150,9 @@ function trackingRemoveDir(delayMs) {
   const cancelledHumanOld = randomUUID(); // dismiss shape — same state, different cancelledBy
   const dir4 = mkCandidate(cancelledHumanOld, { state: "cancelled", cancelledAt: oldIso, cancelledBy: "human", cancelledReason: null });
   const noticeReadOld = randomUUID();
-  const dir5 = mkCandidate(noticeReadOld, { state: "notice", createdAt: ancientIso, readAt: oldIso });
+  const dir5 = mkCandidate(noticeReadOld, { state: "notice", createdAt: ancientIso, readAt: oldIso, dismissedAt: oldIso });
   const noticeReadFresh = randomUUID();
-  const dir6 = mkCandidate(noticeReadFresh, { state: "notice", createdAt: ancientIso, readAt: freshIso });
+  const dir6 = mkCandidate(noticeReadFresh, { state: "notice", createdAt: ancientIso, readAt: freshIso, dismissedAt: freshIso });
 
   const result = await sweepExpiredAttachments(db, RETENTION_MS, { nowMs });
 
@@ -159,8 +160,8 @@ function trackingRemoveDir(delayMs) {
   check("1b consumed inside the window is NOT reaped", fs.existsSync(dir2) && !result.reaped.includes(consumedFresh));
   check("1c cancelled (question_cancel shape, cancelled_by:agent) past the window IS reaped", !fs.existsSync(dir3) && result.reaped.includes(cancelledAgentOld));
   check("1d cancelled (dismiss shape, cancelled_by:human) past the window IS ALSO reaped — dismiss isn't special-cased", !fs.existsSync(dir4) && result.reaped.includes(cancelledHumanOld));
-  check("1e a READ notice past the window IS reaped (terminal time = read_at)", !fs.existsSync(dir5) && result.reaped.includes(noticeReadOld));
-  check("1f a READ notice inside the window is NOT reaped", fs.existsSync(dir6) && !result.reaped.includes(noticeReadFresh));
+  check("1e a DISMISSED notice past the window IS reaped (terminal time = dismissed_at)", !fs.existsSync(dir5) && result.reaped.includes(noticeReadOld));
+  check("1f a DISMISSED notice inside the window is NOT reaped", fs.existsSync(dir6) && !result.reaped.includes(noticeReadFresh));
 }
 
 // ============================== 2. non-terminal untouched, incl. an UNREAD notice however old ==============================
@@ -171,12 +172,17 @@ function trackingRemoveDir(delayMs) {
   const dirA = mkCandidate(answeredId, { state: "answered", createdAt: ancientIso, answeredAt: ancientIso });
   const noticeUnreadId = randomUUID();
   const dirN = mkCandidate(noticeUnreadId, { state: "notice", createdAt: ancientIso }); // no readAt at all
+  // Card f549a0ae: an OPENED (read) but NOT dismissed notice is still visible in the inbox, so its
+  // attachments must survive however long ago it was read — GC keys on dismissed_at, never read_at.
+  const noticeReadUndismissedId = randomUUID();
+  const dirRU = mkCandidate(noticeReadUndismissedId, { state: "notice", createdAt: ancientIso, readAt: ancientIso });
 
   const result = await sweepExpiredAttachments(db, RETENTION_MS, { nowMs });
 
   check("2a a pending request, however old, is NEVER reaped (no terminal timestamp exists)", fs.existsSync(dirP));
   check("2b an answered-but-unconsumed request, however old, is NEVER reaped", fs.existsSync(dirA));
   check("2c an UNREAD notice, however old, is NEVER reaped — no age-based fallback exists for it", fs.existsSync(dirN));
+  check("2c2 a READ-but-UNDISMISSED notice, however long ago it was read, is NEVER reaped (GC keys on dismissed_at)", fs.existsSync(dirRU) && !result.reaped.includes(noticeReadUndismissedId));
   check("2d none of pending/answered/unread-notice is ever reported reaped", !result.reaped.includes(pendingId) && !result.reaped.includes(answeredId) && !result.reaped.includes(noticeUnreadId));
   check("2e the SQL candidate set structurally excludes all three (never even considered, not merely spared)", !result.refused.some((r) => r.id === pendingId || r.id === answeredId || r.id === noticeUnreadId));
 }

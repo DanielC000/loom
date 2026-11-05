@@ -4626,8 +4626,9 @@ export class OrchestrationMcpRouter {
           "AND'd): state (pending|answered|consumed|cancelled|notice; \"cancelled\" = withdrawn via " +
           "question_cancel/dismiss, never an answer; \"notice\" = a self-terminal FYI never answered), " +
           "type (decision|input|permission|credential|notice), includeConsumed (default false; folds " +
-          "in already-consumed AND cancelled requests plus every notice regardless of age; without it " +
-          "a notice older than the Inbox's visibility window drops out too; an explicit " +
+          "in already-consumed AND cancelled requests plus every notice, dismissed or not; without it " +
+          "a notice stays in the list until a human dismisses it in the Inbox (opening it does not " +
+          "remove it), then drops out; an explicit " +
           "state:\"consumed\"/\"cancelled\"/\"notice\" always shows those), mine (default false; true " +
           "narrows to requests filed by YOUR OWN agent lineage, the scope question_pull consumes from, " +
           "so a successor session still sees them; it lists notices too, which question_pull never " +

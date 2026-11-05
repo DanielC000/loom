@@ -245,6 +245,8 @@ export function buildQuestionAsk(
       acknowledgedUntil: null,
       // Card 54007ab7 — never read at ask time; only a human can set this, via POST /api/questions/mark-read.
       readAt: null,
+      // Card f549a0ae — never dismissed at ask time; only a human can set this, via POST /api/questions/dismiss-notices.
+      dismissedAt: null,
       // Card 432765ab — always `[]` here: attachments are resolved+copied SEPARATELY (see
       // `prepareQuestionAttachments` below), asynchronously, AFTER this synchronous builder returns and
       // BEFORE `db.insertQuestion` — which takes the real, derived attachment list as its own 2nd param,

@@ -4217,6 +4217,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // Card 54007ab7 — same posture: insertQuestion's INSERT never binds read_at either, always
           // unread at insert time. A spec needing an already-read row marks it via markQuestionsRead.
           readAt: null,
+          // Card f549a0ae — likewise never bound by INSERT; always null at insert time.
+          dismissedAt: null,
           // Card 432765ab — `insertQuestion` reads attachments from its own SEPARATE 2nd param, never
           // from this field, so this stays `[]` even when a spec DID seed some (card 19b7cf7a): the
           // staged `seededAttachments` go through that 2nd param below.
@@ -7225,6 +7227,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!Array.isArray(body.ids) || body.ids.some((v) => typeof v !== "string"))
       return reply.code(400).send({ error: "ids is required — an array of question id strings" });
     const updated = deps.db.markQuestionsRead(body.ids as string[], new Date().toISOString());
+    return reply.send({ updated });
+  });
+  // Card f549a0ae — the human-only notice-dismiss write: a `type:"notice"` stays in the inbox until this
+  // stamps `dismissed_at` (opening only marks it read). The db write is guarded to `state='notice'`, so it
+  // can never alter another request type's lifecycle. Same Tier-0 human-only loopback posture as mark-read
+  // just above; never an agent MCP tool; no push nudge (the asking session can observe nothing).
+  app.post("/api/questions/dismiss-notices", async (req, reply) => {
+    const body = (req.body ?? {}) as { ids?: unknown };
+    if (!Array.isArray(body.ids) || body.ids.some((v) => typeof v !== "string"))
+      return reply.code(400).send({ error: "ids is required — an array of question id strings" });
+    const updated = deps.db.dismissNotices(body.ids as string[], new Date().toISOString());
     return reply.send({ updated });
   });
 

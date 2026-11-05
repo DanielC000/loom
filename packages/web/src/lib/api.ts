@@ -1029,6 +1029,10 @@ export const api = {
   // silently skipped server-side). Returns the ids actually updated (a subset of the request).
   markQuestionsRead: (ids: string[]) =>
     post<{ updated: string[] }>("/api/questions/mark-read", { ids }),
+  // Human notice-dismiss write (POST /api/questions/dismiss-notices, card f549a0ae) — stamps `dismissedAt`
+  // on `type:"notice"` rows only; any other id is silently skipped server-side. Returns the ids updated.
+  dismissNotices: (ids: string[]) =>
+    post<{ updated: string[] }>("/api/questions/dismiss-notices", { ids }),
 
   // --- Request ATTACHMENTS (epic 7d1d66ab: store = card 432765ab, serving route = card 8f050b79, this
   // inbox manifest = card 19b7cf7a). Exactly TWO daemon routes back all three members below, addressed by

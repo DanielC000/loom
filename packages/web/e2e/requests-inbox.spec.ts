@@ -78,6 +78,82 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(main.getByText("FYI", { exact: true })).toBeVisible();
   });
 
+  test("a notice stays in the inbox after it is opened and after reload, and leaves only when Dismissed (card f549a0ae)", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "NoticeDismissMgr" });
+    const noticeTitle = uniq("sticky-notice");
+    const now = new Date().toISOString();
+    await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, title: noticeTitle, type: "notice",
+      body: "status update", state: "notice", createdAt: now, answeredAt: now,
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    const row = main.getByTestId("request-row").filter({ hasText: noticeTitle });
+    await expect(row).toBeVisible();
+    await expect(row.getByTestId("notice-dismiss")).toBeVisible();
+
+    // Open it — this marks it read (witnessed on the wire below) but must NOT remove it.
+    const markRead = page.waitForResponse((r) => r.url().endsWith("/api/questions/mark-read") && r.request().method() === "POST");
+    await row.getByRole("button", { name: "View" }).click();
+    await markRead;
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "✕" }).click();
+    await expect(dialog).toBeHidden();
+    // The default inbox poll (3s) must have refetched with the row marked read; wait out one refetch by
+    // reloading, which also covers "stays after reload".
+    await page.reload();
+    await expect(row).toBeVisible();
+    await expect(row.getByTestId("notice-dismiss")).toBeVisible();
+    // Optional evidence capture (set E2E_SHOT_DIR); a no-op in the normal run.
+    if (process.env.E2E_SHOT_DIR) await row.screenshot({ path: path.join(process.env.E2E_SHOT_DIR, "notice-after-open-and-reload.png") });
+
+    // Dismiss — leaves the inbox; reload keeps it gone.
+    const dismissed = page.waitForResponse((r) => r.url().endsWith("/api/questions/dismiss-notices") && r.request().method() === "POST");
+    await row.getByTestId("notice-dismiss").click();
+    await dismissed;
+    await expect(row).toBeHidden();
+    await page.reload();
+    await expect(main.getByText(/^Waiting on me \(\d+\)$/)).toBeVisible(); // page rendered, so the absence below is real
+    await expect(main.getByText(noticeTitle)).toHaveCount(0);
+    if (process.env.E2E_SHOT_DIR) await page.screenshot({ path: path.join(process.env.E2E_SHOT_DIR, "inbox-after-dismiss-and-reload.png") });
+
+    // Still reachable under History.
+    const hist = (await (await fetch(`${loomDaemon.baseURL}/api/questions?includeConsumed=true`)).json()) as { title: string; dismissedAt: string | null }[];
+    const kept = hist.find((q) => q.title === noticeTitle);
+    expect(kept?.dismissedAt).toBeTruthy();
+  });
+
+  test("a notice can be dismissed from its detail modal, and stays out of the inbox after reload (card f549a0ae)", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "NoticeModalDismissMgr" });
+    const noticeTitle = uniq("modal-notice");
+    const now = new Date().toISOString();
+    await loomDaemon.seedQuestion({
+      sessionId: mgr.sessionId, projectId: mgr.projectId, title: noticeTitle, type: "notice",
+      body: "status update", state: "notice", createdAt: now, answeredAt: now,
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    const row = main.getByTestId("request-row").filter({ hasText: noticeTitle });
+    await expect(row).toBeVisible();
+    await row.getByRole("button", { name: "View" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+
+    const dismissed = page.waitForResponse((r) => r.url().endsWith("/api/questions/dismiss-notices") && r.request().method() === "POST");
+    await dialog.getByTestId("notice-dismiss").click();
+    await dismissed;
+    await expect(dialog.getByTestId("notice-dismiss")).toBeDisabled();
+    await dialog.getByRole("button", { name: "✕" }).click();
+    await expect(dialog).toBeHidden();
+
+    await page.reload();
+    await expect(main.getByText(/^Waiting on me \(\d+\)$/)).toBeVisible(); // rendered, so the absence below is real
+    await expect(main.getByText(noticeTitle)).toHaveCount(0);
+  });
+
   test("a fresh notice fires a browser Notification titled 'FYI' but never inflates the collapsed request pill (card 68f27faf round 2)", async ({ page, loomDaemon }) => {
     // A notice lands state:"notice" immediately (never "pending"), so it's invisible to the pre-existing
     // pending-based toast/bell logic — lib/attention.ts adds a parallel item for it. CR a7a2464e (round 2,

@@ -230,9 +230,17 @@ try {
     const marked = db.markQuestionsRead([readId], new Date().toISOString());
     check("(H setup) markQuestionsRead actually stamped the 'read' notice", marked.length === 1 && marked[0] === readId);
 
+    // Card f549a0ae: reading a notice no longer hides it — only an explicit dismiss does.
+    const readView = db.listOpenQuestions(false);
+    check("(H2a) a READ-but-undismissed notice STAYS in the default view (opening never dismisses)", readView.some((q) => q.id === readId));
+    check("(H2b) listQuestionsForAudit(excludeConsumed:true) also keeps the read-but-undismissed notice", db.listQuestionsForAudit({ projectId: projId, excludeConsumed: true }).some((q) => q.id === readId));
+    const dismissed = db.dismissNotices([readId, "does-not-exist"], new Date().toISOString());
+    check("(H setup) dismissNotices stamped the notice (and skipped the unknown id)", dismissed.length === 1 && dismissed[0] === readId);
+    check("(H setup) dismissing again is a no-op", db.dismissNotices([readId], new Date().toISOString()).length === 0);
+
     const defaultView = db.listOpenQuestions(false);
     check("(H1) the default 'waiting on me' view INCLUDES the unread notice", defaultView.some((q) => q.id === unreadBuilt.question.id));
-    check("(H2) the default view EXCLUDES the read notice", !defaultView.some((q) => q.id === readId));
+    check("(H2) the default view EXCLUDES the DISMISSED notice", !defaultView.some((q) => q.id === readId));
 
     const historyView = db.listOpenQuestions(true);
     check("(H3) History (includeConsumed:true) includes the UNREAD notice too", historyView.some((q) => q.id === unreadBuilt.question.id));

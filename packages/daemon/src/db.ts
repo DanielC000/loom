@@ -2728,6 +2728,10 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   // (toQuestion maps that to attachments: []), and no index references this column (deliberately — see
   // CLAUDE.md's "no base-schema index may reference a migrate-added column" rule).
   attachments_json: "TEXT",
+  // Card f549a0ae — an ISO instant a human explicitly dismissed a `type:"notice"` row, stamped ONLY by the
+  // human-only loopback POST /api/questions/dismiss-notices. Nullable, ALTER-only, no index in the base
+  // SCHEMA. migrateQuestions() backfills it from read_at ONCE, in the same transaction as the ADD COLUMN.
+  dismissed_at: "TEXT",
 };
 
 /** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a) PLUS the project-scoping
@@ -3845,6 +3849,17 @@ export class Db {
       (this.db.prepare("PRAGMA table_info(questions)").all() as { name: string }[]).map((c) => c.name),
     );
     for (const [name, type] of Object.entries(QUESTION_ADDED_COLUMNS)) {
+      if (name === "dismissed_at" && !have.has(name)) {
+        // Card f549a0ae — every notice a human already opened before this column existed was, under the old
+        // rule, "gone from the inbox"; carry that forward so an upgrade doesn't resurrect them. ONLY on the
+        // run that adds the column (a later boot must never re-stamp a notice that was opened since), and in
+        // the SAME transaction as the ALTER so a crash between the two cannot leave the column un-backfilled.
+        this.db.transaction(() => {
+          this.db.exec(`ALTER TABLE questions ADD COLUMN ${name} ${type}`);
+          this.db.exec("UPDATE questions SET dismissed_at = read_at WHERE state = 'notice' AND read_at IS NOT NULL");
+        })();
+        continue;
+      }
       if (!have.has(name)) this.db.exec(`ALTER TABLE questions ADD COLUMN ${name} ${type}`);
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_questions_task ON questions(task_id)");
@@ -11088,7 +11103,8 @@ export class Db {
    * Every request carrying stored `question_ask` attachments (card 432765ab) whose TERMINAL-state
    * transition happened at or before `cutoffIso` — the attachment GC sweep's (`mcp/attachment-gc.ts`)
    * work set: 'consumed' -> consumed_at, 'cancelled' -> cancelled_at (covers question_cancel + dismiss),
-   * 'notice' -> read_at (only once non-null). 'pending'/'answered' and an unread 'notice' never match (no
+   * 'notice' -> dismissed_at (only once non-null; card f549a0ae — an opened-but-undismissed notice is
+   * still visible in the inbox, so its attachments must survive). 'pending'/'answered' and an unread 'notice' never match (no
    * terminal timestamp exists for them). Deliberately NON-CONSUMING — the attachment FILES on disk are
    * the GC target, never this row; `toQuestionAttachments`'s `available` flag reads disk state live, not
    * anything here, so this query touching nothing is what keeps that live-ness correct.
@@ -11108,7 +11124,7 @@ export class Db {
          AND (
            (state = 'consumed' AND consumed_at IS NOT NULL AND consumed_at <= ?)
            OR (state = 'cancelled' AND cancelled_at IS NOT NULL AND cancelled_at <= ?)
-           OR (state = 'notice' AND read_at IS NOT NULL AND read_at <= ?)
+           OR (state = 'notice' AND dismissed_at IS NOT NULL AND dismissed_at <= ?)
          )
        ORDER BY id`,
     ).all(cutoffIso, cutoffIso, cutoffIso) as { id: string }[]).map((r) => r.id);
@@ -11157,6 +11173,23 @@ export class Db {
     const updated: string[] = [];
     for (const id of ids) {
       if (stmt.run(readAt, id).changes > 0) updated.push(id);
+    }
+    return updated;
+  }
+  /**
+   * Card f549a0ae — the human-only notice-dismiss write. Stamps `dismissed_at` on every id in `ids` that is
+   * a `state = 'notice'` row not already dismissed; any other id (missing, another type/state, already
+   * dismissed) is silently skipped, so this can never change a non-notice request's lifecycle. Does not
+   * touch `read_at`. Returns the ids actually updated.
+   */
+  dismissNotices(ids: string[], dismissedAt: string): string[] {
+    if (ids.length === 0) return [];
+    const stmt = this.db.prepare(
+      "UPDATE questions SET dismissed_at = ? WHERE id = ? AND state = 'notice' AND dismissed_at IS NULL",
+    );
+    const updated: string[] = [];
+    for (const id of ids) {
+      if (stmt.run(dismissedAt, id).changes > 0) updated.push(id);
     }
     return updated;
   }
@@ -11511,13 +11544,12 @@ export class Db {
     if (filters.state) { clauses.push("q.state = ?"); params.push(filters.state); }
     // 'cancelled' is EXCLUDED alongside 'consumed' by default (question_cancel/dismiss's terminal state is
     // retained history exactly like 'consumed'), unless an explicit `state` filter asks for it. A 'notice'
-    // (card 54007ab7, Phase 2 of 59fa6403) gets the SAME read-driven visibility as listOpenQuestions: an
-    // already-read one is excluded too under this default, for consistency — without this, requests_list's
-    // default (excludeConsumed) view would keep every notice forever, unlike the web Inbox's own default
-    // view. Round 2 (CR2 844bd6b8) originally gated this on a fixed 7-day age window
-    // (`NOTICE_INBOX_WINDOW_MS`) as a deliberate stopgap; Phase 2 replaces it with the real signal.
+    // gets the SAME dismissal-driven visibility as listOpenQuestions: it stays in this default view until a
+    // human dismisses it (`dismissNotices` stamps `dismissed_at`), and opening it (`read_at`) never hides it.
+    // Without this, requests_list's default (excludeConsumed) view would keep every dismissed notice
+    // forever, unlike the web Inbox's own default view.
     else if (filters.excludeConsumed) {
-      clauses.push("(q.state NOT IN ('consumed','cancelled','notice') OR (q.state = 'notice' AND q.read_at IS NULL))");
+      clauses.push("(q.state NOT IN ('consumed','cancelled','notice') OR (q.state = 'notice' AND q.dismissed_at IS NULL))");
     }
     if (filters.type) { clauses.push("q.type = ?"); params.push(filters.type); }
     if (filters.since) { clauses.push("q.created_at >= ?"); params.push(filters.since); }
@@ -11539,13 +11571,11 @@ export class Db {
    * The web decision-inbox's GLOBAL "waiting on me" read (card 8701bdbb, child B): every question across
    * ALL projects/sessions, enriched with the asking agent/project display names + whether the CURRENTLY
    * ROUTED session is still live (for the jump/nudge affordances). By default only the human-actionable
-   * states ('pending' + 'answered') PLUS an UNREAD `type:"notice"` row (`read_at IS NULL`) — a notice has
-   * nothing pending to show, but an unread one is still worth surfacing in the default view; once a human
-   * reads it (`markQuestionsRead`), it drops out to History-only (`includeConsumed`), the same way an
-   * answered decision drops out once consumed. Round 2 (owner ruling) originally gated this on a fixed
-   * 7-day age window (`NOTICE_INBOX_WINDOW_MS`) as a deliberate stopgap, explicitly destined to be replaced
-   * once read/unread shipped — card 54007ab7 (Phase 2 of 59fa6403) is that replacement; age no longer
-   * matters here at all. `includeConsumed` folds in the FULL terminal history — 'consumed',
+   * states ('pending' + 'answered') PLUS every `type:"notice"` row that has not been dismissed
+   * (`dismissed_at IS NULL`) — a notice has nothing pending to show, but it stays in the default view until
+   * a human explicitly dismisses it (`dismissNotices`), after which it is History-only (`includeConsumed`).
+   * Opening a notice (`markQuestionsRead`, `read_at`) never hides it: `read_at` drives only the unread badge
+   * and the attention list, and age plays no part. `includeConsumed` folds in the FULL terminal history — 'consumed',
    * 'cancelled' (question_cancel/dismiss's terminal state is retained history exactly like 'consumed',
    * never a separate bucket), AND EVERY 'notice' regardless of age. Newest-first. LEFT JOINs so a question
    * whose filing/routed session or agent was hard-deleted still lists (name falls back to "?") rather than
@@ -11566,7 +11596,7 @@ export class Db {
   listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
     const whereClause = includeConsumed
       ? `q.state IN ('pending','answered','consumed','cancelled','notice')`
-      : `q.state IN ('pending','answered') OR (q.state = 'notice' AND q.read_at IS NULL)`;
+      : `q.state IN ('pending','answered') OR (q.state = 'notice' AND q.dismissed_at IS NULL)`;
     const params: unknown[] = [];
     const rows = this.db.prepare(
       `SELECT q.*, a.name AS agent_name, p.name AS project_name, s.process_state AS session_process_state,
@@ -13142,6 +13172,7 @@ function toQuestion(r0: unknown): Question {
     // fix, since session_id is the mutable routing target, not the filer).
     filedBySessionId: (r.filed_by_session_id as string | null) ?? null,
     readAt: (r.read_at as string | null) ?? null,
+    dismissedAt: (r.dismissed_at as string | null) ?? null,
     attachments: toQuestionAttachments(r.id as string, r.attachments_json as string | null),
   };
 }

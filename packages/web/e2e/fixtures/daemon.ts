@@ -951,6 +951,13 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
           // mark-read route, which is this kind's actual "resolved" equivalent.
           if (type === "notice") {
             await markRead(id);
+            // Card f549a0ae: a READ notice now stays in the default inbox until DISMISSED, so also dismiss
+            // it — otherwise every seeded notice leaks into every later spec's inbox on this shared daemon.
+            await fetch(`${baseURL}/api/questions/dismiss-notices`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ ids: [id] }),
+            });
             continue;
           }
           const body =
