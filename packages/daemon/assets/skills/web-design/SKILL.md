@@ -12,19 +12,17 @@ Inter on slate-900 — it failed, regardless of how clean the code is.
 
 Three ideas run through everything here:
 
-- **Taste is trained, not innate.** Good design is a stack of small correct decisions, each
-  defensible. There is no single magic move.
-- **Unseen details compound.** The 75ms exit animation, the 1px focus ring offset, the tinted
-  neutral instead of pure gray — individually invisible, collectively the difference between
-  "fine" and "considered."
+- **Taste is trained, not innate.** Good design is a stack of small, defensible decisions.
+- **Unseen details compound.** The 75ms exit animation, the 1px focus ring offset, the tinted neutral
+  instead of pure gray: individually invisible, collectively "considered" rather than "fine."
 - **Restraint beats expression by default.** One accent, one type scale, one corner-radius scale,
-  motion only where it earns its place. Reach for more only when the brief asks for it.
+  motion only where it earns its place. Reach for more only when the brief asks.
 
 ## When to use this
 
-Use it whenever you design or review web UI: a landing page, a dashboard, a component, a form, a
-marketing section. Use it before you call a screen "done." **Don't** treat it as always-on — it's a
-lens for visual/frontend work, not a tax on every code change.
+Use it whenever you design or review web UI (a landing page, dashboard, component, form, marketing
+section), and before you call a screen "done." **Don't** treat it as always-on: it's a lens for
+visual/frontend work, not a tax on every code change.
 
 ## Workflow
 
@@ -118,16 +116,14 @@ the ecosystem it lives in:
 | GitHub-style devtool or marketing | Primer (Brand variant for marketing) |
 | UK / US public-sector service | GOV.UK Frontend / USWDS — often legally expected |
 
-(This skill is stack-agnostic and prescribes no framework or package beyond naming these systems.) If the
-brief is an *aesthetic* (glassmorphism, bento, brutalist, editorial) rather than a system, there's no
-official package — build it with native CSS and be honest about what's borrowed inspiration vs. official
-material. If nothing fits, build restrained native CSS on the fundamentals above.
+If the brief is an *aesthetic* (glassmorphism, bento, brutalist, editorial) rather than a system, there's
+no official package: build it with native CSS and be honest about what's borrowed inspiration vs.
+official material. If nothing fits, build restrained native CSS on the fundamentals above.
 
-The same principle covers a component-library toolkit that copies primitives into the project rather than
-shipping as a dependency (e.g. shadcn/ui): when one is already present, compose its primitives and
-retheme its tokens rather than hand-rolling new ones or overriding its per-component styles piecemeal —
-its default theme is itself a recognizable "default look," so retheming (not fighting) it is what keeps
-the anti-AI-default goal intact.
+The same holds for a toolkit that copies primitives into the project rather than shipping as a
+dependency (e.g. shadcn/ui): when one is present, compose its primitives and retheme its tokens rather
+than hand-rolling new ones or overriding per-component styles piecemeal. Its default theme is itself a
+recognizable "default look," so retheming (not fighting) it keeps the anti-AI-default goal intact.
 
 ## Output modes
 
@@ -164,36 +160,33 @@ consent copy.
 testing available (a browser-testing-capable profile — a QA or web-design rig with a Playwright/browser
 MCP — spawns with one), use it:
 
-1. Render the page or component in the browser — at the dev server's **actual bound URL**. Assert the
-   bound port from the tracked server process itself, by whatever means your OS exposes (the framework's
-   own startup banner, when captured — e.g. vite's `Local: http://…:PORT` — is one way but not the only
-   one); never assume a default port. If that port is already held by another process, the dev server
-   binds another port or fails, so eyeballing the default would render the wrong, *stale* server.
+1. Render the page or component at the dev server's **actual bound URL**. Read the bound port from the
+   tracked server process itself (the framework's startup banner, when captured, e.g. vite's
+   `Local: http://…:PORT`, is one way); never assume a default port. If the default is held by another
+   process, the dev server binds another port or fails, and the default URL would render a *stale* server.
    For a **static on-disk HTML file** with no dev server (a CV, a rendered report), don't navigate
-   `file://` — Playwright's `browser_navigate` blocks it outright — and don't hand-roll a web server
-   per render cycle. Serve its directory over loopback with the bundled helper: `node
+   `file://` (Playwright's `browser_navigate` blocks it) and don't hand-roll a web server per render.
+   Serve its directory over loopback with the bundled helper: `node
    .claude/skills/web-design/scripts/serve-static.mjs start <dir>` prints the URL + the exact tracked
    pid and returns immediately (the server keeps running); eyeball via Playwright at the printed URL,
    then `node .claude/skills/web-design/scripts/serve-static.mjs stop <dir>` tears down EXACTLY that
-   tracked pid when you're done — never a `netstat`/`taskkill` port hunt.
-2. **Screenshot it and actually look** — squint test, hierarchy, spacing rhythm, contrast, the eight
-   states, dark mode, a narrow (mobile) viewport. For a **throwaway** verification shot, take it with
-   **no filename/path** — the screenshot tool auto-names it into your session's out-of-tree
-   scratch/output dir, so the working tree stays clean. Only pass a path when you deliberately **persist**
-   a shot (to attach or diff), and then make it an **absolute path under the per-session scratch
-   directory the Playwright client itself allows writes to** — this is not necessarily the same as your
-   generic session scratch/temp dir, and a path outside Playwright's own allowed roots is rejected ("…
-   is outside allowed roots"); a bare or relative name also resolves against the browser tool's client
-   workspace (the repo root), litters the tree, and risks an accidental commit (`git status` will flag
-   it). **The auto-name-into-scratch and `$LOOM_SCRATCH_DIR` mechanics here are `@playwright/mcp`-specific:
-   only a session that mounts Playwright gets that allowed root exposed as the `$LOOM_SCRATCH_DIR`
-   environment variable** — persist a shot there rather than your generic session scratch/temp dir. A
-   session on a DIFFERENT browser tool (e.g. claude-in-chrome) has no `$LOOM_SCRATCH_DIR` and no
-   auto-naming — use that tool's own capture flow instead. To persist a shot **as a file** under
-   Playwright, don't rely on claude-in-chrome `save_to_disk` — it renders the inline base64 but writes no
-   reachable file (Claude Code issue #40141). Use Playwright `page.screenshot({ path })` against the
-   loopback page (launch with `{ channel: 'chrome' }` to reuse system Chrome and skip a download), or
-   decode the base64 from the transcript for a shot you already captured.
+   tracked pid; never a `netstat`/`taskkill` port hunt.
+2. **Screenshot it and actually look**: squint test, hierarchy, spacing rhythm, contrast, the eight
+   states, dark mode, a narrow (mobile) viewport.
+   - For a **throwaway** shot, pass **no filename/path**; the screenshot tool auto-names it into your
+     session's out-of-tree scratch/output dir, keeping the working tree clean.
+   - To deliberately **persist** a shot (to attach or diff), pass an **absolute path under the directory
+     the Playwright client itself allows writes to**. That is not necessarily your generic session
+     scratch/temp dir; a path outside Playwright's allowed roots is rejected ("… is outside allowed
+     roots"), and a bare or relative name resolves against the repo root, litters the tree, and risks an
+     accidental commit.
+   - **The auto-naming and `$LOOM_SCRATCH_DIR` mechanics are `@playwright/mcp`-specific:** only a session
+     that mounts Playwright gets that allowed root as the `$LOOM_SCRATCH_DIR` env var. A session on a
+     DIFFERENT browser tool (e.g. claude-in-chrome) has neither; use that tool's own capture flow.
+   - claude-in-chrome `save_to_disk` renders the inline base64 but writes no reachable file. To persist a
+     shot as a file, use Playwright `page.screenshot({ path })` against the loopback page (launch with
+     `{ channel: 'chrome' }` to reuse system Chrome), or decode the base64 from the transcript for a
+     shot already captured.
 3. Compare what you see against the fundamentals and the don't-list.
 4. Fix what's visibly wrong and repeat. One or two iteration loops catch what reading the code never
    will.
@@ -216,13 +209,12 @@ A short gate — not an exhaustive audit. Run it before calling any screen done:
 9. **Layout tells** — no nested cards, no eyebrow chips, no numbered section markers, no three-equal-cards.
 10. **Responsive** — single-column mobile works; nothing overflows or touches the viewport edge.
 11. **A11y** — headings not skipped, images have alt text, touch targets ≥44px.
-12. **Image framing** — for any embedded photo/portrait, the subject is framed correctly: faces/heads
-    not cropped, not cut off by `object-fit: cover` or a fixed container aspect ratio. Verify against the
-    ACTUAL rendered crop in the browser, not the source image — a center-crop that looks fine full-bleed
-    can decapitate a portrait once it's constrained to the container. And don't reach for an optional,
-    IRREVERSIBLE transform (a square/center crop, a destructive resize) unless the layout truly needs it:
-    correctness of the shown subject comes before optimization, and a crop you can't undo isn't worth a
-    marginal layout gain.
+12. **Image framing** — for any embedded photo/portrait, faces/heads are not cropped or cut off by
+    `object-fit: cover` or a fixed container aspect ratio. Verify against the ACTUAL rendered crop in the
+    browser, not the source image: a center-crop that looks fine full-bleed can decapitate a portrait
+    once constrained to its container. Don't apply an optional, IRREVERSIBLE transform (a square/center
+    crop, a destructive resize) unless the layout truly needs it; the shown subject's correctness comes
+    before a marginal layout gain.
 13. **Eyeballed** — you looked at the rendered result, not just the code.
 14. **E2E** — if the project has an end-to-end test suite, a new or changed screen ships with (or
     updates) a test in it, run green — see the project's own docs for the harness.
