@@ -292,7 +292,9 @@ try {
     // tightened read-only list: removed verbs refused, the narrow forms still pass (flip controls)
     for (const [command, reason] of [
       ["file -C -m x", "not-read-only-verb"], ["docker logs web", "not-read-only-verb"], ["docker inspect web", "not-read-only-verb"],
-      ["docker ps --format x", "not-read-only-verb"], ["systemctl status -l nginx", "not-read-only-verb"],
+      ["docker ps --format x", "not-read-only-verb"], ["docker ps --format=x", "not-read-only-verb"],
+      ["docker ps -n 5", "not-read-only-verb"], ["docker ps -aq", "not-read-only-verb"], ["docker ps --filter=x", "not-read-only-verb"],
+      ["systemctl status -l nginx", "not-read-only-verb"],
       ["systemctl show nginx", "not-read-only-verb"], ["systemctl status a b", "not-read-only-verb"],
     ]) {
       const r = await direct(roConn, command);
@@ -332,6 +334,33 @@ try {
     const after = getSshRegexWorkerStats();
     check("3d all three still end in a bounded timeout once running (budget applies after the wait)", results.every((x) => x.ok === false && x.reason === "timeout"));
     check("3d peak live workers never exceeded the cap, and everything drained", after.peak <= SSH_REGEX_MAX_CONCURRENT_WORKERS && after.active === 0 && after.queued === 0 && before.active === 0);
+  }
+
+  // ============ 3e. regex wait queue is bounded: the over-cap caller is refused IMMEDIATELY and audited ============
+  {
+    const { getSshRegexWorkerStats, SSH_REGEX_MAX_CONCURRENT_WORKERS, SSH_REGEX_MAX_QUEUED_WAITERS } = await import("../dist/connections/sshRegex.js");
+    const evilInput = "a".repeat(4000) + "b";
+    const total = SSH_REGEX_MAX_CONCURRENT_WORKERS + SSH_REGEX_MAX_QUEUED_WAITERS;
+    // holders use a long budget so the queue stays full while the probe call runs
+    const holders = Array.from({ length: total }, () => testRegexesBounded(["^(a+)+$"], evilInput, 400));
+    await delay(0);
+    const full = getSshRegexWorkerStats();
+    check(`3e queue filled to the cap (${SSH_REGEX_MAX_CONCURRENT_WORKERS} active + ${SSH_REGEX_MAX_QUEUED_WAITERS} queued)`, full.active === SSH_REGEX_MAX_CONCURRENT_WORKERS && full.queued === SSH_REGEX_MAX_QUEUED_WAITERS);
+    calls.length = 0;
+    const probe = "a".repeat(30) + "b";
+    const t0 = performance.now();
+    const r = await direct(evilConn, probe);
+    const elapsed = performance.now() - t0;
+    check("3e over-cap call refused as allowlist-regex-busy", r.ok === false && r.reason === "allowlist-regex-busy");
+    check(`3e refusal is immediate (${Math.round(elapsed)}ms < 150; a queued call would wait >= one 400ms worker round)`, elapsed < 150);
+    const pair = rowsFor(probe);
+    check("3e refusal audited as attempt+outcome pair with the busy reason, runner untouched", pair.length === 2 && pair[0].detail.phase === "attempt" && pair[1].detail.outcome === "refused" && pair[1].detail.reason === "allowlist-regex-busy" && calls.length === 0);
+    check("3e refusal text echoes neither the command nor the pattern", !String(r.error).includes(probe) && !String(r.error).includes("(a+)+"));
+    check("3e the refused call did not join the queue", getSshRegexWorkerStats().queued === SSH_REGEX_MAX_QUEUED_WAITERS);
+    const settled = await Promise.all(holders);
+    check("3e queued holders still complete (bounded timeout), nothing leaked", settled.every((x) => x.ok === false && x.reason === "timeout") && getSshRegexWorkerStats().active === 0 && getSshRegexWorkerStats().queued === 0);
+    const again = await testRegexesBounded(["^(a+)+$"], "aaaa");
+    check("3e (flip control) once drained, a regex call is accepted again", again.ok === true && again.results[0] === true);
   }
 
   // ============ 4. ReDoS: bounded, audited, event loop stays responsive ============

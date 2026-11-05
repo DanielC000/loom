@@ -27,22 +27,33 @@ parentPort.postMessage(out);
 /** Per-pattern result: true/false = matched or not, null = the pattern did not compile. */
 export type BoundedRegexResult =
   | { ok: true; results: Array<boolean | null> }
-  | { ok: false; reason: "timeout" | "error" };
+  | { ok: false; reason: "timeout" | "error" | "busy" };
 
 /** At most this many regex workers exist daemon-wide; further calls queue (the per-call budget only starts
  *  once a call is actually running), so parallel ssh_exec calls cannot spawn unbounded threads. */
 export const SSH_REGEX_MAX_CONCURRENT_WORKERS = 2;
+/**
+ * Longest wait queue tolerated; a caller arriving past it is refused at once (fail closed, never queued).
+ * 8 waiters on 2 workers is about 4 rounds of the 250 ms budget, so the worst benign wait stays near 1 s
+ * instead of growing with an attacker's concurrency (measured unbounded: 38 waiters ⇒ 6.6 s for an
+ * unrelated call).
+ * @decision ede5177a — keep the queue bounded; never turn an over-cap caller into a waiter.
+ */
+export const SSH_REGEX_MAX_QUEUED_WAITERS = 8;
 let activeWorkers = 0;
 let peakWorkers = 0;
 const waiters: Array<() => void> = [];
 
-async function acquireSlot(): Promise<void> {
+/** false = queue full, caller must refuse. */
+async function acquireSlot(): Promise<boolean> {
   if (activeWorkers < SSH_REGEX_MAX_CONCURRENT_WORKERS) {
     activeWorkers++;
     peakWorkers = Math.max(peakWorkers, activeWorkers);
-    return;
+    return true;
   }
+  if (waiters.length >= SSH_REGEX_MAX_QUEUED_WAITERS) return false;
   await new Promise<void>((resolve) => waiters.push(resolve)); // slot is handed over without a decrement
+  return true;
 }
 function releaseSlot(): void {
   const next = waiters.shift();
@@ -60,7 +71,7 @@ export async function testRegexesBounded(
   budgetMs: number = SSH_REGEX_BUDGET_MS,
 ): Promise<BoundedRegexResult> {
   if (patterns.length === 0) return { ok: true, results: [] };
-  await acquireSlot();
+  if (!(await acquireSlot())) return { ok: false, reason: "busy" };
   try {
     return await runRegexWorker(patterns, command, budgetMs);
   } finally {

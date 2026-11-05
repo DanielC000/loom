@@ -25,7 +25,7 @@ export const SSH_MAX_COMMAND_LENGTH = 4096;
 
 export type SshRefusalReason =
   | "invalid-command" | "command-too-long" | "control-characters" | "non-ascii-characters"
-  | "shell-metacharacters" | "allowlist-regex-timeout" | "risky-pattern-requires-approval"
+  | "shell-metacharacters" | "allowlist-regex-timeout" | "allowlist-regex-busy" | "risky-pattern-requires-approval"
   | "not-read-only-verb" | "not-in-allowlist";
 
 /** `requiresApproval: true` = every check passed but a risky pattern matched: the command is HELD for owner
@@ -151,7 +151,7 @@ export async function evaluateSshCommandPolicy(
   let regexResults: Array<boolean | null> = [];
   if (regexPatterns.length > 0) {
     const res = await testRegexesBounded(regexPatterns, trimmed);
-    if (!res.ok) return refuse("allowlist-regex-timeout");
+    if (!res.ok) return refuse(res.reason === "busy" ? "allowlist-regex-busy" : "allowlist-regex-timeout");
     regexResults = res.results;
   }
 
