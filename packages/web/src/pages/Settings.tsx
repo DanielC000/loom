@@ -39,7 +39,7 @@ import {
 } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAtlasUi } from "../lib/atlasUi";
-import { useAllAgentLabels } from "../lib/useAllAgents";
+import { useAllAgentLabels, useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
 import {
@@ -61,6 +61,7 @@ import { type FieldComparers } from "../lib/formSync";
 import { useFormSync } from "../lib/useFormSync";
 import { color, font, tone, type Tone } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
+import { SshConnectionFields, SshConnectionRowDetail, buildSshCreateBody, emptySshDraft, type SshDraft } from "../components/sshConnection";
 import { PASS_ENV_MAX_KEYS, duplicatePassEnvIndexes, passEnvEntryError, validatePassEnv } from "../lib/passEnv";
 
 // ── The section list ───────────────────────────────────────────────────────────────────────────
@@ -2282,6 +2283,9 @@ function oauthStatus(c: { connected?: boolean; needsReauth?: boolean; tokenExpir
   return { tone: "cyan", label: "Not connected" };
 }
 
+/** The ssh create mutation's cache key — the handle its on-success eviction finds it by. */
+const SSH_CREATE_MUTATION_KEY = ["connections", "ssh-create"] as const;
+
 function ConnectionsPanel() {
   const qc = useQueryClient();
   const [adding, setAdding] = useState(false);
@@ -2311,6 +2315,29 @@ function ConnectionsPanel() {
       api.createOAuthConnection(b),
     onSuccess: () => { setAdding(false); invalidate(); },
   });
+  // SSH (card b5565d4c). The mutation's `state.variables` carry the pasted key and passphrase, and the
+  // Mutation lives in the client's MutationCache, not in this hook: `reset()` alone only detaches the
+  // observer and schedules GC after `gcTime` (default 5 min in @tanstack/query-core 5.x), so the key would
+  // stay readable from the cache that long. So: `gcTime: 0` evicts it on the next tick whenever it loses its
+  // observer (cancel after an error, unmount, a retry superseding it), and on success it is removed from
+  // the cache synchronously. While the form is open after a failed save it stays, like the form's own draft.
+  const createSsh = useMutation({
+    meta: { inlineError: true },
+    mutationKey: SSH_CREATE_MUTATION_KEY,
+    gcTime: 0,
+    mutationFn: (b: Parameters<typeof api.createSshConnection>[0]) => api.createSshConnection(b),
+    onSuccess: () => {
+      setAdding(false); invalidate(); createSsh.reset();
+      const cache = qc.getMutationCache();
+      for (const m of cache.findAll({ mutationKey: SSH_CREATE_MUTATION_KEY })) cache.remove(m);
+    },
+  });
+  // Grant reach for an ssh row: which AGENTS carry it in their own credential grants (card caca806c — ssh
+  // connections are bound on the agent, never the profile). `null` until the list has really loaded, so a
+  // pending fetch never renders as "Not granted".
+  const allAgents = useAllAgents();
+  const grantedTo = (id: string): string[] | null =>
+    allAgents.isSuccess ? allAgents.data.filter((a) => (a.connections ?? []).includes(id)).map((a) => `${a.projectName} / ${a.name}`) : null;
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteConnection(id),
     onSuccess: () => invalidate(),
@@ -2336,7 +2363,7 @@ function ConnectionsPanel() {
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <SectionLabel style={{ margin: 0 }}>Connections ({rows.length})</SectionLabel>
           <span style={{ flex: 1 }} />
-          {!adding && <Button variant="primary" onClick={() => { setAdding(true); create.reset(); createOAuth.reset(); }}>New connection</Button>}
+          {!adding && <Button variant="primary" onClick={() => { setAdding(true); create.reset(); createOAuth.reset(); createSsh.reset(); }}>New connection</Button>}
         </div>
 
         {isLoading && <Hint>loading connections…</Hint>}
@@ -2345,12 +2372,13 @@ function ConnectionsPanel() {
         {adding && (
           <div style={{ marginBottom: 10, padding: 12, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6 }}>
             <ConnectionForm
-              pending={create.isPending || createOAuth.isPending}
-              error={(create.error ? errorText(create.error) : null) ?? (createOAuth.error ? errorText(createOAuth.error) : null)}
+              pending={create.isPending || createOAuth.isPending || createSsh.isPending}
+              error={(create.error ? errorText(create.error) : null) ?? (createOAuth.error ? errorText(createOAuth.error) : null) ?? (createSsh.error ? errorText(createSsh.error) : null)}
               projects={projects ?? []}
               onSubmit={(v) => create.mutate(v)}
               onSubmitOAuth={(v) => createOAuth.mutate(v)}
-              onCancel={() => { setAdding(false); create.reset(); createOAuth.reset(); }}
+              onSubmitSsh={(v) => createSsh.mutate(v)}
+              onCancel={() => { setAdding(false); create.reset(); createOAuth.reset(); createSsh.reset(); }}
             />
           </div>
         )}
@@ -2362,9 +2390,10 @@ function ConnectionsPanel() {
           {rows.map((c) => {
             const status = c.authScheme === "oauth2" ? oauthStatus(c) : null;
             return (
-              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, flexWrap: "wrap" }}>
+              <div key={c.id} data-testid={`connection-row-${c.id}`} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, flexWrap: "wrap" }}>
                 <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{c.name}</span>
-                <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{c.host}</span>
+                {/* An ssh row names its full user@host:port target on its own detail line below. */}
+                {c.authScheme !== "ssh" && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{c.host}</span>}
                 <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                   {c.authScheme}{c.provider ? ` · ${c.provider}` : ""}
                 </span>
@@ -2400,6 +2429,7 @@ function ConnectionsPanel() {
                   onClick={() => { if (window.confirm(`Revoke "${c.name}"? This cannot be undone — you'll need to re-create it with the secret to restore it.`)) remove.mutate(c.id); }}>
                   Revoke
                 </Button>
+                {c.authScheme === "ssh" && <SshConnectionRowDetail c={c} grantedTo={grantedTo(c.id)} />}
               </div>
             );
           })}
@@ -2478,13 +2508,15 @@ function PendingBindingsPanel() {
 // preset is UX-only: it POSTs the SAME /api/connections/oauth surface, just with the fields pre-shaped.
 // v1 uses USER-supplied client id/secret (the user registers their own Google Cloud OAuth app) — a
 // shared Loom-owned OAuth app is a separate owner-liability decision, not built here.
-type ConnectorMode = "google-analytics" | "sonarqube" | "custom";
+type ConnectorMode = "google-analytics" | "sonarqube" | "ssh" | "custom";
 // Card 7fba8d90: the Name each preset pre-fills. "custom" has no product name of its own, so its
 // preset-derived default is the EMPTY string — the field's own placeholder ("e.g. GitHub personal token")
 // is the guidance there, and an empty box is honest where a borrowed product name would be a lie.
+// "ssh" is the same case: a host is the owner's own machine, so there is no product name to borrow.
 const CONNECTOR_PRESET_NAMES: Record<ConnectorMode, string> = {
   "google-analytics": "Google Analytics",
   sonarqube: "SonarQube",
+  ssh: "",
   custom: "",
 };
 // GA products span several googleapis.com hosts (analyticsdata / searchconsole / adsense); host is
@@ -2498,13 +2530,17 @@ function normalizeSonarQubeHost(raw: string): string {
   return raw.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
 }
 
-function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onCancel }: {
+function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onSubmitSsh, onCancel }: {
   pending: boolean; error: string | null;
   projects: { id: string; name: string }[];
   onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null }) => void;
   onSubmitOAuth: (v: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[]; projectId: string | null }) => void;
+  onSubmitSsh: (v: Parameters<typeof api.createSshConnection>[0]) => void;
   onCancel: () => void;
 }) {
+  // SSH draft (card b5565d4c) — held HERE, not in SshConnectionFields, so switching presets away and back
+  // never discards a pasted key (decision 2790ce05: credential fields persist across a preset switch).
+  const [sshDraft, setSshDraft] = useState<SshDraft>(emptySshDraft);
   const [mode, setMode] = useState<ConnectorMode>("google-analytics");
   const [name, setName] = useState(CONNECTOR_PRESET_NAMES["google-analytics"]);
   // Card 7fba8d90: switching presets used to leave the PREVIOUS preset's Name in place, so a SonarQube
@@ -2538,6 +2574,12 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
 
   const submit = () => {
     setLocalErr(null);
+    if (mode === "ssh") {
+      const built = buildSshCreateBody(name, host, sshDraft, scopeProjectId || null);
+      if (!built.ok) { setLocalErr(built.error); return; }
+      onSubmitSsh(built.body);
+      return;
+    }
     if (mode === "sonarqube") {
       if (!name.trim()) { setLocalErr("A name is required."); return; }
       if (!host.trim()) { setLocalErr("A host is required."); return; }
@@ -2619,6 +2661,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
         <div style={{ display: "flex", gap: 6 }} role="group" aria-label="Connector type">
           {modeBtn("google-analytics", "Google Analytics")}
           {modeBtn("sonarqube", "SonarQube")}
+          {modeBtn("ssh", "SSH host")}
           {modeBtn("custom", "Custom")}
         </div>
       </div>
@@ -2632,7 +2675,15 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onC
         <Hint>Global is reachable daemon-wide, exactly like today. Scoping to a project bounds the credential to that project's own sessions only.</Hint>
       </label>
 
-      {mode === "sonarqube" ? (
+      {mode === "ssh" ? (
+        <>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Name</span>
+            <Input value={name} onChange={(e) => onNameChange(e.target.value)} placeholder="e.g. Homelab NAS" />
+          </label>
+          <SshConnectionFields host={host} setHost={setHost} draft={sshDraft} setDraft={setSshDraft} />
+        </>
+      ) : mode === "sonarqube" ? (
         <>
           <Hint>
             Let an agent read code-quality signal — quality gate status, issues, coverage — from a SonarQube

@@ -187,6 +187,19 @@ export function validateConnectionInput(input: {
   return { ok: true };
 }
 
+/** The one host check for an ssh target, shared by `validateSshConnectionInput` (create) and the
+ *  Connections form's fingerprint probe route (card b5565d4c) so the two can never drift: non-blank, at
+ *  most `CONNECTION_HOST_MAX` chars, and no control characters inside the trimmed value. The error strings
+ *  are fixed and never echo the submitted host. */
+export function validateSshHost(host: unknown): { ok: true } | { ok: false; error: string } {
+  if (!isNonBlankStr(host, CONNECTION_HOST_MAX)) {
+    return { ok: false, error: `host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters` };
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(host.trim())) return { ok: false, error: "host must not contain control characters" };
+  return { ok: true };
+}
+
 /**
  * Validate `createSshConnection`'s input (design record a3d5c7f4). Non-throwing, mirrors
  * `validateConnectionInput`'s shape. Does NOT parse/decrypt the private key itself — that's
@@ -204,9 +217,8 @@ export function validateSshConnectionInput(input: {
   if (!isNonBlankStr(input.name, CONNECTION_NAME_MAX)) {
     return { ok: false, error: `name must be a non-empty string of at most ${CONNECTION_NAME_MAX} characters` };
   }
-  if (!isNonBlankStr(input.host, CONNECTION_HOST_MAX)) {
-    return { ok: false, error: `host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters` };
-  }
+  const host = validateSshHost(input.host);
+  if (!host.ok) return host;
   const port = input.port === undefined ? SSH_DEFAULT_PORT : input.port;
   if (typeof port !== "number" || !Number.isInteger(port) || port < SSH_PORT_MIN || port > SSH_PORT_MAX) {
     return { ok: false, error: `port must be an integer between ${SSH_PORT_MIN} and ${SSH_PORT_MAX}` };

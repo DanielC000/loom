@@ -1,4 +1,4 @@
-import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, OrchestrationEvent, OrchestrationEventKind, Wake, SkillSummary, SkillPermissionVector, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, CapabilityGrant, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks, GatesActive, GateHistoryPage, StalePromptWarning, ProfileGrantReach } from "@loom/shared";
+import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, OrchestrationEvent, OrchestrationEventKind, Wake, SkillSummary, SkillPermissionVector, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, CapabilityGrant, ConnectionMetadata, ConnectionAuthScheme, SshCommandRule, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks, GatesActive, GateHistoryPage, StalePromptWarning, ProfileGrantReach } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -1423,6 +1423,19 @@ export const api = {
   createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null }) =>
     postErr<ConnectionMetadata>("/api/connections", b),
   deleteConnection: (id: string) => delErr<{ ok: boolean }>(`/api/connections/${encodeURIComponent(id)}`),
+  // SSH connections (design record a3d5c7f4, UI card b5565d4c). The private key + passphrase are WRITE-ONLY:
+  // sent once on create, never returned by any read (the response is ConnectionMetadata only).
+  createSshConnection: (b: {
+    name: string; host: string; port: number; user: string; privateKey: string; passphrase?: string;
+    hostKeyFingerprint: string; readOnly: boolean; commandAllowlist: SshCommandRule[]; riskyCommandPatterns: SshCommandRule[];
+    projectId: string | null;
+  }) => postErr<ConnectionMetadata>("/api/connections/ssh", b),
+  // Human-clicked probe: DISPLAYS the host's current key fingerprint for the owner to confirm; pins nothing.
+  fetchSshHostFingerprint: (b: { host: string; port: number }) =>
+    postErr<{ fingerprint: string }>("/api/connections/ssh/fingerprint", b),
+  // Editable config only — host/port/user/key/fingerprint are fixed after create (revoke + recreate).
+  updateSshConnection: (id: string, b: { readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[] }) =>
+    putErr<ConnectionMetadata>(`/api/connections/${encodeURIComponent(id)}/ssh`, b),
   // Card 1e8e9b1e: a live pre-save probe for the SonarQube preset — never persists anything. The preset's
   // "Create connection" submit calls this FIRST and only proceeds to createConnection() once it resolves.
   validateSonarQubeConnection: (b: { host: string; token: string }) =>

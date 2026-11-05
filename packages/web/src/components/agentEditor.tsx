@@ -68,7 +68,8 @@ export function useAgentWrites(
     meta: { inlineError: true },
     mutationFn: (v: { id: string; patch: { connections: string[]; capabilities: CapabilityGrant[] } }) =>
       api.updateAgent(v.id, v.patch),
-    onSuccess: invalidateAgents,
+    // ["allAgents"] too: the Connections page's per-connection "Granted to N agents" reads that cache.
+    onSuccess: () => { invalidateAgents(); qc.invalidateQueries({ queryKey: ["allAgents"] }); },
   });
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteAgent(id),
@@ -305,7 +306,9 @@ export function AgentEditor(
                 style={{ cursor: "pointer", fontFamily: font.mono, fontSize: 12, padding: "3px 9px", borderRadius: 12,
                   border: `1px solid ${on ? color.phosphor : color.border}`, background: on ? color.panel2 : "transparent",
                   color: on ? color.phosphor : color.textMuted }}>
-                {on ? "✓ " : ""}{c.name} <span style={{ opacity: 0.7 }}>({c.host})</span>
+                {/* Metadata only — name, target, scheme. ConnectionMetadata carries no key field to render. */}
+                {on ? "✓ " : ""}{c.name} <span style={{ opacity: 0.7 }}>({c.authScheme === "ssh" ? `${c.user}@${c.host}` : c.host})</span>
+                {c.authScheme === "ssh" && <span style={{ marginLeft: 6, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", opacity: 0.8 }}>ssh</span>}
               </button>
             );
           })}

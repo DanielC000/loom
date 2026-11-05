@@ -38,6 +38,7 @@ const {
 } = await import("../dist/connections/store.js");
 const { decryptSecret } = await import("../dist/keys/envelope.js");
 const { performAuthenticatedRequest } = await import("../dist/connections/request.js");
+const { computeHostKeyFingerprint } = await import("../dist/connections/ssh.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -393,6 +394,44 @@ try {
     check("REST PUT: unknown id -> 400 (not a connection crash)", (await inject({ method: "PUT", url: "/api/connections/does-not-exist/ssh", payload: { readOnly: true } })).statusCode === 400);
     const putBadRule = await inject({ method: "PUT", url: `/api/connections/${createdBody.id}/ssh`, payload: { commandAllowlist: [{ kind: "bogus", pattern: "x" }] } });
     check("REST PUT: an invalid rule shape -> 400", putBadRule.statusCode === 400);
+
+    // POST /api/connections/ssh/fingerprint (card b5565d4c) — the human-clicked "fetch & show" probe, against
+    // a THROWAWAY loopback ssh2.Server (never a real host). The expected value is computed INDEPENDENTLY from
+    // the generated host key, never from the route's own output. It must DISPLAY only: no row is written.
+    {
+      const hostKey = sshUtils.generateKeyPairSync("ed25519");
+      const expected = computeHostKeyFingerprint(sshUtils.parseKey(hostKey.public).getPublicSSH());
+      const server = new sshDefault.Server({ hostKeys: [hostKey.private] }, (conn) => { conn.on("error", () => {}); });
+      await new Promise((r) => server.listen(0, "127.0.0.1", r));
+      const port = server.address().port;
+      const before = db.listConnections().length;
+      const fp = await inject({ method: "POST", url: "/api/connections/ssh/fingerprint", payload: { host: "127.0.0.1", port } });
+      check("REST fingerprint: 200 + the loopback server's real host-key fingerprint", fp.statusCode === 200 && JSON.parse(fp.payload).fingerprint === expected);
+      check("REST fingerprint: displays only — no connection row written", db.listConnections().length === before);
+      await new Promise((r) => server.close(r));
+      check("REST fingerprint: missing host -> 400", (await inject({ method: "POST", url: "/api/connections/ssh/fingerprint", payload: { port: 22 } })).statusCode === 400);
+      check("REST fingerprint: bad port -> 400", (await inject({ method: "POST", url: "/api/connections/ssh/fingerprint", payload: { host: "127.0.0.1", port: 70000 } })).statusCode === 400);
+      // The probe runs the create path's OWN host check (validateSshHost, shared with
+      // validateSshConnectionInput), so the two can't drift: an oversized or control-character host is
+      // refused BEFORE any dial, with a fixed message that never echoes the submitted host.
+      const HOST_TOO_LONG = "host must be a non-empty string of at most 300 characters";
+      const HOST_CONTROL = "host must not contain control characters";
+      for (const [label, badHost, want] of [
+        ["oversized host", "h".repeat(301), HOST_TOO_LONG],
+        ["control-character host", "127.0.0.1\nzz-planted-host-echo", HOST_CONTROL],
+        ["NUL in host", "127.0.0.1\u0000zz-planted-host-echo", HOST_CONTROL],
+      ]) {
+        const r = await inject({ method: "POST", url: "/api/connections/ssh/fingerprint", payload: { host: badHost, port } });
+        check(`REST fingerprint: ${label} -> 400 with the fixed generic error`, r.statusCode === 400 && JSON.parse(r.payload).error === want);
+        check(`REST fingerprint: ${label} — the error never echoes the submitted host`, !r.payload.includes("zz-planted-host-echo") && !r.payload.includes("h".repeat(301)));
+        // Same input through the create path's validator: the identical refusal (one check, two callers).
+        const v = validateSshConnectionInput({ name: "n", host: badHost, user: "u", privateKey: unenc.private, hostKeyFingerprint: FINGERPRINT });
+        check(`create validator: ${label} refused with the same message as the probe`, v.ok === false && v.error === want);
+      }
+      // A closed port: the probe's own generic failure surfaces as a non-2xx, never a fingerprint.
+      const closed = await inject({ method: "POST", url: "/api/connections/ssh/fingerprint", payload: { host: "127.0.0.1", port } });
+      check("REST fingerprint: unreachable host -> 502 with no fingerprint", closed.statusCode === 502 && !("fingerprint" in JSON.parse(closed.payload)));
+    }
 
     // DELETE (revoke) — the generic route, unchanged.
     const del = await inject({ method: "DELETE", url: `/api/connections/${createdBody.id}` });

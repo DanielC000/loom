@@ -51,9 +51,10 @@ import { reconcileCompanionBindingRoutes, companionRouteBlockReason } from "../c
 import { buildCompanionReplyStatus, checkCompanionReplyHealth } from "../companion/reply-watch.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
-import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection, createSshConnection, updateSshConnectionConfig } from "../connections/store.js";
+import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection, createSshConnection, updateSshConnectionConfig, validateSshHost } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { validateSonarQubeCredential } from "../connections/sonarqube.js";
+import { fetchHostKeyFingerprint } from "../connections/ssh.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer, updateCapabilityDefPassEnv, requirePassEnvKey, resetCapabilityProvisionStatus } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout, mergeConfigOverride, unsetConfigPath, findConfigPatchUnsetCollisions } from "../mcp/platform.js";
@@ -2864,6 +2865,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
     }
+  });
+
+  // Card b5565d4c: the Connections form's human-clicked "fetch & show fingerprint" — a thin wrapper over
+  // connections/ssh.ts's existing `fetchHostKeyFingerprint` probe (it never authenticates and never pins).
+  // It only DISPLAYS: nothing is stored here, and the form pins the value only after an explicit owner
+  // confirm, then sends it through POST /api/connections/ssh like a pasted one (no silent TOFU).
+  // Human-only loopback, no MCP path, same as every route in this section.
+  app.post("/api/connections/ssh/fingerprint", async (req, reply) => {
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    // The SAME host check the create path runs (validateSshConnectionInput), so the two can't drift.
+    const hostCheck = validateSshHost(b.host);
+    if (!hostCheck.ok) return reply.code(400).send({ error: hostCheck.error });
+    const host = (b.host as string).trim();
+    const port = b.port === undefined ? 22 : b.port;
+    if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
+      return reply.code(400).send({ error: "port must be an integer between 1 and 65535" });
+    }
+    const result = await fetchHostKeyFingerprint(host, port);
+    if (!result.ok) return reply.code(502).send({ error: result.error });
+    return { fingerprint: result.fingerprint };
   });
 
   // Update an EXISTING ssh connection's editable config only (readOnly / commandAllowlist /

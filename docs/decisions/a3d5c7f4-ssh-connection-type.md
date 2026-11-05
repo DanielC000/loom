@@ -105,6 +105,10 @@ what a toolchain-less end user silently gets (the expected, documented behavior)
 confirmed by a real failure-to-build repro; don't treat it as verified. See `docs/releasing.md`'s
 "`ssh2` (+ its optional `cpu-features`) at `npm i -g` time" note for the install-script behavior itself.
 
+## Connections UI copy tracks `ssh_exec`'s real behavior (card b5565d4c)
+
+The form's risky-pattern section (`packages/web/src/components/sshConnection.tsx`) is labelled "Refuse these commands" and says a match is refused and logged, because that is what `ssh_exec` does until the owner-approval hold (card f7d70f75) ships. Card f7d70f75 must update that copy, and the row's "N refused" count, when the hold lands.
+
 ## The `ssh_exec` tool (child 3, card `699fdbd9`)
 
 `mcp/server.ts` registers `ssh_exec({connectionId, command})` on the same stateless, per-request session-ROW read as `authenticated_request` (`session.connections`), only when at least one granted id is a usable `ssh` connection (`resolveUsableSshConnections`). It never reads the profile or agent row, so it stays correct however grant resolution evolves (a grant on the agent row alone registers it; a sibling agent on the same profile without it does not; rewriting the row revokes on the next request). Host, port, user, pinned fingerprint and key always come from the connection row (`connections/sshExec.ts`); the caller supplies only an id and a command.
@@ -121,13 +125,13 @@ confirmed by a real failure-to-build repro; don't treat it as verified. See `doc
 
 ## Do not
 
+- Do not let the Connections UI promise an approval inbox for a risky-pattern match before card f7d70f75's hold exists — today a match is refused outright.
 - Do not relax the shell-syntax refusal by inferring safety from `readOnly` or from the rule types — see the `ssh_exec` section above; shell syntax needs an explicit per-connection opt-in on a future card.
 - Do not evaluate an owner regex against agent text on the daemon event loop — only through `testRegexesBounded` (one worker, one total budget, fail closed, at most two workers daemon-wide).
 - Do not infer a `systemctl`/`docker` subcommand by skipping option words — an option's VALUE is also a bare word (`systemctl -o cat stop sshd`).
 - Do not write the `ssh_command_run` attempt row after any step that can throw, and do not let a caught path skip its outcome row.
 - Do not register `ssh_exec` from the profile or agent row; key it on the session row's `connections` only.
 - Do not put command text, ssh2 error text, output bodies or key material in a log line, a returned error or an audit row beyond the exact command and fixed reason codes.
-
 - Do not place the private key, or any derived credential, in an agent-reachable env var, argv, or file — it is decrypted only inside the daemon process, only for the duration of one `ssh_exec` call. The agent gets a tool call, never a socket, cert, or key.
 - Do not hand the agent a raw ssh-agent socket, a short-lived certificate, or a ControlMaster socket for this connection type (v1, decision 2 above) — none of the three let Loom see or gate commands after authentication, and the two Windows `ssh` flavors are mutually socket-incompatible anyway (measured above).
 - Do not perform a silent trust-on-first-use host-key pin — the fingerprint must be captured and explicitly human-confirmed at connection-create time; refuse, never silently re-pin, on a later mismatch.
