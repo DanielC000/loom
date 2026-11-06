@@ -20,7 +20,8 @@ export interface ToolAttributionResult {
   state: ToolAttributionState;
   agentId?: string;
   agentType?: string;
-  /** Only set for "ambiguous" — how many fresh, genuinely indistinguishable candidates were pending. */
+  /** Only set for "ambiguous" — how many fresh, genuinely indistinguishable candidates were pending (tracker-side),
+   *  or, for a watched tool repeated within one request body (gateway-side), the larger of that and the body's call count. */
   candidateCount?: number;
 }
 

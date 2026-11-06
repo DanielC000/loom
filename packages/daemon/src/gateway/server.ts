@@ -992,10 +992,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // request; a 2nd `consumeToolAttribution` call reads "unknown" and silently fails open, not loud.
   const computeAttributions = (sid: string, server: string, body: unknown): Map<string, ToolAttributionResult> => {
     const map = new Map<string, ToolAttributionResult>();
-    for (const tool of extractWatchedToolCalls(body, WATCHED_TOOL_NAMES)) {
+    const calls = extractWatchedToolCalls(body, WATCHED_TOOL_NAMES);
+    for (const tool of calls) {
       if (map.has(tool)) continue; // one consume() per (session, tool) per request — see doc above.
       const result = deps.pty.consumeToolAttribution?.(sid, `mcp__${server}__${tool}`);
-      if (result) map.set(tool, result);
+      if (!result) continue;
+      // A bare name repeated in ONE body (JSON-RPC batch) shares this single map slot, but the one consume above
+      // can only vouch for one invocation. Still consume once (never worse than zero): with exactly ONE pending
+      // entry that drains it so a later request can't inherit it; with >=2 pending the tracker returns ambiguous
+      // and drains nothing (entries age out via the TTL, a later call in that window under-attributes — safe).
+      // Then store "ambiguous" so no call in the body is over-attributed.
+      const repeated = calls.filter((t) => t === tool).length;
+      map.set(tool, repeated > 1 ? { state: "ambiguous", candidateCount: Math.max(result.candidateCount ?? 0, repeated) } : result);
     }
     return map;
   };
