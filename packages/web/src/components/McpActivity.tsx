@@ -10,6 +10,7 @@ import {
   applyFilter, emptyFilter, filterActive, groupByTurn, isUnclassified, linksOf, mcpPollInterval, parseMcpCalls, sentenceOf,
   tally, REFUSED_HINT, SUBSYSTEMS, UNCLASSIFIED_HINT, type McpCall, type McpFilter, type McpOutcome, type McpSubsystem,
 } from "../lib/mcpActivity";
+import { turnCauses, type TurnCause } from "../lib/turnCause";
 
 const OUTCOME_MARK: Record<McpOutcome, string> = { ok: "✓", refused: "!", error: "✕", pending: "…" };
 const OUTCOME_LABEL: Record<McpOutcome, string> = { ok: "ok", refused: "refused", error: "error", pending: "no answer yet" };
@@ -38,6 +39,22 @@ function Sentence({ call }: { call: McpCall }) {
       {s.object && <> <b>{s.object}</b></>}
       {s.tail && <> <span className="loom-mcp-tail">{s.tail}</span></>}
     </>
+  );
+}
+
+/** "after worker report 9e40d7a1 (progress)": what opened the turn (lib/turnCause.ts). Text only; the
+ *  excerpt is the opening message, already cut, and shown in quotes only where there is room for it. */
+function Cause({ cause, testId, quote = false }: { cause: TurnCause | undefined; testId: string; quote?: boolean }) {
+  if (!cause) return null;
+  return (
+    <span className="loom-mcp-why" data-testid={testId} data-cause={cause.kind}
+      title={cause.excerpt && !quote ? cause.excerpt : undefined}>
+      after {cause.label}
+      {cause.id && <> <b>{cause.id}</b></>}
+      {cause.detail && <> ({cause.detail})</>}
+      {cause.more > 0 && <> <span className="loom-mcp-whymore">+{cause.more} more</span></>}
+      {quote && cause.excerpt && <> <q className="loom-mcp-quote">{cause.excerpt}</q></>}
+    </span>
   );
 }
 
@@ -75,6 +92,7 @@ export function McpActivity({ sessionId, harness, busy = false }: {
     refetchInterval: mcpPollInterval({ hidden, expanded, busy }),
   });
   const calls = useMemo(() => parseMcpCalls(t.data ?? []), [t.data]);
+  const causes = useMemo(() => turnCauses(t.data ?? []), [t.data]);
   const panelId = useId();
 
   if (!calls.length) {
@@ -109,6 +127,7 @@ export function McpActivity({ sessionId, harness, busy = false }: {
         <span className="loom-mcp-l1">
           <span className="loom-mcp-lab">Loom MCP</span>
           <span>· turn {latest.turn}</span>
+          <Cause cause={causes.get(latest.turn)} testId="mcp-activity-cause" />
           <span className="loom-mcp-beads" aria-label={`${plural(turnCalls.length, "call")} this turn`}>
             {turnCalls.length > beads.length && <span className="loom-mcp-more">+{turnCalls.length - beads.length}</span>}
             {beads.map((c) => (
@@ -137,12 +156,12 @@ export function McpActivity({ sessionId, harness, busy = false }: {
           <span className="loom-mcp-chev" aria-hidden="true">▾</span>
         </span>
       </button>
-      {expanded && <Expanded id={panelId} calls={calls} />}
+      {expanded && <Expanded id={panelId} calls={calls} causes={causes} />}
     </div>
   );
 }
 
-function Expanded({ id, calls }: { id: string; calls: McpCall[] }) {
+function Expanded({ id, calls, causes }: { id: string; calls: McpCall[]; causes: ReadonlyMap<number, TurnCause> }) {
   const [filter, setFilter] = useState<McpFilter>(emptyFilter);
   const [openSeq, setOpenSeq] = useState<ReadonlySet<number>>(() => new Set());
   const shown = useMemo(() => applyFilter(calls, filter), [calls, filter]);
@@ -176,7 +195,8 @@ function Expanded({ id, calls }: { id: string; calls: McpCall[] }) {
             <div key={g.turn} role="listitem" className="loom-mcp-turn" data-testid={`mcp-turn-${g.turn}`}>
               <div className="loom-mcp-turnh">
                 <span className="loom-mcp-tn">Turn {g.turn}</span>
-                <span>{plural(tot.n, "call")}{tot.ref > 0 && <span className="loom-mcp-refn"> · {tot.ref} refused</span>}{tot.err > 0 &&<span className="loom-mcp-errn"> · {plural(tot.err, "error")}</span>}</span>
+                <Cause cause={causes.get(g.turn)} testId={`mcp-cause-turn-${g.turn}`} quote />
+                <span className="loom-mcp-tcount">{plural(tot.n, "call")}{tot.ref > 0 && <span className="loom-mcp-refn"> · {tot.ref} refused</span>}{tot.err > 0 &&<span className="loom-mcp-errn"> · {plural(tot.err, "error")}</span>}</span>
                 <span className="loom-mcp-stack" aria-hidden="true">
                   {tot.calls.map((c) => <i key={c.seq} className={`${c.subsystem} ${c.outcome}`} />)}
                 </span>

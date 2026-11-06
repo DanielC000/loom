@@ -29,11 +29,12 @@ const TRANSCRIPT = [
     call("tag00003", "mcp__loom-orchestration__worker_list", {}),
   ].join("\n") },
   { role: "tool_result", text: "-> tool result {tag00001}: [{\"id\":\"a9a7140c\"}]\n-> tool result {tag00002}: 1 x\n-> tool result {tag00003}: {\"workers\":[]}" },
-  { role: "user", text: "[loom:from-worker] 1c07b3e5 progress" },
+  // The daemon's own worker-report frame, delivered inside a pasted_content wrapper (card 7627a850).
+  { role: "user", text: "<pasted_content id=\"e2e1\">\n[loom:worker-report] worker 1c07b3e5-0000-4000-8000-000000000000 (task a9a7140c) — progress: retained view wired\n</pasted_content id=\"e2e1\">" },
   { role: "assistant", text: call("tag00004", "mcp__loom-orchestration__worker_redirect",
     { sessionId: "1c07b3e5-0000-4000-8000-000000000000", text: "Stop: <b>rebase</b> first." }) },
   { role: "tool_result", text: "-> tool result {tag00004} (error): MCP error -32602: session 1c07b3e5 is not live (processState=exited)" },
-  { role: "user", text: "Owner: go ahead." },
+  { role: "user", text: "Owner: go ahead. <img src=x onerror=\"window.__mcpXss=1\"><b>ship</b> it" },
   { role: "assistant", text: [
     call("tag00005", "mcp__loom-tasks__memory_read", { key: "atlas-session-node-build-p2-7" }),
     call("tag00006", "mcp__loom-tasks__tasks_update", { id: "a9a7140c-3591-403c-9c2b-6f2311de7f37", columnKey: "review" }),
@@ -154,6 +155,37 @@ test.describe("session Loom MCP activity strip", () => {
     // Collapse.
     await page.getByTestId("mcp-activity-bar").click();
     await expect(page.getByTestId("mcp-activity-log")).toHaveCount(0);
+  });
+
+  test("each turn says what opened it: your message, a worker report, the opening prompt; message text stays text", async ({ page, loomDaemon }) => {
+    test.setTimeout(120_000);
+    await openSession(page, loomDaemon);
+
+    // Compact: the latest turn was opened by the human's message.
+    const compactCause = page.getByTestId("mcp-activity-cause");
+    await expect(compactCause).toHaveText("after your message");
+    await expect(compactCause).toHaveAttribute("data-cause", "human");
+
+    await page.getByTestId("mcp-activity-bar").click();
+    const human = page.getByTestId("mcp-cause-turn-3");
+    const report = page.getByTestId("mcp-cause-turn-2");
+    await expect(human).toHaveAttribute("data-cause", "human");
+    await expect(report).toHaveAttribute("data-cause", "worker-report");
+    await expect(page.getByTestId("mcp-cause-turn-1")).toHaveAttribute("data-cause", "opening");
+    // The worker report is read through its pasted_content wrapper: id in mono, status beside it.
+    await expect(report).toContainText("after worker report 1c07b3e5 (progress)");
+    await expect(report.locator("b")).toHaveText("1c07b3e5");
+    await expect(page.getByTestId("mcp-cause-turn-1")).toContainText("after the opening prompt");
+
+    // The human's message is quoted as literal text: its markup is characters, not elements.
+    await expect(human).toContainText("after your message");
+    const quote = human.locator(".loom-mcp-quote");
+    await expect(quote).toHaveText('Owner: go ahead. <img src=x onerror="window.__mcpXss=1"><b>ship</b> it');
+    await expect(quote.locator("*")).toHaveCount(0);
+    await expect(page.locator(".loom-mcp img")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { __mcpXss?: number }).__mcpXss)).toBeUndefined();
+    // The header still counts the whole turn beside the cause.
+    await expect(page.getByTestId("mcp-turn-2")).toContainText("1 call · 1 error");
   });
 
   test("a refused call (error field in a successful answer) is amber, counted, and filterable apart from ok and error", async ({ page, loomDaemon }) => {
