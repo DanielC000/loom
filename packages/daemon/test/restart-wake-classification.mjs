@@ -173,7 +173,10 @@ try {
   mkSession({ id: id.affLead, projId: projZ, agentId: zAg, role: "platform" });   // 0 workers, PENDING board, escalated-suppressed (genuinely stranded)
   mkSession({ id: id.silentLead, projId: projZ, agentId: zAg, role: "platform" }); // 0 workers, SAME pending board, policy 'watching' (default) — parity with pendMgr
   mkSession({ id: id.deferredMgr, projId: projW, agentId: wAg, role: "manager" }); // 0 workers, board is deferred-only
-  mkSession({ id: id.answerMgr, projId: projX, agentId: xAg, role: "manager" });  // 0 workers, EMPTY board, unconsumed answer
+  // Card 38ef3d5f: hasUnconsumedAnswer is agent-lineage scoped (same as question_pull), so answerMgr needs its
+  // OWN agent — sharing xAg would make every other projX manager (the bystander) see its answered row too.
+  const answerAg = `rwc-X-answer-ag-${sfx}`; mkAgent(answerAg, projX);
+  mkSession({ id: id.answerMgr, projId: projX, agentId: answerAg, role: "manager" });  // 0 workers, EMPTY board, unconsumed answer
   // watcherOffMgr / watcherOffSnoozedMgr: same PENDING board as pendMgr/snoozedMgr, but in projV where
   // idleNudgeMinutes=0 (watcher disabled) — NOTHING re-engages either policy here, so BOTH must classify
   // STRANDED (the CR-caught regression: without the idleNudgeMinutes gate these would wrongly go silent).

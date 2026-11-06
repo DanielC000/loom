@@ -67,13 +67,16 @@ export function hasPendingBoardWork(db: Db, id: string): boolean {
 
 /**
  * A genuinely NEW per-session event distinct from generic board content: an ANSWERED question this
- * session itself asked that it hasn't `question_pull`ed yet. Non-destructive PEEK (listQuestionsForSession
- * reads all states without flipping anything) — the wake classification must never consume the queue
- * it's only checking.
+ * agent lineage asked that `question_pull` would deliver. Non-destructive PEEK through the SAME shared
+ * predicate and agent-lineage scope as the pull itself (`Db.hasPullableAnsweredQuestionForAgent`) — never
+ * a raw `state === "answered"` count, which also matched an ssh-approval hold `question_pull` never
+ * returns. The wake classification must never consume the queue it's only checking.
  */
 export function hasUnconsumedAnswer(db: Db, id: string): boolean {
   try {
-    return db.listQuestionsForSession(id).some((q) => q.state === "answered");
+    const agentId = db.getSession(id)?.agentId;
+    if (!agentId) return false;
+    return db.hasPullableAnsweredQuestionForAgent(agentId);
   } catch {
     return true; // defensive: a read fault must never silently drop a real pending answer
   }

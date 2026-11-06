@@ -143,6 +143,21 @@ import { isLikelyGroupTelegramChatId, isNonNumericTelegramChatId, InvalidTelegra
 import { resolveIdPrefix, type IdPrefixResult } from "./id-prefix.js";
 
 /**
+ * The ONE definition of "an answered Request `question_pull` can deliver": `state = 'answered'` and NOT an
+ * ssh-approval hold (that answer reaches its worker through the `[loom:ssh-approval-answered]` nudge and
+ * `ssh_exec`'s own claim, never `question_pull`, so it stays 'answered' for the life of its grant).
+ * Every pull variant, the answered-stuck watchdog and the restart notice's peek
+ * (`Db.hasPullableAnsweredQuestionForAgent`) interpolate THIS fragment, so they cannot drift apart.
+ * @decision 38ef3d5f — do not re-spell the ssh-approval exclusion at a call site (or count raw
+ * `state === "answered"` rows to decide "has something to pull"): a second copy made the restart notice
+ * claim an unpullable answer forever. `alias` is the questions-table alias ("" for none).
+ */
+export function pullableAnsweredWhere(alias = ""): string {
+  const p = alias ? `${alias}.` : "";
+  return `${p}state = 'answered' AND (${p}permission_action IS NULL OR substr(${p}permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) != '${SSH_APPROVAL_ACTION_PREFIX}')`;
+}
+
+/**
  * The atomic result of a companion pairing-code redemption (db layer). A single silent `rejected` covers
  * EVERY failure (wrong/expired/consumed/locked-out/grant-type-or-session mismatch/route-collision) so the
  * caller can surface the SAME reject as any unallowlisted inbound — no pairing oracle. On success the grant
@@ -11260,7 +11275,7 @@ export class Db {
    * answered, but the asking manager hasn't pulled it. Oldest-first.
    */
   listAnsweredStuckQuestions(beforeIso: string): Question[] {
-    return (this.db.prepare(`SELECT * FROM questions WHERE state = 'answered' AND answered_at <= ? AND (permission_action IS NULL OR substr(permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) != '${SSH_APPROVAL_ACTION_PREFIX}') ORDER BY answered_at`)
+    return (this.db.prepare(`SELECT * FROM questions WHERE ${pullableAnsweredWhere()} AND answered_at <= ? ORDER BY answered_at`)
       .all(beforeIso) as Row[]).map(toQuestion);
   }
   /**
@@ -11433,7 +11448,7 @@ export class Db {
    */
   pullAnsweredQuestions(sessionId: string, consumedAt: string): Question[] {
     return this.db.transaction((): Question[] => {
-      const rows = (this.db.prepare(`SELECT * FROM questions WHERE session_id = ? AND state = 'answered' AND (permission_action IS NULL OR substr(permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) != '${SSH_APPROVAL_ACTION_PREFIX}') ORDER BY answered_at`)
+      const rows = (this.db.prepare(`SELECT * FROM questions WHERE session_id = ? AND ${pullableAnsweredWhere()} ORDER BY answered_at`)
         .all(sessionId) as Row[]).map(toQuestion);
       if (rows.length === 0) return rows;
       const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
@@ -11465,7 +11480,7 @@ export class Db {
       // CONSTRUCTION, with no separate `type` filter needed. Do not re-add one.
       const rows = (this.db.prepare(
         `SELECT q.* FROM questions q JOIN sessions s ON s.id = q.session_id
-         WHERE s.agent_id = ? AND q.state = 'answered' AND (q.permission_action IS NULL OR substr(q.permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) != '${SSH_APPROVAL_ACTION_PREFIX}') ORDER BY q.answered_at`,
+         WHERE s.agent_id = ? AND ${pullableAnsweredWhere("q")} ORDER BY q.answered_at`,
       ).all(agentId) as Row[]).map(toQuestion);
       if (rows.length === 0) return rows;
       const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
@@ -11499,7 +11514,7 @@ export class Db {
       // pullAnsweredQuestionsForAgent's sibling query above; keep both in sync if this ever changes.
       const rows = (this.db.prepare(
         `SELECT q.* FROM questions q JOIN sessions s ON s.id = q.session_id
-         WHERE s.agent_id = ? AND q.state = 'answered' AND (q.permission_action IS NULL OR substr(q.permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) != '${SSH_APPROVAL_ACTION_PREFIX}') ORDER BY q.answered_at`,
+         WHERE s.agent_id = ? AND ${pullableAnsweredWhere("q")} ORDER BY q.answered_at`,
       ).all(agentId) as Row[]).map(toQuestion);
       if (rows.length === 0) return { consumed: rows, remaining: 0 };
       const consumed: Question[] = [];
@@ -11515,6 +11530,16 @@ export class Db {
       this.notifyQuestionsChanged();
       return { consumed, remaining: rows.length - consumed.length };
     })();
+  }
+  /**
+   * NON-CONSUMING peek: would {@link pullAnsweredQuestionsForAgentBounded} return at least one row for
+   * `agentId` right now? Same JOIN scope and the SAME {@link pullableAnsweredWhere} fragment, so the restart
+   * notice (`wake-impact.hasUnconsumedAnswer`) can never claim an answer `question_pull` cannot deliver.
+   */
+  hasPullableAnsweredQuestionForAgent(agentId: string): boolean {
+    return this.db.prepare(
+      `SELECT 1 FROM questions q JOIN sessions s ON s.id = q.session_id WHERE s.agent_id = ? AND ${pullableAnsweredWhere("q")} LIMIT 1`,
+    ).get(agentId) !== undefined;
   }
   /**
    * Count of `type:"notice"` rows filed by agent lineage `agentId` with `created_at >= sinceIso` —

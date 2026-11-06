@@ -3325,6 +3325,9 @@ interface Live {
   // or race-discard event; the ONLY source of `ownerTextSeq`/`lastPromptOwnerTextSeq`/
   // `raceDiscardedOwnerSubmitSeq`. Never read directly for anything but minting the next rank.
   ownerAttributionSeq: number;
+  // @decision 38ef3d5f — the HIGHEST numeric owner-text rank ever recorded on this Live (monotone; unlike
+  // `lastPromptOwnerTextSeq`, a non-owner turn never nulls it). `consumePending`'s rank guard baseline.
+  highestOwnerTextSeq?: number;
   // True once ANY turn has ever started for this session (the first UserPromptSubmit hook observed).
   // Gates the fresh-spawn kickoff guarantee (scheduleKickoffGuarantee) and healIfStuck's short pre-first-
   // turn stale window (FIRST_TURN_STALE_MS) — see both for why "never started a turn" needs distinct
@@ -11768,11 +11771,41 @@ export class PtyHost {
     const live = this.findAnyLive(sessionId);
     if (!live?.alive) return []; // dead/unknown session: nothing to consume (don't hand back a stale queue)
     const removed = live.pending.splice(0); // empty the queue in place AND keep the removed entries
+    // @decision 38ef3d5f — a pulled owner entry is delivered, so attribute it like a normal drain (FIFO);
+    // skipping this made `question_resolve` quote a STALE earlier owner turn.
+    this.attributePulledOwnerText(sessionId, live, removed);
     // inbox_pull HANDS these to the recipient (it returns them to the agent) — that's delivery, so fire
     // each entry's optional delivery callback (durable-message resolution) so a pulled message is marked
     // delivered and won't be re-enqueued on a later boot. Guarded; undefined for non-messaging entries.
     for (const m of removed) { if (m.onDeliver) { try { m.onDeliver(); } catch { /* never break the pull */ } } }
     return removed.map((m) => m.text); // string contract unchanged
+  }
+
+  /**
+   * @decision 38ef3d5f — the `inbox_pull` path writes ONLY `activeTurnOwnerText` + the ring, never a
+   * `lastPrompt*` field (a rate-limit replay would re-queue the in-flight turn carrying the pulled owner text).
+   * Stricter than a normal drain: skips an entry ranked below `highestOwnerTextSeq`.
+   */
+  private attributePulledOwnerText(sessionId: string, live: Live | CodexLive, entries: QueuedMessage[]): void {
+    const claude = this.live.get(sessionId) === live ? (live as Live) : null;
+    for (const m of entries) {
+      if (m.ownerText === undefined) continue;
+      if (claude) {
+        const seq = m.ownerTextSeq;
+        if (typeof seq === "number" && claude.highestOwnerTextSeq !== undefined && seq < claude.highestOwnerTextSeq) continue;
+        claude.activeTurnOwnerText = m.ownerText;
+        pushRecentOwnerTurn(claude.recentOwnerTurns, m.ownerText);
+        if (typeof seq === "number") {
+          if (claude.highestOwnerTextSeq === undefined || seq > claude.highestOwnerTextSeq) claude.highestOwnerTextSeq = seq;
+          if (claude.raceDiscardedOwnerSubmitSeq === null || seq > claude.raceDiscardedOwnerSubmitSeq) {
+            claude.raceDiscardedOwnerSubmitAt = null; claude.raceDiscardedOwnerSubmitGen = null; claude.raceDiscardedOwnerSubmitSeq = null;
+          }
+        }
+      } else {
+        live.activeTurnOwnerText = m.ownerText;
+        pushRecentOwnerTurn(live.recentOwnerTurns, m.ownerText);
+      }
+    }
   }
 
   /**
@@ -12490,6 +12523,7 @@ export class PtyHost {
     live.activeTurnOwnerText = ownerText;
     live.lastPromptOwnerText = ownerText;
     live.lastPromptOwnerTextSeq = seq;
+    if (typeof seq === "number" && (live.highestOwnerTextSeq === undefined || seq > live.highestOwnerTextSeq)) live.highestOwnerTextSeq = seq;
     // NEVER cleared at Stop — persists across the turn boundary so a later turn's lever call can still see it.
     pushRecentOwnerTurn(live.recentOwnerTurns, ownerText);
     // @decision d326c3c2 — a genuine owner turn just landed in recentOwnerTurns, so any earlier

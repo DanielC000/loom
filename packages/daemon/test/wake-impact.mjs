@@ -15,7 +15,8 @@ import {
   hasPendingBoardWork, hasUnconsumedAnswer, isEscalatedSuppression, isWatcherActiveForSession,
   strandedBoardWork, computeWakeImpact,
 } from "../dist/orchestration/wake-impact.js";
-import { buildQuestionAsk } from "../dist/mcp/questionTool.js";
+import { buildQuestionAsk, pullQuestionsForAgent } from "../dist/mcp/questionTool.js";
+import { SSH_APPROVAL_ACTION_PREFIX } from "@loom/shared";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -30,9 +31,9 @@ function makeEnv({ projectConfig = {} } = {}) {
   db.insertAgent({ id: agentId, projectId: projId, name: "t", startupPrompt: "", position: 0 });
   return { dbFile, db, projId, agentId, now };
 }
-function seedSession(e, id, { role = "manager", processState = "live" } = {}) {
+function seedSession(e, id, { role = "manager", processState = "live", agentId = e.agentId } = {}) {
   e.db.insertSession({
-    id, projectId: e.projId, agentId: e.agentId, engineSessionId: `eng-${id}`, title: null, cwd: e.projId,
+    id, projectId: e.projId, agentId, engineSessionId: `eng-${id}`, title: null, cwd: e.projId,
     processState, resumability: "resumable", busy: false,
     createdAt: e.now, lastActivity: e.now, lastError: null, role, parentSessionId: null, taskId: null,
     worktreePath: null, branch: null,
@@ -108,7 +109,11 @@ function cleanup(e) {
   // above. Seeded through the REAL buildQuestionAsk, not a hand-built `{state:"notice"}` row — a
   // hand-built row never exercises the production state-assignment decision under test (it would pass
   // identically on pre-fix code too).
-  seedSession(e, "m2-notice");
+  // Card 38ef3d5f: hasUnconsumedAnswer is now AGENT-LINEAGE scoped (same as question_pull), so this
+  // 'notice'-only manager needs its OWN agent — sharing m2's agent would (correctly) see m2's answered row.
+  const noticeAgentId = `wia-notice-${Math.random().toString(36).slice(2, 8)}`;
+  e.db.insertAgent({ id: noticeAgentId, projectId: e.projId, name: "t-notice", startupPrompt: "", position: 1 });
+  seedSession(e, "m2-notice", { agentId: noticeAgentId });
   const noticeBuilt = buildQuestionAsk(
     { type: "notice", title: "t", body: "" },
     { sessionId: "m2-notice", projectId: e.projId, db: e.db, role: "manager" },
@@ -116,6 +121,31 @@ function cleanup(e) {
   if (!("question" in noticeBuilt)) throw new Error(`buildQuestionAsk failed: ${noticeBuilt.error}`);
   e.db.insertQuestion(noticeBuilt.question);
   check("(hasUnconsumedAnswer) a manager holding ONLY a 'notice' → false", hasUnconsumedAnswer(e.db, "m2-notice") === false);
+  cleanup(e);
+}
+
+// ============== hasUnconsumedAnswer == question_pull's predicate (card 38ef3d5f) ==============
+{
+  const e = makeEnv();
+  seedSession(e, "m3");
+  const answered = (id, extra = {}) => e.db.insertQuestion({ id, sessionId: "m3", projectId: e.projId, type: "decision", title: "t", body: "", state: "answered", chosenOption: "a", createdAt: e.now, answeredAt: e.now, ...extra });
+  // (a) resolve -> pull -> the restart notice says nothing.
+  answered("q38-a");
+  check("(38ef3d5f a) an answered decision → notice true BEFORE the pull", hasUnconsumedAnswer(e.db, "m3") === true);
+  const pulled = pullQuestionsForAgent(e.db, e.agentId, e.now);
+  check("(38ef3d5f a) question_pull delivers it", pulled.items.length === 1 && pulled.remaining === 0);
+  check("(38ef3d5f a) notice false AFTER the pull", hasUnconsumedAnswer(e.db, "m3") === false);
+  // (b) an answered ssh-approval hold is never pullable → must never raise the notice.
+  answered("q38-ssh", { type: "permission", chosenOption: "authorize", permissionAction: `${SSH_APPROVAL_ACTION_PREFIX}a3684933 target=root@h:22 pin=f934 command="x"` });
+  check("(38ef3d5f b) an answered ssh-approval hold → notice false (question_pull cannot deliver it)", hasUnconsumedAnswer(e.db, "m3") === false);
+  check("(38ef3d5f b) …and question_pull really returns nothing for it", pullQuestionsForAgent(e.db, e.agentId, e.now).items.length === 0);
+  check("(38ef3d5f b) the hold row itself is still 'answered' (unconsumed)", e.db.getQuestion("q38-ssh").state === "answered");
+  // (c) agent LINEAGE: an answered row left on a predecessor session is pullable by the successor → notice true.
+  seedSession(e, "m3-pred", { processState: "exited" });
+  e.db.insertQuestion({ id: "q38-pred", sessionId: "m3-pred", projectId: e.projId, type: "decision", title: "t", body: "", state: "answered", chosenOption: "a", createdAt: e.now, answeredAt: e.now });
+  check("(38ef3d5f c) an answered row on a predecessor session of the SAME agent → notice true for the successor", hasUnconsumedAnswer(e.db, "m3") === true);
+  check("(38ef3d5f c) …and the successor's question_pull really returns it", pullQuestionsForAgent(e.db, e.agentId, e.now).items.length === 1);
+  check("(38ef3d5f c) …after which the notice is false again", hasUnconsumedAnswer(e.db, "m3") === false);
   cleanup(e);
 }
 
