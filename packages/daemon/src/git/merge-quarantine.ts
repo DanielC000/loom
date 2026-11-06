@@ -6290,8 +6290,9 @@ function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]):
  * informative key it carries is ALSO armed via {@link armQuarantineKey} directly, never PASS 1's own
  * freshness/eviction decision tree (Step B, below) — see the decision record for the full rationale.
  */
-function armForeignOrphanContentInMemoryIfUnenforced(record: MergeQuarantineEntry, basenames: string[], kind: "orphan" | "tmp-residue" = "orphan"): "armed-active" | "armed-pending" | "already-enforced" {
+function armForeignOrphanContentInMemoryIfUnenforced(record: MergeQuarantineEntry, files: ReadonlyArray<{ basename: string; record: MergeQuarantineEntry }>, kind: "orphan" | "tmp-residue" = "orphan"): "armed-active" | "armed-pending" | "already-enforced" {
   if (stillBlockedEntryFor(record.repoPath) !== undefined) return "already-enforced";
+  const basenames = files.map((f) => f.basename);
   let armedEntry: MergeQuarantineEntry = {
     ...record, orphanLatchFiles: [...new Set([...(record.orphanLatchFiles ?? []), ...basenames])],
   };
@@ -6320,32 +6321,47 @@ function armForeignOrphanContentInMemoryIfUnenforced(record: MergeQuarantineEntr
   // @decision 5d0820c7 (round 3) — decline for ANY different-identity occupant, fresh OR stale, never
   // gated on the occupant's own freshness (round 2 gated this on `isKeyVerifiedFor` and still corrupted
   // on a stale occupant) — see the decision record's own Round 3 section for the named residual.
-  for (const key of secondaryKeysToAttempt(record, currentKey)) {
-    if (resolvableNow) {
-      const occupant = activeQuarantines.get(key);
-      if (occupant && directPathIdentity(occupant.repoPath) !== directPathIdentity(record.repoPath)) {
-        // eslint-disable-next-line no-console
-        console.warn(`[merge-quarantine] ${record.repoPath}'s own kept ${label} (${basenameText}) names a secondary key already occupied by a different identity (${occupant.repoPath}) — declining the secondary arm at this key (round 3: regardless of whether that occupant is itself still fresh); ${occupant.repoPath}'s own entry is left completely untouched.`);
-        continue;
+  const armSecondaryKeys = (startEntry: MergeQuarantineEntry, keySource: MergeQuarantineEntry): MergeQuarantineEntry => {
+    let entry = startEntry;
+    for (const key of secondaryKeysToAttempt(keySource, currentKey)) {
+      if (resolvableNow) {
+        const occupant = activeQuarantines.get(key);
+        if (occupant && directPathIdentity(occupant.repoPath) !== directPathIdentity(record.repoPath)) {
+          // eslint-disable-next-line no-console
+          console.warn(`[merge-quarantine] ${record.repoPath}'s own kept ${label} (${basenameText}) names a secondary key already occupied by a different identity (${occupant.repoPath}) — declining the secondary arm at this key (round 3: regardless of whether that occupant is itself still fresh); ${occupant.repoPath}'s own entry is left completely untouched.`);
+          continue;
+        }
       }
-    }
-    // @decision 1de37538 — mirror PASS 1's own stamp before unioning cross-identity, via the SAME
-    // shared predicates fed by the LIVE provider (never a boot snapshot). See the decision record for
-    // why this never fires on the `resolvableNow` branch (declined above) — only the unresolvable one.
-    const priorAtKey = activeQuarantines.get(key);
-    if (priorAtKey && directPathIdentity(priorAtKey.repoPath) !== directPathIdentity(armedEntry.repoPath)) {
-      const liveRegistered = liveRegisteredRepoPaths();
-      if (secondaryArmClaimsADifferentRegisteredIdentitysKey(armedEntry, key, false, liveRegistered)
-        || priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity(priorAtKey, key, liveRegistered)) {
-        armedEntry = { ...armedEntry, provenanceUnknown: true };
+      // @decision 1de37538 — mirror PASS 1's own stamp before unioning cross-identity, via the SAME
+      // shared predicates fed by the LIVE provider (never a boot snapshot). See the decision record for
+      // why this never fires on the `resolvableNow` branch (declined above) — only the unresolvable one.
+      const priorAtKey = activeQuarantines.get(key);
+      if (priorAtKey && directPathIdentity(priorAtKey.repoPath) !== directPathIdentity(entry.repoPath)) {
+        const liveRegistered = liveRegisteredRepoPaths();
+        if (secondaryArmClaimsADifferentRegisteredIdentitysKey(entry, key, false, liveRegistered)
+          || priorHoldsKeyViaNonFreshClaimOnADifferentRegisteredIdentity(priorAtKey, key, liveRegistered)) {
+          entry = { ...entry, provenanceUnknown: true };
+        }
       }
+      entry = armQuarantineKey(activeQuarantines, key, entry);
     }
-    armedEntry = armQuarantineKey(activeQuarantines, key, armedEntry);
+    return entry;
+  };
+  if (resolvableNow) {
+    armedEntry = armSecondaryKeys(armedEntry, record);
+    return result;
   }
-  // @decision 5d0820c7 — the PENDING push is deferred until AFTER the secondary-key loop, using the
-  // FINAL (possibly-unioned) object — mirrors PASS 1's own degraded-entry secondary-key loop, which
-  // also defers its `degradedDivertsToFlush.push` until after that same loop.
-  if (!resolvableNow) pendingUnresolvedQuarantines.push({ entry: armedEntry, sourceFile: basenames[0]! });
+  // @decision 4c7e0ed0 — ONE pending entry per physical file seeded with its own tokens (a shared secondary
+  // key still unions same-identity entries via armQuarantineKey, as boot does); never the identity-wide
+  // union pushed under `basenames[0]`, or id-route and partial-clear behaviour diverge from a reboot.
+  // @decision 5d0820c7 — each push is deferred until AFTER that file's own secondary-key loop, using the
+  // FINAL (possibly-unioned) object — mirrors PASS 1's own degraded-entry secondary-key loop.
+  for (const f of files) {
+    // Keeps the arm's own self-reference (028837ad's reduce-write persists it) — this file's ONLY, never the
+    // siblings' (they each get their own entry).
+    const perFile = { ...f.record, orphanLatchFiles: [...new Set([...(f.record.orphanLatchFiles ?? []), f.basename])] };
+    pendingUnresolvedQuarantines.push({ entry: armSecondaryKeys(perFile, f.record), sourceFile: f.basename });
+  }
   return result;
 }
 
@@ -6462,7 +6478,7 @@ function sweepOrphanLatchFilesUnioned(files: Iterable<string>, candidateTokens: 
   const contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }> = [];
   let anyUnattributed = false;
   let unlinkFailed = false;
-  const armableByIdentity = new Map<string, { record: MergeQuarantineEntry; basenames: string[] }>();
+  const armableByIdentity = new Map<string, { record: MergeQuarantineEntry; basenames: string[]; files: Array<{ basename: string; record: MergeQuarantineEntry }> }>();
   const deferredForeign: Array<{ repoPath: string; sourceFile: string }> = [];
   for (const f of files) {
     const decision = orphanLatchFileSweepDecision(f, candidateTokens, excludeIdentities);
@@ -6479,8 +6495,8 @@ function sweepOrphanLatchFilesUnioned(files: Iterable<string>, candidateTokens: 
       if (decision.armable) {
         const identity = directPathIdentity(decision.repoPath);
         const bucket = armableByIdentity.get(identity);
-        if (bucket) { bucket.basenames.push(f); bucket.record = unionQuarantineEntries(bucket.record, decision.armable); }
-        else armableByIdentity.set(identity, { record: decision.armable, basenames: [f] });
+        if (bucket) { bucket.basenames.push(f); bucket.files.push({ basename: f, record: decision.armable }); bucket.record = unionQuarantineEntries(bucket.record, decision.armable); }
+        else armableByIdentity.set(identity, { record: decision.armable, basenames: [f], files: [{ basename: f, record: decision.armable }] });
       }
     }
     // "deleted": nothing more to do — already unlinked by the decision call above. ("unlink-failed" is
@@ -6489,7 +6505,7 @@ function sweepOrphanLatchFilesUnioned(files: Iterable<string>, candidateTokens: 
   // @decision 9f387d7e — arm each identity ONCE here, with the union collected above, never per-file
   // inline inside the loop above.
   for (const [, bucket] of armableByIdentity) {
-    const armResult = armForeignOrphanContentInMemoryIfUnenforced(bucket.record, bucket.basenames, "orphan");
+    const armResult = armForeignOrphanContentInMemoryIfUnenforced(bucket.record, bucket.files, "orphan");
     if (armResult === "already-enforced") {
       // eslint-disable-next-line no-console
       console.warn(`[merge-quarantine] ${bucket.record.repoPath}'s own kept orphan latch (${bucket.basenames.join(", ")}) was NOT armed in memory — that identity, or its own canonical key, is already enforced elsewhere in this process.`);
@@ -6745,7 +6761,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
   // @decision 5d0820c7 — `record` is now the FULL MergeQuarantineEntry safety.armable already carries;
   // a SECOND same-identity file at this hash unions via the SAME `unionQuarantineEntries` every other
   // multi-record merge in this module uses (never a second, token-only hand-rolled union).
-  const armableByIdentity = new Map<string, { record: MergeQuarantineEntry; basenames: string[] }>();
+  const armableByIdentity = new Map<string, { record: MergeQuarantineEntry; basenames: string[]; files: Array<{ basename: string; record: MergeQuarantineEntry }> }>();
   // @decision 25d0d45b (Round 3) — EVERY non-own-content attributed file (armable or not) is deferred
   // here; its final disposition is decided from ENFORCEMENT TRUTH only after the whole arm phase below
   // runs, never from this file's own armable-ness (see the decision record's "Round 3" section).
@@ -6809,8 +6825,8 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
           const toArm = safety.armable ?? safety.unarmablePlaceholder;
           if (toArm) {
             const bucket = armableByIdentity.get(identity);
-            if (bucket) { bucket.basenames.push(f); bucket.record = unionQuarantineEntries(bucket.record, toArm); }
-            else armableByIdentity.set(identity, { record: toArm, basenames: [f] });
+            if (bucket) { bucket.basenames.push(f); bucket.files.push({ basename: f, record: toArm }); bucket.record = unionQuarantineEntries(bucket.record, toArm); }
+            else armableByIdentity.set(identity, { record: toArm, basenames: [f], files: [{ basename: f, record: toArm }] });
           }
           // NIT (6): the final disposition (armed-and-blocked vs content-kept) isn't known until the arm
           // phase below runs — logged there, per file, instead of asserting "fail-closed" prematurely here.
@@ -6892,8 +6908,8 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
         const toArm = safety.armable ?? safety.unarmablePlaceholder;
         if (toArm) {
           const bucket = armableByIdentity.get(identity);
-          if (bucket) { bucket.basenames.push(f); bucket.record = unionQuarantineEntries(bucket.record, toArm); }
-          else armableByIdentity.set(identity, { record: toArm, basenames: [f] });
+          if (bucket) { bucket.basenames.push(f); bucket.files.push({ basename: f, record: toArm }); bucket.record = unionQuarantineEntries(bucket.record, toArm); }
+          else armableByIdentity.set(identity, { record: toArm, basenames: [f], files: [{ basename: f, record: toArm }] });
         }
         continue;
       }
@@ -6914,7 +6930,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
   // inline inside the loop (see `armableByIdentity`'s own doc for why). `kind:"tmp-residue"` only
   // changes the helper's own log wording; the gate/entry-shape are identical to the `.json` orphan case.
   for (const [, bucket] of armableByIdentity) {
-    const armResult = armForeignOrphanContentInMemoryIfUnenforced(bucket.record, bucket.basenames, "tmp-residue");
+    const armResult = armForeignOrphanContentInMemoryIfUnenforced(bucket.record, bucket.files, "tmp-residue");
     if (armResult === "already-enforced") {
       // eslint-disable-next-line no-console
       console.warn(`[merge-quarantine] ${bucket.record.repoPath}'s own kept tmp residue (${bucket.basenames.join(", ")}) was NOT armed in memory — that identity, or its own canonical key, is already enforced elsewhere in this process.`);
@@ -7141,6 +7157,11 @@ export function pushPendingQuarantineTestOnly(entry: MergeQuarantineEntry, sourc
  *  {@link setActiveQuarantineTestOnly}'s own doc for why the `TestOnly` suffix is load-bearing. */
 export function listPendingMergeQuarantinesTestOnly(): Array<{ repoPath: string; sourceFile: string }> {
   return pendingUnresolvedQuarantines.map((p) => ({ repoPath: p.entry.repoPath, sourceFile: p.sourceFile }));
+}
+
+/** Test-only: each pending entry's OWN token set (card 4c7e0ed0's per-file shape comparison reads this). */
+export function listPendingTokensTestOnly(): Array<{ repoPath: string; sourceFile: string; tokens: string[] }> {
+  return pendingUnresolvedQuarantines.map((p) => ({ repoPath: p.entry.repoPath, sourceFile: p.sourceFile, tokens: [...p.entry.tokens] }));
 }
 
 /**
