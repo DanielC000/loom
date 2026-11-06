@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolveConfig, contextWindowForModel } from "@loom/shared";
 import type { OrchestrationConfig, Session } from "@loom/shared";
 import type { Db } from "../db.js";
@@ -291,6 +291,16 @@ export class ContextWatcher {
       this.checkTurnCountRecycle(db, pty, lead, cfg, envOverride, nowMs, nowIso);
     }
 
+    // COMPANION (assistant-role) context-exhaustion — detection + owner notice ONLY. A Companion has no
+    // recycle path and no ratio nudges (it has no wind-down doctrine), so this loop runs nothing but the
+    // exhaustion check. Its owner-facing channel IS the dead session, hence the daemon-authored inbox notice.
+    for (const a of db.listLiveAssistants()) {
+      if (this.checkAssistantContextExhaustion(db, pty, a, nowIso)) continue;
+      // Already marked on an earlier tick: re-assert the notice by its deterministic id. No-op when it exists
+      // (covers every later tick AND a daemon restart); heals a crash between the mark and the notice insert.
+      if (a.contextExhaustedAt != null) this.ensureAssistantExhaustionNotice(db, a, a.contextExhaustedAt);
+    }
+
     // WORKER CONTEXT (Triggers C/D, card dacc6d9e) — a third, separate loop (workers are a structurally
     // different session kind from managers/leads, with a different owning-manager-notify shape; same
     // reasoning BusyWorkerWatcher is its own class rather than a worker branch bolted onto this one).
@@ -400,6 +410,78 @@ export class ContextWatcher {
       console.log(`[context-watcher] manager/platform ${m.id} CONTEXT-EXHAUSTED (${exhaustion.error ?? "unknown error"}) — busy cleared, queue held, surfaced via lastError/attention-push`);
     }
     return true;
+  }
+
+  /**
+   * Companion twin of `checkContextExhaustion` above: same detector, same mark + `lastError`, but a DISTINCT
+   * event kind (`assistant_context_exhausted` — the manager kind's web/fleet consumers say "recycle it",
+   * which no Companion path supports) and an owner notice through the inbox instead of a push into the
+   * dead session. Returns true iff exhaustion was found this tick.
+   */
+  private checkAssistantContextExhaustion(db: Db, pty: ContextPty, a: Session, nowIso: string): boolean {
+    if (!a.busy || a.harness === "codex" || !a.engineSessionId) return false;
+    const exhaustion = checkContextExhaustion(a.cwd, a.engineSessionId, a.harness, pty.busySinceMs?.(a.id) ?? null);
+    if (!exhaustion) return false;
+    const marked = pty.markContextExhausted(a.id);
+    if (marked) {
+      db.setContextExhausted(a.id, nowIso, `Context exhausted — the engine rejected the next prompt as too long (${exhaustion.matchedText}).`);
+      const noticeId = this.ensureAssistantExhaustionNotice(db, a, nowIso);
+      db.appendEvent({
+        id: randomUUID(), ts: nowIso, managerSessionId: a.id, kind: "assistant_context_exhausted",
+        detail: { error: exhaustion.error ?? null, noticeId },
+      });
+      // eslint-disable-next-line no-console
+      console.log(`[context-watcher] companion ${a.id} CONTEXT-EXHAUSTED (${exhaustion.error ?? "unknown error"}) — busy cleared, queue held, owner notice filed`);
+    }
+    return true;
+  }
+
+  /**
+   * File the owner-facing inbox notice for one Companion exhaustion episode, EXACTLY once. Two dedupes:
+   * (1) the row id is a deterministic v4-shaped UUID of (session, episode stamp), so a repeat tick or a
+   * post-restart tick carrying the SAME stamp finds it and does nothing; (2) an UNDISMISSED exhaustion
+   * notice for the same session blocks a new one even under a different stamp — after a daemon restart the
+   * in-memory hold is gone, the next delivery clears the DB mark, the turn fails again and the re-mark
+   * carries a fresh stamp for what is still one episode to the owner. Once the owner dismisses the notice a
+   * later exhaustion files a fresh one. Returns the notice id in force (null if it could not be filed).
+   *
+   * Written via `db.insertQuestion`, not the `question_ask` builder, so the per-agent `maxNoticesPerHour`
+   * throttle is bypassed (daemon-authored, once per episode). Fixed text, no transcript content;
+   * `sessionId` and `filedBySessionId` are the Companion's own id (FK + inbox agent-name join).
+   */
+  private ensureAssistantExhaustionNotice(db: Db, a: Session, episodeStamp: string): string | null {
+    const id = assistantExhaustionNoticeId(a.id, episodeStamp);
+    try {
+      if (db.getQuestion(id)) return id;
+      const open = db.listQuestionsForSession(a.id).find(
+        (q) => q.type === "notice" && q.dismissedAt == null && q.title.endsWith(ASSISTANT_EXHAUSTION_TITLE_SUFFIX),
+      );
+      if (open) return open.id;
+      const name = db.getCompanionConfig(a.id)?.name?.trim() || db.getAgent(a.agentId)?.name || "Your Companion";
+      db.insertQuestion({
+        id, sessionId: a.id, filedBySessionId: a.id, projectId: a.projectId, type: "notice",
+        title: `${name}${ASSISTANT_EXHAUSTION_TITLE_SUFFIX}`,
+        body:
+          `${name} (session ${a.id.slice(0, 8)}) hit its context limit: the engine rejected the next prompt as too ` +
+          `long, so it will not answer any more messages or alerts.\n\n` +
+          `What you can do now: open the session in Loom to review it, or start a fresh Companion. ` +
+          `There is no automatic recycle for a Companion yet.`,
+        options: null, recommendation: null, taskId: null,
+        permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
+        decidedScope: null, decidedExpiresAt: null,
+        credentialEnvVar: null, credentialByteLength: null, provisionTarget: null, fulfillmentTarget: null,
+        provisionConnectionId: null, provisionBindingState: "none",
+        state: "notice", chosenOption: null, note: null,
+        createdAt: episodeStamp, answeredAt: episodeStamp, consumedAt: null,
+        cancelledReason: null, cancelledBy: null, cancelledAt: null,
+        escalatedAt: null, acknowledgedUntil: null, readAt: null, dismissedAt: null, attachments: [],
+      });
+      return id;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[context-watcher] could not file the exhaustion notice for companion ${a.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   /**
@@ -626,4 +708,15 @@ export class ContextWatcher {
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
+}
+
+const ASSISTANT_EXHAUSTION_TITLE_SUFFIX = " has run out of context and cannot reply";
+
+/** Deterministic v4-SHAPED UUID of (session, episode stamp): every question id is a v4 UUID (QUESTION_ID_RE). */
+export function assistantExhaustionNoticeId(sessionId: string, episodeStamp: string): string {
+  const b = createHash("sha256").update(`ctxexh|${sessionId}|${episodeStamp}`).digest().subarray(0, 16);
+  b[6] = (b[6]! & 0x0f) | 0x40;
+  b[8] = (b[8]! & 0x3f) | 0x80;
+  const h = b.toString("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
 }

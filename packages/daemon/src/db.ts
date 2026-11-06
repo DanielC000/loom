@@ -8509,6 +8509,15 @@ export class Db {
       .all() as Row[]).map(toSession);
   }
   /**
+   * Live Companion (assistant-role) sessions. ContextWatcher's exhaustion-only loop reads this; kept apart
+   * from listLiveManagers/listLivePlatformSessions on purpose so widening it never pulls a Companion into
+   * the manager recycle-nudge logic.
+   */
+  listLiveAssistants(): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE role = 'assistant' AND process_state = 'live'")
+      .all() as Row[]).map(toSession);
+  }
+  /**
    * The currently-LIVE session for an agent lineage (card f88e91f0) — resolves whoever is orchestrating
    * this agent RIGHT NOW, whether that's a recycle successor (already reparented via reparentQuestions)
    * OR a fresh, non-recycle respawn on the SAME agent (never reparented — a manual stop + fresh spawn is

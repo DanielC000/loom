@@ -1404,6 +1404,13 @@ export type OrchestrationEventKind =
   // (companion/attention-push.ts `classify()` → "context-overflow") plus `lastError`, never a new push
   // channel. `detail` carries { error? }, same shape as `worker_context_exhausted`.
   | "manager_context_exhausted"
+  // Context-EXHAUSTION detection, Companion (assistant-role) twin of `manager_context_exhausted` above:
+  // same terminal record, same tick-detected mechanism. A DISTINCT kind on purpose — the web attention
+  // surface and fleet pairing treat `manager_context_exhausted` as "a manager/Lead is exhausted, recycle
+  // it", which is wrong for a Companion (no recycle path exists). Filed under the Companion's own
+  // session id (managerSessionId = its id, no workerSessionId). The owner is told through a daemon-
+  // authored inbox `notice` row, not through the (dead) Companion. `detail` carries { error?, noticeId? }.
+  | "assistant_context_exhausted"
   // MCP-silence watchdog (IdleWatcher, card d1521fca): a LIVE, non-recycled session whose MCP traffic
   // has gone quiet — one router stale while another stays recent (ASYMMETRIC), or every established
   // router stale at once (ALL-SILENT) — while the session itself shows no sign of having simply gone
@@ -2339,7 +2346,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true,
   worker_context_high: true, worker_context_interrupt: true,
   give_up_recovery_escalated: true, worker_stuck: true, mcp_silence_detected: true,
-  worker_context_exhausted: true, manager_context_exhausted: true,
+  worker_context_exhausted: true, manager_context_exhausted: true, assistant_context_exhausted: true,
   worktree_vanished: true,
   manager_manage: true, session_message: true, session_steer_dropped: true, platform_escalate: true, escalation_triaged: true,
   cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,

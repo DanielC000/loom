@@ -265,6 +265,9 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
     // Same class as its context_escalated/context_blind_turn siblings: nothing automated is left to
     // notify (no parent to push into), so this is the human-attention surface's job via lastError too.
     case "manager_context_exhausted":
+    // Companion (assistant-role) twin of the above: a distinct kind so the web/fleet "recycle it" surfaces
+    // never misread it, but the same human-attention class.
+    case "assistant_context_exhausted":
       return "context-overflow";
     // Card 66ff7321: a WORKER's own context EXHAUSTED — same "the owning manager already got a direct
     // nudge, this is the secondary attention-surface sighting" shape as worker_stuck above.
@@ -629,6 +632,12 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       line = `${projectName}: ${roleLabel} turn-1 kickoff was never confirmed delivered — it may have booted with no brief — ${who}`;
       break;
     }
+    case "manager_context_exhausted":
+      line = `${projectName}: manager/platform session ran out of context and cannot reply — recycle it — ${who}`;
+      break;
+    case "assistant_context_exhausted":
+      line = `${projectName}: Companion ran out of context and cannot reply — owner notice filed in the inbox — ${who}`;
+      break;
     default:
       line = `${projectName}: ${alertClass} — ${m8}`;
   }
@@ -756,6 +765,10 @@ export class AttentionPushWatcher {
     for (const e of scanned) {
       const cls = classify(e.kind, e.detail);
       if (!cls || !alertClasses.has(cls)) continue;
+      // A Companion that is itself context-exhausted must not enqueue an alert ABOUT ITSELF into its own
+      // held queue (it can never answer it; the owner already has the inbox notice). A different, healthy
+      // Companion still gets the alert.
+      if (e.kind === "assistant_context_exhausted" && e.managerSessionId === sessionId) continue;
       const projectId = db.getSession(e.managerSessionId)?.projectId;
       if (!projectId || !scope.projectIds.has(projectId)) continue; // out of this grant's scope
       // Escalation re-delivery suppression (defense-in-depth alongside the server-side title-dedup) — see

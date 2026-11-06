@@ -1547,6 +1547,40 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   cleanupEnv(e);
 }
 
+// --- 37. SELF-ALERT SKIP: an exhausted Companion's OWN watcher must not enqueue an alert about itself;
+//     a DIFFERENT healthy Companion's watcher still gets it (control). ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["context-overflow"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "assistant_context_exhausted", e.sessId, { noticeId: "n" }); // the watcher's OWN session is the subject
+  e.watcher.tick(new Date());
+  check("self-alert: own assistant_context_exhausted enqueues nothing", e.enqueued.length === 0);
+  check("self-alert: …and records no companion_alert_pushed", events(e, "companion_alert_pushed").length === 0);
+
+  // control: another Companion in the same project, with its own watcher, still gets an alert about e.sessId.
+  const otherId = `cs2-${randomUUID()}`;
+  seedSession(e.db, otherId, e.projA, "assistant");
+  e.db.upsertCompanionCapabilityGrant({ sessionId: otherId, capability: "attention-push", projectId: e.projA, mode: "read", config: { alertClasses: ["context-overflow"] } });
+  const otherEnq = [];
+  const otherPty = { isAlive: (id) => id === otherId, enqueueStdin: (id, text) => { otherEnq.push({ id, text }); return { delivered: false, position: 1 }; }, getPending: () => [] };
+  const other = new AttentionPushWatcher({ db: e.db, pty: otherPty, sessionId: otherId });
+  // Baseline the other watcher BEFORE the event (start() seeds the watermark), then fire a fresh one.
+  other.start(); other.stop();
+  fire(e, "assistant_context_exhausted", e.sessId, { noticeId: "n2" });
+  other.tick(new Date());
+  check("self-alert control: a DIFFERENT Companion's watcher still gets the alert", otherEnq.length === 1 && /Companion/.test(otherEnq[0].text));
+  cleanupEnv(e);
+}
+
+// --- 38. alertLine: explicit cases for the two context-exhausted kinds (not the bare default) ---
+{
+  const mk = (kind) => ({ id: "x", ts: new Date().toISOString(), managerSessionId: "sess-12345678", kind, detail: {} });
+  const asst = alertLine(mk("assistant_context_exhausted"), "context-overflow", "Proj Z");
+  const mgr = alertLine(mk("manager_context_exhausted"), "context-overflow", "Proj Z");
+  check("alertLine: assistant_context_exhausted names a Companion and the session", /Companion/.test(asst) && asst.includes("m:sess-123"));
+  check("alertLine: manager_context_exhausted is not the bare default", /ran out of context/.test(mgr) && !/^Proj Z: context-overflow —/.test(mgr));
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped, and claude_boot_dialog_stuck reaches the owner via the non-FLEET_OPS 'escalation' class exactly when nobody else was addressed (parentNudged:false), never otherwise."
   : `\n❌ ${failures} FAILURE(S).`);
