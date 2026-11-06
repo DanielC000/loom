@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node ../../scripts/sync-claude-skills.mjs",
+    "build": "node -e \"require('fs').rmSync('tsconfig.tsbuildinfo',{force:true})\" && tsc -p tsconfig.json && node ../../scripts/sync-claude-skills.mjs",
     "stamp": "node ../../scripts/write-build-info.mjs packages/daemon/dist",
     "skills-sync": "node ../../scripts/sync-claude-skills.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
