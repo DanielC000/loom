@@ -5677,8 +5677,8 @@ export class SessionService {
     // SessionStart lands, then spawn. A throw restores the engine id (and its prior resumability and
     // archive state) so a later resume still has something.
     this.db.setProcessState(sessionId, "live");
-    this.db.clearEngineSessionId(sessionId);
     try {
+      this.db.clearEngineSessionId(sessionId);
       if (archivedNow) this.db.restoreSession(sessionId);
       this.pty.spawn({
         sessionId,

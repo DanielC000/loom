@@ -346,6 +346,22 @@ try {
     check("(S1) ...trust STAYS CLOSED (fail closed: the old engine was already dead)", !trustOpen(c.id));
   }
 
+  // ===================== clearEngineSessionId throws ⇒ same restore path, never phantom-live =====================
+  {
+    const c = mkCompanion({ resumability: "unknown", archived: true });
+    armTrust(c.id);
+    const origClear = db.clearEngineSessionId.bind(db);
+    db.clearEngineSessionId = (sid) => { if (sid === c.id) throw new Error("injected clear failure"); return origClear(sid); };
+    let err = null;
+    try { await controller.recycle(c.id).then((x) => { if (!x.ok) throw new Error(x.error); }); } catch (e) { err = e; }
+    db.clearEngineSessionId = origClear;
+    const row = db.getSession(c.id);
+    check("(CL) a throwing clearEngineSessionId is reported as a failure", err && /injected clear failure/.test(err.message));
+    check("(CL) ...the row is not left phantom-live", row.processState === "exited" && !host.isAlive(c.id));
+    check("(CL) ...the OLD engine id is still on the row", row.engineSessionId === c.eng);
+    check("(CL) ...archived state restored", row.archivedAt != null);
+  }
+
   // ===================== S5: recycle of a companion that is NOT alive + Q3: wiring re-armed =====================
   {
     // Kill the main companion's pty and let onSessionExit tear its wiring down (the production sequence).
