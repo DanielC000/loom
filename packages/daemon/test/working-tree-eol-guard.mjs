@@ -155,148 +155,22 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { mkdtempManaged, unregister, finishAndExit } from "./_tmp-fixture.mjs";
-import { listUntrackedTestFiles as listUntrackedRepoFiles } from "./fixed-wait-witness-guard.mjs";
+import {
+  containsNul, expectedPolicy, evaluate, coreAutocrlfTrue, listTrackedFiles, listUntrackedFiles,
+  resolveTrackedGitEolStates, checkAttrsBatch, scanEolViolations, fixViolations,
+} from "./_eol-policy.mjs";
+
+// `--fix` (card 97ddb56b): rewrite ONLY the files section (B) flags to their expected line endings, then
+// re-scan. Only ever acts on THIS repo's own root; `scripts/run-static-guards.mjs` spawns this file with
+// no extra argv, so the runner can never trigger it.
+const FIX_MODE = process.argv.includes("--fix");
+const FIX_COMMAND = "node packages/daemon/test/working-tree-eol-guard.mjs --fix";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..", "..", ".."); // test/ -> daemon -> packages -> repo root
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
-
-/** Raw CRLF vs bare-LF line-ending counts of a buffer, read directly off disk — never through a git diff/
- *  status/show comparison (see this file's own header for why those are blind to exactly this fault). */
-function countEndings(buf) {
-  let crlf = 0;
-  let totalLf = 0;
-  for (let i = 0; i < buf.length; i++) {
-    if (buf[i] === 0x0a) {
-      totalLf++;
-      if (i > 0 && buf[i - 1] === 0x0d) crlf++;
-    }
-  }
-  return { crlf, bareLf: totalLf - crlf };
-}
-
-/** Mirrors git's own `text=auto` content-sniffing heuristic closely enough for this guard's purpose: a
- *  raw NUL byte anywhere in the content means git treats the path as binary and never applies LF/CRLF
- *  conversion to it (empirically confirmed on this card via `git checkout --` against both of this
- *  repo's real examples — see this file's own header). */
-function containsNul(buf) {
-  return buf.includes(0);
-}
-
-/** The line-ending policy `.gitattributes` + `core.autocrlf` imply for a path, given its `eol`/`text`
- *  check-attr values. Returns "lf" | "crlf" | null (null = no policy — an explicit `-text`/binary path). */
-function expectedPolicy(eolAttr, textAttr, autocrlfTrue) {
-  if (textAttr === "unset") return null; // explicit -text / binary attribute — git never converts it
-  if (eolAttr === "lf") return "lf";
-  if (eolAttr === "crlf") return "crlf";
-  return autocrlfTrue ? "crlf" : "lf"; // no eol pin — falls through to the live core.autocrlf setting
-}
-
-/** Evaluates one file's actual bytes against its expected policy. `skip:true` covers both "no line-
- *  ending policy applies" (policy === null) and "the file has no newlines to have an opinion about". */
-function evaluate(buf, policy) {
-  if (policy === null) return { skip: true };
-  const { crlf, bareLf } = countEndings(buf);
-  if (crlf === 0 && bareLf === 0) return { skip: true };
-  if (policy === "crlf") return { skip: false, ok: bareLf === 0, crlf, bareLf };
-  return { skip: false, ok: crlf === 0, crlf, bareLf }; // policy === "lf"
-}
-
-function execGit(root, args, opts = {}) {
-  return execFileSync("git", ["-C", root, ...args], { encoding: "buffer", ...opts });
-}
-
-function coreAutocrlfTrue(root) {
-  let out;
-  try { out = execGit(root, ["config", "--get", "core.autocrlf"]).toString("utf8").trim(); }
-  catch { out = ""; } // `git config --get` exits non-zero with empty output when the key is unset
-  return out === "true";
-}
-
-/** Card d854889d — EVERY tracked path, full stop. No extension filter: see this file's own header
- *  (`@decision d854889d`) for why a filename-pattern allowlist is the wrong mechanism — it is structurally
- *  incapable of matching a dotfile like `.gitignore`, among other gaps. Binary/no-policy paths are
- *  excluded downstream, in section (B), by `containsNul` and `expectedPolicy`'s existing `-text` check —
- *  content- and attribute-driven, never filename-driven. */
-function listTrackedFiles(root) {
-  const raw = execGit(root, ["ls-files", "-z"]).toString("utf8");
-  return raw.split("\0").filter(Boolean);
-}
-
-/** Card c3e70c20 — the population-visibility fix (see this file's own header for the full rationale).
- *  Reuses `fixed-wait-witness-guard.mjs`'s `listUntrackedTestFiles` (a thin wrapper around `git ls-files
- *  --others --exclude-standard`) with pathspec `"."` (repo-root-relative, matches at any depth — verified
- *  empirically on this card) rather than re-typing the same git invocation a second time. Card `d854889d`
- *  removed the extension filter this used to apply here too — EVERY non-ignored untracked path, full
- *  stop, same reasoning as `listTrackedFiles` above. Mirrors that helper's null-vs-empty contract: `null`
- *  means "git itself failed" (could not check), `[]` means "checked, found none" — a caller must not
- *  conflate the two. */
-function listUntrackedFiles(root) {
-  return listUntrackedRepoFiles(root, ".");
-}
-
-/** Card d854889d — parses one `git ls-files --eol -z` record's fixed-width status columns (everything
- *  before the literal tab) into `{i, w, attr}`. `attr` can itself contain a space (e.g. `"text eol=lf"`),
- *  so this anchors on the three `i/`/`w/`/`attr/` prefixes rather than splitting on whitespace. Returns
- *  `null` for a record that doesn't match the expected shape — a caller treats that as "could not parse",
- *  never as a silent false value. */
-function parseLsFilesEolStatus(statusPart) {
-  const m = statusPart.match(/^i\/(\S*)\s+w\/(\S*)\s+attr\/(.+?)\s*$/);
-  if (!m) return null;
-  return { i: m[1], w: m[2], attr: m[3] };
-}
-
-/** Card d854889d — GROUND-TRUTH CROSS-VALIDATION for the `containsNul` binary-skip decision below.
- *  `containsNul` is this guard's own REPLICA of git's `text=auto` content-sniffing heuristic (scans the
- *  WHOLE buffer for a NUL byte; git itself only scans the first 8000 bytes — a safe superset for this
- *  guard's purpose, see this file's header). Rather than trusting that replica forever, this asks git
- *  ITSELF, via `git ls-files --eol`, whether it also resolves each TRACKED path's CURRENT working-tree
- *  bytes to `-text` (binary) — the same primitive used in the guard's own header evidence for why the
- *  staging window doesn't blind this check (`w/` reads real on-disk bytes, not the index). Deliberately
- *  takes NO pathspec argument — `git ls-files --eol -z` with nothing after it resolves the WHOLE tracked
- *  tree in one call, the same no-argv-list shape `listTrackedFiles` already uses above, so a repo with
- *  thousands of tracked paths never risks the OS command-line length limit the way passing each one as a
- *  pathspec would (see this repo's own CLAUDE.md on that hazard). Returns `Map<path, {i,w,attr}>`; a path
- *  missing from the map means git itself failed, or genuinely has no row (e.g. gone since enumeration) —
- *  the caller treats that as "could not cross-validate", never as a silent negative. */
-function resolveTrackedGitEolStates(root) {
-  const map = new Map();
-  let out;
-  try {
-    out = execFileSync("git", ["-C", root, "ls-files", "--eol", "-z"], { encoding: "utf8" });
-  } catch {
-    return map;
-  }
-  for (const rec of out.split("\0").filter(Boolean)) {
-    const tabIdx = rec.indexOf("\t");
-    if (tabIdx === -1) continue;
-    const parsed = parseLsFilesEolStatus(rec.slice(0, tabIdx));
-    if (parsed) map.set(rec.slice(tabIdx + 1), parsed);
-  }
-  return map;
-}
-
-/** Batched `git check-attr eol text` over every path at once via stdin (never argv — sidesteps any
- *  OS command-line length limit for a corpus this size). Returns Map<path, {eol, text}>. */
-function checkAttrsBatch(root, files) {
-  const map = new Map();
-  if (files.length === 0) return map;
-  const input = Buffer.from(files.map((f) => `${f}\0`).join(""), "utf8");
-  const out = execFileSync("git", ["-C", root, "check-attr", "-z", "--stdin", "eol", "text"], {
-    input, encoding: "buffer",
-  }).toString("utf8");
-  const tokens = out.split("\0");
-  if (tokens[tokens.length - 1] === "") tokens.pop();
-  for (let i = 0; i + 2 < tokens.length; i += 3) {
-    const [file, attr, value] = [tokens[i], tokens[i + 1], tokens[i + 2]];
-    let entry = map.get(file);
-    if (!entry) { entry = {}; map.set(file, entry); }
-    entry[attr] = value;
-  }
-  return map;
-}
 
 // =====================================================================================================
 // (A) POSITIVE CONTROL — a real fixture git repo, proving the guard actually fires (DoD-4).
@@ -478,45 +352,25 @@ function checkAttrsBatch(root, files) {
 // disk. Card `d854889d`: no extension filter — see `@decision d854889d` in this file's header.
 // =====================================================================================================
 {
-  const autocrlfTrue = coreAutocrlfTrue(repoRoot);
-  const files = listTrackedFiles(repoRoot);
+  let scan = scanEolViolations(repoRoot);
+  if (FIX_MODE && scan.violations.length) {
+    const { changed, skipped } = fixViolations(repoRoot, scan.violations);
+    for (const c of changed) console.log(`  FIXED  ${c.file}  -> all-${c.policy} (was CRLF=${c.crlf} bareLF=${c.bareLf})${c.tracked ? "" : "  [untracked]"}`);
+    for (const s of skipped) console.log(`  SKIPPED  ${s.file}  (${s.reason})`);
+    console.log(`[working-tree-eol-guard --fix] rewrote ${changed.length} file(s); the git index was not touched (a staged copy needs no re-add: git stores the LF-normalised blob either way). Re-scanning...`);
+    scan = scanEolViolations(repoRoot);
+  }
+  const { autocrlfTrue, files, untrackedFiles, scanTargets, violations, skippedBinary, lfPinnedCount, crlfPinnedCount } = scan;
   check(`sanity: the tracked-file walk found a non-trivial population (found ${files.length} file(s), no extension filter)`, files.length > 100);
 
   // Card c3e70c20 — the population-visibility fix itself: a never-`git add`ed file was previously
   // invisible to everything below. `null` means git failed (skip, don't fail an unrelated build over it
   // — same fail-safe posture as the sibling this reuses); `[]` means checked, genuinely none found.
-  const untrackedFiles = listUntrackedFiles(repoRoot);
   if (untrackedFiles === null) {
     console.log("[working-tree-eol-guard] could not enumerate untracked files (git ls-files --others failed) — skipping the untracked-visibility scan this run");
   } else {
     console.log(`[working-tree-eol-guard] population: ${untrackedFiles.length} untracked file(s) found alongside ${files.length} tracked (state the actual population, not just a bare "found 0")`);
   }
-  const scanTargets = [
-    ...files.map((rel) => ({ rel, tracked: true })),
-    ...(untrackedFiles || []).map((rel) => ({ rel, tracked: false })),
-  ];
-
-  const attrs = checkAttrsBatch(repoRoot, scanTargets.map((t) => t.rel));
-
-  const violations = [];
-  const skippedBinary = [];
-  let lfPinnedCount = 0;
-  let crlfPinnedCount = 0;
-
-  for (const { rel, tracked } of scanTargets) {
-    const attr = attrs.get(rel) || {};
-    if (tracked && attr.eol === "lf") lfPinnedCount++;
-    if (tracked && attr.eol === "crlf") crlfPinnedCount++;
-    const abs = path.join(repoRoot, rel);
-    let buf;
-    try { buf = fs.readFileSync(abs); } catch { continue; } // gone from the working tree since enumeration
-    if (containsNul(buf)) { if (tracked) skippedBinary.push(rel); continue; }
-    const policy = expectedPolicy(attr.eol, attr.text, autocrlfTrue);
-    const result = evaluate(buf, policy);
-    if (result.skip) continue;
-    if (!result.ok) violations.push({ file: rel, tracked, policy, crlf: result.crlf, bareLf: result.bareLf });
-  }
-
   check(`sanity: .gitattributes' real eol=lf pin(s) actually resolve to ≥1 tracked file (found ${lfPinnedCount}) — proves check-attr reads .gitattributes rather than defaulting`, lfPinnedCount > 0);
   check(`sanity: .gitattributes' real eol=crlf pin (install.ps1) resolves to ≥1 tracked file (found ${crlfPinnedCount})`, crlfPinnedCount > 0);
 
@@ -546,7 +400,8 @@ function checkAttrsBatch(root, files) {
   );
 
   if (violations.length) {
-    for (const v of violations) console.log(`  EOL-MISMATCH${v.tracked ? "" : " (UNTRACKED — never added to git; stage it and re-run)"}  ${v.file}  expected all-${v.policy}, found CRLF=${v.crlf} bareLF=${v.bareLf}`);
+    for (const v of violations) console.log(`  EOL-MISMATCH${v.tracked ? "" : " (UNTRACKED — never added to git)"}  ${v.file}  expected all-${v.policy}, found CRLF=${v.crlf} bareLF=${v.bareLf}`);
+    console.log(`  FIX: run this ONE command from the worktree root to rewrite exactly the files listed above to their expected line endings, then re-run the guard:\n       ${FIX_COMMAND}`);
   }
   check(
     `every tracked text file's WORKING-TREE bytes on disk, AND every untracked-but-present text file's (never added to git — see this file's header for why those are scanned too), match the line-ending policy .gitattributes + core.autocrlf(=${autocrlfTrue}) imply for it (found ${violations.length} violation(s) across ${scanTargets.length} file(s) scanned: ${files.length} tracked + ${(untrackedFiles || []).length} untracked)`,
