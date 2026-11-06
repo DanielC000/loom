@@ -46,17 +46,15 @@ const { Server, utils } = ssh2;
 const net = (await import("node:net")).default;
 
 // ---- fixture keys (pure JS) --------------------------------------------------------------------------
-// ssh2's generateKeyPairSync output was seen ONCE (≈1 in 15 runs, cause not investigated) failing its own
-// parseKey with "getPrivatePEM is not a function"; regenerate until the pair round-trips so a fixture
-// hiccup cannot masquerade as a product failure. Bounded: gives up loudly after 10 tries.
+// ssh2's raw ed25519 generator is malformed ~1 in 256 (card 28c304b2); the shared helper retries until
+// parseKey accepts it, so a fixture hiccup cannot masquerade as a product failure. Bounded.
+const { generateParseableEd25519 } = await import("./_ssh-test-keys.mjs");
 function genKey() {
-  for (let i = 0; i < 10; i++) {
-    const kp = utils.generateKeyPairSync("ed25519");
-    const priv = utils.parseKey(kp.private);
-    const pub = utils.parseKey(kp.public);
-    if (!(priv instanceof Error) && typeof priv.getPrivatePEM === "function" && !(pub instanceof Error)) return kp;
+  const kp = generateParseableEd25519(utils);
+  if (typeof utils.parseKey(kp.private).getPrivatePEM !== "function" || utils.parseKey(kp.public) instanceof Error) {
+    throw new Error("generated ed25519 fixture key lacks getPrivatePEM / unparseable public half");
   }
-  throw new Error("could not generate a parseable ed25519 fixture key in 10 tries");
+  return kp;
 }
 const hostKeyPair = genKey();
 const clientKey = genKey();

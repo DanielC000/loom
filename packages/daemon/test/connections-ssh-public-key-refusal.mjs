@@ -29,11 +29,12 @@ const sshUtils = (await import("ssh2")).default.utils;
 const FINGERPRINT = "SHA256:" + "A".repeat(43);
 const PUBLIC_KEY_REFUSAL = "that is a public key; paste the PRIVATE key file";
 
-// card 28c304b2: ssh2's generateKeyPairSync("ed25519") yields a malformed private key ~0.5% of the time —
-// regenerate until the private half parses AND round-trips a sign/verify, same robustness as ssh-exec-tool.mjs.
+// card 28c304b2: ssh2's raw ed25519 generator yields a malformed private key ~0.5% of the time —
+// ed25519 goes through the shared retry helper, then must also round-trip a sign/verify.
+const { generateParseableEd25519 } = await import("./_ssh-test-keys.mjs");
 function genKey(type, opts) {
   for (let i = 0; i < 20; i++) {
-    const kp = sshUtils.generateKeyPairSync(type, opts);
+    const kp = type === "ed25519" ? generateParseableEd25519(sshUtils, opts) : sshUtils.generateKeyPairSync("rsa", opts);
     const priv = sshUtils.parseKey(kp.private, opts?.passphrase);
     const pub = sshUtils.parseKey(kp.public);
     if (priv instanceof Error || pub instanceof Error) continue;

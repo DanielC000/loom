@@ -71,7 +71,7 @@ export function stripComments(src) {
 }
 
 /** @returns {{line:number, text:string}[]} violations in one source string. */
-export function findSsh2KeygenCalls(source) {
+export function findSsh2KeygenCalls(source, { allowNonEd25519Literal = false } = {}) {
   let code = stripComments(source);
   const cryptoNs = new Set(["crypto"]);
   const CRYPTO = String.raw`["'](?:node:)?crypto["']`;
@@ -89,6 +89,8 @@ export function findSsh2KeygenCalls(source) {
     const before = code.slice(0, m.index);
     const recv = /([A-Za-z_$][\w$]*)\s*\??\.\s*$/.exec(before);
     if (recv && cryptoNs.has(recv[1])) continue;
+    // Test-corpus mode: ssh2's defect is ed25519-only, so a call whose first argument is a literal rsa/ecdsa is fine.
+    if (allowNonEd25519Literal && /^\s*\(\s*["'](?:rsa|ecdsa)["']/.test(code.slice(m.index + m[0].length))) continue;
     const line = before.split("\n").length;
     hits.push({ line, text: code.split("\n")[line - 1].trim() });
   }
@@ -149,6 +151,26 @@ for (const f of files) {
 check("no product source calls ssh2's key generator", offenders.length === 0,
   `ssh2@1.17.0's generateKeyPairSync("ed25519") emits a malformed key ~1 in 256 (card 28c304b2), and patching node_modules would not reach npm users. ` +
   `Use node:crypto generateKeyPairSync('ed25519') plus Loom's own OpenSSH serialization, or ssh2 plus parse-verify-and-retry. Offenders:\n  ${offenders.join("\n  ")}`);
+
+// ---- (C) the test corpus: packages/daemon/test/** (card 9519fe64) ----
+// Tests must reach ssh2's ed25519 generator only through generateParseableEd25519 in _ssh-test-keys.mjs (the
+// retry helper, allowlisted). This file is excluded too: its controls carry the generator as string literals.
+const TEST_ALLOW = new Set(["_ssh-test-keys.mjs", path.basename(fileURLToPath(import.meta.url))]);
+const testOpts = { allowNonEd25519Literal: true };
+check("test control RED: raw ed25519 call", findSsh2KeygenCalls('const kp = utils.generateKeyPairSync("ed25519");', testOpts).length === 1);
+check("test control RED: non-literal type", findSsh2KeygenCalls("utils.generateKeyPairSync(type, opts);", testOpts).length === 1);
+check("test control GREEN: rsa literal", findSsh2KeygenCalls('utils.generateKeyPairSync("rsa", { bits: 2048 });', testOpts).length === 0);
+const testFiles = fs.readdirSync(here).filter((f) => /\.(?:[cm]?js|ts)$/.test(f)).map((f) => path.join(here, f));
+check("test corpus is non-empty and includes the helper and a consumer",
+  testFiles.length > 100 && testFiles.some((f) => f.endsWith("_ssh-test-keys.mjs")) && testFiles.some((f) => f.endsWith("ssh-exec-tool.mjs")),
+  `files=${testFiles.length}`);
+const testOffenders = [];
+for (const f of testFiles) {
+  if (TEST_ALLOW.has(path.basename(f))) continue;
+  for (const h of findSsh2KeygenCalls(fs.readFileSync(f, "utf8"), testOpts)) testOffenders.push(`${path.basename(f)}:${h.line}  ${h.text}`);
+}
+check("no test calls ssh2's ed25519 generator outside the retry helper", testOffenders.length === 0,
+  `use generateParseableEd25519 from ./_ssh-test-keys.mjs (ssh2@1.17.0 emits a malformed ed25519 key ~1 in 256, card 28c304b2). Offenders:\n  ${testOffenders.join("\n  ")}`);
 
 if (failures) {
   console.error(`\n${failures} check(s) failed`);

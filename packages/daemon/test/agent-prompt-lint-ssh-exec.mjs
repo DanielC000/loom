@@ -25,10 +25,12 @@ const { createSshConnection, createConnection } = await import("../dist/connecti
 const { computeHostKeyFingerprint } = await import("../dist/connections/ssh.js");
 const { agentCreatePromptWarning, agentUpdatePromptWarning } = await import("../dist/agents/promptLint.js");
 const { utils } = (await import("ssh2")).default;
+const { generateParseableEd25519 } = await import("./_ssh-test-keys.mjs");
 
 try {
-  const kp = utils.generateKeyPairSync("ed25519");
-  const hostFp = computeHostKeyFingerprint(utils.parseKey(utils.generateKeyPairSync("ed25519").public).getPublicSSH());
+  // ssh2's raw ed25519 generator is malformed ~1 in 256 (card 28c304b2) — always go through the retry helper.
+  const kp = generateParseableEd25519(utils);
+  const hostFp = computeHostKeyFingerprint(utils.parseKey(generateParseableEd25519(utils).public).getPublicSSH());
   const db = new Db(path.join(tmpHome, "t.db"));
   const now = new Date().toISOString();
   for (const id of ["pA", "pB"]) db.insertProject({ id, name: id, repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });

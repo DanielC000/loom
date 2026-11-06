@@ -5787,6 +5787,12 @@ export const STATIC_GUARD_REPO_PATHS = [
   // regardless of which of its two scanned trees a future regression lands in, at negligible cost (<1s,
   // pure text, no subprocess).
   "packages/daemon/test/windows-detached-console-guard.mjs",
+  // Card 9519fe64: its section (C) is a corpus-wide source-TEXT scan of packages/daemon/test/*.mjs asserting
+  // no test calls ssh2's ed25519 generator outside the _ssh-test-keys.mjs retry helper. A TEST-file edit can
+  // trip it with zero compiled-behaviour change, so such a diff takes computeEmitCompareGate's reduced path
+  // (or no gate at all under an interval) and would otherwise never run it. Its src-scan section (B) is
+  // unaffected by this. Pure text, ~1s, no subprocess.
+  "packages/daemon/test/ssh2-keygen-product-ban-guard.mjs",
 ];
 
 /** The test files that actually read REAL, checked-in content under `packages/daemon/assets/**` — run
