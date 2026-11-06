@@ -69,7 +69,7 @@ To extract: leave a short pointer in your language's comment syntax —
 
 ℹ️ **Codex sandbox caveat (unverified):** a codex-harness worker's CLI sandbox may deny writes outside its worktree cwd, possibly including `LOOM_PROJECT_WORK_DIR`. If a write there is silently refused, treat it as a sandbox-denied write and report it up.
 
-**A shared temp directory is shared with OTHER sessions.** Write logs and scratch artifacts under your own session scratch dir (`$LOOM_SCRATCH_DIR`), never a bare `/tmp` or other host-wide temp path, and never derive a count by globbing one: a concurrent session's leftovers silently inflate your population. Scope to a path you own.
+**A shared temp directory is shared with OTHER sessions.** Write logs and scratch artifacts under your own session scratch dir (`$LOOM_SCRATCH_DIR`), never a bare `/tmp` or other host-wide temp path, and never derive a count by globbing one: a concurrent session's leftovers silently inflate your population. Scope to a path you own. **Send browser and other tool output (screenshots, snapshots) there too, not to the scratchpad directory your harness announces:** tools confine writes to their own allowed roots and may refuse a path outside them.
 
 **Your worktree is force-removed on merge — nothing durable belongs inside it that isn't committed.** The whole directory is force-deleted, including gitignored/untracked content and anything you cloned inside it. If your task needs another repo checked out alongside your work, put it **outside** your worktree, or push its work to its own remote before you report done. Don't rely on removal refusing on your behalf.
 
