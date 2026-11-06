@@ -15590,6 +15590,8 @@ export class SessionService {
     // confirmWorkerMerge). FAILS SAFE: precheckWorkerDone degrades to ALLOW on any git error, so a flaky
     // check can never wedge a legitimate done. Only the AFFIRMATIVE uncommitted signal refuses.
     let warning: string | undefined;
+    // The branch tip the unanchored-comment advisory last scanned (recorded on the report event as the next scan's anchor).
+    let commentCheckTip: string | undefined;
     // Card 00a6cdd6: set only when Loom actually auto-committed for an eligible codex-harness worker —
     // declared at this OUTER scope (not inside the project/worktree block below) so the `worker_report`
     // event append further down can read it regardless of which branch of that block ran.
@@ -15919,7 +15921,12 @@ export class SessionService {
         // should that refusal's own guard ever change.
         if (!report.noChanges && !precheck.zeroAhead) {
           try {
-            const commentBlocks = await detectUnanchoredAddedCommentBlocks(precheckRepoPath, worker.branch, doneBase, { timeoutMs: this.gitOpMs });
+            // @decision 60e9eae9 — anchor on THIS worker's previous report's recorded tip so only blocks added since are advised; never re-list the same blocks.
+            const prevCheckTip = this.db.listEventsForWorker(workerSessionId)
+              .filter((e) => e.kind === "worker_report" && typeof (e.detail as { commentCheckTip?: unknown } | undefined)?.commentCheckTip === "string")
+              .at(-1)?.detail as { commentCheckTip?: string } | undefined;
+            const commentBlocks = await detectUnanchoredAddedCommentBlocks(precheckRepoPath, worker.branch, doneBase, { timeoutMs: this.gitOpMs }, { sinceTip: prevCheckTip?.commentCheckTip ?? null });
+            if (commentBlocks.branchTip) commentCheckTip = commentBlocks.branchTip;
             const note = formatUnanchoredCommentBlocksAdvisory(commentBlocks, "worker");
             if (note) warning = warning ? `${warning} ${note}` : note;
           } catch { /* fail safe: detector failure never blocks or alters the report */ }
@@ -15962,6 +15969,7 @@ export class SessionService {
       detail: {
         status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs,
         ...(warning ? { warning } : {}), ...(report.noChanges ? { noChanges: true } : {}),
+        ...(commentCheckTip ? { commentCheckTip } : {}),
         ...(report.awaiting === "background" ? { awaiting: "background" } : {}),
         ...(managerSessionId ? { managerTurnSeqAtReport: this.db.getSession(managerSessionId)?.turnSeq ?? 0 } : {}),
         // Card 808ee811: the worker's own context occupancy AT REPORT TIME — the exact "should this
@@ -19781,7 +19789,10 @@ export class SessionService {
     // redundant diffstat git call) — own try/catch — never let a detector hiccup disturb this review.
     let commentBlockWarning: string | undefined;
     try {
-      const commentBlocks = await detectUnanchoredAddedCommentBlocks(repoPath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs }, { allFiles: diff.allFiles });
+      // @decision 60e9eae9 — a RE-review only lists blocks added since the previous merge_request's tip; the FIRST review (no prior) still lists every block.
+      const prevReviewTip = this.db.listEventsForBranch(worker.branch, "merge_request")
+        .filter((e) => (e.detail?.repoKey ?? null) === (worker.repoKey ?? null)).at(-1)?.detail?.tip;
+      const commentBlocks = await detectUnanchoredAddedCommentBlocks(repoPath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs }, { allFiles: diff.allFiles, sinceTip: typeof prevReviewTip === "string" ? prevReviewTip : null });
       commentBlockWarning = formatUnanchoredCommentBlocksAdvisory(commentBlocks, "manager");
     } catch { /* fail safe: no warning, no throw */ }
     // Card 13fc5227: a HELD branch's fork-point diff above mixes what the batch already landed with the late commits (and shows a late REVERT as nothing), so the

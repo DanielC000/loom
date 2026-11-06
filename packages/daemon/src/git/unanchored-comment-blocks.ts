@@ -22,9 +22,41 @@ export interface DetectUnanchoredAddedCommentBlocksResult {
   // detection never ran at all (script missing/incompatible, no in-scope file, git failure) — as opposed
   // to a genuine empty result from a resolved threshold finding nothing.
   minLines: number | null;
+  // The exact branch tip this scan read (full sha), or `null` when detection never got that far. Callers
+  // persist it as the "already advised up to here" anchor for the NEXT scan (`hint.sinceTip`).
+  branchTip: string | null;
+  // true iff the result was narrowed to lines added since `hint.sinceTip` (false = whole-branch scan,
+  // including every fail-open fallback).
+  scopedSince: boolean;
 }
 
-const EMPTY_RESULT: DetectUnanchoredAddedCommentBlocksResult = { blocks: [], truncated: false, totalCount: 0, minLines: null };
+const EMPTY_RESULT: DetectUnanchoredAddedCommentBlocksResult = { blocks: [], truncated: false, totalCount: 0, minLines: null, branchTip: null, scopedSince: false };
+
+const FULL_SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i;
+
+/**
+ * Generic test-header exemption. Exempt only when BOTH hold: the path is test-shaped (a `test`/`tests`/
+ * `__tests__` DIRECTORY segment, or a `*.test.*`/`*.spec.*` basename) AND the block is the file's LEADING
+ * comment (only blanks, a shebang, comment lines or single-line import/require/"use strict" precede it).
+ * Deliberately not a Loom path: this advisory also runs for end-user projects. Accepted false-exempts:
+ * a long narrative header on a non-test helper/fixture that merely lives under a `test/` dir; product code
+ * in a dir literally named `test`/`tests`; a production file named `x.test.ts`/`x.spec.ts`. Mid-file
+ * blocks in test files are NOT exempt.
+ *
+ * @decision 60e9eae9 — keep this heuristic path-generic; never hardcode a repo's own test directory.
+ */
+export function isTestShapedPath(file: string): boolean {
+  const parts = file.split(/[\\/]/);
+  const base = parts[parts.length - 1] ?? "";
+  if (/\.(?:test|spec)\./i.test(base)) return true;
+  return parts.slice(0, -1).some((p) => /^(?:tests?|__tests__)$/i.test(p));
+}
+const PREAMBLE_LINE_RE = /^\s*(?:$|#!|\/\/|\/\*|\*|import\b|["']use strict["'];?\s*$|(?:const|let|var)\s+[\w{},\s]+=\s*(?:await\s+)?require\()/;
+export function isLeadingTestHeaderBlock(file: string, lines: string[], startLine: number): boolean {
+  if (!isTestShapedPath(file)) return false;
+  for (let i = 0; i < startLine - 1; i++) if (!PREAMBLE_LINE_RE.test(lines[i] ?? "")) return false;
+  return true;
+}
 
 // Bounded so a branch that (legitimately or not) adds many long unanchored blocks can't blow up either
 // response — same posture as WORKER_COMMIT_LOG_MAX_ENTRIES/HOOK_POINTER_ANCHOR_CAP elsewhere.
@@ -183,6 +215,12 @@ export interface DetectUnanchoredAddedCommentBlocksHint {
    *  this detector skips its own diffstat-only git call and reuses this one instead. Optional; omit for
    *  the plain no-hint path (worker_report has no pre-existing diffstat of its own to reuse). */
   allFiles?: DiffstatFile[];
+  /** The branch tip a PREVIOUS scan/report already covered (card 60e9eae9). When it is a full sha that is a
+   *  proper ancestor of the current tip, only lines added in BOTH `base...tip` and `sinceTip...tip` count
+   *  (the intersection keeps main merged into the branch from surfacing mainline's own changes). Anything
+   *  else — absent, malformed, unknown to the repo, or no longer an ancestor (rewritten history) — falls
+   *  back to the whole-branch scan: never silently reports nothing. */
+  sinceTip?: string | null;
 }
 
 /**
@@ -226,7 +264,7 @@ export async function detectUnanchoredAddedCommentBlocks(
         if (f.renameFrom !== undefined) pathspecPaths.add(f.renameFrom);
       }
     }
-    if (candidates.size === 0) return { blocks: [], truncated: false, totalCount: 0, minLines };
+    if (candidates.size === 0) return { blocks: [], truncated: false, totalCount: 0, minLines, branchTip: null, scopedSince: false };
 
     const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
     const git = boundedSimpleGit(repoPath, timeoutMs);
@@ -245,9 +283,35 @@ export async function detectUnanchoredAddedCommentBlocks(
     const patch = await withTimeout(
       git.raw(["-c", "core.quotepath=false", "--literal-pathspecs", "diff", "--end-of-options", range, "--", ...pathspecPaths]), timeoutMs, "git diff (unanchored-comment-blocks, scoped)",
     );
-    if (!patch) return { blocks: [], truncated: false, totalCount: 0, minLines };
+    if (!patch) return { blocks: [], truncated: false, totalCount: 0, minLines, branchTip, scopedSince: false };
 
-    const addedLinesByFile = parseAddedLineNumbers(patch);
+    let addedLinesByFile = parseAddedLineNumbers(patch);
+    let scopedSince = false;
+    const since = hint.sinceTip;
+    if (typeof since === "string" && FULL_SHA_RE.test(since)) {
+      try {
+        // Ancestor proof via merge-base OUTPUT (never an exit code — see resolveBranchTip's note): the
+        // merge-base of (since, tip) equals `since` iff `since` is an ancestor of the tip. An unknown
+        // object throws; a rewritten branch yields a different base. Both fall to the whole-branch scan.
+        const mb = (await withTimeout(git.raw(["merge-base", "--end-of-options", since, branchTip]), timeoutMs, "git merge-base (unanchored-comment-blocks, sinceTip)")).trim();
+        if (mb.toLowerCase() === since.toLowerCase()) {
+          const sincePatch = since.toLowerCase() === branchTip.toLowerCase() ? "" : await withTimeout(
+            git.raw(["-c", "core.quotepath=false", "--literal-pathspecs", "diff", "--end-of-options", `${since}...${branchTip}`, "--", ...pathspecPaths]), timeoutMs, "git diff (unanchored-comment-blocks, since last report)",
+          );
+          const sinceAdded = parseAddedLineNumbers(sincePatch);
+          const narrowed = new Map<string, Set<number>>();
+          for (const [file, lines] of addedLinesByFile) {
+            const sl = sinceAdded.get(file);
+            if (!sl) continue;
+            const both = new Set<number>();
+            for (const ln of lines) if (sl.has(ln)) both.add(ln);
+            if (both.size > 0) narrowed.set(file, both);
+          }
+          addedLinesByFile = narrowed;
+          scopedSince = true;
+        }
+      } catch { /* fail open to the whole-branch scan */ }
+    }
     const blocks: UnanchoredCommentBlock[] = [];
     let totalCount = 0;
 
@@ -259,9 +323,11 @@ export async function detectUnanchoredAddedCommentBlocks(
       } catch {
         continue; // deleted/renamed-away/unreadable at the branch tip — nothing to scan
       }
-      const fileBlocks = extractCommentBlocks(content.split(/\r?\n/));
+      const contentLines = content.split(/\r?\n/);
+      const fileBlocks = extractCommentBlocks(contentLines);
       for (const b of fileBlocks) {
         if (b.anchorIds.length > 0) continue;
+        if (isLeadingTestHeaderBlock(file, contentLines, b.startLine)) continue;
         let addedCount = 0;
         for (let ln = b.startLine; ln <= b.endLine; ln++) if (added.has(ln)) addedCount++;
         if (addedCount < minLines) continue;
@@ -269,7 +335,7 @@ export async function detectUnanchoredAddedCommentBlocks(
         if (blocks.length < MAX_BLOCKS) blocks.push({ file, startLine: b.startLine, endLine: b.endLine, length: b.length });
       }
     }
-    return { blocks, truncated: totalCount > blocks.length, totalCount, minLines };
+    return { blocks, truncated: totalCount > blocks.length, totalCount, minLines, branchTip, scopedSince };
   } catch {
     return EMPTY_RESULT;
   }
@@ -289,7 +355,9 @@ export function formatUnanchoredCommentBlocksAdvisory(
   const list = result.blocks.map((b) => `${b.file}:${b.startLine}-${b.endLine} (${b.length} lines)`).join(", ");
   const more = result.truncated ? ` (showing ${result.blocks.length} of ${result.totalCount} — list truncated)` : "";
   const action = audience === "worker"
-    ? "classify each: a class A guard (keep inline) or a class B decision/incident narrative (extract to a record, then re-report)"
+    ? "classify each: a class A guard (keep inline) or a class B decision/incident narrative (extract to a record). Include the classification in your next report — do not send a standalone re-report for this, and these blocks will not be listed again unless they change"
     : "classify each: a class A guard (keep inline), or a class B decision/incident narrative (extract to a record before confirming)";
-  return `NEW UNANCHORED COMMENT BLOCK(S): this branch adds ${result.totalCount} comment block(s) with >= ${result.minLines} newly-added line(s) and no @decision anchor: ${list}${more}. Please ${action} — see the doctrine's "Extracting a decision record" section. Advisory only; this never blocks.`;
+  const scope = result.scopedSince ? "since the last report" : "this branch adds";
+  const lead = result.scopedSince ? `${result.totalCount} comment block(s) added ${scope}` : `this branch adds ${result.totalCount} comment block(s)`;
+  return `NEW UNANCHORED COMMENT BLOCK(S): ${lead} with >= ${result.minLines} newly-added line(s) and no @decision anchor: ${list}${more}. Please ${action} — see the doctrine's "Extracting a decision record" section. Advisory only; this never blocks.`;
 }

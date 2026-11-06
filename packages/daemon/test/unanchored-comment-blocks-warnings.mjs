@@ -89,7 +89,8 @@ const RD = mk("rd"); // worker_report, noChanges:true, 0-ahead -> not warned
 const MA = mk("ma"); // worker_merge review, added unanchored -> warned
 const MB = mk("mb"); // worker_merge review, added anchored -> not warned
 const MC = mk("mc"); // worker_merge review, legacy unchanged -> not warned
-const all = [RA, RB, RC, RD, MA, MB, MC];
+const RE = mk("re"); // card 60e9eae9: re-report / re-review scoping
+const all = [RA, RB, RC, RD, RE, MA, MB, MC];
 
 const relPath = path.join("packages", "daemon", "src", "example.ts");
 
@@ -114,7 +115,45 @@ try {
     check("(RA) worker_report: reported:true, not refused", r.reported === true && !r.refused);
     check("(RA) worker_report: advisory fires", typeof r.warning === "string" && r.warning.includes("NEW UNANCHORED COMMENT BLOCK"));
     check("(RA) worker_report: names the file:line", r.warning.includes(`${relPath.replace(/\\/g, "/")}:1-16`));
-    check("(RA) worker_report: worker-audience phrasing (re-report, not confirming)", r.warning.includes("then re-report"));
+    check("(RA) worker_report: worker-audience phrasing (classification goes in the NEXT report; no standalone re-report)", r.warning.includes("Include the classification in your next report") && r.warning.includes("do not send a standalone re-report") && !r.warning.includes("then re-report"));
+  }
+
+  // ── (RE) card 60e9eae9: the same blocks are NOT re-flagged on a re-report; only NEW blocks are; and the
+  //        manager's FIRST review still lists every block, its SECOND only the ones added since. ─────────
+  {
+    const wt = await cutWorktree(RE);
+    fs.mkdirSync(path.join(wt, "packages", "daemon", "src"), { recursive: true });
+    fs.writeFileSync(path.join(wt, relPath), `${longUnanchoredComment(16)}\nexport const a = 1;\n`);
+    commitAll(wt, "add long unanchored block", GIT_ID);
+
+    const r1 = await sessions.workerReport(RE.workerId, { status: "done", summary: "implemented" });
+    check("(RE) report 1: advisory fires for the new block", typeof r1.warning === "string" && r1.warning.includes("NEW UNANCHORED COMMENT BLOCK"));
+    // Same branch, no new commits: a re-report must NOT re-flag the same block.
+    const r2 = await sessions.workerReport(RE.workerId, { status: "done", summary: "classified: class A, keep" });
+    check("(RE) report 2 (no new blocks): NO advisory", r2.warning === undefined);
+    // A new unrelated commit: still nothing.
+    fs.appendFileSync(path.join(wt, relPath), "export const more = 2;\n");
+    commitAll(wt, "unrelated tweak", GIT_ID);
+    const r3 = await sessions.workerReport(RE.workerId, { status: "done", summary: "tweaked" });
+    check("(RE) report 3 (unrelated commit): NO advisory", r3.warning === undefined);
+    // A genuinely new narrative block in a second file: advisory fires for THAT block only.
+    fs.writeFileSync(path.join(wt, "packages", "daemon", "src", "second.ts"), `${longUnanchoredComment(17)}\nexport const s = 1;\n`);
+    commitAll(wt, "add second long block", GIT_ID);
+    const r4 = await sessions.workerReport(RE.workerId, { status: "done", summary: "added second" });
+    check("(RE) report 4: advisory fires for the NEW block", typeof r4.warning === "string" && r4.warning.includes("second.ts:1-17"));
+    check("(RE) report 4: the already-advised block is NOT re-listed", !r4.warning.includes("example.ts"));
+
+    // Manager side: FIRST review (no prior merge_request) lists EVERY block, even though the worker was already advised.
+    const rev1 = await sessions.reviewWorkerMerge(RE.mgrId, RE.workerId);
+    check("(RE) manager FIRST review still lists every block", typeof rev1.warning === "string" && rev1.warning.includes("example.ts:1-16") && rev1.warning.includes("second.ts:1-17"));
+    // Add one more block, then a SECOND review: only the new one.
+    fs.writeFileSync(path.join(wt, "packages", "daemon", "src", "third.ts"), `${longUnanchoredComment(18)}\nexport const t = 1;\n`);
+    commitAll(wt, "add third long block", GIT_ID);
+    const rev2 = await sessions.reviewWorkerMerge(RE.mgrId, RE.workerId);
+    check("(RE) manager SECOND review lists only the block added since the first", typeof rev2.warning === "string" && rev2.warning.includes("third.ts:1-18") && !rev2.warning.includes("example.ts") && !rev2.warning.includes("second.ts"));
+    // A third review with nothing new: silent.
+    const rev3 = await sessions.reviewWorkerMerge(RE.mgrId, RE.workerId);
+    check("(RE) manager THIRD review (nothing new): NO advisory", rev3.warning === undefined);
   }
 
   // ── (RB) branch ADDS the SAME shape, but anchored -> no comment-block text ──────────────────────

@@ -295,6 +295,107 @@ try {
     check("(G) hint path result is byte-identical to the no-hint path",
       JSON.stringify(withHint.blocks) === JSON.stringify(noHint.blocks));
   }
+
+  // ── (T) card 60e9eae9: generic LEADING test-header exemption ─────────────────────────────────────────
+  {
+    const repo = mkRepo("testhdr");
+    initRepo(repo);
+    const base = cutBranch(repo, "loom/ucb-t");
+    const w = (rel, content) => { const f = path.join(repo, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, content); };
+    // Leading header after an import line, in a `test/` dir (the Loom "Proves/Run" shape) -> exempt.
+    w("packages/x/test/a.mjs", `import "./_guard.mjs";\n${longUnanchoredComment(16)}\nexport const a = 1;\n`);
+    // Leading header in a *.spec.* file outside any test dir -> exempt.
+    w("packages/x/src/b.spec.ts", `${longUnanchoredComment(16)}\nexport const b = 1;\n`);
+    // Same shape in a `tests/` dir of an unrelated (end-user) layout -> exempt.
+    w("app/tests/c.js", `#!/usr/bin/env node\n${longUnanchoredComment(16)}\nexport const c = 1;\n`);
+    // MID-FILE long block in a test file (code precedes it) -> still flagged.
+    w("packages/x/test/d.mjs", `export const d0 = 0;\n${longUnanchoredComment(16)}\nexport const d = 1;\n`);
+    // Same leading shape in a NON-test src file -> still flagged.
+    w("packages/x/src/e.ts", `${longUnanchoredComment(16)}\nexport const e = 1;\n`);
+    // A dir merely CONTAINING "test" in its name (not an exact segment) -> not test-shaped, flagged.
+    w("packages/x/contest/f.ts", `${longUnanchoredComment(16)}\nexport const f = 1;\n`);
+    commitAll(repo, "add headers", GIT_ID);
+    const result = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-t", base);
+    const files = result.blocks.map((b) => b.file).sort();
+    check("(T) exactly the non-exempt blocks are flagged", JSON.stringify(files) === JSON.stringify(["packages/x/contest/f.ts", "packages/x/src/e.ts", "packages/x/test/d.mjs"]));
+  }
+
+  // ── (S) card 60e9eae9: sinceTip scoping ──────────────────────────────────────────────────────────────
+  {
+    const repo = mkRepo("since");
+    initRepo(repo);
+    const base = cutBranch(repo, "loom/ucb-s");
+    const w = (rel, content) => { const f = path.join(repo, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, content); };
+    const tipOf = () => execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+    w("packages/x/src/one.ts", `${longUnanchoredComment(16)}\nexport const one = 1;\n`);
+    commitAll(repo, "one", GIT_ID);
+    const tip1 = tipOf();
+    const whole1 = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-s", base);
+    check("(S) whole-branch scan reports the block and exposes the scanned tip", whole1.blocks.length === 1 && whole1.branchTip === tip1 && whole1.scopedSince === false);
+    const same = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-s", base, {}, { sinceTip: tip1 });
+    check("(S) sinceTip === tip -> nothing new, scoped", same.blocks.length === 0 && same.scopedSince === true);
+    w("packages/x/src/two.ts", `${longUnanchoredComment(17)}\nexport const two = 1;\n`);
+    commitAll(repo, "two", GIT_ID);
+    const scoped = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-s", base, {}, { sinceTip: tip1 });
+    check("(S) only the block added since sinceTip is reported", scoped.blocks.length === 1 && scoped.blocks[0].file === "packages/x/src/two.ts" && scoped.scopedSince === true);
+    // main moves on with a long unanchored block of ITS OWN, then is merged into the branch: not attributed to the branch.
+    execFileSync("git", ["checkout", "-q", base], { cwd: repo });
+    w("packages/x/src/mainline.ts", `${longUnanchoredComment(16)}\nexport const m = 1;\n`);
+    commitAll(repo, "mainline block", GIT_ID);
+    execFileSync("git", ["checkout", "-q", "loom/ucb-s"], { cwd: repo });
+    execFileSync("git", ["merge", "-q", "--no-ff", "-m", "merge main", base], { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "ucb", GIT_AUTHOR_EMAIL: "ucb@loom", GIT_COMMITTER_NAME: "ucb", GIT_COMMITTER_EMAIL: "ucb@loom" } });
+    const tip2 = tipOf();
+    const afterMerge = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-s", base, {}, { sinceTip: tip1 });
+    check("(S) main merged into the branch does not surface mainline's block", afterMerge.blocks.every((b) => b.file !== "packages/x/src/mainline.ts"));
+    // The intersection matters for a file BOTH sides touch: the branch edits shared.ts's top; main appends a long
+    // block to its bottom and is merged in. Mainline's block sits inside the branch's file (so it is in the
+    // pathspec) and in `sinceTip...tip`, but NOT in `base...tip` (merge-base = main's new tip) -> not the branch's.
+    execFileSync("git", ["checkout", "-q", base], { cwd: repo });
+    w("packages/x/src/shared.ts", "export const top = 0;\nexport const mid = 1;\nexport const bottom = 2;\n");
+    commitAll(repo, "shared on main", GIT_ID);
+    execFileSync("git", ["checkout", "-q", "loom/ucb-s"], { cwd: repo });
+    execFileSync("git", ["merge", "-q", "--no-ff", "-m", "merge main 2", base], { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "ucb", GIT_AUTHOR_EMAIL: "ucb@loom", GIT_COMMITTER_NAME: "ucb", GIT_COMMITTER_EMAIL: "ucb@loom" } });
+    w("packages/x/src/shared.ts", "export const top = 100;\nexport const mid = 1;\nexport const bottom = 2;\n");
+    commitAll(repo, "branch edits shared top", GIT_ID);
+    const tipShared = tipOf();
+    execFileSync("git", ["checkout", "-q", base], { cwd: repo });
+    w("packages/x/src/shared.ts", `export const top = 0;\nexport const mid = 1;\nexport const bottom = 2;\n${longUnanchoredComment(16)}\n`);
+    commitAll(repo, "main appends block to shared", GIT_ID);
+    execFileSync("git", ["checkout", "-q", "loom/ucb-s"], { cwd: repo });
+    execFileSync("git", ["merge", "-q", "--no-ff", "-m", "merge main 3", base], { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "ucb", GIT_AUTHOR_EMAIL: "ucb@loom", GIT_COMMITTER_NAME: "ucb", GIT_COMMITTER_EMAIL: "ucb@loom" } });
+    const sharedScan = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-s", base, {}, { sinceTip: tipShared });
+    check("(S) a block main appended to a file the branch ALSO touched is not attributed to the branch (intersection)", sharedScan.scopedSince === true && sharedScan.blocks.every((b) => b.file !== "packages/x/src/shared.ts"));
+    // REWRITTEN history: sinceTip no longer an ancestor -> whole-branch fallback, NEVER silently nothing.
+    execFileSync("git", ["checkout", "-q", "--orphan", "loom/ucb-s2"], { cwd: repo });
+    execFileSync("git", ["rm", "-rfq", "."], { cwd: repo });
+    w("README.md", "# rewritten\n");
+    commitAll(repo, "orphan root", GIT_ID);
+    const orphanBase = tipOf();
+    execFileSync("git", ["checkout", "-q", "-b", "loom/ucb-s3", orphanBase], { cwd: repo });
+    w("packages/x/src/rew.ts", `${longUnanchoredComment(16)}\nexport const r = 1;\n`);
+    commitAll(repo, "rewritten branch block", GIT_ID);
+    const rewritten = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-s3", orphanBase, {}, { sinceTip: tip2 });
+    check("(S) non-ancestor sinceTip falls back to the whole-branch scan (block still reported)", rewritten.blocks.length === 1 && rewritten.scopedSince === false);
+    // Force-moved branch that SHARES history with the old tip: X(block1) -> Y(blockA) was advised (sinceTip = Y);
+    // the branch is then reset to X and rebuilt as X -> Z(blockB). merge-base(Y, Z) = X != Y, so Y is not an
+    // ancestor: the scan must be WHOLE-branch (block1 AND blockB), never silently narrowed to Z's diff.
+    execFileSync("git", ["checkout", "-q", "-b", "loom/ucb-s4", orphanBase], { cwd: repo });
+    w("packages/x/src/block1.ts", `${longUnanchoredComment(16)}\nexport const b1 = 1;\n`);
+    commitAll(repo, "X block1", GIT_ID);
+    w("packages/x/src/blockA.ts", `${longUnanchoredComment(16)}\nexport const bA = 1;\n`);
+    commitAll(repo, "Y blockA", GIT_ID);
+    const tipY = tipOf();
+    execFileSync("git", ["reset", "-q", "--hard", "HEAD~1"], { cwd: repo });
+    w("packages/x/src/blockB.ts", `${longUnanchoredComment(16)}\nexport const bB = 1;\n`);
+    commitAll(repo, "Z blockB", GIT_ID);
+    const forced = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-s4", orphanBase, {}, { sinceTip: tipY });
+    check("(S) force-moved branch (sinceTip shares history but is not an ancestor) -> whole-branch fallback keeps block1 AND blockB",
+      forced.scopedSince === false && forced.blocks.map((b) => b.file).sort().join(",") === "packages/x/src/block1.ts,packages/x/src/blockB.ts");
+    const unknown = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-s3", orphanBase, {}, { sinceTip: "0123456789abcdef0123456789abcdef01234567" });
+    check("(S) unknown sinceTip falls back to the whole-branch scan", unknown.blocks.length === 1 && unknown.scopedSince === false);
+    const malformed = await detectUnanchoredAddedCommentBlocks(repo, "loom/ucb-s3", orphanBase, {}, { sinceTip: "--output=/tmp/x" });
+    check("(S) malformed sinceTip falls back to the whole-branch scan", malformed.blocks.length === 1 && malformed.scopedSince === false);
+  }
 } finally {
   for (const repo of repos) {
     try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* ignore */ }
