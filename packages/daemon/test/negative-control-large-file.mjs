@@ -86,7 +86,9 @@ function writeContentAwareTest(dir) {
     "import fs from 'node:fs';\n" +
     "import path from 'node:path';\n" +
     "const content = fs.readFileSync(path.join(process.cwd(), 'src', 'big.txt'), 'utf8');\n" +
-    "process.exit(content.includes('MARKER:FIXED') ? 0 : 1);\n";
+    "const ok = content.includes('MARKER:FIXED');\n" +
+    "if (!ok) console.log('FAIL  big.txt lacks MARKER:FIXED');\n" + // FAIL line = BEHAVIOURAL RED (card 95f2a466)
+    "process.exit(ok ? 0 : 1);\n";
   fs.writeFileSync(testPath, body, "utf8");
   return testPath;
 }

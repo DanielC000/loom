@@ -36,9 +36,30 @@
 // Repeat --file / --test for more than one of either. --ref defaults to HEAD; --build defaults to
 // `pnpm --filter @loom/daemon build`.
 //
-// Exit 0 iff: the RED phase failed as expected, the GREEN phase passed as expected, AND every
-// reverted file restored byte-identical to its original snapshot. Non-zero and a named reason
-// otherwise — printed in full, this script's own output is never the thing worth compressing.
+// Exit 0 iff: the RED phase failed as expected AND that failure is BEHAVIOURAL (or --allow-structural
+// was passed), the GREEN phase passed as expected, AND every reverted file restored byte-identical to
+// its original snapshot. Non-zero and a named reason otherwise — printed in full, this script's own
+// output is never the thing worth compressing.
+//
+// RED-PHASE CLASSIFICATION (card 95f2a466): a RED that is merely a compile/import failure proves the
+// symbol is missing, not that the logic is wrong, so the RED phase is classified and only BEHAVIOURAL
+// counts as proof. Rules, in order:
+//   BUILD-ONLY    the build exited non-zero. Tests then ran against stale/partial output, so even a test
+//                 failure in the same phase proves nothing.
+//   BEHAVIOURAL   build ok and at least one failing test printed a recognised assertion-failure line
+//                 (`FAIL ...`, `not ok`, ✗, ❌ at line start, or an AssertionError). Takes precedence over
+//                 every structural signature.
+//   STRUCTURAL    a failing test with no assertion line whose STDERR holds a crash signature (missing
+//                 export, cannot find module, "is not a function", TS23xx, or a ReferenceError /
+//                 SyntaxError / "Cannot read properties" WITH a stack frame).
+//   UNCLASSIFIED  a failing test with neither (e.g. exit 1 and nothing printed, an unlisted crash).
+//                 Fail-closed: never assumed behavioural.
+// Signatures are matched against stderr only, so a behavioural message that merely contains one of those
+// strings (printed on stdout via a FAIL line) can't trigger them. The phase is BEHAVIOURAL if ANY failing
+// test is BEHAVIOURAL; otherwise it is refused (exit 3) unless --allow-structural, which accepts
+// STRUCTURAL, BUILD-ONLY and UNCLASSIFIED alike.
+// KNOWN GAP: a test that try/catches a missing API call and prints its own `FAIL` line is classified
+// BEHAVIOURAL — the classifier reads output, it can't tell why an assertion failed.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 import fs from "node:fs";
 import path from "node:path";
@@ -66,7 +87,7 @@ Usage:
   pnpm --filter @loom/daemon negative-control \\
     --file <repo/relative/path> [--file <repo/relative/path> ...] \\
     --test <repo/relative/test.mjs> [--test <repo/relative/test.mjs> ...] \\
-    [--ref <git-ref>] [--build "<command>"]
+    [--ref <git-ref>] [--build "<command>"] [--allow-structural]
 
   --file    Repo-relative path to a source file your uncommitted (or --ref-relative) fix touches.
             Repeatable. Its CURRENT on-disk bytes are snapshotted, temporarily replaced with the
@@ -76,6 +97,23 @@ Usage:
             Default: HEAD (the usual case — your fix is an uncommitted working-tree edit on top of
             HEAD). If your fix is already committed, pass e.g. --ref HEAD~1 or --ref HEAD^.
   --build   Build command to run before each test phase. Default: "${DEFAULT_BUILD_COMMAND}".
+  --allow-structural  Accept a RED that is not BEHAVIOURAL (see below). Default: refuse, exit 3.
+  RED CLASSES (the RED phase is only proof of a bug when it is BEHAVIOURAL):
+    BUILD-ONLY    the build failed (tests ran against stale output) — proves nothing about logic.
+    BEHAVIOURAL   build ok and a failing test printed an assertion-failure line: a line starting with
+                  FAIL, "not ok", ✗ or ❌, or an AssertionError. Counted as failingAssertions.
+    STRUCTURAL    no assertion line, and stderr shows a crash: "does not provide an export named",
+                  "Cannot find module"/ERR_MODULE_NOT_FOUND, "is not a function"/"is not a constructor",
+                  TS23xx/TS2304/TS2307/TS2339, or ReferenceError/SyntaxError/"Cannot read properties"
+                  with a stack frame. The symbol is missing; the logic was never exercised.
+    UNCLASSIFIED  non-zero exit with no recognised assertion line and no known signature (0 recognised
+                  assertion lines). Fail-closed: treated like STRUCTURAL.
+    A phase is BEHAVIOURAL if ANY failing test is. Signatures are matched on stderr only, and assertion
+    lines win over signatures. Known gap: a test that try/catches a missing API and prints its own
+    FAIL line reads as BEHAVIOURAL — keep the API and disable the logic instead (a mutant).
+  Exit codes: 0 proven; 1 RED/GREEN/restore failure; 2 usage; 3 RED class refused.
+  The last stdout line is always: [negative-control] RESULT: red=<class> failingAssertions=<n>
+    green=<pass|FAIL> restore=<verified|MISMATCH> => OK | REFUSED(<reason>)
   --repo-root  Override the repo root everything above is relative to. Default: this script's own
             real repo. TEST SEAM ONLY — point a test at a throwaway synthetic git fixture instead of
             exercising this script against its own real, shared source tree.
@@ -83,7 +121,7 @@ Usage:
 `;
 
 function parseArgs(argv) {
-  const args = { file: [], test: [], ref: DEFAULT_REF, build: DEFAULT_BUILD_COMMAND, repoRoot: DEFAULT_REPO_ROOT, help: false };
+  const args = { file: [], test: [], ref: DEFAULT_REF, build: DEFAULT_BUILD_COMMAND, repoRoot: DEFAULT_REPO_ROOT, help: false, allowStructural: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") { args.help = true; continue; }
@@ -91,6 +129,7 @@ function parseArgs(argv) {
     if (a === "--test") { args.test.push(argv[++i]); continue; }
     if (a === "--ref") { args.ref = argv[++i]; continue; }
     if (a === "--build") { args.build = argv[++i]; continue; }
+    if (a === "--allow-structural") { args.allowStructural = true; continue; }
     if (a === "--repo-root") { args.repoRoot = argv[++i]; continue; }
     console.error(`[negative-control] unrecognized argument: ${a}`);
     process.exit(2);
@@ -113,18 +152,63 @@ function readRefContent(repoRoot, ref, posixRel) {
   }
 }
 
+const CAPTURE_MAX_BUFFER_BYTES = 256 * 1024 * 1024;
+// A line that is a test's own assertion-failure report (repo `check()` prints `FAIL  label`).
+const ASSERTION_LINE_RE = /^\s*(?:FAIL|not ok|✗|❌)\b/;
+const ASSERTION_ERROR_RE = /\bAssertionError\b/;
+const STACK_FRAME_RE = /\n\s+at /;
+// Crash signatures, matched against a failing test's STDERR only (never stdout).
+const STRUCTURAL_SIGNATURES = [
+  /does not provide an export named/,
+  /ERR_MODULE_NOT_FOUND|Cannot find (?:module|package)/,
+  /\bis not a (?:function|constructor)\b/,
+  /\bTS23\d\d\b|\bTS2304\b|\bTS2307\b|\bTS2339\b/,
+];
+// These need a stack frame to count — bare prose containing the words is not a crash.
+const STRUCTURAL_WITH_STACK_SIGNATURES = [/\bReferenceError\b/, /\bSyntaxError\b/, /Cannot read propert(?:y|ies) of/];
+
+function echo(r) {
+  if (r.stdout) process.stdout.write(r.stdout);
+  if (r.stderr) process.stderr.write(r.stderr);
+}
+
+/** Classify ONE failing test from its captured output. Assertion lines win; then stderr signatures; else UNCLASSIFIED. */
+function classifyFailingTest(stdout, stderr) {
+  const lines = `${stdout}\n${stderr}`.split(/\r?\n/);
+  let assertions = lines.filter((l) => ASSERTION_LINE_RE.test(l)).length;
+  if (assertions === 0 && ASSERTION_ERROR_RE.test(stderr)) assertions = 1;
+  if (assertions > 0) return { cls: "BEHAVIOURAL", assertions };
+  const structural =
+    STRUCTURAL_SIGNATURES.some((re) => re.test(stderr)) ||
+    (STACK_FRAME_RE.test(stderr) && STRUCTURAL_WITH_STACK_SIGNATURES.some((re) => re.test(stderr)));
+  return { cls: structural ? "STRUCTURAL" : "UNCLASSIFIED", assertions: 0 };
+}
+
+/** Classify a whole RED phase. "NONE" = the phase did not fail at all. */
+function classifyPhase({ buildOk, testResults }) {
+  const failing = testResults.filter((r) => r.status !== 0);
+  if (buildOk && failing.length === 0) return { cls: "NONE", assertions: 0 };
+  if (!buildOk) return { cls: "BUILD-ONLY", assertions: 0 };
+  const per = failing.map((r) => classifyFailingTest(r.stdout ?? "", r.stderr ?? ""));
+  const assertions = per.reduce((n, p) => n + p.assertions, 0);
+  if (per.some((p) => p.cls === "BEHAVIOURAL")) return { cls: "BEHAVIOURAL", assertions };
+  return { cls: per.some((p) => p.cls === "STRUCTURAL") ? "STRUCTURAL" : "UNCLASSIFIED", assertions };
+}
+
 function runPhase(repoRoot, label, { buildCommand, testPaths }) {
   console.log(`\n[negative-control] ── ${label}: build (${buildCommand}) ──`);
-  const buildResult = spawnSync(buildCommand, { cwd: repoRoot, shell: true, stdio: "inherit" });
+  const buildResult = spawnSync(buildCommand, { cwd: repoRoot, shell: true, encoding: "utf8", maxBuffer: CAPTURE_MAX_BUFFER_BYTES });
+  echo(buildResult);
   const buildOk = buildResult.status === 0;
   if (!buildOk) {
-    console.error(`[negative-control] ${label}: build exited ${buildResult.status} — tests below still run so you can see whether the test itself also caught the break, but a build failure alone already counts as this phase NOT passing.`);
+    console.error(`[negative-control] ${label}: build exited ${buildResult.status} — tests below still run so you can see whether the test itself also caught the break, but a build failure alone already counts as this phase NOT passing (and classifies a RED as BUILD-ONLY).`);
   }
   const testResults = [];
   for (const t of testPaths) {
     console.log(`[negative-control] ── ${label}: running ${t} ──`);
-    const r = spawnSync(process.execPath, [t], { cwd: repoRoot, stdio: "inherit" });
-    testResults.push({ test: t, status: r.status });
+    const r = spawnSync(process.execPath, [t], { cwd: repoRoot, encoding: "utf8", maxBuffer: CAPTURE_MAX_BUFFER_BYTES });
+    echo(r);
+    testResults.push({ test: t, status: r.status, stdout: r.stdout ?? "", stderr: r.stderr ?? "" });
   }
   const allTestsOk = testResults.every((r) => r.status === 0);
   const pass = buildOk && allTestsOk;
@@ -205,9 +289,12 @@ async function main() {
   const redOk = phase1.pass === false;
   const greenOk = phase2.pass === true;
   const cleanOk = integrityFailures.length === 0;
+  const redClass = classifyPhase(phase1);
+  const classOk = redClass.cls === "BEHAVIOURAL" || args.allowStructural;
 
   console.log("\n[negative-control] ── SUMMARY ──");
   console.log(`  RED   (reverted to ${args.ref}): ${phase1.pass ? "PASSED — ⚠️ expected this to FAIL" : "failed, as expected"} ⇒ ${redOk ? "OK" : "❌ FAIL"}`);
+  console.log(`  CLASS (RED failure kind):        ${redClass.cls}, ${redClass.assertions} recognised assertion line(s)${redClass.cls === "BEHAVIOURAL" ? "" : args.allowStructural ? " — allowed by --allow-structural" : " — not behavioural ⇒ ❌ REFUSED"}`);
   console.log(`  GREEN (restored):                ${phase2.pass ? "passed, as expected" : "FAILED — ⚠️ expected this to PASS"} ⇒ ${greenOk ? "OK" : "❌ FAIL"}`);
   console.log(`  CLEAN (byte-identical restore):  ${cleanOk ? "confirmed for all file(s)" : `MISMATCH: ${integrityFailures.join(", ")}`} ⇒ ${cleanOk ? "OK" : "❌ FAIL"}`);
 
@@ -221,9 +308,20 @@ async function main() {
     console.error(`\n[negative-control] ❌ restore did not reproduce the original bytes for: ${integrityFailures.join(", ")}. Do not trust your worktree — diff these files against your last known-good state before doing anything else.`);
   }
 
-  const ok = redOk && greenOk && cleanOk;
+  const classRefused = redOk && !classOk;
+  if (classRefused) {
+    console.error(`\n[negative-control] ❌ the RED phase failed, but as ${redClass.cls} (${redClass.assertions} recognised assertion lines), not BEHAVIOURAL — that proves a symbol/import/build is missing or the cause is unrecognised, not that the logic is wrong. Keep the API and disable only the logic (a mutant), give the test a FAIL line, or pass --allow-structural if a structural RED is genuinely what you mean to prove.`);
+  }
+  const ok = redOk && greenOk && cleanOk && classOk;
   console.log(ok ? "\n✅ negative control proven: RED before the fix, GREEN after, tree restored clean." : "\n❌ negative control NOT proven — see failures above.");
-  process.exit(ok ? 0 : 1);
+  const reasons = [];
+  if (!redOk) reasons.push("red-did-not-fail");
+  if (classRefused) reasons.push(`red-class-${redClass.cls}`);
+  if (!greenOk) reasons.push("green-failed");
+  if (!cleanOk) reasons.push("restore-mismatch");
+  console.log(`[negative-control] RESULT: red=${redClass.cls}${redOk && args.allowStructural && redClass.cls !== "BEHAVIOURAL" ? "(allowed)" : ""} failingAssertions=${redClass.assertions} green=${greenOk ? "pass" : "FAIL"} restore=${cleanOk ? "verified" : "MISMATCH"} => ${ok ? "OK" : `REFUSED(${reasons.join(",")})`}`);
+  // 3 = ONLY the RED class was refused (everything else held); any other failure is 1.
+  process.exit(ok ? 0 : classRefused && greenOk && cleanOk ? 3 : 1);
 }
 
 main();

@@ -72,7 +72,9 @@ function writeContentAwareTest(dir, fixedContent) {
     "import fs from 'node:fs';\n" +
     "import path from 'node:path';\n" +
     `const content = fs.readFileSync(path.join(process.cwd(), 'src', 'example.txt'), 'utf8');\n` +
-    `process.exit(content === ${JSON.stringify(fixedContent)} ? 0 : 1);\n`;
+    `const ok = content === ${JSON.stringify(fixedContent)};\n` +
+    "if (!ok) console.log('FAIL  src/example.txt does not hold the fixed content');\n" + // a FAIL line = BEHAVIOURAL RED (card 95f2a466)
+    "process.exit(ok ? 0 : 1);\n";
   fs.writeFileSync(testPath, body, "utf8");
   return testPath;
 }
@@ -167,7 +169,9 @@ function runNegativeControl(dir, { files, tests, ref = "HEAD", build = NOOP_BUIL
     "import fs from 'node:fs';\nimport path from 'node:path';\n" +
       "const a = fs.readFileSync(path.join(process.cwd(), 'src', 'a.txt'), 'utf8');\n" +
       "const b = fs.readFileSync(path.join(process.cwd(), 'src', 'b.txt'), 'utf8');\n" +
-      "process.exit(a === 'a-fixed\\n' && b === 'b-fixed\\n' ? 0 : 1);\n",
+      "const ok = a === 'a-fixed\\n' && b === 'b-fixed\\n';\n" +
+      "if (!ok) console.log('FAIL  a/b do not hold the fixed content');\n" + // FAIL line = BEHAVIOURAL RED (card 95f2a466)
+      "process.exit(ok ? 0 : 1);\n",
     "utf8"
   );
 
