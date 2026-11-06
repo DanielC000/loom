@@ -3745,7 +3745,7 @@ type ProtectResult = { ok: boolean; persisted?: { repoPath: string; sourceFile: 
 export type BlockedCoOccupant = {
   repoPath: string;
   route: { repoPath: string; id?: string };
-  alsoClear?: { repoPath: string; id: string };
+  alsoClear?: { repoPath: string; id?: string };
 };
 
 /** A content-kept repoPath that is, right now, genuinely refused by a DIFFERENT identity's own entry —
@@ -3765,7 +3765,34 @@ function contentKeptBlockedByEntries(map: ReadonlyMap<string, ContentKeptBlocked
 }
 
 function blockedCoOccupant(repoPath: string, sourceFile: string): BlockedCoOccupant {
-  return { repoPath, route: { repoPath, id: pendingLatchIdFor(sourceFile) } };
+  return routeWithFollowableId(repoPath, pendingLatchIdFor(sourceFile));
+}
+
+/**
+ * The `{repoPath}` route plus `id` ONLY when {@link clearMergeQuarantineLatchFile} would actually act on
+ * it. An id matching an ACTIVE entry AND a pending entry of a DIFFERENT identity is refused there as
+ * ambiguous, for every co-occupant alike — so it is omitted, never handed out as a dead route.
+ *
+ * @decision b6f573cf — do not hand out an `{id}` route the by-id clear refuses; mirror its active-vs-
+ * different-repo-pending check (first active match, `directPathIdentity`) at the one place ids are built.
+ */
+function routeWithFollowableId(repoPath: string, id: string | undefined): BlockedCoOccupant {
+  const followable = followableIdOrUndefined(id);
+  return followable === undefined ? { repoPath, route: { repoPath } } : { repoPath, route: { repoPath, id: followable } };
+}
+
+function followableIdOrUndefined(id: string | undefined): string | undefined {
+  return id === undefined || latchIdIsAmbiguousActiveVsPending(id) ? undefined : id;
+}
+
+function latchIdIsAmbiguousActiveVsPending(id: string): boolean {
+  let activeRepoPath: string | undefined;
+  for (const [key, entry] of activeQuarantines) {
+    if (quarantineHashForKey(key) === id) { activeRepoPath = entry.repoPath; break; }
+  }
+  if (activeRepoPath === undefined) return false;
+  const activeIdentity = directPathIdentity(activeRepoPath);
+  return pendingUnresolvedQuarantines.some((p) => pendingLatchIdFor(p.sourceFile) === id && directPathIdentity(p.entry.repoPath) !== activeIdentity);
 }
 
 /**
@@ -3792,7 +3819,7 @@ function blockedCoOccupantForReferencer(repoPath: string, sourceFile: string): B
   const ownEntry = [...activeQuarantines.values()].find((e) => directPathIdentity(e.repoPath) === wantedIdentity)
     ?? pendingUnresolvedQuarantines.find((p) => directPathIdentity(p.entry.repoPath) === wantedIdentity)?.entry;
   if (!ownEntry) return { repoPath, route: { repoPath } };
-  return { repoPath, route: { repoPath, id: quarantineLatchFileIdsFor(ownEntry)[0] } };
+  return routeWithFollowableId(repoPath, quarantineLatchFileIdsFor(ownEntry)[0]);
 }
 
 /**
@@ -3811,15 +3838,18 @@ function blockedCoOccupantForReferencer(repoPath: string, sourceFile: string): B
 function classifyKeptRepoPath(repoPath: string, sourceFile: string): { live: true; coOccupant: BlockedCoOccupant } | { live: false; blockedBy?: ContentKeptBlockedBy } {
   const co = blockedCoOccupantForReferencer(repoPath, sourceFile);
   if (co.route.id !== undefined) return { live: true, coOccupant: co };
+  // An id-less route means EITHER "no entry of repoPath's own" OR "its own entry, but the id is ambiguous
+  // (routeWithFollowableId)". The `stillBlockedEntryFor` fallback below tells the two apart: an own-entry
+  // blocker keeps it LIVE (id-less route), anything else is content-kept.
   const blocker = stillBlockedEntryFor(repoPath);
   if (!blocker) return { live: false };
   // @decision 25d0d45b (Round 5, MINOR) — a spelling/case/separator variant of `repoPath` ITSELF can
   // fail `blockedCoOccupantForReferencer`'s bare string match yet still resolve here. Compare by
   // `directPathIdentity`, never raw strings, before concluding a DIFFERENT identity is blocking it.
   if (directPathIdentity(blocker.repoPath) === directPathIdentity(repoPath)) {
-    return { live: true, coOccupant: { repoPath, route: { repoPath, id: quarantineLatchFileIdsFor(blocker)[0] } } };
+    return { live: true, coOccupant: routeWithFollowableId(repoPath, quarantineLatchFileIdsFor(blocker)[0]) };
   }
-  return { live: false, blockedBy: { repoPath: blocker.repoPath, id: quarantineLatchFileIdsFor(blocker)[0] } };
+  return { live: false, blockedBy: { repoPath: blocker.repoPath, id: followableIdOrUndefined(quarantineLatchFileIdsFor(blocker)[0]) } };
 }
 
 /**
@@ -3861,10 +3891,13 @@ function reclassifyNonLiveReferencing(
  * when the two sourceFiles genuinely differ. See the decision record's "Round 4" section. */
 function blockedCoOccupantBothRoutes(repoPath: string, relocatedSourceFile: string, keptSourceFile: string): BlockedCoOccupant {
   if (relocatedSourceFile === keptSourceFile) return blockedCoOccupant(repoPath, relocatedSourceFile);
+  const keptId = followableIdOrUndefined(pendingLatchIdFor(keptSourceFile));
+  // @decision b6f573cf — a dead kept id drops the ID, never the STEP: the OLD file still durably holds this
+  // identity's record, so `alsoClear` stays (id-less) and the reason text names the second step by repoPath.
   return {
     repoPath,
-    route: { repoPath, id: pendingLatchIdFor(relocatedSourceFile) },
-    alsoClear: { repoPath, id: pendingLatchIdFor(keptSourceFile) },
+    route: routeWithFollowableId(repoPath, pendingLatchIdFor(relocatedSourceFile)).route,
+    alsoClear: keptId === undefined ? { repoPath } : { repoPath, id: keptId },
   };
 }
 
@@ -3877,12 +3910,10 @@ function blockedCoOccupantBothRoutes(repoPath: string, relocatedSourceFile: stri
  * @decision 182c01cc (round 4, CR3 MAJOR) — the SAME safety net as {@link blockedCoOccupantBothRoutes}:
  * two IDENTICAL route ids collapse to one route, never a nonsensical "clear id X FIRST, THEN id X". */
 function mergeKeptAndRelocatedCoOccupant(relocatedCo: BlockedCoOccupant, keptCo: BlockedCoOccupant): BlockedCoOccupant {
-  if (relocatedCo.route.id === keptCo.route.id) return { repoPath: relocatedCo.repoPath, route: relocatedCo.route };
-  // @decision 182c01cc (round 5) — `keptCo.route.id` is undefined only on the structurally-unreachable
-  // no-owner-entry fallback (see blockedCoOccupantForReferencer's own doc); there is no real second id to
-  // offer, so fall back to the relocated route alone rather than a broken `alsoClear` with no id.
-  if (keptCo.route.id === undefined) return { repoPath: relocatedCo.repoPath, route: relocatedCo.route };
-  return { repoPath: relocatedCo.repoPath, route: relocatedCo.route, alsoClear: { repoPath: keptCo.route.repoPath, id: keptCo.route.id } };
+  if (relocatedCo.route.id !== undefined && relocatedCo.route.id === keptCo.route.id) return { repoPath: relocatedCo.repoPath, route: relocatedCo.route };
+  // @decision b6f573cf — an id-less kept route (an ambiguous shared id, or the unreachable no-owner fallback)
+  // keeps the second STEP as an id-less `alsoClear`; only the id is dropped.
+  return { repoPath: relocatedCo.repoPath, route: relocatedCo.route, alsoClear: keptCo.route.id === undefined ? { repoPath: keptCo.route.repoPath } : { repoPath: keptCo.route.repoPath, id: keptCo.route.id } };
 }
 
 /**
@@ -3920,11 +3951,28 @@ function splitCoOccupants(coOccupants: BlockedCoOccupant[] | undefined, referenc
 function relocatedCoOccupantsReason(coOccupants: BlockedCoOccupant[]): string {
   // @decision 182c01cc (round 5, nit) — "a record of this same identity", never "this same record": the
   // old file can legitimately hold a DIFFERENT record (cd5a3cf9/c93e9e7a's stale-sourceFile gap).
-  const names = coOccupants.map((c) => c.alsoClear
-    ? `'${c.repoPath}' — clear id '${c.route.id}' FIRST (its new, relocated latch), THEN id '${c.alsoClear.id}' (its OLD file, which also still durably holds a record of this same identity) — clearing only one of the two leaves it re-quarantined on the next restart`
-    : `'${c.repoPath}' (now filed under id '${c.route.id}')`).join(", ");
+  const names = coOccupants.map((c) => {
+    if (!c.alsoClear) {
+      return c.route.id !== undefined
+        ? `'${c.repoPath}' (now filed under id '${c.route.id}')`
+        : `'${c.repoPath}' (its latch id is shared and ambiguous — clear it by repoPath)`;
+    }
+    // Two steps in every id/no-id combination. A single clear by repoPath does NOT lift both latches
+    // (verified with a real reboot: the OLD file survives and the identity re-quarantines), so the second
+    // step is always named — by id when followable, else as the OLD file whose shared id cannot be followed.
+    const first = c.route.id !== undefined
+      ? `clear id '${c.route.id}'`
+      : `clear '${c.repoPath}' by repoPath`;
+    const second = c.alsoClear.id !== undefined
+      ? `THEN id '${c.alsoClear.id}' (its OLD file, which also still durably holds a record of this same identity)`
+      : `THEN its OLD file, which also still durably holds a record of this same identity (that file's id is shared with another identity and cannot be followed by id; this identity is re-quarantined on the next restart until that file is cleared — inspect it via GET /internal/merge-quarantine/list before clearing anything)`;
+    return `'${c.repoPath}' — ${first} FIRST (its new, relocated latch), ${second} — clearing only one of the two leaves it re-quarantined on the next restart`;
+  }).join(", ");
   return `this clear also found ${coOccupants.length} other, unrelated identit${coOccupants.length === 1 ? "y" : "ies"} whose own content was sitting at the same physical file this clear just removed — durably RELOCATED to its own new, independent latch before deletion, never lost (${names}). Still genuinely quarantined; clear it separately via POST /internal/merge-quarantine/clear-by-path with {id} (or {repoPath}).`;
 }
+
+/** Test seam for {@link relocatedCoOccupantsReason} (pure string builder). */
+export function relocatedCoOccupantsReasonTestOnly(coOccupants: BlockedCoOccupant[]): string { return relocatedCoOccupantsReason(coOccupants); }
 
 /** Appends {@link relocatedCoOccupantsReason}'s own clause onto an existing (possibly absent) base
  *  reason — never silently drops the relocation just because there was nothing else to say. */
