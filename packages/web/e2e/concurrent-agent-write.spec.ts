@@ -494,7 +494,8 @@ test("Projects: the agent-prompt conflict notice retires after its own save and 
   const save = page.getByRole("button", { name: "Save", exact: true });
   await save.click();
   await expect.poll(async () => (await readAgent()).startupPrompt).toBe(mine);
-  await expect(page.getByText("saved", { exact: true })).toBeVisible();
+  // The PROMPT's own indicator: a bare "saved" text also matches the grants block's `agent-grants-saved-*`.
+  await expect(page.getByTestId(`agent-prompt-saved-${agent.id}`)).toBeVisible();
   await expect(notice).toHaveCount(0);
   await prompt.fill(uniq("edited again"));
   await expect(save).toBeEnabled();

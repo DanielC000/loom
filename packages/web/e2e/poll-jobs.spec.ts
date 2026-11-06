@@ -94,9 +94,8 @@ test("create → floor-gate → toggle → delete a poll job end to end", async 
   await expect(row.getByText(connName, { exact: true })).toBeVisible();
   await expect.poll(() => pollJobByPath(loomDaemon.baseURL, pollPath).then((j) => j?.enabled ?? null)).toBe(true);
 
-  // Exactly one poll job on this daemon now (no other spec creates them) → the row's action buttons are
-  // unambiguous.
-  await expect(page.getByRole("button", { name: "Edit" })).toHaveCount(1);
+  // Scoped to the poll-job row: the Connections list above renders its own Edit for the seeded connection.
+  await expect(row.getByRole("button", { name: "Edit" })).toHaveCount(1);
 
   // --- Toggle (observable #3): Disable flips the badge to "disabled" AND the REST row's enabled to false. ---
   await expect(row.getByText("enabled", { exact: true })).toBeVisible();
