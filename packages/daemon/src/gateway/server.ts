@@ -5108,8 +5108,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const s = deps.db.getSession((req.params as { id: string }).id);
     let turns: TranscriptTurn[] = [];
     if (s) {
-      if (s.archivedAt && archivedTranscriptExists(s.projectId, s.id)) turns = readArchivedTranscript(s.projectId, s.id, s.harness);
-      else if (s.engineSessionId) turns = readTranscript(s.cwd, s.engineSessionId, s.harness);
+      // Card 0bcdd158: this human route (only) carries each turn's engine `ts` for the web MCP strip.
+      const withTs = { withTs: true };
+      if (s.archivedAt && archivedTranscriptExists(s.projectId, s.id)) turns = readArchivedTranscript(s.projectId, s.id, s.harness, withTs);
+      else if (s.engineSessionId) turns = readTranscript(s.cwd, s.engineSessionId, s.harness, withTs);
     }
     if (offset === undefined && limit === undefined) return turns;
     return pageTranscript(turns, { offset: offset ?? 0, limit });

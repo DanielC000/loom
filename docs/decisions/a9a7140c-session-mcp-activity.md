@@ -8,7 +8,7 @@ A strip under the composer on the Atlas session node (`components/McpActivity.ts
 
 ## Where the data comes from
 
-No daemon change. `GET /api/sessions/:id/transcript` already serves every tool call, flattened to text by `packages/daemon/src/pty/claude-transcript.ts` `extractText`:
+`GET /api/sessions/:id/transcript` serves every tool call (and, since card `0bcdd158`, each turn's engine `ts`, on this route only), flattened to text by `packages/daemon/src/pty/claude-transcript.ts` `extractText`:
 
 - an assistant turn holds one line per call: `[tool] {<8-char tag>} mcp__loom-<router>__<tool>(<JSON.stringify(args)>)`;
 - a `tool_result` turn holds one block per result: `-> tool result {<tag>} (error): <body>`, the body capped at `TOOL_RESULT_BODY_CAP` (2 KB).
@@ -23,7 +23,7 @@ This couples the web parser to `extractText`'s marker format. `test/mcp-activity
 
 ## Do not
 
-- Do not show a call time, a duration, a latency or a turn cause in this strip. The transcript carries none of them (the parser drops each JSONL line's `timestamp`). Each needs its own plumbing card first. The only outcome FACTS are `ok`, `error` (the engine's `is_error`) and `pending` (no result yet).
+- Do not show a time or duration that does not come from the turns' engine `ts` (card `0bcdd158`, record `0bcdd158-transcript-turn-timestamp-is-rest-only.md`). The strip shows a call's clock time, an APPROXIMATE duration (result turn ts minus call turn ts, which includes hook and harness overhead, so every duration is marked `≈` and says so), per-row bars, and per turn the start time (titled with the full local date) and a SPAN. No call-line ts → no clock time. No duration and no bar when either ts is missing, the result hasn't arrived, or the result is stamped before its call; never a 0. The turn span is wall clock, from the first timed call's ts to the last timed result's ts (calls with both ts only), never a sum of durations: calls that run in parallel would be counted twice. A turn with no call carrying both ts shows no span. Do not relabel the duration as Loom's own latency. The only outcome FACTS are `ok`, `error` (the engine's `is_error`) and `pending` (no result yet).
 - `refused` (card `825e38da`) is a HEURISTIC, not a fact, and the UI must keep saying so (the rail's legend line, the marker's tooltip, the detail's "Read as refused" note). `classifyResult` marks a successful result refused only when the WHOLE capped body parses as a JSON object with a non-null top-level `error`; an array, a string, plain text, a nested `error`, or a body cut at the 2 KB cap stays `ok` (a cut body is counted as "too long to check", `isUnclassified`). Do not fold refused into `error`: `isError` keeps its own red "failed" state and wins over any body. Do not loosen the parse to a prefix or regex match on a truncated body; a guessed refusal on a cut answer is worse than an honest ok.
 - Do not render arguments or result bodies as HTML. They are agent- and tool-authored text; React text nodes only.
 - Do not move argument text into the daemon log to feed this strip (`@decision 16c93a50`). The transcript route is human-only loopback REST, the same exposure the Transcript tab already has.

@@ -59,7 +59,23 @@ const REFUSAL_TRANSCRIPT = [
   ].join("\n") },
 ];
 
-async function openSession(page: Page, loomDaemon: LoomDaemon, transcript: ReadonlyArray<{ role: string; text: string }> = TRANSCRIPT) {
+/** Card 0bcdd158: turns carry the engine `ts` the daemon's REST route now serves. Call 1's line has no
+ *  ts (no time, no bar); call 2 has a time but its result line has none (no bar); call 3 is fully timed,
+ *  1.45s apart (a time, "≈1.4s", a bar). */
+const TS0 = "2026-11-06T10:14:05.000Z";
+const TS1 = "2026-11-06T10:14:31.000Z";
+const TS1_RESULT = "2026-11-06T10:14:32.450Z";
+const TIMED_TRANSCRIPT = [
+  { role: "user", text: "Kick off: card 0bcdd158.", ts: TS0 },
+  { role: "assistant", text: call("tim00001", "mcp__loom-tasks__tasks_get", { id: "0bcdd158" }) },
+  { role: "tool_result", text: "-> tool result {tim00001}: {\"id\":\"0bcdd158\"}", ts: TS0 },
+  { role: "assistant", text: call("tim00002", "mcp__loom-orchestration__worker_list", {}), ts: TS0 },
+  { role: "tool_result", text: "-> tool result {tim00002}: {\"workers\":[]}" },
+  { role: "assistant", text: call("tim00003", "mcp__loom-tasks__tasks_update", { id: "0bcdd158", columnKey: "review" }), ts: TS1 },
+  { role: "tool_result", text: "-> tool result {tim00003}: {\"columnKey\":\"review\"}", ts: TS1_RESULT },
+];
+
+async function openSession(page: Page, loomDaemon: LoomDaemon, transcript: ReadonlyArray<{ role: string; text: string; ts?: string }> = TRANSCRIPT) {
   const mgr = await loomDaemon.seedLiveSession({
     role: "manager", agentName: "McpLead", id: `e2e-mcp-${Date.now()}`,
     ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
@@ -242,6 +258,85 @@ test.describe("session Loom MCP activity strip", () => {
     await expect(page.getByTestId("mcp-call-2-answer")).toContainText("concurrency cap reached");
     await expect(page.getByTestId("mcp-call-2-answer")).toHaveCSS("color", amber);
     await expect(page.getByTestId("mcp-call-2-detail")).toContainText("Read as refused.");
+  });
+
+  test("timed rows show the call time and an approximate duration bar; an untimed row shows neither", async ({ page, loomDaemon }) => {
+    test.setTimeout(120_000);
+    await openSession(page, loomDaemon, TIMED_TRANSCRIPT);
+    // The browser's own local clock for a ts, the same reading the strip renders.
+    const clock = (iso: string) => page.evaluate((s) => {
+      const d = new Date(s), p = (n: number) => String(n).padStart(2, "0");
+      return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }, iso);
+
+    // Compact: the latest call is timed, so its duration rides beside the tool name, marked approximate.
+    await expect(page.getByTestId("mcp-activity-latest")).toHaveText("Moved card 0bcdd158 to Review");
+    await expect(page.getByTestId("mcp-activity-latest-dur")).toHaveText("· ≈1.4s");
+    await expect(page.getByTestId("mcp-activity-latest-dur")).toHaveAttribute("title", /Approximate/);
+
+    await page.getByTestId("mcp-activity-bar").click();
+    await expect(entries(page)).toHaveCount(3);
+
+    // Call 3: a time, a figure and a visible bar.
+    await expect(page.getByTestId("mcp-call-3-at")).toHaveText(await clock(TS1));
+    await expect(page.getByTestId("mcp-call-3-dur")).toHaveText("≈1.4s");
+    await expect(page.getByTestId("mcp-call-3-dur")).toHaveAttribute("title", /includes hook and harness time/);
+    const bar = page.getByTestId("mcp-call-3-bar");
+    await expect(bar).toBeVisible();
+    expect((await bar.boundingBox())!.width).toBeGreaterThan(2);
+
+    // Call 2: its own line has a time, but its result does not, so there is no duration and no bar.
+    await expect(page.getByTestId("mcp-call-2-at")).toHaveText(await clock(TS0));
+    await expect(page.getByTestId("mcp-call-2-dur")).toHaveCount(0);
+    await expect(page.getByTestId("mcp-call-2-bar")).toHaveCount(0);
+
+    // Call 1: no ts on its line, so no time, no duration, no bar, and no "0" anywhere in the row.
+    const untimed = page.getByTestId("mcp-call-1");
+    await expect(untimed).toContainText("Read card 0bcdd158");
+    await expect(page.getByTestId("mcp-call-1-at")).toHaveCount(0);
+    await expect(untimed.locator(".loom-mcp-t")).toHaveText("");
+    await expect(page.getByTestId("mcp-call-1-dur")).toHaveCount(0);
+    await expect(untimed.locator(".loom-mcp-dur i")).toHaveCount(0);
+    await expect(untimed).not.toContainText("0ms");
+
+    // The turn header: start time (its title carries the full local date, so a turn past midnight is
+    // unambiguous), and the span from the first call to the last answer over the calls with both ts:
+    // only call 3 here, so 1.45s.
+    const turnAt = page.getByTestId("mcp-turn-1-at");
+    await expect(turnAt).toHaveText((await clock(TS0)).slice(0, 5));
+    const fullLocal = await page.evaluate((s) => {
+      const d = new Date(s), p = (n: number) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }, TS0);
+    await expect(turnAt).toHaveAttribute("title", `first Loom call at ${fullLocal}`);
+    const total = page.getByTestId("mcp-turn-1-total");
+    await expect(total).toHaveText("· ≈1.4s");
+    await expect(total).toHaveAttribute("title", "Time from the first Loom call to the last answer in this turn (approximate).");
+    await expect(page.getByTestId("mcp-turn-1")).toContainText("3 calls · ≈1.4s");
+
+    // The detail states the time and that the duration is approximate.
+    await page.getByTestId("mcp-call-3").click();
+    await expect(page.getByTestId("mcp-call-3-detail")).toContainText(`at ${await clock(TS1)}`);
+    await expect(page.getByTestId("mcp-call-3-detail")).toContainText("took ≈1.4s, approximate: includes hook and harness time");
+
+    // Narrow column: the time stays, the duration column gives way (the turn total still carries it).
+    await page.setViewportSize({ width: 560, height: 900 });
+    await expect(page.getByTestId("mcp-call-3-at")).toBeVisible();
+    await expect(page.getByTestId("mcp-call-3-dur")).toBeHidden();
+    await expect(page.getByTestId("mcp-turn-1-total")).toBeVisible();
+  });
+
+  test("a transcript with no times keeps the untimed layout: no time column, no bars, no totals", async ({ page, loomDaemon }) => {
+    test.setTimeout(120_000);
+    await openSession(page, loomDaemon);
+    await page.getByTestId("mcp-activity-bar").click();
+    const log = page.getByTestId("mcp-activity-log");
+    await expect(log.locator(".loom-mcp-ent")).toHaveCount(5);
+    await expect(log).not.toHaveClass(/\btimed\b/);
+    await expect(log.locator(".loom-mcp-t").first()).toBeHidden();
+    await expect(log.locator(".loom-mcp-dur i")).toHaveCount(0);
+    await expect(log.locator("[data-testid$='-total']")).toHaveCount(0);
+    await expect(page.getByTestId("mcp-activity-latest-dur")).toHaveCount(0);
   });
 
   // The transcript route has no tail, so every poll is the whole transcript. Counts real requests.

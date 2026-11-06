@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { TranscriptTurn } from "./adapter.js";
+import { lineTimestamp, type TranscriptTurn, type TranscriptParseOpts } from "./adapter.js";
 import { claudeUserSettingsDir } from "./claude-config.js";
 import { toClaudeAbsoluteGlob } from "./loom-home-deny.js";
 
@@ -334,7 +334,7 @@ function classifyRole(engineType: "user" | "assistant", content: unknown): Trans
  * the same engine JSONL, so the wire format is identical either way; see `sessions/transcript.ts`'s
  * `readArchivedTranscript`, which imports this).
  */
-export function parseTranscriptFile(file: string): TranscriptTurn[] {
+export function parseTranscriptFile(file: string, opts: TranscriptParseOpts = {}): TranscriptTurn[] {
   let raw: string;
   try { raw = fs.readFileSync(file, "utf8"); } catch { return []; }
   const turns: TranscriptTurn[] = [];
@@ -345,7 +345,11 @@ export function parseTranscriptFile(file: string): TranscriptTurn[] {
     if (o.type !== "user" && o.type !== "assistant") continue; // skip system/meta/summary
     const msg = o.message as { content?: unknown } | undefined;
     const text = extractText(msg?.content);
-    if (text.trim()) turns.push({ role: classifyRole(o.type, msg?.content), text });
+    if (!text.trim()) continue;
+    const turn: TranscriptTurn = { role: classifyRole(o.type, msg?.content), text };
+    const ts = opts.withTs ? lineTimestamp(o) : undefined;
+    if (ts !== undefined) turn.ts = ts;
+    turns.push(turn);
   }
   return turns;
 }
@@ -354,10 +358,10 @@ export function parseTranscriptFile(file: string): TranscriptTurn[] {
  * Render Claude's session JSONL into a clean, ordered transcript — the canonical
  * "read past conversation" surface (terminal scrollback is best-effort live-only).
  */
-export function readTranscript(cwd: string, engineSessionId: string): TranscriptTurn[] {
+export function readTranscript(cwd: string, engineSessionId: string, opts: TranscriptParseOpts = {}): TranscriptTurn[] {
   const file = resolveTranscriptFile(cwd, engineSessionId);
   if (!file) return [];
-  return parseTranscriptFile(file);
+  return parseTranscriptFile(file, opts);
 }
 
 /**

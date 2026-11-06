@@ -604,4 +604,57 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
     expect(box.x + box.width, "the Request-changes button's right edge is off a 420px viewport")
       .toBeLessThanOrEqual(420);
   });
+
+  // Card 0bcdd158: the node's MCP strip shows a call time and an approximate duration bar for a timed
+  // call, nothing for an untimed one, and the two extra columns fit the node at both widths.
+  test("the node's MCP strip times its calls, and the timed rows fit the column", async ({ page, loomDaemon }) => {
+    test.setTimeout(180_000);
+    const mgr = await loomDaemon.seedLiveSession({
+      role: "manager", agentName: "TimedMgr", id: `e2e-timedmgr-${Date.now()}`,
+      ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
+    });
+    const call = (tag: string, name: string, args: Record<string, unknown>) => `[tool] {${tag}} ${name}(${JSON.stringify(args)})`;
+    const transcript = [
+      { role: "user", text: "go", ts: "2026-11-06T10:14:05.000Z" },
+      { role: "assistant", text: call("nod00001", "mcp__loom-tasks__tasks_get", { id: "0bcdd158" }) },
+      { role: "tool_result", text: "-> tool result {nod00001}: {}", ts: "2026-11-06T10:14:05.100Z" },
+      { role: "assistant", text: call("nod00002", "mcp__loom-tasks__tasks_list", {}), ts: "2026-11-06T10:14:06.000Z" },
+      { role: "tool_result", text: "-> tool result {nod00002}: []", ts: "2026-11-06T10:14:06.033Z" },
+    ];
+    await page.route(new RegExp(`/api/sessions/${mgr.sessionId}/transcript(\\?.*)?$`), (route) => {
+      const offset = new URL(route.request().url()).searchParams.get("offset");
+      if (offset === null) return route.fulfill({ json: transcript });
+      const start = Math.min(Number(offset), transcript.length);
+      return route.fulfill({ json: { turns: transcript.slice(start), totalTurns: transcript.length, offset: start, returned: transcript.length - start, nextOffset: null } });
+    });
+    await seedAtlasOn(page);
+    await pinProject(page, mgr.projectId);
+    await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
+
+    const strip = page.getByTestId("session-node-mcp");
+    await expect(strip.getByTestId("mcp-activity-latest")).toHaveText("Listed the board");
+    await strip.getByTestId("mcp-activity-bar").click();
+    // Timed: a clock time and a bar. Untimed (no ts on the call line): neither.
+    await expect(strip.getByTestId("mcp-call-2-at")).toHaveText(/^\d\d:\d\d:\d\d$/);
+    await expect(strip.getByTestId("mcp-call-2-dur")).toHaveText("≈33ms");
+    await expect(strip.getByTestId("mcp-call-2-bar")).toBeVisible();
+    await expect(strip.getByTestId("mcp-call-1")).toBeVisible();
+    await expect(strip.getByTestId("mcp-call-1-at")).toHaveCount(0);
+    await expect(strip.getByTestId("mcp-call-1-bar")).toHaveCount(0);
+
+    // The strip's own rows never push the node sideways, wide or at a 420px column.
+    // Scoped to the call rows and turn headers (the parts this card adds columns to).
+    const ROW_PARTS = /^(button\.loom-mcp-ent|span\.loom-mcp-(t|dur|tat|tcount|s|tool)|div\.loom-mcp-turnh)$/;
+    const fromStrip = (boxes: Awaited<ReturnType<typeof overflowingBoxes>>) => boxes.filter((b) => ROW_PARTS.test(b.sel));
+    expect(fromStrip(await overflowingBoxes(page)), "the timed MCP rows overflow the wide node").toEqual([]);
+    await page.setViewportSize({ width: 420, height: 900 });
+    await expect(strip.getByTestId("mcp-call-2-at")).toBeVisible();
+    expect(fromStrip(await overflowingBoxes(page)), "the timed MCP rows overflow a 420px node").toEqual([]);
+    // POSITIVE CONTROL: a row given fixed, unshrinkable columns must read as overflowing here.
+    await strip.getByTestId("mcp-call-2").evaluate((el) => {
+      (el as HTMLElement).style.gridTemplateColumns = "56px 14px 600px 16px";
+    });
+    expect(fromStrip(await overflowingBoxes(page)).length,
+      "positive control: a 600px sentence column did not overflow a 420px node").toBeGreaterThan(0);
+  });
 });

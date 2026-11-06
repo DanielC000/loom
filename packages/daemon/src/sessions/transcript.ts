@@ -20,6 +20,7 @@ import {
   parseTranscriptFile as codexParseTranscriptFile,
   snapshotTranscript as codexSnapshotTranscript,
 } from "../pty/codex-transcript.js";
+import type { TranscriptParseOpts } from "../pty/adapter.js";
 
 /**
  * HarnessAdapter seam: this file is the harness-AGNOSTIC half of transcript handling — pagination,
@@ -54,8 +55,8 @@ export type TranscriptHarness = "claude" | "codex" | null | undefined;
 interface TranscriptOps {
   resolve(cwd: string, engineSessionId: string): string | null;
   exists(cwd: string, engineSessionId: string): boolean;
-  read(cwd: string, engineSessionId: string): TranscriptTurn[];
-  parse(file: string): TranscriptTurn[];
+  read(cwd: string, engineSessionId: string, opts?: TranscriptParseOpts): TranscriptTurn[];
+  parse(file: string, opts?: TranscriptParseOpts): TranscriptTurn[];
   snapshot(cwd: string, engineSessionId: string, projectId: string, sessionId: string): boolean;
 }
 
@@ -85,8 +86,11 @@ export function resolveTranscriptFile(cwd: string, engineSessionId: string, harn
 export function engineTranscriptExists(cwd: string, engineSessionId: string, harness?: TranscriptHarness): boolean {
   return transcriptOpsFor(harness).exists(cwd, engineSessionId);
 }
-export function readTranscript(cwd: string, engineSessionId: string, harness?: TranscriptHarness): TranscriptTurn[] {
-  return transcriptOpsFor(harness).read(cwd, engineSessionId);
+/** `opts.withTs` is for human REST reads only — never an agent-facing MCP read (decision 0bcdd158). */
+export function readTranscript(
+  cwd: string, engineSessionId: string, harness?: TranscriptHarness, opts?: TranscriptParseOpts,
+): TranscriptTurn[] {
+  return transcriptOpsFor(harness).read(cwd, engineSessionId, opts);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -480,10 +484,12 @@ export function snapshotTranscript(
 /** Render an archived snapshot with the SAME parser {@link readTranscript} would use for this harness —
  *  a Loom archive snapshot is a raw copy of the engine's own transcript file, so its wire format matches
  *  whichever harness produced it. [] when no snapshot exists. */
-export function readArchivedTranscript(projectId: string, sessionId: string, harness?: TranscriptHarness): TranscriptTurn[] {
+export function readArchivedTranscript(
+  projectId: string, sessionId: string, harness?: TranscriptHarness, opts?: TranscriptParseOpts,
+): TranscriptTurn[] {
   const file = archivedTranscriptPath(projectId, sessionId);
   if (!fs.existsSync(file)) return [];
-  return transcriptOpsFor(harness).parse(file);
+  return transcriptOpsFor(harness).parse(file, opts);
 }
 
 /** Best-effort removal of a session's transcript snapshot (on permanent delete). Never throws. */

@@ -7,8 +7,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type TranscriptTurn } from "../lib/api";
 import { fetchTranscriptIncremental } from "../lib/transcriptTail";
 import {
-  applyFilter, emptyFilter, filterActive, groupByTurn, isUnclassified, linksOf, mcpPollInterval, parseMcpCalls, sentenceOf,
-  tally, REFUSED_HINT, SUBSYSTEMS, UNCLASSIFIED_HINT, type McpCall, type McpFilter, type McpOutcome, type McpSubsystem,
+  applyFilter, durationBarPx, emptyFilter, filterActive, fmtClock, fmtMs, groupByTurn, isUnclassified, linksOf, mcpPollInterval,
+  fmtDateTime, parseMcpCalls, sentenceOf, tally, turnSpanMs, DURATION_HINT, REFUSED_HINT, SPAN_HINT, SUBSYSTEMS, UNCLASSIFIED_HINT,
+  type McpCall, type McpFilter, type McpOutcome, type McpSubsystem,
 } from "../lib/mcpActivity";
 import { turnCauses, type TurnCause } from "../lib/turnCause";
 
@@ -59,6 +60,20 @@ function Cause({ cause, testId, quote = false }: { cause: TurnCause | undefined;
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** "≈42ms", always marked approximate (lib/mcpActivity.ts DURATION_HINT). */
+const approx = (ms: number) => `≈${fmtMs(ms)}`;
+
+/** A row's duration cell: the figure and a log-scale bar, or nothing at all when there is no duration. */
+function Duration({ call }: { call: McpCall }) {
+  if (call.ms == null) return <span className="loom-mcp-dur" />;
+  return (
+    <span className="loom-mcp-dur" data-testid={`mcp-call-${call.seq}-dur`} title={DURATION_HINT}>
+      {approx(call.ms)}
+      <i className={call.outcome} data-testid={`mcp-call-${call.seq}-bar`} style={{ width: durationBarPx(call.ms) }} />
+    </span>
+  );
+}
 
 function useDocumentHidden(): boolean {
   const [hidden, setHidden] = useState(() => typeof document !== "undefined" && document.hidden);
@@ -142,7 +157,10 @@ export function McpActivity({ sessionId, harness, busy = false }: {
           <span className="loom-mcp-say" data-testid="mcp-activity-latest" data-outcome={latest.outcome}>
             <Sentence call={latest} />
           </span>
-          <span className="loom-mcp-meta">{latest.tool}</span>
+          <span className="loom-mcp-meta">
+            {latest.tool}
+            {latest.ms != null && <span data-testid="mcp-activity-latest-dur" title={DURATION_HINT}> · {approx(latest.ms)}</span>}
+          </span>
         </span>
         <span className="loom-mcp-right">
           <span>
@@ -186,17 +204,32 @@ function Expanded({ id, calls, causes }: { id: string; calls: McpCall[]; causes:
   return (
     <div className="loom-mcp-x" id={id}>
       <Facets calls={calls} filter={filter} setFilter={setFilter} />
-      <div className="loom-mcp-log" data-testid="mcp-activity-log" role="list" aria-label="Loom calls by turn">
+      <div className={`loom-mcp-log${calls.some((c) => c.at != null) ? " timed" : ""}`}
+        data-testid="mcp-activity-log" role="list" aria-label="Loom calls by turn">
         {groups.length === 0 ? (
           <p className="loom-mcp-none">No calls match. Clear a filter to widen it.</p>
         ) : groups.map((g) => {
           const tot = turnTotals.get(g.turn)!;
+          const span = turnSpanMs(tot.calls);
+          const startedAt = tot.calls.find((c) => c.at != null)?.at;
           return (
             <div key={g.turn} role="listitem" className="loom-mcp-turn" data-testid={`mcp-turn-${g.turn}`}>
               <div className="loom-mcp-turnh">
                 <span className="loom-mcp-tn">Turn {g.turn}</span>
+                {startedAt && (
+                  <span className="loom-mcp-tat" data-testid={`mcp-turn-${g.turn}-at`} title={`first Loom call at ${fmtDateTime(startedAt)}`}>
+                    {fmtClock(startedAt).slice(0, 5)}
+                  </span>
+                )}
                 <Cause cause={causes.get(g.turn)} testId={`mcp-cause-turn-${g.turn}`} quote />
-                <span className="loom-mcp-tcount">{plural(tot.n, "call")}{tot.ref > 0 && <span className="loom-mcp-refn"> · {tot.ref} refused</span>}{tot.err > 0 &&<span className="loom-mcp-errn"> · {plural(tot.err, "error")}</span>}</span>
+                <span className="loom-mcp-tcount">
+                  {plural(tot.n, "call")}
+                  {span != null && (
+                    <span data-testid={`mcp-turn-${g.turn}-total`} title={SPAN_HINT}>{" · "}{approx(span)}</span>
+                  )}
+                  {tot.ref > 0 && <span className="loom-mcp-refn"> · {tot.ref} refused</span>}
+                  {tot.err > 0 && <span className="loom-mcp-errn"> · {plural(tot.err, "error")}</span>}
+                </span>
                 <span className="loom-mcp-stack" aria-hidden="true">
                   {tot.calls.map((c) => <i key={c.seq} className={`${c.subsystem} ${c.outcome}`} />)}
                 </span>
@@ -226,9 +259,13 @@ function Entry({ call, open, onToggle }: { call: McpCall; open: boolean; onToggl
         aria-controls={open ? bodyId : undefined}
         onClick={onToggle}
       >
+        <span className="loom-mcp-t" data-testid={call.at ? `mcp-call-${call.seq}-at` : undefined}>
+          {call.at ? fmtClock(call.at) : ""}
+        </span>
         <Glyph sub={call.subsystem} />
         <span className="loom-mcp-s"><Sentence call={call} /></span>
         <span className="loom-mcp-tool">{call.tool}</span>
+        <Duration call={call} />
         <Mark outcome={call.outcome} />
       </button>
       {open && (
@@ -237,6 +274,8 @@ function Entry({ call, open, onToggle }: { call: McpCall; open: boolean; onToggl
             <span>router <b>{call.router}</b></span>
             <span>call <b>#{call.seq}</b> this session</span>
             {call.tag && <span>transcript tag <b>{`{${call.tag}}`}</b></span>}
+            {call.at && <span>at <b>{fmtClock(call.at)}</b></span>}
+            {call.ms != null && <span title={DURATION_HINT}>took <b>{approx(call.ms)}</b>, approximate: includes hook and harness time</span>}
           </div>
           <div>
             <div className="loom-mcp-subh">Asked Loom</div>

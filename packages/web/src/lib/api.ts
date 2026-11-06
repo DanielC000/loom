@@ -75,7 +75,9 @@ export class ColumnsDriftedError extends Error {
 // package boundary, not an import, so this union must be updated by hand whenever that one changes
 // (card 100c523f added "system" for a harness whose native turns include a system/instruction role that
 // would otherwise silently mislabel as "user" — see that file's own doc).
-export interface TranscriptTurn { role: "user" | "assistant" | "tool_result" | "system"; text: string; }
+// `ts` (card 0bcdd158): the engine line's ISO timestamp. Only GET /api/sessions/:id/transcript sends it,
+// and only for lines that carried one; absent means unknown.
+export interface TranscriptTurn { role: "user" | "assistant" | "tool_result" | "system"; text: string; ts?: string; }
 // One queued (not-yet-delivered) message. `id` is server-minted and stable, so the UI can
 // delete/edit/reorder a specific entry even as the FIFO head drains between polls. `source` is who
 // enqueued it ('human' composer vs 'system' programmatic) and `kind` classifies a system entry: 'warning'

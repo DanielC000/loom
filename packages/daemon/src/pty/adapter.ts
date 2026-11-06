@@ -18,6 +18,26 @@ import { codexAdapter } from "./codex-adapter.js";
 export interface TranscriptTurn {
   role: "user" | "assistant" | "tool_result" | "system";
   text: string;
+  /**
+   * The engine line's own ISO timestamp (card 0bcdd158) — set ONLY when the caller opted in with
+   * {@link TranscriptParseOpts.withTs} AND the line carried a parseable one; absent otherwise, never a
+   * fabricated value.
+   * @decision 0bcdd158 — agent-facing MCP transcript reads never opt in: `ts` costs tokens on every read
+   * and would change pinned turn key sets. Only the human REST transcript route passes `withTs`.
+   */
+  ts?: string;
+}
+
+/** Options for a transcript parse/read. Default (no opts) keeps every turn at exactly `{role, text}`. */
+export interface TranscriptParseOpts {
+  /** Carry each line's engine timestamp as {@link TranscriptTurn.ts} (see that field's decision note). */
+  withTs?: boolean;
+}
+
+/** The line's `timestamp` when it is a string that parses as a date; undefined otherwise. */
+export function lineTimestamp(o: Record<string, unknown>): string | undefined {
+  const t = o.timestamp;
+  return typeof t === "string" && Number.isFinite(Date.parse(t)) ? t : undefined;
 }
 
 /**

@@ -3,9 +3,11 @@
 //   [tool] {<tag>} mcp__loom-<router>__<tool>(<JSON args>)   and   -> tool result {<tag>} (error): <body>
 // Pure functions of the transcript, pinned by test/mcp-activity.mjs.
 //
-// @decision a9a7140c — never show a call time or duration: the transcript carries neither. `ok` /
-// `error` (the transport's isError) / `pending` (no result yet) are facts; `refused` is a labelled
-// heuristic read from the result body (classifyResult, card 825e38da), never a fact.
+// @decision a9a7140c — `ok` / `error` (the transport's isError) / `pending` (no result yet) are facts;
+// `refused` is a labelled heuristic read from the result body (classifyResult, card 825e38da), never a fact.
+//
+// @decision 0bcdd158 — a call's time and duration come only from the turns' engine `ts`; a missing or
+// out-of-order ts means NO time / NO duration (null), never a fabricated 0. Durations stay labelled approximate.
 import type { TranscriptTurn } from "./api";
 
 export type McpSubsystem = "board" | "fleet" | "gate" | "memory" | "inbox" | "self";
@@ -27,6 +29,14 @@ export interface McpCall {
   /** The result body as the transcript holds it (already capped at 2 KB by the daemon), or null. */
   result: string | null;
   subsystem: McpSubsystem;
+  /** The call turn's engine timestamp (ISO), or null when the transcript line carried none. */
+  at: string | null;
+  /**
+   * Approximate duration: the result turn's ts minus the call turn's ts. It includes hook and harness
+   * overhead, so it is an upper bound on Loom's own time. Null when either ts is missing, the result has
+   * not arrived, or the two are out of order (durationMs).
+   */
+  ms: number | null;
 }
 
 export interface McpTurn { turn: number; calls: McpCall[] }
@@ -60,6 +70,8 @@ export function parseMcpCalls(turns: readonly TranscriptTurn[]): McpCall[] {
           outcome: "pending",
           result: null,
           subsystem: subsystemOf(tool),
+          at: validTs(t.ts),
+          ms: null,
         };
         calls.push(call);
         if (call.tag) openByTag.set(call.tag, call);
@@ -73,11 +85,78 @@ export function parseMcpCalls(turns: readonly TranscriptTurn[]): McpCall[] {
         openByTag.delete(seg.tag!);
         call.outcome = classifyResult(seg.body, seg.error);
         call.result = seg.body;
+        call.ms = durationMs(call.at, t.ts);
       }
     }
   }
   return calls;
 }
+
+// ── When a call ran, and roughly how long it took ───────────────────────────────────────────────
+const validTs = (ts: string | undefined | null): string | null =>
+  typeof ts === "string" && Number.isFinite(Date.parse(ts)) ? ts : null;
+
+/**
+ * Result ts minus call ts, in ms. Null (never 0) when either is missing or unparseable, or when the
+ * result is stamped BEFORE its call: an out-of-order pair is a clock or parse problem, not a duration.
+ */
+export function durationMs(callTs: string | null | undefined, resultTs: string | null | undefined): number | null {
+  const a = validTs(callTs), b = validTs(resultTs);
+  if (a == null || b == null) return null;
+  const d = Date.parse(b) - Date.parse(a);
+  return d >= 0 ? d : null;
+}
+
+/**
+ * A turn's wall-clock span: from the first timed call's ts to the last timed result's ts. Only calls
+ * with BOTH ts (a non-null `ms`) count. Not a sum: calls that run in parallel would be counted twice.
+ * Null when no call in the set has both.
+ */
+export function turnSpanMs(calls: readonly McpCall[]): number | null {
+  let start = Infinity, end = -Infinity;
+  for (const c of calls) {
+    if (c.at == null || c.ms == null) continue;
+    const t = Date.parse(c.at);
+    start = Math.min(start, t);
+    end = Math.max(end, t + c.ms);
+  }
+  return Number.isFinite(start) ? end - start : null;
+}
+
+/** "42ms", "1.4s", "18s", "3m 05s". */
+export function fmtMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}s`;
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+}
+
+/** Local wall-clock "HH:MM:SS" for an ISO timestamp. */
+export function fmtClock(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** Duration bar width in px: a log scale from 10ms (the minimum) to 30s (the full width). */
+export const DURATION_BAR_MAX_PX = 40;
+export function durationBarPx(ms: number): number {
+  const lo = Math.log10(10), hi = Math.log10(30_000);
+  const f = (Math.log10(Math.max(10, ms)) - lo) / (hi - lo);
+  return Math.max(3, Math.round(DURATION_BAR_MAX_PX * Math.min(1, f)));
+}
+
+export const SPAN_HINT = "Time from the first Loom call to the last answer in this turn (approximate).";
+
+/** Full local date and time, for a title where a bare clock time could be ambiguous (a turn past midnight). */
+export function fmtDateTime(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${fmtClock(iso)}`;
+}
+
+export const DURATION_HINT ="Approximate: from the call's transcript line to its result's, so it includes hook and harness time.";
 
 // ── Refused: a heuristic over the result body ───────────────────────────────────────────────────
 // Many Loom refusals (concurrency cap, stale memory baseVersion, guard refusals) come back as a

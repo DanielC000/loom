@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { TranscriptTurn } from "./adapter.js";
+import { lineTimestamp, type TranscriptTurn, type TranscriptParseOpts } from "./adapter.js";
 import { archivedTranscriptPath } from "../sessions/transcript.js";
 import { realCodexHome } from "./codex-doctrine.js";
 import { codexRolloutArchiveRoot } from "./codex-rollout-archive.js";
@@ -483,7 +483,7 @@ function classifyRole(role: unknown): TranscriptTurn["role"] {
  * @decision ca9c4e34 — do not remove the `sawAssistantResponseThisTurn` guard below; without it a turn
  * whose reply is captured by both a real response_item AND task_complete's own echo renders twice.
  */
-export function parseTranscriptFile(file: string): TranscriptTurn[] {
+export function parseTranscriptFile(file: string, opts: TranscriptParseOpts = {}): TranscriptTurn[] {
   let raw: string;
   try { raw = fs.readFileSync(file, "utf8"); } catch { return []; }
   const turns: TranscriptTurn[] = [];
@@ -493,6 +493,9 @@ export function parseTranscriptFile(file: string): TranscriptTurn[] {
     let o: Record<string, unknown>;
     try { o = JSON.parse(line); } catch { continue; }
     const payload = o.payload as Record<string, unknown> | undefined;
+    // Every rollout record carries a top-level ISO `timestamp` (card 0bcdd158; opt-in only).
+    const ts = opts.withTs ? lineTimestamp(o) : undefined;
+    const push = (turn: TranscriptTurn) => { if (ts !== undefined) turn.ts = ts; turns.push(turn); };
     if (o.type === "event_msg" && payload?.type === "task_started") {
       sawAssistantResponseThisTurn = false;
       continue;
@@ -502,7 +505,7 @@ export function parseTranscriptFile(file: string): TranscriptTurn[] {
       if (text.trim()) {
         const role = classifyRole(payload.role);
         if (role === "assistant") sawAssistantResponseThisTurn = true;
-        turns.push({ role, text });
+        push({ role, text });
       }
       continue;
     }
@@ -512,7 +515,7 @@ export function parseTranscriptFile(file: string): TranscriptTurn[] {
     // it never re-renders a reply a response_item already captured for THIS turn.
     if (o.type === "event_msg" && payload?.type === "task_complete") {
       if (!sawAssistantResponseThisTurn && typeof payload.last_agent_message === "string" && payload.last_agent_message.trim()) {
-        turns.push({ role: "assistant", text: payload.last_agent_message });
+        push({ role: "assistant", text: payload.last_agent_message });
       }
       // card ca9c4e34 (manager review): reset HERE too, not only on task_started — task_complete is
       // itself every turn's real terminal, so closing the window here makes the guard self-limiting and
@@ -527,10 +530,10 @@ export function parseTranscriptFile(file: string): TranscriptTurn[] {
   return turns;
 }
 
-export function readTranscript(cwd: string, conversationId: string): TranscriptTurn[] {
+export function readTranscript(cwd: string, conversationId: string, opts: TranscriptParseOpts = {}): TranscriptTurn[] {
   const file = resolveTranscriptFile(cwd, conversationId);
   if (!file) return [];
-  return parseTranscriptFile(file);
+  return parseTranscriptFile(file, opts);
 }
 
 /** Best-effort copy of a conversation's rollout file into Loom's own archive store — the codex mirror of

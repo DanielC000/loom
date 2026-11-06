@@ -13,6 +13,7 @@ const {
   parseMcpCalls, groupByTurn, sentenceOf, sentenceText, linksOf, applyFilter, emptyFilter, filterActive,
   tally, subsystemOf, columnLabel, mcpPollInterval, MCP_POLL_ACTIVE_MS, MCP_POLL_IDLE_MS,
   classifyResult, isUnclassified, REFUSED_HINT,
+  durationMs, turnSpanMs, fmtMs, fmtClock, fmtDateTime, durationBarPx, DURATION_BAR_MAX_PX,
 } = await import("../src/lib/mcpActivity.ts");
 
 // Poll policy. A poll can still be a whole transcript (first load, rotation fallback): the strip
@@ -167,6 +168,64 @@ assert.deepEqual(tally(calls, "router"), [["loom-tasks", 3], ["loom-orchestratio
   assert.deepEqual(applyFilter(R, { ...emptyFilter(), outcomes: new Set(["refused"]) }).map((c) => c.seq), [1]);
   assert.deepEqual(applyFilter(R, { ...emptyFilter(), outcomes: new Set(["error"]) }).map((c) => c.seq), [4]);
   assert.ok(REFUSED_HINT.includes("error field"));
+}
+
+// Time and approximate duration (card 0bcdd158): only from the turns' engine `ts`, never a fake 0.
+{
+  const a = "2026-11-06T10:00:00.000Z", b = "2026-11-06T10:00:00.042Z", c = "2026-11-06T10:00:01.500Z";
+  assert.equal(durationMs(a, b), 42);
+  assert.equal(durationMs(a, a), 0); // a real same-millisecond pair is a real 0
+  assert.equal(durationMs(undefined, b), null, "missing call ts → none");
+  assert.equal(durationMs(a, undefined), null, "missing result ts → none");
+  assert.equal(durationMs(null, null), null);
+  assert.equal(durationMs("not a date", b), null, "unparseable → none");
+  assert.equal(durationMs(c, a), null, "result stamped before its call (out of order) → none, not a negative");
+
+  const D = parseMcpCalls([
+    { role: "user", text: "go", ts: a },
+    { role: "assistant", ts: a, text: [
+      call("dddd0001", "mcp__loom-tasks__tasks_get", { id: "x" }),
+      call("dddd0002", "mcp__loom-tasks__tasks_list", {}),
+    ].join("\n") },
+    { role: "tool_result", ts: b, text: "-> tool result {dddd0001}: {}" },
+    // An untimed result line: the call keeps its time, but gets no duration.
+    { role: "tool_result", text: "-> tool result {dddd0002}: []" },
+    { role: "assistant", text: call("dddd0003", "mcp__loom-tasks__tasks_get", { id: "y" }) }, // untimed call
+    { role: "tool_result", ts: c, text: "-> tool result {dddd0003}: {}" },
+    { role: "assistant", ts: c, text: call("dddd0004", "mcp__loom-memory__memory_read", { key: "k" }) },
+    { role: "tool_result", ts: a, text: "-> tool result {dddd0004}: {}" }, // out of order
+    { role: "assistant", ts: c, text: call("dddd0005", "mcp__loom-tasks__tasks_get", { id: "z" }) }, // pending
+  ]);
+  assert.deepEqual(D.map((x) => x.at), [a, a, null, c, c]);
+  assert.deepEqual(D.map((x) => x.ms), [42, null, null, null, null]);
+  // The turn span counts only calls with BOTH ts: call 1 alone here (call 2 has no result ts, call 3 no
+  // call ts, call 4 is out of order, call 5 pending).
+  assert.equal(turnSpanMs(D), 42);
+  // Two calls issued together and answered at different times: the span is wall clock (first call to
+  // last answer, 1500ms), NOT the sum of their durations (42 + 1500 = 1542), which double-counts overlap.
+  const P = parseMcpCalls([
+    { role: "user", text: "go", ts: a },
+    { role: "assistant", ts: a, text: [call("eeee0001", "mcp__loom-tasks__tasks_get", { id: "x" }), call("eeee0002", "mcp__loom-tasks__tasks_list", {})].join("\n") },
+    { role: "tool_result", ts: b, text: "-> tool result {eeee0001}: {}" },
+    { role: "tool_result", ts: c, text: "-> tool result {eeee0002}: []" },
+  ]);
+  assert.deepEqual(P.map((x) => x.ms), [42, 1500]);
+  assert.equal(turnSpanMs(P), 1500, "span is first call to last answer, not a sum");
+  // A transcript with no ts at all (an older cache, or a route that does not send it): nothing is timed.
+  assert.ok(calls.every((x) => x.at === null && x.ms === null));
+  assert.equal(turnSpanMs(calls), null);
+  // A turn whose only timed call is still pending has a clock time but no span.
+  assert.equal(turnSpanMs(D.slice(4)), null);
+  assert.match(fmtDateTime(a), /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+
+  assert.equal(fmtMs(42), "42ms");
+  assert.equal(fmtMs(1450), "1.4s");
+  assert.equal(fmtMs(18_900), "18s");
+  assert.equal(fmtMs(185_000), "3m 05s");
+  assert.match(fmtClock(a), /^\d\d:\d\d:\d\d$/);
+  assert.equal(durationBarPx(0), 3);
+  assert.equal(durationBarPx(10 * 60_000), DURATION_BAR_MAX_PX);
+  assert.ok(durationBarPx(42) < durationBarPx(1450), "longer call, longer bar");
 }
 
 // A transcript with no Loom calls (e.g. a codex session's different markers) parses to nothing.
