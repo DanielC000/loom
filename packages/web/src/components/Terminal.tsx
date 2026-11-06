@@ -635,7 +635,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}
         >
-          <Dot tone="busy" style={{ flexShrink: 0 }} />
+          <Dot tone="attn" style={{ flexShrink: 0 }} />
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
             View-only from a remote device. Steer via the composer.
           </span>
@@ -660,7 +660,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}
         >
-          <Dot tone="busy" style={{ flexShrink: 0 }} />
+          <Dot tone="work" style={{ flexShrink: 0 }} />
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
             Reconnecting to this session. Keystrokes are not being sent.
           </span>

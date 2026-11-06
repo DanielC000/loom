@@ -222,7 +222,7 @@ export default function MissionControl() {
           <Stat label="active projects" value={projectNames.length} />
           <Stat label="active managers" value={managers.length} />
           <Stat label="active workers" value={workers.length} />
-          <Stat label="attention" value={attention.length} tone={attention.length ? "busy" : "muted"} />
+          <Stat label="attention" value={attention.length} tone={attention.length ? "attn" : "muted"} />
         </div>
         <span style={{ flex: 1 }} />
         <ClearUsageHoldButton onCleared={refreshSessions} />

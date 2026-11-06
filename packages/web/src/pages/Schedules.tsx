@@ -86,7 +86,7 @@ export default function Schedules() {
         <SectionLabel style={{ margin: 0 }}>Schedules</SectionLabel>
         {orch.data && (
           <StatusPill
-            tone={orch.data.schedulerEnabled ? "live" : "busy"}
+            tone={orch.data.schedulerEnabled ? "live" : "attn"}
             label={orch.data.schedulerEnabled ? "scheduler active" : "scheduler off"}
             glow={orch.data.schedulerEnabled}
           />
@@ -104,13 +104,13 @@ export default function Schedules() {
       {schedulerOff && (
         <div role="status" style={{
           marginTop: 12, display: "flex", alignItems: "flex-start", gap: 10, flexWrap: "wrap",
-          padding: "10px 12px", border: `1px solid ${color.busy}`, borderRadius: radius.base,
-          background: wash(color.busy, 6),
+          padding: "10px 12px", border: `1px solid ${color.attn}`, borderRadius: radius.base,
+          background: wash(color.attn, 6),
         }}>
-          <Badge tone="busy">scheduler off</Badge>
+          <Badge tone="attn">scheduler off</Badge>
           <p style={{ margin: 0, flex: 1, minWidth: 260, color: color.text2, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6 }}>
             The cron scheduler is disabled, so schedules you create here are saved but{" "}
-            <strong style={{ color: color.busy, fontWeight: 700 }}>will not fire</strong>. To enable it, set{" "}
+            <strong style={{ color: color.attnText, fontWeight: 700 }}>will not fire</strong>. To enable it, set{" "}
             <code style={codeStyle}>LOOM_SCHEDULER_ENABLED=1</code> in the daemon's environment (or turn on{" "}
             <strong>Scheduler</strong> under <strong>Settings → Global / Daemon</strong>), then restart the daemon.
           </p>
@@ -143,7 +143,7 @@ export default function Schedules() {
                   <td style={{ padding: "10px 12px", color: color.text, fontWeight: 600, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name}</td>
                   <td style={{ padding: "10px 12px", color: color.text2, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{agentLabel(s.agentId)}</td>
                   <td style={{ padding: "10px 12px", color: color.text, whiteSpace: "nowrap" }}>{describeCron(s.cron)}</td>
-                  <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }}><span style={{ color: color.info }}>{s.cron}</span></td>
+                  <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }}><span style={{ color: color.text2 }}>{s.cron}</span></td>
                   <td style={{ padding: "10px 12px", color: color.text2, whiteSpace: "nowrap" }}>
                     {fmt(s.nextFireAt)}
                     {/* Deferral observability (card 53edd8d5): a due fire held back by a budget gate — the
@@ -157,7 +157,7 @@ export default function Schedules() {
                         lost occurrence "deferred" (which implies it will still fire imminently). */}
                     {s.enabled && s.lastDeferredAt && (
                       <div style={{ marginTop: 4, whiteSpace: "normal" }} title={`${s.lastDeferredReason?.startsWith("missed —") ? "Missed" : "Deferred"} since ${fmt(s.lastDeferredAt)}`}>
-                        <Badge tone={s.lastDeferredReason?.startsWith("missed —") ? "muted" : "busy"}>
+                        <Badge tone={s.lastDeferredReason?.startsWith("missed —") ? "muted" : "attn"}>
                           {s.lastDeferredReason?.startsWith("missed —") ? s.lastDeferredReason : `deferred: ${s.lastDeferredReason ?? "budget reached"}`}
                         </Badge>
                       </div>
@@ -224,7 +224,7 @@ const OUTCOME_TABS: { key: "all" | "fired" | "deferred" | "failed" | "missed"; l
 // daemon was down across it) — so it gets its own outcome rather than folding into "deferred".
 const OUTCOME_STYLE: Record<ScheduleHistoryEntry["kind"], { label: string; color: string; dot: string }> = {
   schedule_fired: { label: "fired", color: color.live, dot: color.live },
-  schedule_fire_deferred: { label: "deferred", color: color.busy, dot: color.busy },
+  schedule_fire_deferred: { label: "deferred", color: color.attnText, dot: color.attn },
   schedule_fire_failed: { label: "failed", color: color.danger, dot: color.danger },
   schedule_fire_missed: { label: "missed", color: color.text3, dot: color.text3 },
 };
@@ -263,7 +263,7 @@ function ScheduleRunHistory({ schedules }: { schedules: Schedule[] }) {
   const total = history.data?.pages[0]?.total ?? 0;
   const firstLoad = history.isLoading && history.fetchStatus === "fetching";
 
-  const caretStyle: CSSProperties = { fontFamily: font.mono, fontSize: fs.mono, width: 12, color: open ? color.live : color.text2 };
+  const caretStyle: CSSProperties = { fontFamily: font.mono, fontSize: fs.mono, width: 12, color: color.text2 };
   const th: CSSProperties = {
     textAlign: "left", color: color.text2, fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700,
     padding: "0 12px 8px", borderBottom: `1px solid ${color.line}`, whiteSpace: "nowrap",
@@ -363,7 +363,7 @@ function ScheduleRunHistory({ schedules }: { schedules: Schedule[] }) {
 // time it was skipped at (textMuted) — the daemon was down across that slot, so it never fired.
 function ResultCell({ entry }: { entry: ScheduleHistoryEntry }) {
   if (entry.kind === "schedule_fire_deferred") {
-    return <span style={{ color: color.busy }}>{entry.reason ?? "deferred"}</span>;
+    return <span style={{ color: color.attnText }}>{entry.reason ?? "deferred"}</span>;
   }
   if (entry.kind === "schedule_fire_failed") {
     return <span style={{ color: color.danger }}>{entry.error ?? "spawn failed"}</span>;
@@ -377,7 +377,7 @@ function ResultCell({ entry }: { entry: ScheduleHistoryEntry }) {
   }
   if (entry.sessionId) {
     return (
-      <Link to={`/session/${entry.sessionId}`} style={{ color: color.info, textDecoration: "none" }}>
+      <Link to={`/session/${entry.sessionId}`} style={{ color: color.text2, textDecoration: "none" }}>
         {entry.sessionId.slice(0, 8)} ›
       </Link>
     );
@@ -523,7 +523,7 @@ function ScheduleBuilderModal({
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Name</span>
           <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Nightly PR sweep" autoFocus spellCheck={false} />
-          {!nameValid && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>A name is required.</span>}
+          {!nameValid && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>A name is required.</span>}
         </label>
 
         {/* Target agent — chosen on create, fixed after */}
@@ -537,7 +537,7 @@ function ScheduleBuilderModal({
                 <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents in this project —" : "— select an agent —"}</option>
                 {projectAgents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
               </Select>
-              {noAgents && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>This project has no agents yet — create one on the Projects page first.</span>}
+              {noAgents && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>This project has no agents yet — create one on the Projects page first.</span>}
             </>
           )}
         </label>
@@ -561,13 +561,13 @@ function ScheduleBuilderModal({
 
         {/* Contextual controls per frequency */}
         <FrequencyControls builder={builder} set={set} />
-        {weeklyNeedsDay && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>Pick at least one day.</span>}
+        {weeklyNeedsDay && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>Pick at least one day.</span>}
 
         {/* Live preview: human summary + generated cron chip + real next-3 runs */}
         <div style={{ background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.base, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ color: color.live, fontFamily: font.mono, fontSize: fs.body }}>{cronValid ? summary : "Incomplete cron"}</span>
-            <Chip label="cron" value={cronValid ? cron : "—"} tone="info" />
+            <span style={{ color: color.text, fontFamily: font.mono, fontSize: fs.body }}>{cronValid ? summary : "Incomplete cron"}</span>
+            <Chip label="cron" value={cronValid ? cron : "—"} tone="muted" />
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
             <span style={{ ...fieldLabel, fontSize: fs.xs }}>Next runs</span>
@@ -599,7 +599,7 @@ function ScheduleBuilderModal({
                 onChange={(e) => set({ frequency: "custom", raw: e.target.value })}
                 placeholder="0 9 * * *" spellCheck={false} />
               {!cronValid && (builder.frequency === "custom" ? builder.raw : cron).trim().length > 0 &&
-                <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>Expected 5 whitespace-separated fields.</span>}
+                <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>Expected 5 whitespace-separated fields.</span>}
             </label>
           )}
         </div>
@@ -698,8 +698,8 @@ function FrequencyControls({ builder, set }: { builder: CronBuilderState; set: (
                   <button key={d.v} type="button" aria-pressed={on}
                     onClick={() => set({ daysOfWeek: on ? builder.daysOfWeek.filter((x) => x !== d.v) : [...builder.daysOfWeek, d.v] })}
                     style={{
-                      cursor: "pointer", background: on ? color.liveSoft : "transparent",
-                      border: `1px solid ${on ? color.live : color.lineStrong}`, color: on ? color.live : color.text2,
+                      cursor: "pointer", background: on ? color.selected : "transparent",
+                      border: `1px solid ${on ? color.accentEdge : color.lineStrong}`, color: on ? color.accentFg : color.text2,
                       borderRadius: radius.sm, fontFamily: font.mono, fontSize: fs.mono, padding: "4px 8px", minWidth: 40,
                     }}>{d.label}</button>
                 );

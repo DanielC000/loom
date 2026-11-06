@@ -54,7 +54,7 @@ const NARROW = { width: 900, height: 1000 };
 const CTX_WINDOW = 1_000_000;
 const WARM_PCT = 42;
 const RED_PCT = 96;
-// The red tone is read from the live --loom-danger token at run time (`cssColor`), never typed as a literal.
+// The red tones are read from the live --loom-danger(-text) tokens at run time (`cssColor`), never typed as literals.
 
 // The four readings that carry a breakdown. `merged` is deliberately NOT here — leg 5 is the
 // assertion that it is a plain readout, and listing it would make that leg contradict this list.
@@ -283,7 +283,7 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     // ── THE MANAGER ROW. Busy, no card of its own, no branch, its own context, its own last event.
     expect(mgr!.agent).toContain(seeded.mgr.agentName);
     expect(mgr!.agent.toLowerCase()).toContain("manager");
-    expect(mgr!.state.toLowerCase()).toBe("busy");
+    expect(mgr!.state.toLowerCase()).toBe("working");
     expect(mgr!.branch, "a manager holds no branch").toContain("—");
     expect(mgr!.context, `manager context: ${mgr!.context}`).toContain(`${WARM_PCT}%`);
     // 🔴 The manager's event is one it FILED, not one filed about a worker — a map keyed only on
@@ -434,8 +434,9 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     // reading is a real `worstContext` derivation and not "whichever session came back first".
     const figure = page.getByTestId("atlas-brief-context").locator(".loom-ovbrief-n");
     await expect(figure).toHaveText(`${RED_PCT}%`);
+    // Red as TEXT is the danger text shade; the meter below is the danger fill. Both are red.
     const TONE_RED = await cssColor(page, "--loom-danger");
-    await expect(figure).toHaveCSS("color", TONE_RED);
+    await expect(figure).toHaveCSS("color", await cssColor(page, "--loom-danger-text"));
 
     // …and the SAME expression, rendered a second way: the roster row's own track fill.
     const track = row(page, seeded.worker.sessionId).locator(".loom-ovroster-track > span");

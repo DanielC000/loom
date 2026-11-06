@@ -142,19 +142,35 @@ test("another tab's change is applied at once", async ({ page, loomDaemon, conte
 });
 
 test("the main contrast pairs clear AA in both themes, read from live token values", async ({ page, loomDaemon }) => {
-  // The Graphite spec's contrast table: [label, foreground token, background token, floor].
+  // Direction C's ("Ink & Signal", card d2a44f7b) contrast table, every pair of the vault README's
+  // §WCAG contrast, plus the secondary-on-panel pair: [label, foreground, background, floor]. Text
+  // needs 4.5:1; UI (dots, edges, borders, the focus ring, a meter fill) needs 3:1. A background may be
+  // an expression: the "needs you" band is an 11% attn wash over the panel, measured as rendered.
+  const ATTN_BAND = "color-mix(in oklab, var(--loom-attn) 11%, var(--loom-surface))";
   const PAIRS: [string, string, string, number][] = [
-    ["primary text on page", "--loom-text", "--loom-bg", 4.5],
-    ["secondary text on page", "--loom-text-2", "--loom-bg", 4.5],
+    ["primary text", "--loom-text", "--loom-bg", 4.5],
+    ["secondary text", "--loom-text-2", "--loom-bg", 4.5],
     ["muted text on page", "--loom-text-3", "--loom-bg", 4.5],
-    ["muted text on a panel", "--loom-text-3", "--loom-surface", 4.5],
+    ["muted text on panel", "--loom-text-3", "--loom-surface", 4.5],
     ["link / accent text", "--loom-accent-fg", "--loom-bg", 4.5],
     ["primary button label", "--loom-on-accent", "--loom-accent", 4.5],
-    ["live signal", "--loom-live", "--loom-bg", 3],
-    ["busy label", "--loom-busy", "--loom-bg", 4.5],
-    ["danger label", "--loom-danger", "--loom-bg", 4.5],
-    ["input / control border", "--loom-line-strong", "--loom-bg", 3],
-    ["focus ring", "--loom-ring", "--loom-bg", 3],
+    ["selected row text", "--loom-text", "--loom-selected", 4.5],
+    ["live capsule text", "--loom-live-text", "--loom-live-soft", 4.5],
+    ["working capsule text", "--loom-work-text", "--loom-work-soft", 4.5],
+    ["needs-you capsule text", "--loom-attn-text", "--loom-attn-soft", 4.5],
+    ["needs-you text on panel", "--loom-attn-text", "--loom-surface", 4.5],
+    ["error capsule text", "--loom-danger-text", "--loom-danger-soft", 4.5],
+    ["error text on panel", "--loom-danger-text", "--loom-surface", 4.5],
+    ["danger button label", "--loom-on-danger", "--loom-danger-fill", 4.5],
+    ["solid needs-you label", "--loom-on-attn", "--loom-attn", 4.5],
+    ["text on a needs-you band", "--loom-text", ATTN_BAND, 4.5],
+    ["live dot (UI)", "--loom-live", "--loom-surface", 3],
+    ["working dot (UI)", "--loom-work", "--loom-surface", 3],
+    ["needs-you edge (UI)", "--loom-attn", "--loom-surface", 3],
+    ["error dot (UI)", "--loom-danger", "--loom-surface", 3],
+    ["input border (UI)", "--loom-line-strong", "--loom-field-bg", 3],
+    ["focus ring (UI)", "--loom-ring", "--loom-bg", 3],
+    ["healthy meter fill (UI)", "--loom-meter-ok", "--loom-track", 3],
     ["secondary text on a panel", "--loom-text-2", "--loom-surface", 4.5],
   ];
   await page.goto(loomDaemon.baseURL + "/settings");
@@ -170,6 +186,35 @@ test("the main contrast pairs clear AA in both themes, read from live token valu
   // Positive control: the two themes really did resolve to different values, so the loop above checked
   // two palettes and not the same one twice.
   expect(close(bgByTheme.Dark!, bgByTheme.Light!)).toBe(false);
+  // Positive control for the instrument: a pair KNOWN to sit far below 3:1 (the track and the hairline,
+  // two adjacent neutrals) must measure that way, so the loop cannot pass because the resolver returns
+  // a constant.
+  const known = contrast(await rgbOf(page, "--loom-track"), await rgbOf(page, "--loom-line"));
+  expect(known, "a near-identical neutral pair measures well under 3:1").toBeLessThan(3);
+});
+
+test("every token in the contrast table is defined, so no pair is measured against an inherited fallback", async ({ page, loomDaemon }) => {
+  // An undefined custom property in `color: var(--x)` silently resolves to the INHERITED text colour,
+  // which would pass most text-on-background pairs vacuously. So name every token and require a value.
+  const TOKENS = [
+    "--loom-text", "--loom-text-2", "--loom-text-3", "--loom-bg", "--loom-surface", "--loom-selected",
+    "--loom-accent", "--loom-accent-fg", "--loom-on-accent", "--loom-field-bg", "--loom-line-strong",
+    "--loom-ring", "--loom-track", "--loom-meter-ok",
+    "--loom-live", "--loom-live-text", "--loom-live-soft",
+    "--loom-work", "--loom-work-text", "--loom-work-soft",
+    "--loom-attn", "--loom-attn-text", "--loom-attn-soft", "--loom-on-attn",
+    "--loom-danger", "--loom-danger-text", "--loom-danger-soft", "--loom-danger-fill", "--loom-on-danger",
+  ];
+  await page.goto(loomDaemon.baseURL + "/settings");
+  for (const theme of ["Dark", "Light"] as const) {
+    await pickTheme(page, theme);
+    const missing = await page.evaluate((names) => names.filter(
+      (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim() === ""), TOKENS);
+    expect(missing, `${theme}: tokens with no value`).toEqual([]);
+  }
+  // Positive control: the same probe DOES report a token that is genuinely absent (the retired busy).
+  const retired = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--loom-busy").trim());
+  expect(retired, "the retired --loom-busy token is gone, and the probe can see an absence").toBe("");
 });
 
 test("Overview, the board and a session render in light; the terminal stays a dark well and re-themes live", async ({ page, loomDaemon }) => {

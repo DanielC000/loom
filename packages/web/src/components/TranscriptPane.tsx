@@ -22,7 +22,7 @@ function highlight(text: string, q: string): ReactNode {
     }
     if (idx > i) out.push(text.slice(i, idx));
     out.push(
-      <mark key={k++} style={{ background: color.liveSoft, color: color.text, borderRadius: 2 }}>
+      <mark key={k++} style={{ background: color.attnSoft, color: color.text, borderRadius: 2 }}>
         {text.slice(idx, idx + q.length)}
       </mark>,
     );
@@ -124,7 +124,7 @@ function RoleChip({ label, current, onPick }: { label: RoleFilter; current: Role
 // cyan/info (a system/instruction turn — e.g. codex's "developer" role, card 100c523f — is likewise not
 // a speaker, but it's live instruction content rather than inert tool output, so it gets the info tone
 // instead of tool_result's muted one).
-const ROLE_COLOR: Record<TranscriptTurn["role"], string> = { user: color.liveText, assistant: color.accentFg, tool_result: color.text3, system: color.info };
+const ROLE_COLOR: Record<TranscriptTurn["role"], string> = { user: color.text, assistant: color.accentFg, tool_result: color.text3, system: color.text2 };
 const ROLE_LABEL: Record<TranscriptTurn["role"], string> = { user: "user", assistant: "assistant", tool_result: "tool result", system: "system" };
 
 function Turn({ turn, q }: { turn: TranscriptTurn; q: string }) {

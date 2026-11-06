@@ -5,7 +5,7 @@ import type { Agent, SessionListItem, OrchestrationEvent, SessionRole } from "@l
 import { resolveConfig } from "@loom/shared";
 import { api, workerDiffQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { useAttention, attentionOpenTarget, dismissAttention, type AttentionItem } from "../lib/attention";
+import { useAttention, usePendingDecisionsBySession, attentionOpenTarget, dismissAttention, type AttentionItem } from "../lib/attention";
 import { useOpenRequest } from "../components/requests";
 import { bySessionActivity, byCreatedStable, byManagerThenCreated, dedupeSessionsById, goLiveHeldControl, goLiveSessionPill, holdsGoLiveSlot } from "../lib/sessions";
 import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
@@ -27,7 +27,7 @@ import { attentionItemInProject } from "../lib/fleet";
 import { ReviewQueue } from "../components/reviewQueue";
 import { MergeGateStrip, MergeGateAttention, mergeGateAttentionCount, useMergeGateStatus } from "../components/mergeGate";
 import { HarnessMixProvider } from "../components/HarnessPicker";
-import { color, font, tone, fs, radius } from "../theme";
+import { color, font, tone, fs, radius, type Tone } from "../theme";
 import { RoleBadge } from "../lib/roleDisplay";
 import { errorText } from "../lib/loopbackCredential";
 
@@ -61,9 +61,12 @@ export default function Overview() {
   // reshuffles on the 3s poll when a manager flips busy↔idle — matching the Terminal view (see lib/sessions.ts).
   const managers = all.filter((s) => s.role === "manager").sort(byCreatedStable);
   const workers = all.filter((s) => s.role === "worker");
-  const roll = fleetRollup(all);
+  const decisions = usePendingDecisionsBySession();
+  const roll = fleetRollup(all, decisions);
   const wc = worstContext(all);
   const ctxPct = wc.ctx > 0 ? Math.round(wc.ratio * 100) : 0;
+  // 95% and up is danger, 80% and up needs you, below that the healthy ink meter.
+  const ctxTone: Tone = ctxPct >= 95 ? "danger" : ctxPct >= 80 ? "attn" : "accent";
 
   // Each project-manager's event timeline → the project activity feed (same per-manager events MC uses).
   const eventQueries = useQueries({
@@ -182,26 +185,26 @@ export default function Overview() {
       <div>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Overview
-          <Badge tone="info">{project?.name ?? "…"}</Badge>
+          <Badge tone="muted">{project?.name ?? "…"}</Badge>
           <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
             the active project at a glance · switch the project in the header to rescope
           </span>
         </SectionLabel>
         <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", marginTop: 8 }}>
-          <StatusPill tone={roll.tone} label={roll.label} glow={roll.glow} />
+          <StatusPill tone={roll.tone} label={roll.label} glow={roll.glow} solid={roll.solid} />
           <div style={{ display: "flex", gap: 10 }}>
             <Stat label="active managers" value={managers.length} />
             <Stat label="active workers" value={workers.length} />
-            <Stat label="attention" value={projAttention.length} tone={projAttention.length ? "busy" : "muted"} />
+            <Stat label="attention" value={projAttention.length} tone={projAttention.length ? "attn" : "muted"} />
             <Stat label="archived" value={archived.data?.total ?? 0} tone="muted" />
           </div>
           <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
             <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
               <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Worst context</span>
               <span style={{ flex: 1 }} />
-              <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[ctxPct >= 80 ? "busy" : "live"] }}>{wc.ctx > 0 ? `${ctxPct}%` : "—"}</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[ctxTone] }}>{wc.ctx > 0 ? `${ctxPct}%` : "—"}</span>
             </span>
-            <Meter value={wc.ctx} max={wc.window || 1} tone={ctxPct >= 80 ? "busy" : "accent"} width={110} />
+            <Meter value={wc.ctx} max={wc.window || 1} tone={ctxTone} width={110} />
           </div>
         </div>
       </div>
@@ -218,7 +221,7 @@ export default function Overview() {
         <SectionLabel>Agents</SectionLabel>
         {projectAgents.length === 0 ? (
           <Panel style={{ padding: 12 }}>
-            <span style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.mono }}>
+            <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>
               No manually-spawnable agents — workers are dispatched by a manager, not spawned here. Create one on the Projects page.
             </span>
           </Panel>
@@ -381,7 +384,7 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
         <RoleBadge role={role} />
         <strong style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
-        {live && pill && <StatusPill tone={pill.pending ? "busy" : "live"} glow={pill.pending} label={pill.label} />}
+        {live && pill && <StatusPill tone={pill.pending ? "work" : "live"} glow={pill.pending} label={pill.label} />}
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         {managerLive && held ? (
@@ -511,7 +514,7 @@ function FleetCockpitRow({ s, star, open, onToggle, actions }: {
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <button onClick={onToggle} title={open ? "Collapse this session" : "Expand to this session's cockpit"}
           style={{ background: "transparent", border: "none", cursor: "pointer", padding: "0 2px",
-            color: open ? color.live : color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
+            color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
           {open ? "▾" : "▸"}
         </button>
         <div style={{ flex: 1, minWidth: 0 }}><FleetRow s={s} star={star} /></div>
@@ -572,9 +575,9 @@ function WorkerDiffPanel({ workerId }: { workerId: string }) {
       {diff.isError && <span style={{ color: color.danger, fontSize: fs.sm }}>No diff (worker has no branch, or it was merged/removed).</span>}
       {diff.data && (
         <>
-          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info, marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <span>{diff.data.filesChanged} file(s) · +{diff.data.insertions} −{diff.data.deletions}</span>
-            {diff.data.uncommitted && <Badge tone="busy">live · incl. uncommitted</Badge>}
+            {diff.data.uncommitted && <Badge tone="work">live · incl. uncommitted</Badge>}
             {diff.data.merged && <Badge tone="live">merged → landed diff</Badge>}
           </div>
           <DiffView patch={diff.data.patch || "(no changes vs HEAD)"} />

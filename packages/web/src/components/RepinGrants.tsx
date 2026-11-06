@@ -124,7 +124,7 @@ export function RepinGrantsControl({ session }: { session: Partial<Pick<Session,
   const showResumeNote = d.firstTimeGrant || d.spawnTimeChanged;
   return (
     <span data-testid={`repin-grants-${session.id}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <Badge tone="busy" data-testid={`repin-drift-badge-${session.id}`}
+      <Badge tone="attn" data-testid={`repin-drift-badge-${session.id}`}
         title={d.firstTimeGrant ? `${summary}. ${FIRST_TIME_GRANT_NOTE}` : summary}>
         grants out of date
       </Badge>
@@ -136,7 +136,7 @@ export function RepinGrantsControl({ session }: { session: Partial<Pick<Session,
           onClick={(ev) => ev.stopPropagation()}
           style={{
             position: "fixed", top: "20%", left: "50%", transform: "translateX(-50%)", zIndex: 1000, width: "min(460px, 92vw)",
-            boxShadow: `inset 0 0 0 1px ${color.busy}`, display: "flex", flexDirection: "column", gap: 10,
+            boxShadow: `inset 0 0 0 1px ${color.attn}`, display: "flex", flexDirection: "column", gap: 10,
           }}>
           <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>Re-pin grants for this session?</strong>
           <p data-testid="repin-confirm-counts" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
@@ -147,18 +147,18 @@ export function RepinGrantsControl({ session }: { session: Partial<Pick<Session,
           <ul data-testid="repin-confirm-changes" style={{ margin: 0, paddingLeft: 18, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
             {changes.map((c) => (
               <li key={c.key} data-testid={`repin-confirm-change-${c.key}`} data-loosening={c.loosening ? "true" : undefined}
-                style={c.loosening ? { color: color.danger, fontWeight: 700 } : undefined}>
+                style={c.loosening ? { color: color.dangerText, fontWeight: 700 } : undefined}>
                 {c.loosening ? "⚠ " : ""}{c.text}
               </li>
             ))}
           </ul>
           {showResumeNote && (
-            <p data-testid="repin-confirm-resume-note" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.busy }}>
+            <p data-testid="repin-confirm-resume-note" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.attnText }}>
               {SPAWN_TIME_NOTE} Connection and vault-write changes apply to the session's next tool call.
             </p>
           )}
           {d.firstTimeGrant && (
-            <p data-testid="repin-confirm-first-time" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.busy }}>
+            <p data-testid="repin-confirm-first-time" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.attnText }}>
               {d.connections.pinned === 0 && d.connections.current > 0
                 ? `Pinned 0 of ${plural(d.connections.current, "connection grant")}. Re-pin, then resume this session: `
                 : "Re-pin, then resume this session: "}

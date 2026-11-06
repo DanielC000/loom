@@ -210,7 +210,7 @@ export function OrchestrationChip() {
                 "global". Stated here because a destructive control that overstates its reach is
                 exactly as misleading as one that understates it. */}
             <BandFoot>
-              Clearing the hold drops the global <code style={{ color: color.info, fontFamily: font.mono }}>worker_spawn</code> latch
+              Clearing the hold drops the global <code style={{ color: color.text2, fontFamily: font.mono }}>worker_spawn</code> latch
               without touching a session. <b style={{ color: color.text2 }}>Kill all</b> hard-stops every live
               WORKER across every project and pauses orchestration — a manager, the Platform Lead and a
               Companion are left running.

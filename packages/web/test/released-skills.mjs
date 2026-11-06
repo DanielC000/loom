@@ -50,8 +50,8 @@ check("an unrecognised reason still renders a gloss and a tone instead of blanki
 });
 
 check("reason tones are the intended three, and none of them is red", () => {
-  assert.equal(releaseReasonTone("modified"), "busy");
-  assert.equal(releaseReasonTone("unverifiable-legacy"), "info");
+  assert.equal(releaseReasonTone("modified"), "attn");
+  assert.equal(releaseReasonTone("unverifiable-legacy"), "muted");
   assert.equal(releaseReasonTone("abandoned"), "muted");
   // danger is reserved for a refusal the reader has actually run into; a frozen copy is not an error.
   for (const r of ["modified", "unverifiable-legacy", "abandoned"]) {

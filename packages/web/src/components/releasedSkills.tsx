@@ -65,7 +65,7 @@ function ReleasedSkillsBody({ project }: { project: Project }) {
       <Panel>
         <Prose>
           Loom copies its own skills into this project's
-          <code style={{ color: color.info }}> .claude/skills</code> so every session here reads the same
+          <code style={{ color: color.text2 }}> .claude/skills</code> so every session here reads the same
           doctrine. When it can no longer prove a copy is still the one it placed, it stops overwriting it
           — your edit is safe, but that skill is now <strong style={{ color: color.text }}>frozen</strong>:
           it will never pick up a Loom update again until you hand it back.
@@ -253,7 +253,7 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
       ) : changed.length === 0 ? (
         <Prose>
           Every file matches the store copy byte for byte — this skill was frozen without its content
-          diverging, which is what <code style={{ color: color.info }}>{reviewed.reason}</code> means here.
+          diverging, which is what <code style={{ color: color.text2 }}>{reviewed.reason}</code> means here.
           Re-adopting changes no content; it just hands management back to Loom.
         </Prose>
       ) : (

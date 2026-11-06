@@ -129,46 +129,62 @@ export function Select({ style, className, mono, children, ...rest }: SelectHTML
 }
 
 // ── Status: Dot / StatusPill / Badge ───────────────────────────────────────────
-// Status is always a dot plus a word, never colour alone. Graphite has no glow, so `glow` is still
-// ACCEPTED (call sites pass it for live/busy states) but draws nothing. All three forward
-// unrecognized DOM props (data-*, aria-*, id, ...) to their root span via `rest`, same pattern as Panel.
+// Status is always a dot plus a word, never colour alone. There is no glow, so `glow` is still
+// ACCEPTED (call sites pass it for live/working states) but draws nothing. Motion is reserved for
+// one meaning: a `work` dot breathes slowly (.loom-dot-work in global.css, off under reduced motion).
+// All three forward unrecognized DOM props (data-*, aria-*, id, ...) to their root span via `rest`.
 type DotProps = { tone: Tone; glow?: boolean; title?: string } & Omit<HTMLAttributes<HTMLSpanElement>, "title">;
 
-export function Dot({ tone: t, glow: _glow, title, style, ...rest }: DotProps) {
+export function Dot({ tone: t, glow: _glow, title, style, className, ...rest }: DotProps) {
+  const cls = [t === "work" ? "loom-dot-work" : null, className].filter(Boolean).join(" ");
   return (
     <span
       {...rest}
+      className={cls || undefined}
       title={title}
       style={{ width: 8, height: 8, borderRadius: radius.base, background: toneFill[t], display: "inline-block", flexShrink: 0, ...style }}
     />
   );
 }
 
-// A tinted status capsule: the tone's soft fill, a 6px dot and a sentence-case word, e.g. "● Idle".
-// The label renders as given (no text-transform), so the casing lives in the label source.
-type StatusPillProps = { tone: Tone; label: string; glow?: boolean } & HTMLAttributes<HTMLSpanElement>;
+// A SOLID capsule: the signal's own fill under its on-colour. Only the two states that must stop the
+// eye get one: "needs you" (attn: a worker waiting on you, P1) and danger.
+const SOLID: Partial<Record<Tone, { bg: string; fg: string }>> = {
+  attn: { bg: color.attn, fg: color.onAttn },
+  danger: { bg: color.dangerFill, fg: color.onDanger },
+};
+const capsuleColors = (t: Tone, solid?: boolean): { background: string; color: string } => {
+  const s = solid ? SOLID[t] : undefined;
+  return s ? { background: s.bg, color: s.fg } : { background: toneSoft[t], color: toneText[t] };
+};
 
-export function StatusPill({ tone: t, label, glow: _glow, style, ...rest }: StatusPillProps) {
+// A tinted status capsule: the tone's soft fill, a 6px dot and a sentence-case word, e.g. "● Idle".
+// The label renders as given (no text-transform), so the casing lives in the label source. `solid`
+// (attn / danger only) fills the capsule with the signal itself.
+type StatusPillProps = { tone: Tone; label: string; glow?: boolean; solid?: boolean } & HTMLAttributes<HTMLSpanElement>;
+
+export function StatusPill({ tone: t, label, glow: _glow, solid, style, ...rest }: StatusPillProps) {
+  const c = capsuleColors(t, solid);
   return (
     <span {...rest} style={{
       display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 9px 4px 8px", borderRadius: radius.pill,
-      background: toneSoft[t], color: toneText[t], fontFamily: font.ui, fontSize: fs.sm, fontWeight: 500, lineHeight: 1,
+      ...c, fontFamily: font.ui, fontSize: fs.sm, fontWeight: 500, lineHeight: 1,
       whiteSpace: "nowrap", ...style,
     }}>
-      <Dot tone={t} style={{ width: 6, height: 6 }} />
+      <Dot tone={t} style={{ width: 6, height: 6, ...(solid && SOLID[t] ? { background: c.color } : null) }} />
       {label}
     </span>
   );
 }
 
 // A tinted tag with no border, e.g. "Running" / "Paused": the tone's soft fill under its text.
-type BadgeProps = { tone: Tone; children: ReactNode } & HTMLAttributes<HTMLSpanElement>;
+type BadgeProps = { tone: Tone; children: ReactNode; solid?: boolean } & HTMLAttributes<HTMLSpanElement>;
 
-export function Badge({ tone: t, children, style, ...rest }: BadgeProps) {
+export function Badge({ tone: t, children, solid, style, ...rest }: BadgeProps) {
   return (
     <span {...rest} style={{
       fontFamily: font.ui, fontSize: fs.sm, fontWeight: 500,
-      padding: "2px 8px", borderRadius: radius.sm, background: toneSoft[t], color: toneText[t], ...style,
+      padding: "2px 8px", borderRadius: radius.sm, ...capsuleColors(t, solid), ...style,
     }}>
       {children}
     </span>
@@ -222,8 +238,8 @@ export function SectionLabel({ children, style, ...rest }: SectionLabelProps) {
 }
 
 // ── Meter ────────────────────────────────────────────────────────────────────
-// Thin fill bar, e.g. context-token usage. The healthy fill is cobalt (`accent`); a warning state
-// passes `busy` or `danger`.
+// Thin fill bar, e.g. context-token usage. The healthy fill is ink-grey (`accent`); a threshold state
+// passes `attn` or `danger`.
 export function Meter({ value, max, tone: t = "accent", width = 80 }: { value: number; max: number; tone?: Tone; width?: number }) {
   const pct = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;
   return (
@@ -321,7 +337,7 @@ export function Segmented<T extends string>({
 export function StaleStartupPromptWarning({ warnings }: { warnings: StalePromptWarning[] | undefined }) {
   if (!warnings || warnings.length === 0) return null;
   return (
-    <div style={{ marginTop: 10, padding: 10, background: color.inset, border: `1px solid ${color.busy}`, borderRadius: radius.sm }}>
+    <div style={{ marginTop: 10, padding: 10, background: color.inset, border: `1px solid ${color.attn}`, borderRadius: radius.sm }}>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
         these agent startup prompts still reference the OLD value — edit them manually if that's a problem:
       </span>

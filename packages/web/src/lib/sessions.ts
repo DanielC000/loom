@@ -142,13 +142,13 @@ export function goLiveHeldControl(s: SessionGoLiveSlot): { label: string; title:
 }
 
 /**
- * The status pill for a session holding the slot. `pending` drives the amber tone + glow every
- * caller already uses for `busy`: a session mid-startup is transitional in exactly the way a busy
- * one is, and it must not borrow the settled phosphor "live" treatment.
+ * The status pill for a session holding the slot. `pending` drives the "work" tone + glow every
+ * caller already uses for a busy session: a session mid-startup is transitional in exactly the way a
+ * working one is, and it must not borrow the settled green "live" treatment.
  */
 export function goLiveSessionPill(s: Pick<Session, "processState" | "busy">): { label: string; pending: boolean } {
   if (s.processState === "starting") return { label: "starting", pending: true };
-  return { label: s.busy ? "busy" : "live", pending: s.busy };
+  return { label: s.busy ? "working" : "live", pending: s.busy };
 }
 
 /**

@@ -23,7 +23,7 @@ export function RateLimitBanner() {
       role="status"
       data-testid="rate-limit-banner"
       style={{
-        background: wash(color.busy, 10), border: `1px solid ${color.busy}`, borderRadius: radius.base,
+        background: wash(color.attn, 10), border: `1px solid ${color.attn}`, borderRadius: radius.base,
         padding: "8px 12px", margin: "8px 0", fontFamily: font.ui, fontSize: fs.sm, color: color.text,
       }}
     >

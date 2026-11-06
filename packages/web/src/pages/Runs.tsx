@@ -20,8 +20,8 @@ import { color, font, tone, type Tone, fs, radius } from "../theme";
 const IN_FLIGHT: ReadonlySet<RunStatus> = new Set<RunStatus>(["queued", "starting", "running"]);
 const statusTone: Record<RunStatus, Tone> = {
   queued: "muted",
-  starting: "busy",
-  running: "busy",
+  starting: "work",
+  running: "work",
   completed: "live",
   failed: "danger",
   timed_out: "danger",
@@ -155,7 +155,7 @@ function CapRejections({ events, agentName }: { events: RunEvent[]; agentName: (
               </div>
               <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <Chip label="key" value={e.keyId ? e.keyId.slice(0, 8) : "—"} />
-                {d.agentId && <Chip label="agent" value={agentName(d.agentId)} tone="info" />}
+                {d.agentId && <Chip label="agent" value={agentName(d.agentId)} tone="muted" />}
                 {d.observed != null && d.limit != null && <Chip label="observed" value={`${d.observed} / ${d.limit}`} />}
               </div>
             </Panel>
@@ -178,7 +178,7 @@ function RunRow({ run, selected, agentName, onSelect, onCancel, cancelling }:
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{run.id.slice(0, 8)}</span>
       </div>
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <Chip label="agent" value={agentName} tone="info" />
+        <Chip label="agent" value={agentName} tone="muted" />
         <Chip label="key" value={run.keyId ? run.keyId.slice(0, 8) : "internal"} />
         <Chip label="created" value={ts(run.createdAt)} />
         {run.endedAt && <Chip label="ended" value={ts(run.endedAt)} />}
@@ -214,7 +214,7 @@ function RunDetail({ run, agentName, onCancel, cancelling }:
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <Chip label="run" value={run.id} />
-        <Chip label="agent" value={agentName} tone="info" />
+        <Chip label="agent" value={agentName} tone="muted" />
         <Chip label="key" value={run.keyId ? run.keyId : "internal"} />
         {run.sessionId && <Chip label="session" value={run.sessionId.slice(0, 8)} />}
         {run.idempotencyKey && <Chip label="idem" value={run.idempotencyKey} />}

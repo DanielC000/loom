@@ -84,10 +84,10 @@ for (const theme of THEMES) {
       cssColor(page, "--loom-pressed"), cssColor(page, "--loom-btn-bg"), cssColor(page, "--loom-danger-soft"),
     ]);
     // The press fills are the exact expressions global.css's :active rules use.
-    const primaryPress = await cssColor(page, "color-mix(in oklab, var(--loom-accent) 82%, black)");
+    const primaryPress = await cssColor(page, "color-mix(in oklab, var(--loom-accent-hover) 70%, var(--loom-text-3))");
     const dangerPress = await cssColor(page, "color-mix(in oklab, var(--loom-danger-soft) 80%, var(--loom-danger))");
 
-    // primary: the connections "New connection" button. A solid cobalt fill under an on-accent label.
+    // primary: the connections "New connection" button. A solid ink fill under an on-accent label.
     const primary = page.getByRole("button", { name: "New connection" });
     await expect(primary).toBeVisible();
     await expect(primary).toHaveCSS("color", await cssColor(page, "--loom-on-accent"));
@@ -114,7 +114,7 @@ for (const theme of THEMES) {
     // danger: the board ColumnManager's per-column delete — a red outline that tints on hover.
     const danger = page.locator('button[title="Delete this column"]').first();
     await expect(danger).toBeVisible();
-    await expect(danger).toHaveCSS("color", await cssColor(page, "--loom-danger"));
+    await expect(danger).toHaveCSS("color", await cssColor(page, "--loom-danger-text"));
     await expect(danger).toHaveCSS("border-top-color", await cssColor(page, "--loom-danger-line"));
     await hoverAndPress(page, danger, { rest: transparent, hover: dangerSoft, press: dangerPress });
     await expectRing(page, danger, "2px");

@@ -21,17 +21,18 @@ function eventTone(e: AuditEvent): Tone {
   const k = e.kind;
   if (k === "worker_report") {
     const st = (e.detail as { status?: string } | null)?.status;
-    return st === "blocked" ? "busy" : st === "done" ? "live" : "info";
+    return st === "blocked" ? "attn" : st === "done" ? "live" : "muted";
   }
   if (k === "merge_rejected" || k === "worker_report_rejected" || k === "idle_escalated" ||
       k === "context_escalated" || k === "request_escalated" || k === "session_recovery_abandoned" || k === "session_died" ||
       k === "schedule_fire_failed" || k === "worker_report_undelivered") return "danger";
-  if (k === "merge_request" || k === "worker_stuck" || k === "idle_report" || k === "redirect_worker" ||
-      k === "schedule_fire_deferred" || k === "merge_landing_started" || k === "merge_landing_aborted") return "busy";
+  if (k === "merge_landing_started" || k === "redirect_worker") return "work";
+  if (k === "merge_request" || k === "worker_stuck" || k === "idle_report" ||
+      k === "schedule_fire_deferred" || k === "merge_landing_aborted") return "attn";
   if (k === "merge_done" || k === "recycle_complete" || k === "session_recovered") return "live";
-  if (k === "build_gate_retry_attempt" || k === "build_gate_retry") return "info";
+  if (k === "build_gate_retry_attempt" || k === "build_gate_retry") return "muted";
   if (k === "deploy") return (e.detail as { ok?: boolean } | null)?.ok ? "live" : "danger";
-  return "info";
+  return "muted";
 }
 
 // The session that an event is "about" — its worker when present, else its manager. The timeline ships
@@ -128,7 +129,7 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
   if (q.isLoading) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "8px 6px" }}>diffing…</div>;
   if (q.isError) {
     return (
-      <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, padding: "8px 6px", display: "flex", gap: 10, alignItems: "center" }}>
+      <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, padding: "8px 6px", display: "flex", gap: 10, alignItems: "center" }}>
         <span>{(q.error as Error).message}</span>
         <Button variant="ghost" onClick={onClose}>Dismiss</Button>
       </div>
@@ -314,7 +315,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
                 title={sc === "wave" ? "The whole manager wave (every agent)" : "Focus one agent — the manager or one of its workers"}
                 style={{
                   background: scope === sc ? color.inset : "transparent", border: "none",
-                  color: scope === sc ? color.live : color.text3,
+                  color: scope === sc ? color.accentFg : color.text3,
                   fontFamily: font.mono, fontSize: fs.mono, padding: "4px 12px", cursor: "pointer",
                 }}>{sc}</button>
             ))}
@@ -350,7 +351,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
             <Button variant="ghost" title="Step forward" onClick={() => { setPlaying(false); setSeq(Math.min(last, cur + 1)); }}>›</Button>
             <input type="range" min={0} max={last} value={cur}
               onChange={(e) => { setPlaying(false); setSeq(Number(e.target.value)); }}
-              style={{ flex: 1, accentColor: color.live }} aria-label="Replay position" />
+              style={{ flex: 1, accentColor: color.accent }} aria-label="Replay position" />
             <span data-testid="audit-replay-position"
               style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, minWidth: 64, textAlign: "right" }}>
               {cur + 1}/{events.length}

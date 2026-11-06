@@ -226,11 +226,11 @@ export function cadenceDraftFrom(override: Partial<OrchestrationConfig> | undefi
 export function CadenceWeakening({ cadence, interval }: { cadence: MergeGateCadence; interval: number | null }) {
   const note = weakeningNote(cadence, interval);
   if (!note) return null;
-  const c = note.tone === "danger" ? color.danger : color.busy;
+  const c = note.tone === "danger" ? color.danger : color.attn;
   return (
     <div data-testid={note.tone === "danger" ? "merge-gate-warn-never" : "merge-gate-warn-interval"}
       style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: color.inset }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: c, lineHeight: 1.6 }}>{note.text}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: note.tone === "danger" ? color.danger : color.attnText, lineHeight: 1.6 }}>{note.text}</span>
     </div>
   );
 }
@@ -291,10 +291,10 @@ export function CommitMessagePanel({ draft, onChange }: {
 export function CommitMessageWeakening({ k, value }: { k: CommitMessageKey; value: CommitMessageSwitch }) {
   const note = commitMessageNote(k, value);
   if (!note) return null;
-  const c = note.tone === "busy" ? color.busy : color.text3;
+  const c = note.tone === "attn" ? color.attnText : color.text3;
   return (
     <div data-testid={k === "trailers" ? "commit-trailers-warn" : "commit-log-body-warn"}
-      style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${note.tone === "busy" ? c : color.line}`, borderRadius: radius.base, background: color.inset }}>
+      style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${note.tone === "attn" ? color.attn : color.line}`, borderRadius: radius.base, background: color.inset }}>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: c, lineHeight: 1.6 }}>{note.text}</span>
     </div>
   );
@@ -526,7 +526,7 @@ export function MergeGateCadencePanel({ projectId, draft, onChange }: {
     <div data-testid="merge-gate-panel" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <CadenceControls draft={draft} onChange={onChange} idPrefix="settings" layout="stack" />
       <Hint>effective: {effective} · human-set only</Hint>
-      <div style={{ marginTop: 8, paddingLeft: 13, borderLeft: `2px solid ${toneMap[draft.cadence === "every" ? "live" : draft.cadence === "never" ? "danger" : "busy"]}`, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ marginTop: 8, paddingLeft: 13, borderLeft: `2px solid ${toneMap[draft.cadence === "every" ? "muted" : draft.cadence === "never" ? "danger" : "attn"]}`, display: "flex", flexDirection: "column", gap: 10 }}>
         {s && <LiveCounterRow status={s} />}
         {!s && <Hint>live counter unavailable — this daemon does not report merge-gate state</Hint>}
         <CadenceWeakening cadence={draft.cadence} interval={draft.cadence === "interval" ? (Number(draft.intervalRaw.trim()) || null) : null} />

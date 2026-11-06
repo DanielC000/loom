@@ -4,7 +4,7 @@ import type { SkillPermissionVector } from "@loom/shared";
 import { api, type SkillMergePreview, type SkillFileState } from "../lib/api";
 import { LineDiff } from "../components/LineDiff";
 import { Panel, Button, Input, SectionLabel, Badge } from "../components/ui";
-import { color, font, radius, type Tone, fs } from "../theme";
+import { color, font, radius, toneFill, type Tone, fs } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 
 // Loom's OWN skill set — the editable store (~/.loom/skills) that the daemon injects into every
@@ -145,7 +145,7 @@ export default function Skills() {
   );
 }
 
-// Compact sidebar status: a cyan dot for "customized", an amber dot for "update available". Restrained —
+// Compact sidebar status: a muted dot for "customized", an attn dot for "update available". Restrained —
 // the full-text badges live in the editor header; here it's a glanceable signal with a hover title.
 // The permission-widening dot is RED, the one red signal on this page: amber already carries two
 // unrelated states here, and this ranks above both (card 87a51903).
@@ -155,16 +155,15 @@ function StatusDots({ customized, updateAvailable, notTrusted, vectors }: {
   if (!customized && !updateAvailable && !notTrusted && !vectors.length) return null;
   return (
     <span style={{ display: "inline-flex", gap: 4, flexShrink: 0 }}>
-      {customized && <Dot tone="info" title="Customized — you edited this skill" />}
-      {updateAvailable && <Dot tone="busy" title="Update available — Loom shipped a newer version" />}
-      {notTrusted && <Dot tone="busy" title="Not delivered to locked roles (Companion, Setup…) — save it here to trust it" />}
+      {customized && <Dot tone="muted" title="Customized — you edited this skill" />}
+      {updateAvailable && <Dot tone="attn" title="Update available — Loom shipped a newer version" />}
+      {notTrusted && <Dot tone="attn" title="Not delivered to locked roles (Companion, Setup…) — save it here to trust it" />}
       {!!vectors.length && <Dot tone="danger" title={`${PERMISSION_SIGNAL_LABEL}: ${vectors.map((v) => PERMISSION_VECTORS[v].code).join(", ")}`} />}
     </span>
   );
 }
 function Dot({ tone, title }: { tone: Tone; title: string }) {
-  const c = { cyan: color.info, amber: color.busy, red: color.danger } as Record<string, string>;
-  return <span title={title} style={{ width: 7, height: 7, borderRadius: radius.base, background: c[tone] ?? color.text3, display: "inline-block" }} />;
+  return <span title={title} style={{ width: 7, height: 7, borderRadius: radius.base, background: toneFill[tone], display: "inline-block" }} />;
 }
 
 // --- Permission-widening disclosure (card 87a51903) -------------------------------------------------
@@ -282,11 +281,11 @@ function SkillEditor({
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
         <strong style={{ fontFamily: font.ui, color: color.text }}>{name}</strong>
         {bundled && <Badge tone="muted">bundled</Badge>}
-        {customized && <Badge tone="info">customized</Badge>}
-        {updateAvailable && <Badge tone="busy">update available</Badge>}
+        {customized && <Badge tone="muted">customized</Badge>}
+        {updateAvailable && <Badge tone="attn">update available</Badge>}
         {notTrusted && (
           <span title="Not delivered to locked roles (Companion, Setup, Elevated Operator, Workspace Auditor…) under their deliver-all default — save it here to trust it.">
-            <Badge tone="busy">not delivered to locked roles</Badge>
+            <Badge tone="attn">not delivered to locked roles</Badge>
           </span>
         )}
         {!!permissionVectors.length && (
@@ -362,14 +361,14 @@ function SkillEditor({
         <span style={{ flex: 1 }} />
         {bundled && canPublish && (confirmPublish ? (
           <>
-            <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>write store edits into the repo asset?</span>
+            <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>write store edits into the repo asset?</span>
             <Button variant="primary" disabled={publishing} onClick={() => { onPublish(); setConfirmPublish(false); }}>Publish</Button>
             <Button onClick={() => setConfirmPublish(false)}>Cancel</Button>
           </>
         ) : <Button onClick={() => setConfirmPublish(true)} title="Write this skill's store edits back into the repo's bundled asset (you commit it)">Publish to repo</Button>)}
         {bundled && (confirmReset ? (
           <>
-            <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>discard edits & restore shipped?</span>
+            <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>discard edits & restore shipped?</span>
             <Button variant="danger" disabled={resetting} onClick={onReset}>Reset</Button>
             <Button onClick={() => setConfirmReset(false)}>Cancel</Button>
           </>
@@ -394,10 +393,10 @@ function UpdateBanner({ name, onAdopt, adoptBusy, error }: { name: string; onAdo
     enabled: showDiff,
   });
   return (
-    <div style={{ border: `1px solid ${color.busy}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
+    <div style={{ border: `1px solid ${color.attn}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
       background: color.inset, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.mono }}>
           Loom shipped an update to this skill.
         </span>
         <span style={{ flex: 1 }} />
@@ -431,10 +430,10 @@ function FilesDivergedBanner({ name }: { name: string }) {
   const diverged = (diff.data?.files ?? []).filter((f) => f.path !== "SKILL.md" && (f.customized || f.updateAvailable));
   if (!diverged.length) return null;
   return (
-    <div style={{ border: `1px solid ${color.info}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
+    <div style={{ border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
       background: color.inset, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ color: color.info, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
           {diverged.length} supporting {diverged.length === 1 ? "file differs" : "files differ"} from the shipped version.
         </span>
         <span style={{ flex: 1 }} />
@@ -506,8 +505,8 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
           padding: "6px 8px", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, flexShrink: 0 }}>{file.path}</span>
-        {file.customized && <Badge tone="info">customized</Badge>}
-        {file.updateAvailable && <Badge tone="busy">update available</Badge>}
+        {file.customized && <Badge tone="muted">customized</Badge>}
+        {file.updateAvailable && <Badge tone="attn">update available</Badge>}
       </button>
       {open && (
         <div style={{ padding: "0 8px 8px", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -519,13 +518,13 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
             // anchored on the common base, so "what I changed" and "what Loom changed" stay legible
             // instead of collapsing into one confusing mine-vs-shipped diff.
             <>
-              <DiffBlock kind="mine" label="Your edits (base → your copy)" tone="info"><LineDiff base={d.base} shipped={d.mine} /></DiffBlock>
-              <DiffBlock kind="shipped" label="What Loom shipped (base → shipped)" tone="busy"><LineDiff base={d.base} shipped={d.shipped} /></DiffBlock>
+              <DiffBlock kind="mine" label="Your edits (base → your copy)" tone="muted"><LineDiff base={d.base} shipped={d.mine} /></DiffBlock>
+              <DiffBlock kind="shipped" label="What Loom shipped (base → shipped)" tone="muted"><LineDiff base={d.base} shipped={d.shipped} /></DiffBlock>
             </>
           ) : file.customized ? (
-            <DiffBlock kind="mine" label="Your copy vs shipped" tone="info"><LineDiff base={d.shipped} shipped={d.mine} /></DiffBlock>
+            <DiffBlock kind="mine" label="Your copy vs shipped" tone="muted"><LineDiff base={d.shipped} shipped={d.mine} /></DiffBlock>
           ) : (
-            <DiffBlock kind="shipped" label="What Loom shipped (base → shipped)" tone="busy"><LineDiff base={d.base} shipped={d.shipped} /></DiffBlock>
+            <DiffBlock kind="shipped" label="What Loom shipped (base → shipped)" tone="muted"><LineDiff base={d.base} shipped={d.shipped} /></DiffBlock>
           )}
 
           {resolve.error && (
@@ -543,7 +542,7 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
               <span style={{ flex: 1 }} />
               {confirmTake ? (
                 <>
-                  <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>discard your edits to this file?</span>
+                  <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>discard your edits to this file?</span>
                   <Button variant="danger" disabled={resolve.isPending} onClick={() => resolve.mutate("shipped")}>Take shipped</Button>
                   <Button onClick={() => setConfirmTake(false)}>Cancel</Button>
                 </>
@@ -571,7 +570,7 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
 // a page-wide text assertion is satisfiable by the same text appearing in the sibling diff or the
 // editor below, which is precisely how a first attempt at the regression pin passed against the bug.
 function DiffBlock({ kind, label, tone, children }: { kind: "mine" | "shipped"; label: string; tone: Tone; children: ReactNode }) {
-  const accent = tone === "info" ? color.info : color.busy;
+  const accent = toneFill[tone];
   return (
     <div data-diff-kind={kind} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono,
@@ -601,17 +600,17 @@ function DivergedBanner({ name, mine, onSync, syncing }: { name: string; mine: s
     enabled: showDiff,
   });
   return (
-    <div style={{ border: `1px solid ${color.info}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
+    <div style={{ border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
       background: color.inset, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ color: color.info, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
           Your saved copy differs from the current shipped version.
         </span>
         <span style={{ flex: 1 }} />
         <Button onClick={() => setShowDiff((v) => !v)}>{showDiff ? "Hide differences" : "Compare with shipped"}</Button>
         {confirmSync ? (
           <>
-            <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>discard your copy & sync?</span>
+            <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>discard your copy & sync?</span>
             <Button variant="danger" disabled={syncing} onClick={onSync}>Sync</Button>
             <Button onClick={() => setConfirmSync(false)}>Cancel</Button>
           </>
@@ -653,7 +652,7 @@ function ConflictResolver({
         <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: `1px solid ${color.line}` }}>
             <strong style={{ fontFamily: font.ui, color: color.text }}>Resolve update</strong>
-            <Badge tone="info">{name}</Badge>
+            <Badge tone="muted">{name}</Badge>
             <span style={{ color: color.text3, fontSize: fs.sm }}>
               {conflictCount} conflicting {conflictCount === 1 ? "hunk" : "hunks"} — keep yours or take shipped
             </span>
@@ -671,9 +670,9 @@ function ConflictResolver({
                 <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>Conflict {idx + 1}</span>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <HunkSide label="Your version" tone="info" active={choice === "mine"} lines={p.mine}
+                    <HunkSide label="Your version" tone="muted" active={choice === "mine"} lines={p.mine}
                       onPick={() => setChoices((c) => c.map((v, k) => (k === idx ? "mine" : v)))} />
-                    <HunkSide label="Shipped version" tone="busy" active={choice === "shipped"} lines={p.shipped}
+                    <HunkSide label="Shipped version" tone="muted" active={choice === "shipped"} lines={p.shipped}
                       onPick={() => setChoices((c) => c.map((v, k) => (k === idx ? "shipped" : v)))} />
                   </div>
                 </div>
@@ -707,16 +706,16 @@ function ConflictResolver({
 // One side of a conflict hunk — clickable to select. The active side gets a phosphor border; the other
 // reads dim, so the chosen resolution is obvious at a glance.
 function HunkSide({ label, tone, active, lines, onPick }: { label: string; tone: Tone; active: boolean; lines: string[]; onPick: () => void }) {
-  const accent = tone === "info" ? color.info : color.busy;
+  const accent = toneFill[tone];
   return (
     <button onClick={onPick} title={`Keep this version (${label})`}
       style={{ textAlign: "left", cursor: "pointer", borderRadius: radius.sm, padding: 8,
         background: active ? color.surface : color.inset,
-        border: `1px solid ${active ? color.live : color.line}`,
-        boxShadow: active ? `inset 0 0 0 1px ${color.liveSoft}` : undefined }}>
+        border: `1px solid ${active ? color.accentEdge : color.line}`,
+        boxShadow: active ? `inset 0 0 0 1px ${color.lineStrong}` : undefined }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
         <span style={{ width: 7, height: 7, borderRadius: radius.base, background: accent, display: "inline-block" }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: active ? color.live : color.text2 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: active ? color.accentFg : color.text2 }}>
           {label}{active ? " ✓" : ""}
         </span>
       </div>

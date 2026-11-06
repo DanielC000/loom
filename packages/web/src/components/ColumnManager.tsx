@@ -246,7 +246,7 @@ export function ColumnManager({ project }: { project: Project }) {
           nothing was written. Staged edits are kept; the human reviews and presses Save again (card d5946e05). */}
       {drift ? (
         <div role="status" data-testid="column-drift-notice"
-          style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5, border: `1px solid ${color.busy}`, borderRadius: radius.base, padding: "6px 9px" }}>
+          style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5, border: `1px solid ${color.attn}`, borderRadius: radius.base, padding: "6px 9px" }}>
           The board changed while you were editing — nothing was saved, and your edits are kept.
           {drift.added.length ? ` Added elsewhere: ${drift.added.map(labelOf).join(", ")} (now listed below).` : ""}
           {drift.removed.length ? ` Removed elsewhere: ${drift.removed.map(labelOf).join(", ")} (flagged below).` : ""}
@@ -259,7 +259,7 @@ export function ColumnManager({ project }: { project: Project }) {
       {warnings.length ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {warnings.map((w, i) => (
-            <span key={i} style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>⚠ {w}</span>
+            <span key={i} style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>⚠ {w}</span>
           ))}
         </div>
       ) : null}
@@ -272,7 +272,7 @@ export function ColumnManager({ project }: { project: Project }) {
         {error
           ? <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{error}</span>
           : dirty
-            ? <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
+            ? <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
             : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
         {save.isError && !(save.error instanceof ColumnsDriftedError) && (
@@ -345,7 +345,7 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
       style={{
         // All-longhand borders (never the `border` shorthand) so toggling the left accent / hover color
         // on rerender doesn't trip React's shorthand-vs-longhand conflict warning.
-        borderWidth: 1, borderStyle: "solid", borderColor: isOver ? color.live : color.line,
+        borderWidth: 1, borderStyle: "solid", borderColor: isOver ? color.accentEdge : color.line,
         borderLeftWidth: 2, borderLeftColor: meta ? tone[meta.t] : color.line,
         borderRadius: radius.base, background: color.inset,
         opacity: isDragging ? 0.4 : 1,
@@ -383,7 +383,7 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
           style={{
             width: 20, height: 20, flexShrink: 0, padding: 0, cursor: "pointer", borderRadius: radius.sm,
             borderWidth: row.accentColor ? 1 : 1, borderStyle: row.accentColor ? "solid" : "dashed",
-            borderColor: accentOpen ? color.info : row.accentColor ? color.lineStrong : color.line,
+            borderColor: accentOpen ? color.lineStrong : row.accentColor ? color.lineStrong : color.line,
             background: row.accentColor ?? "transparent",
           }} />
 
@@ -419,14 +419,14 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
           again as an empty lane — the human's call, so it is stated on the row itself; ✕ drops it instead. */}
       {row.removedElsewhere && (
         <div data-testid="column-removed-elsewhere"
-          style={{ padding: "0 9px 8px 28px", fontFamily: font.mono, fontSize: fs.mono, color: color.busy, lineHeight: 1.5 }}>
+          style={{ padding: "0 9px 8px 28px", fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, lineHeight: 1.5 }}>
           Removed elsewhere — Save will re-create this lane (empty; its cards were already moved). Press ✕ to leave it deleted.
         </div>
       )}
 
       {/* Delete-with-cards confirm: what happens to the lane's cards on save. */}
       {confirming && cards > 0 && (
-        <div style={{ padding: "0 9px 8px 28px", fontFamily: font.mono, fontSize: fs.mono, color: color.busy, lineHeight: 1.5 }}>
+        <div style={{ padding: "0 9px 8px 28px", fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, lineHeight: 1.5 }}>
           {cards} card{cards === 1 ? "" : "s"} will move to <span style={{ color: color.text }}>{landingLabel}</span> when you save.
         </div>
       )}
@@ -466,7 +466,7 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
           <Input value={row.key} onChange={(e) => onKey(e.target.value)} aria-label="Column key" spellCheck={false}
             placeholder="stable_key" style={{ width: 200 }} />
           {renamed && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>
               rename {row.originalKey} → {row.key.trim() || "?"}{cards > 0 ? ` · moves ${cards} card${cards === 1 ? "" : "s"}` : ""}
             </span>
           )}

@@ -58,11 +58,11 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
       <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
         title={open ? "Collapse the startup prompt" : "View / edit the startup prompt"}
         style={headerBtn}>
-        <span style={{ color: open ? color.live : color.text2, fontFamily: font.mono, fontSize: fs.mono, width: 10 }}>{open ? "▾" : "▸"}</span>
+        <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono, width: 10 }}>{open ? "▾" : "▸"}</span>
         <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.text2 }}>
           Startup prompt
         </span>
-        {dirty && <span style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.xs }}>● unsaved</span>}
+        {dirty && <span style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.xs }}>● unsaved</span>}
         {empty && !dirty && <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.xs }}>empty</span>}
       </button>
 
@@ -96,7 +96,7 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
             {readOnly
               ? <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>read-only in this preview</span>
               : dirty
-                ? <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
+                ? <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
                 : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
             <span style={{ flex: 1 }} />
             {save.isError && (

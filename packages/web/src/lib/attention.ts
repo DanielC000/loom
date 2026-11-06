@@ -518,7 +518,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const qDismissKey = requestDismissKey(q, now);
     items.push(q.sessionOrphaned
       ? {
-          key: `q-${q.id}`, tone: "busy", notify: "request", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "attn", notify: "request", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           dismissKey: qDismissKey,
           dismissHint: "Hide this alert — this request can never be consumed by its asking session; it stays in the inbox for you to cancel or answer.",
@@ -536,7 +536,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
           text: `${decisionAttentionText(q)} — pending since ${new Date(q.createdAt).toLocaleDateString()}, unanswered`,
         }
       : {
-          key: `q-${q.id}`, tone: "info", notify: "request", kind: label, questionId: q.id, sessionId: q.sessionId,
+          key: `q-${q.id}`, tone: "attn", notify: "request", kind: label, questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           dismissKey: qDismissKey,
           dismissHint: "Hide this alert — it returns if this request goes stale or its asking session dies. The request stays pending and answerable in the inbox.",
@@ -610,7 +610,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       });
     } else if (detail.state === "done") {
       items.push({
-        key: `id-${e.id}`, tone: "busy", notify: "queue-drained", kind: "QUEUE DRAINED", sessionId: e.managerSessionId,
+        key: `id-${e.id}`, tone: "attn", notify: "queue-drained", kind: "QUEUE DRAINED", sessionId: e.managerSessionId,
         // Card 611e76ba — the EPISODE id, never this event's own id: a drained manager re-files
         // idle_report("done") on every nudge cycle. Falls back to the event id only if the episode map
         // somehow has no entry (it always should — this branch only runs for a done-state idle_report).
@@ -674,7 +674,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     const agentLabel = all.find((s) => s.id === sid)?.agentName
       ?? (detail.agentId ? `agent ${detail.agentId.slice(0, 8)}` : `session ${sid.slice(0, 8)}`);
     items.push({
-      key: `cig-${e.id}`, tone: "busy", notify: "codex-isolation-gap", kind: "CODEX ISOLATION GAP", sessionId: sid,
+      key: `cig-${e.id}`, tone: "attn", notify: "codex-isolation-gap", kind: "CODEX ISOLATION GAP", sessionId: sid,
       // Card 5ced500b — this kind has NO liveness filter by design (card ed0858dc: it reports a
       // standing CONFIGURATION fact whose remedy outlives the disclosing session), and a codex run is
       // short-lived, so by the time a human looks the session is usually archived and gone from the live
@@ -763,7 +763,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       : `manager ${e.managerSessionId.slice(0, 8)} — quiet: ${causePhrase}` +
         (questionCount > 0 ? `; answering ${questionCount} pending Request(s) releases ${releasedCardCount} card(s)` : "");
     items.push({
-      key: `bq-${e.id}`, tone: "busy", notify: "quiet-board", kind: "QUIET BOARD", sessionId: e.managerSessionId, text,
+      key: `bq-${e.id}`, tone: "attn", notify: "quiet-board", kind: "QUIET BOARD", sessionId: e.managerSessionId, text,
       // Card 611e76ba — idle-watcher.ts emits board_quiet_cause exactly once per quiet episode, so the
       // event id is "this manager, this quiet episode": the board going quiet AGAIN after work picks back
       // up files a new event and the row returns, which is the owner's own stated expectation.
@@ -817,7 +817,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     isWaitingSnoozed: isActiveWaitingSnooze(latestIdle.get(s.id)),
   }))) {
     items.push({
-      key: `s-${s.id}`, tone: "busy", notify: "stuck-busy", kind: "STUCK-BUSY", sessionId: s.id,
+      key: `s-${s.id}`, tone: "attn", notify: "stuck-busy", kind: "STUCK-BUSY", sessionId: s.id,
       // Card 5ced500b — derived by ITERATING the live session feed, so the project is already in hand;
       // stating it keeps every reader on the same `projectId` path instead of a session re-lookup.
       projectId: s.projectId,

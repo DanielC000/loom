@@ -34,7 +34,8 @@ function cardByTitle(page: Page, title: string) {
 // Asserting the fill's computed color is the strongest observable that the card actually switched
 // terminal state, not merely that some bar is present. The expected colours are resolved from the live
 // tokens inside the test (`cssColor`), never typed as literals:
-//   --loom-busy         the running sweep gradient AND the rejected fill
+//   --loom-work         the running sweep gradient (a gate is working)
+//   --loom-attn         the rejected fill (a rejection needs you)
 //   --loom-live         the merged fill (the live FILL shade, not the live text shade)
 //   --loom-danger       the failed fill
 //   --loom-text-3   the queued fill (card 53ad9ed3)
@@ -86,8 +87,9 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   await expect(card).toBeVisible();
 
   // ── RUNNING: the oscilloscope sweep is present (settled fill is NOT), the pill reads "merging", the
-  //    branch chip yields to the merge pill (compactness), and the sweep is drawn with the amber token. ──
-  const AMBER = await cssColor(page, "--loom-busy");
+  //    branch chip yields to the merge pill (compactness), and the sweep is drawn with the work token. ──
+  const WORK = await cssColor(page, "--loom-work");
+  const ATTN = await cssColor(page, "--loom-attn");
   const PHOSPHOR = await cssColor(page, "--loom-live");
   const RED = await cssColor(page, "--loom-danger");
   const MUTED = await cssColor(page, "--loom-text-3");
@@ -96,7 +98,7 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   await expect(card.locator(".loom-merge-fill")).toHaveCount(0);
   await expect(card.getByText("merging", { exact: true })).toBeVisible();
   await expect(card.getByText("loom/mrg1", { exact: true })).toHaveCount(0); // branch hidden during merge
-  expect(await sweep.evaluate((el) => getComputedStyle(el).backgroundImage)).toContain(AMBER);
+  expect(await sweep.evaluate((el) => getComputedStyle(el).backgroundImage)).toContain(WORK);
 
   // The live timer ticks: capture M:SS, wait past a second boundary, and assert it ADVANCED.
   const timer = card.getByText(/^\d+:\d{2}$/);
@@ -150,8 +152,8 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   await shoot(card, "merge-merged.png");
 
   // ── REJECTED (op-state "done", outcome "rejected" — a gate/stranded-work/empty-stage refusal that
-  //    RESOLVED rather than threw): a solid AMBER fill + "rejected" pill — distinct from both "merged"
-  //    (phosphor) and the RUNNING sweep (also amber, but the animated `.loom-merge-sweep`, not a static
+  //    RESOLVED rather than threw): a solid ATTN fill + "rejected" pill — distinct from both "merged"
+  //    (green) and the RUNNING sweep (the work colour, on the animated `.loom-merge-sweep`, not a static
   //    `.loom-merge-fill`). This is the case that used to misread as green "merged" via `state:"done"`
   //    alone before `outcome` existed. ──
   mergeInjection = { state: "done", outcome: "rejected" };
@@ -161,7 +163,7 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   await expect(card.locator(".loom-merge-sweep")).toHaveCount(0);
   await expect(card.getByText("rejected", { exact: true })).toBeVisible();
   await expect(card.getByText("merged", { exact: true })).toHaveCount(0);
-  expect(await rejectedFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(AMBER);
+  expect(await rejectedFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toBe(ATTN);
   await shoot(card, "merge-rejected.png");
 
   // ── FAILED (op-state "failed" — a genuine exception during confirm): a solid RED fill + "failed"

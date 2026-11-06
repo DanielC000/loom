@@ -349,7 +349,7 @@ function MicButton({ speech }: { speech: SpeechRecognitionApi }) {
     >
       <span
         className={listening ? "loom-mic-pulse" : undefined}
-        style={{ width: 7, height: 7, borderRadius: radius.base, display: "inline-block", background: listening ? color.danger : color.live }}
+        style={{ width: 7, height: 7, borderRadius: radius.base, display: "inline-block", background: listening ? color.danger : color.text2 }}
       />
       {listening ? "Stop" : requesting ? "starting…" : "Voice"}
     </Button>
@@ -391,7 +391,7 @@ function ComposerStatusLine({ speech, sendStatus }: { speech: SpeechRecognitionA
   const { status, interim, error, secure, supported } = speech;
   let node: React.ReactNode = null;
   if (supported && !secure) {
-    node = <span style={{ color: color.busy }}>voice needs a secure context</span>;
+    node = <span style={{ color: color.attnText }}>voice needs a secure context</span>;
   } else if (status === "requesting") {
     node = <span style={{ color: color.text2 }}>requesting microphone…</span>;
   } else if (status === "listening") {

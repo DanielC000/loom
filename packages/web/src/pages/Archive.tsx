@@ -252,13 +252,13 @@ function ArchiveRow({ s, selected, onSelect, onRestore, restoring, onDelete, del
         {/* A cheap, bulk-computed hint (archive snapshot presence) — NOT a guarantee either way; a
             missing snapshot doesn't mean no transcript is viewable (the raw engine JSONL can still be
             there, see the transcript panel's own fallback), so this reads "snapshot", not "transcript". */}
-        {s.snapshotExists ? <Badge tone="live">snapshot</Badge> : <Badge tone="muted">no snapshot</Badge>}
+        {s.snapshotExists ? <Badge tone="muted">snapshot</Badge> : <Badge tone="muted">no snapshot</Badge>}
         <StatusPill tone={dead ? "danger" : "muted"} label={dead ? "dead · view-only" : s.processState} />
       </div>
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <Chip label="agent" value={s.agentName} />
-        {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} tone="info" />}
-        {s.branch && <Chip label="branch" value={s.branch} tone="info" />}
+        {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} tone="muted" />}
+        {s.branch && <Chip label="branch" value={s.branch} tone="muted" />}
         {/* How much context this session had consumed when it exited — the SAME renderer the live fleet
             rows use (components/fleet's ContextUsage), so the two can never drift on how it's computed.
             A session that never completed a turn has NO reading at all: that renders as an explicit "—",

@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import type { Profile, RepoRegistryEntry } from "@loom/shared";
 import { api, type SetupTemplate, type TemplateApplyResult } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { color, font, radius, wash, fs } from "../theme";
+import { color, font, radius, fs } from "../theme";
 import { Button, Input } from "./ui";
 import { LogoMark } from "./Logo";
 import { roleDisplay, roleColor } from "../lib/roleDisplay";
@@ -169,13 +169,13 @@ function WizardBody({ onClose }: { onClose: () => void }) {
       role="dialog" aria-modal="true" aria-label="Set up a new project"
       style={{
         position: "fixed", inset: 0, zIndex: 1600, display: "flex", flexDirection: "column",
-        background: `radial-gradient(1100px 460px at 50% -8%, ${color.liveSoft}, transparent 60%), ${color.bg}`,
+        background: `radial-gradient(1100px 460px at 50% -8%, ${color.surface2}, transparent 60%), ${color.bg}`,
         overflowY: "auto", overflowX: "hidden",
       }}
     >
       {/* Top bar: brand at the left, the horizontal stepper centered, a close affordance at the right. */}
       <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 24px 30px" }}>
-        <span style={{ position: "absolute", left: 24, top: 20, display: "inline-flex", alignItems: "center", gap: 9, color: color.live }}>
+        <span style={{ position: "absolute", left: 24, top: 20, display: "inline-flex", alignItems: "center", gap: 9, color: color.accentFg }}>
           <LogoMark size={20} />
           <span style={{ fontFamily: font.ui, fontWeight: 600, fontSize: fs.lg, letterSpacing: "0.12em", color: color.text }}>loom</span>
         </span>
@@ -278,17 +278,17 @@ function Stepper({ step, compact }: { step: Step; compact?: boolean }) {
               <span style={{
                 width: bub, height: bub, borderRadius: radius.pill, display: "grid", placeItems: "center",
                 fontFamily: font.mono, fontSize: compact ? fs.sm : fs.body, fontWeight: 700,
-                border: `1px solid ${state === "todo" ? color.lineStrong : color.live}`,
-                color: state === "current" ? color.bg : state === "done" ? color.live : color.text3,
-                background: state === "current" ? color.live : color.bg,
-                boxShadow: state === "current" ? `0 0 0 5px ${color.liveSoft}` : undefined,
+                border: `1px solid ${state === "todo" ? color.lineStrong : state === "current" ? color.accent : color.accentFg}`,
+                color: state === "current" ? color.onAccent : state === "done" ? color.accentFg : color.text3,
+                background: state === "current" ? color.accent : color.bg,
+                boxShadow: state === "current" ? `0 0 0 5px ${color.ringSoft}` : undefined,
               }}>{state === "done" ? "✓" : n}</span>
               <span style={{
                 fontFamily: font.mono, fontSize: compact ? fs.xs : fs.mono, color: state === "current" ? color.text : state === "done" ? color.text2 : color.text3,
               }}>{cap}</span>
             </div>
             {i < STEP_CAPS.length - 1 && (
-              <span aria-hidden style={{ width: connW, height: 1, margin: "0 -4px 22px", background: n < step ? color.live : color.lineStrong }} />
+              <span aria-hidden style={{ width: connW, height: 1, margin: "0 -4px 22px", background: n < step ? color.accentEdge : color.lineStrong }} />
             )}
           </div>
         );
@@ -318,7 +318,7 @@ function RosterRow({ agentName, profile, topBorder }: { agentName: string; profi
     }}>
       <span aria-hidden style={{ width: 8, height: 8, borderRadius: radius.base, flexShrink: 0, background: roleColor(role) }} />
       <span style={{ flex: 1, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{agentName}</span>
-      {profile?.browserTesting && <RigBadge tone={color.info}>browser</RigBadge>}
+      {profile?.browserTesting && <RigBadge tone={color.text2}>browser</RigBadge>}
       {profile?.noCommit && <RigBadge tone={color.text3}>no-commit</RigBadge>}
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: roleColor(role), flexShrink: 0 }}>
         {d.sigil} {d.short}
@@ -364,7 +364,7 @@ function StepTemplate({
               onClick={() => onChoose("empty")} aria-pressed={choice === "empty"}
               style={{
                 background: "transparent", border: "none", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono,
-                padding: 0, color: choice === "empty" ? color.live : color.info,
+                padding: 0, color: color.accentFg,
                 textDecoration: choice === "empty" ? "underline" : "none",
               }}
             >Start with an empty project →</button>
@@ -385,8 +385,8 @@ function TemplateCard({
       style={{
         textAlign: "left", cursor: "pointer", display: "flex", flexDirection: "column", padding: 0, overflow: "hidden",
         background: color.surface, borderRadius: radius.base,
-        border: `1px solid ${selected ? color.live : color.line}`,
-        boxShadow: selected ? `inset 0 0 0 1px ${color.liveSoft}` : undefined,
+        border: `1px solid ${selected ? color.accentEdge : color.line}`,
+        boxShadow: selected ? `inset 0 0 0 1px ${color.lineStrong}` : undefined,
       }}
     >
       <div style={{ padding: "18px 20px 14px" }}>
@@ -394,8 +394,8 @@ function TemplateCard({
           <span style={{ flex: 1, fontFamily: font.ui, fontSize: fs.lg, fontWeight: 600, color: color.text }}>{template.name}</span>
           <span aria-hidden style={{
             width: 18, height: 18, borderRadius: radius.pill, flexShrink: 0, marginTop: 2,
-            border: `1px solid ${selected ? color.live : color.lineStrong}`,
-            background: selected ? `radial-gradient(circle, ${color.live} 0 4px, transparent 5px)` : "transparent",
+            border: `1px solid ${selected ? color.accentEdge : color.lineStrong}`,
+            background: selected ? `radial-gradient(circle, ${color.accent} 0 4px, transparent 5px)` : "transparent",
           }} />
         </div>
         <p style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.55, margin: "8px 0 0" }}>{template.description}</p>
@@ -409,7 +409,7 @@ function TemplateCard({
         marginTop: "auto", padding: "12px 20px", borderTop: `1px solid ${color.line}`, background: color.inset,
         display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: font.mono, fontSize: fs.mono, color: color.text2,
       }}>
-        <span>stands up <b style={{ color: color.live }}>{n} agent{n === 1 ? "" : "s"}</b></span>
+        <span>stands up <b style={{ color: color.text }}>{n} agent{n === 1 ? "" : "s"}</b></span>
         <span>+ {template.boardSeed.count} starter card{template.boardSeed.count === 1 ? "" : "s"}</span>
       </div>
     </button>
@@ -556,7 +556,7 @@ function RegisteredReposField({ repos, onChange }: { repos: RepoRegistryEntry[];
       )}
       {repos.length > 0 && (
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.5 }}>
-          A repo with no gate command merges as <span style={{ color: color.busy }}>unverified</span> — it does not fall back to another repo's gate.
+          A repo with no gate command merges as <span style={{ color: color.attnText }}>unverified</span> — it does not fall back to another repo's gate.
         </span>
       )}
       <div>
@@ -574,8 +574,8 @@ function SegButton({ on, onClick, title, sub }: { on: boolean; onClick: () => vo
         display: "flex", flexDirection: "column", gap: 4, textAlign: "left", cursor: "pointer",
         fontFamily: font.mono, fontSize: fs.body, padding: 12, borderRadius: radius.base,
         background: color.inset, color: on ? color.text : color.text2,
-        border: `1px solid ${on ? color.live : color.lineStrong}`,
-        boxShadow: on ? `inset 0 0 0 1px ${color.liveSoft}` : undefined,
+        border: `1px solid ${on ? color.accentEdge : color.lineStrong}`,
+        boxShadow: on ? `inset 0 0 0 1px ${color.lineStrong}` : undefined,
       }}
     >
       <span>{title}</span>
@@ -655,8 +655,8 @@ function StepReview({
         )}
 
         {needsBrowserInstall && (
-          <div style={{ padding: "14px 22px", borderTop: `1px solid ${color.line}`, background: wash(color.info, 6) }}>
-            <p style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info, margin: 0, lineHeight: 1.55 }}>
+          <div style={{ padding: "14px 22px", borderTop: `1px solid ${color.line}`, background: color.surface2 }}>
+            <p style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, margin: 0, lineHeight: 1.55 }}>
               <b>Browser rigs</b> — {browserRigs.join(" + ")} drive a headless browser. They need a one-time{" "}
               <code style={{ background: color.inset, padding: "1px 5px", borderRadius: radius.sm, color: color.text }}>npx playwright install chromium</code>{" "}
               before their first run.
@@ -701,7 +701,7 @@ function StepDone({
     <div style={{ textAlign: "center", paddingTop: 8 }}>
       <div style={{
         width: 66, height: 66, borderRadius: radius.pill, display: "inline-grid", placeItems: "center", marginBottom: 20,
-        border: `1.5px solid ${color.live}`, color: color.live, background: color.liveSoft, fontSize: fs.kpi,
+        border: `1.5px solid ${color.accentFg}`, color: color.accentFg, background: color.selected, fontSize: fs.kpi,
       }}>✓</div>
       <h1 style={{ fontFamily: font.ui, fontSize: fs.kpi, fontWeight: 700, margin: 0, color: color.text }}>{projectName} is ready</h1>
       <p style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text2, lineHeight: 1.65, margin: "12px auto 0", maxWidth: 520 }}>
@@ -731,7 +731,7 @@ function StepDone({
 function Stat({ n, check, label }: { n?: number; check?: boolean; label: string }) {
   return (
     <div style={{ border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "14px 22px", background: color.surface }}>
-      <b style={{ display: "block", fontFamily: font.ui, fontSize: fs.h1, color: color.live }}>{check ? "✓" : n}</b>
+      <b style={{ display: "block", fontFamily: font.ui, fontSize: fs.h1, color: color.accentFg }}>{check ? "✓" : n}</b>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>{label}</span>
     </div>
   );

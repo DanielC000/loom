@@ -4,7 +4,7 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { contextWindowForModel, resolveConfig, type OrchestrationEvent, type SessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { useAttention } from "../lib/attention";
+import { useAttention, usePendingDecisionsBySession } from "../lib/attention";
 import {
   GLOBAL_ACTIVITY_CAP, PULSE_EXITED_REFETCH_MS, attentionItemInProject, pulseExitedManagers,
 } from "../lib/fleet";
@@ -174,6 +174,8 @@ export default function ProjectHome() {
   const activeGatesQ = useGatesActive();
   const historyQ = useGateHistoryRecent(projectId || undefined);
   const { items: attention } = useAttention();
+  // Sessions holding a PENDING owner Request they filed: their roster pill reads "waiting on you".
+  const decisions = usePendingDecisionsBySession();
 
   const all = (sessionsQ.data ?? []).filter((s) => s.projectId === projectId);
   const live = all.filter(isLiveSession);
@@ -311,11 +313,11 @@ export default function ProjectHome() {
   const briefReadings: BriefReading[] = [
     {
       key: "cards", label: "board", value: board.open, sub: `open · ${board.inReview} review · ${board.waiting} waiting`,
-      tone: board.open > 0 ? "info" : "muted",
+      tone: "muted",
       title: `${plural(board.total, "card")} on the board, ${board.open} of them open`,
       popover: (
         <>
-          {board.lanes.map((l) => <DataRow key={l.key} label={l.label} value={l.count} tone={l.count > 0 ? "info" : "muted"} />)}
+          {board.lanes.map((l) => <DataRow key={l.key} label={l.label} value={l.count} tone="muted" />)}
           <BandFoot>{plural(board.total, "card")} on the board, {board.open} of them open.</BandFoot>
         </>
       ),
@@ -331,14 +333,14 @@ export default function ProjectHome() {
       // Highest band FIRST. Tested amber-before-red, `>= 95` was unreachable — anything at 95 is also
       // at 80 — so the figure could never go red, which is the one state this reading exists to
       // surface. The workspace node's `plan` tile orders it the same way.
-      tone: ctxPct >= 95 ? "danger" : ctxPct >= 80 ? "busy" : "live",
+      tone: ctxPct >= 95 ? "danger" : ctxPct >= 80 ? "attn" : "accent",
       sub: worstSession ? worstSession.agentName : "no session reports context",
       title: worstSession ? `${worstSession.agentName} · ${plural(worstSession.ctxTurns ?? 0, "turn")}` : undefined,
       popover: <ContextList sessions={live} recycleAt={recycleAt} />,
     },
     {
       key: "gates", label: "gate lanes", value: `${lanes.running}·${lanes.queued}`, sub: `of cap ${lanes.cap}`,
-      tone: lanes.queued > 0 ? "busy" : lanes.running > 0 ? "live" : "muted",
+      tone: lanes.queued > 0 || lanes.running > 0 ? "work" : "muted",
       title: `${lanes.running} running · ${lanes.queued} queued, daemon-wide (cap ${lanes.cap})`,
       popover: <GateLaneList lanes={lanes} />,
     },
@@ -375,11 +377,11 @@ export default function ProjectHome() {
     const ratio = ctx > 0 ? ctx / contextWindowForModel(s.model) : 0;
     const e = lastEvents.get(s.id);
     return {
-      state: sessionStatus(s),
+      state: sessionStatus(s, decisions.has(s.id)),
       card: rosterCardLabel(s, taskTitles),
       branch: s.branch ?? null,
       context: ctx > 0
-        ? { ratio, pct: Math.round(ratio * 100), tone: ratio >= 0.95 ? "danger" : ratio >= 0.8 ? "busy" : "live" }
+        ? { ratio, pct: Math.round(ratio * 100), tone: ratio >= 0.95 ? "danger" : ratio >= 0.8 ? "attn" : "accent" }
         : null,
       lastEvent: e ? { kind: e.kind, at: relativeTime(e.ts) } : null,
     };
@@ -676,7 +678,7 @@ function ContextList({ sessions, recycleAt }: { sessions: SessionListItem[]; rec
           <Link to={`/session/${s.id}`} className="loom-inlinelink" title={`Open ${s.agentName}'s session`}>{s.agentName}</Link>
         } ratio={ratio}
           value={`${Math.round(ratio * 100)}% · ${s.ctxTurns ?? 0}t`}
-          tone={ratio >= 0.95 ? "danger" : ratio >= 0.8 ? "busy" : "live"} />
+          tone={ratio >= 0.95 ? "danger" : ratio >= 0.8 ? "attn" : "accent"} />
       ))}
       <BandFoot>
         Occupancy against each session's own model window.{" "}

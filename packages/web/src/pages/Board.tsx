@@ -15,6 +15,8 @@ import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } fro
 import { useOpenRequest, RequestTypeTag, RequestProvenance } from "../components/requests";
 import { DecisionStateChip } from "../components/decisions";
 import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
+import { usePendingDecisionsBySession } from "../lib/attention";
+import { WAITING_ON_YOU } from "../lib/fleet";
 import { color, columnTone, font, fs, radius, shadow, tone, toneFill, toneSoft, toneText, type Tone } from "../theme";
 // Board-hierarchy read model + presentation (card 1ae4f88c). The lib reads the daemon's hierarchy fields
 // structurally and defaults every one of them, so a response without them renders exactly as before.
@@ -487,7 +489,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           )}
           {laneError && (
             <div role="alert" data-testid="lane-reorder-error"
-              style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: color.busy, fontFamily: font.mono, fontSize: fs.mono }}>
+              style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: color.attnText, fontFamily: font.mono, fontSize: fs.mono }}>
               <span style={{ flex: 1 }}>Couldn’t move the lane: {laneError}</span>
               <Button variant="ghost" onClick={() => setLaneError(null)}>Dismiss</Button>
             </div>
@@ -607,7 +609,7 @@ function columnAccent(col: KanbanColumn): string | null {
 // the light one (phosphor #2ee66e is 1.66:1 on white), so the guard compares against the panel of the
 // theme IN FORCE. Each hex is --loom-surface (global.css) converted to sRGB; persisted accentColor values
 // are owner data and are never rewritten.
-const PANEL_HEX: Record<ResolvedTheme, string> = { dark: "#181a1c", light: "#ffffff" };
+const PANEL_HEX: Record<ResolvedTheme, string> = { dark: "#121316", light: "#ffffff" };
 function relLuminance(hex: string): number {
   const lin = (i: number): number => {
     const v = parseInt(hex.slice(1 + i, 3 + i), 16) / 255;
@@ -771,7 +773,7 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
               ? `At or over the soft WIP limit of ${col.wipLimit} (advisory — does not block; counts the column's true load)`
               : `Soft WIP limit of ${col.wipLimit} (advisory; counts the column's true load)`}
             style={{ marginLeft: "auto", flexShrink: 0, fontFamily: font.mono, fontWeight: atOrOverWip ? 600 : 400,
-              color: atOrOverWip ? color.busy : color.text3 }}>
+              color: atOrOverWip ? color.attnText : color.text3 }}>
             {wipCount} / {col.wipLimit}
           </span>
         ) : (
@@ -979,12 +981,15 @@ function FilterBar({ search, onSearch, counts, priFilter, onTogglePri, types, ty
 
 // A State chip's "on" tone matches the badge the card itself wears for that state, so the chip and the
 // cards it keeps read as the same thing.
-const STATE_TONE: Record<CardState, Tone> = { held: "busy", deferred: "info", policy: "danger", request: "accent", blocked: "muted" };
+const STATE_TONE: Record<CardState, Tone> = { held: "muted", deferred: "muted", policy: "danger", request: "attn", blocked: "muted" };
 
-// A worker bound to this task → show its live status + branch (links the board to the spine).
-function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: boolean } {
+// A worker bound to this task → show its live status + branch (links the board to the spine). The same
+// precedence as fleet's `sessionStatus`: not live > waiting on you (it holds a PENDING owner Request it
+// filed) > working > idle.
+function workerStatus(w: SessionListItem, waitingOnYou: boolean): { tone: Tone; label: string; glow?: boolean; solid?: boolean } {
   if (w.processState !== "live") return { tone: "muted", label: w.processState };
-  return w.busy ? { tone: "busy", label: "working", glow: true } : { tone: "live", label: "idle" };
+  if (waitingOnYou) return { ...WAITING_ON_YOU };
+  return w.busy ? { tone: "work", label: "working", glow: true } : { tone: "live", label: "idle" };
 }
 
 // Direction C — the merge-gate hairline sweep meter + live timer (card 7b7fa6d; the merged/rejected/
@@ -1024,10 +1029,10 @@ function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null 
   if (!pm) return null;
   if (pm.state === "running") {
     if (pm.gatePhase === "queued") return { state: "queued", tone: "muted", label: "queued", startedAt: pm.startedAt };
-    return { state: "running", tone: "busy", label: "merging", startedAt: pm.startedAt };
+    return { state: "running", tone: "work", label: "merging", startedAt: pm.startedAt };
   }
   if (pm.state === "failed") return { state: "failed", tone: "danger", label: "failed", startedAt: pm.startedAt };
-  if (pm.outcome === "cancelled") return { state: "cancelled", tone: "info", label: "cancelled", startedAt: pm.startedAt };
+  if (pm.outcome === "cancelled") return { state: "cancelled", tone: "muted", label: "cancelled", startedAt: pm.startedAt };
   // Card 99a1cf6f: "stale-base" (a benign canonical-main-moved rejection, `ConfirmMergeResult
   // .gateBaseInvalidated`) renders identically to an ordinary "rejected" — nothing landed either way, and
   // the board has no reason to teach a viewer the internal cache-eviction taxonomy. Without this, an
@@ -1035,7 +1040,7 @@ function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null 
   // REJECTED branch as a successful green merge.
   // Card c59165b8: ONLY a "merged" (or absent, legacy/synthetic "done") outcome may render green; any other string, including one this
   // build does not know yet ("gate-tip-moved", "worktree-dirty", a future outcome), renders as rejected — never as a successful merge.
-  if (pm.outcome !== undefined && pm.outcome !== "merged") return { state: "rejected", tone: "busy", label: "rejected", startedAt: pm.startedAt };
+  if (pm.outcome !== undefined && pm.outcome !== "merged") return { state: "rejected", tone: "attn", label: "rejected", startedAt: pm.startedAt };
   return { state: "merged", tone: "live", label: "merged", startedAt: pm.startedAt }; // "merged", or a legacy/synthetic "done" with no outcome
 }
 
@@ -1087,8 +1092,8 @@ function MergePill({ merge }: { merge: MergeDisplay }) {
 function MergeTrack({ merge }: { merge: MergeDisplay }) {
   const fillStyle: React.CSSProperties =
     merge.state === "merged" ? { background: toneFill.live }
-    : merge.state === "cancelled" ? { background: toneFill.info }
-    : merge.state === "rejected" ? { background: toneFill.busy }
+    : merge.state === "cancelled" ? { background: toneFill.muted }
+    : merge.state === "rejected" ? { background: toneFill.attn }
     : merge.state === "queued" ? { background: toneFill.muted }
     : { background: toneFill.danger };
   return (
@@ -1106,7 +1111,9 @@ const cardStateTag: React.CSSProperties = { flexShrink: 0, fontFamily: font.ui, 
 function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen }:
   { task: BoardTask; worker?: SessionListItem; policy?: CardPolicyCardStatus; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id, data: { type: "card" } satisfies BoardDragData });
-  const st = worker ? workerStatus(worker) : null;
+  // One shared react-query key, so every card reads the same cached request list (no extra polling).
+  const decisions = usePendingDecisionsBySession();
+  const st = worker ? workerStatus(worker, decisions.has(worker.id)) : null;
   const merge = worker ? mergeDisplay(worker.pendingMerge) : null;
   const hasBody = task.hasBody;
   // Hierarchy (card 1ae4f88c) — every field defaults to empty, so on an older daemon `hier` is all-zero,
@@ -1122,9 +1129,9 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
         // Graphite: a card is a tonal step above its lane well (card-bg), with a hairline and a short
         // shadow in light only (the card-border/card-shadow tokens are transparent/none in dark). The
         // lane's identity rides its head dot, not a per-card edge. Held reads as braked WHEREVER the card
-        // sits: a busy-tone edge plus a 3px busy left rule, so a held card never blends into a lane.
-        border: `1px solid ${task.held ? color.busy : color.cardBorder}`,
-        borderLeft: task.held ? `3px solid ${color.busy}` : `1px solid ${color.cardBorder}`, borderRadius: radius.base,
+        // sits: a muted strong edge plus a 3px muted left rule, so a held card never blends into a lane.
+        border: `1px solid ${task.held ? color.lineStrong : color.cardBorder}`,
+        borderLeft: task.held ? `3px solid ${color.text3}` : `1px solid ${color.cardBorder}`, borderRadius: radius.base,
         boxShadow: shadow.card, padding: "8px 10px", marginBottom: 8, background: color.cardBg,
         opacity: isDragging ? 0.5 : 1,
         transform: transform ? `translate(${transform.x}px, ${transform.y}px)` : undefined,
@@ -1154,8 +1161,8 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
             <PriorityChip priority={prio(task)} />
             {task.held && (
               <span title="Held — won't be worked or nagged (the owner's brake)"
-                style={{ ...cardStateTag, color: toneText.busy, background: toneSoft.busy }}>
-                held
+                style={{ ...cardStateTag, color: toneText.muted, background: toneSoft.muted }}>
+                ⏸ held
               </span>
             )}
             {/* Repo badge (multi-repo epic 49136451, phase 3) — rendered ONLY for a card routed at a
@@ -1183,7 +1190,7 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
               <span title={hier.blockedByFirst
                 ? `Deferred until "${hier.blockedByFirst.title}"${hier.blockedByOpen > 1 ? ` (and ${hier.blockedByOpen - 1} more)` : ""} — a manager's own sequencing marker, won't nag (not the owner's brake)`
                 : "Deferred — a manager's own sequencing marker, won't nag (not the owner's brake)"}
-                style={{ ...cardStateTag, color: toneText.info, background: toneSoft.info }}>
+                style={{ ...cardStateTag, color: toneText.muted, background: toneSoft.muted }}>
                 deferred
               </span>
             )}
@@ -1232,8 +1239,8 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
               {merge
                 ? <MergePill merge={merge} />
                 : <>
-                    <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
-                    {worker.branch && <Chip label="branch" value={worker.branch} tone="info" />}
+                    <StatusPill tone={st.tone} label={st.label} glow={st.glow} solid={st.solid} />
+                    {worker.branch && <Chip label="branch" value={worker.branch} tone="muted" />}
                   </>}
             </div>
           )}
@@ -1605,8 +1612,8 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             wording names WHICH exit is pending, so "Discard" never looks like it might keep the card open. */}
         {pendingNav && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", borderRadius: radius.base,
-            background: color.busySoft }}>
-            <span style={{ flex: 1, color: toneText.busy, fontSize: fs.sm, fontFamily: font.ui }}>
+            background: color.attnSoft }}>
+            <span style={{ flex: 1, color: toneText.attn, fontSize: fs.sm, fontFamily: font.ui }}>
               {pendingNav.to ? "Discard unsaved changes and open that card?" : "Discard unsaved changes?"}
             </span>
             <Button variant="danger" onClick={() => { const to = pendingNav.to; if (to) onOpenTask(to); else onClose(); }}>
@@ -1629,7 +1636,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
         {linksUnavailable && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, color: color.text3,
             fontFamily: font.mono, fontSize: fs.mono }}>
-            <Dot tone="busy" />
+            <Dot tone="attn" />
             <span>links unavailable — couldn’t read this card’s connections (retrying…)</span>
           </div>
         )}
@@ -1693,7 +1700,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: -4, minWidth: 0 }}>
               <span data-testid="parent-resolution" style={{ flex: 1, fontFamily: font.mono, fontSize: fs.mono, minWidth: 0,
                 overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                color: parentRes.state === "ok" ? color.info : parentRes.state === "empty" ? color.text3 : color.busy }}
+                color: parentRes.state === "ok" ? color.text2 : parentRes.state === "empty" ? color.text3 : color.attnText }}
                 title={parentRes.state === "ok" ? parentRes.title : undefined}>
                 {parentRes.state === "ok" ? `→ ${parentRes.title}`
                   : parentRes.state === "empty" ? "no parent"
@@ -1852,14 +1859,14 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           onClick={() => setHeld((h) => !h)}
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", textAlign: "left",
             padding: "6px 8px", borderRadius: radius.sm, background: color.inset,
-            border: `1px solid ${held ? color.busy : color.line}` }}>
+            border: `1px solid ${held ? color.lineStrong : color.line}` }}>
           <span aria-hidden style={{ width: 30, height: 16, borderRadius: radius.pill, flexShrink: 0, position: "relative",
-            background: held ? color.busy : color.line, transition: "background 0.12s" }}>
+            background: held ? color.text3 : color.line, transition: "background 0.12s" }}>
             <span style={{ position: "absolute", top: 2, left: held ? 16 : 2, width: 12, height: 12, borderRadius: radius.pill,
               background: color.bg, transition: "left 0.12s" }} />
           </span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: held ? color.busy : color.text2 }}>
-            {held ? "Held — won't be worked or nagged" : "Not held"}
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: held ? color.text : color.text2 }}>
+            {held ? "⏸ Held — won't be worked or nagged" : "Not held"}
           </span>
         </button>
         {/* Manager DEFERRED marker — orthogonal to Hold: a manager's own sequencing/dependency-gating
@@ -1873,13 +1880,13 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           onClick={() => setDeferred((d) => !d)}
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", textAlign: "left",
             padding: "6px 8px", borderRadius: radius.sm, background: color.inset,
-            border: `1px solid ${deferred ? color.info : color.line}` }}>
+            border: `1px solid ${deferred ? color.lineStrong : color.line}` }}>
           <span aria-hidden style={{ width: 30, height: 16, borderRadius: radius.pill, flexShrink: 0, position: "relative",
-            background: deferred ? color.info : color.line, transition: "background 0.12s" }}>
+            background: deferred ? color.text3 : color.line, transition: "background 0.12s" }}>
             <span style={{ position: "absolute", top: 2, left: deferred ? 16 : 2, width: 12, height: 12, borderRadius: radius.pill,
               background: color.bg, transition: "left 0.12s" }} />
           </span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: deferred ? color.info : color.text2 }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: deferred ? color.text : color.text2 }}>
             {deferred ? "Deferred — sequencing marker, won't nag" : "Not deferred"}
           </span>
         </button>
@@ -1941,8 +1948,8 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
               before this card — see api.updateTask's own doc for why omitting it means "write blind"). */}
           {saveConflict && (
             <div role="alert" style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 100%",
-              padding: "6px 8px", borderRadius: radius.sm, background: color.inset, border: `1px solid ${color.busy}` }}>
-              <span style={{ flex: 1, color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>
+              padding: "6px 8px", borderRadius: radius.sm, background: color.inset, border: `1px solid ${color.attn}` }}>
+              <span style={{ flex: 1, color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>
                 This card changed while you had it open — reload to see the latest, or overwrite anyway.
               </span>
               <Button onClick={() => {
@@ -2012,7 +2019,7 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
         <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.text2 }}>
           Connected requests
         </span>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: linked.length > 0 ? color.info : color.text3 }}>{linked.length}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: linked.length > 0 ? color.text2 : color.text3 }}>{linked.length}</span>
         <span style={{ flex: 1 }} />
         <button type="button" onClick={onCollapse} aria-expanded aria-label="Collapse connected requests"
           title="Collapse the requests rail" data-testid="task-requests-collapse" className="loom-toggle"
@@ -2030,7 +2037,7 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
           {/* By-state summary line. */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", flexWrap: "wrap",
             fontFamily: font.mono, fontSize: fs.mono, color: color.text3, borderBottom: `1px solid ${color.line}` }}>
-            <span style={{ color: pending > 0 ? color.info : color.text3 }}>{pending} pending</span>
+            <span style={{ color: pending > 0 ? color.attnText : color.text3 }}>{pending} pending</span>
             <span aria-hidden>·</span>
             <span>{answered} answered</span>
             <span aria-hidden>·</span>
@@ -2132,7 +2139,7 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>provided · encrypted, never shown</span>
         {q.credentialEnvVar && (
           <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
-            target env var: <span style={{ color: color.busy }}>{q.credentialEnvVar}</span>
+            target env var: <span style={{ color: color.text2 }}>{q.credentialEnvVar}</span>
           </span>
         )}
       </div>
@@ -2150,7 +2157,7 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
   // decision / input — chosen option + note (the note IS the answer for a note-only ask).
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      {q.chosenOption && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>chose <span style={{ color: color.info }}>{q.chosenOption}</span></span>}
+      {q.chosenOption && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>chose <span style={{ color: color.text2 }}>{q.chosenOption}</span></span>}
       {q.note && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, whiteSpace: "pre-wrap" }}>{q.note}</span>}
       {!q.chosenOption && !q.note && <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>—</span>}
     </div>
@@ -2171,7 +2178,7 @@ function CollapsedRequestsStrip({ count, onExpand }: { count: number; onExpand: 
       <span aria-hidden style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.text3, writingMode: "vertical-rl" }}>
         Inbox
       </span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: count > 0 ? color.info : color.text3 }}>{count}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: count > 0 ? color.text2 : color.text3 }}>{count}</span>
     </button>
   );
 }
@@ -2205,7 +2212,7 @@ function DescriptionMic({ speech, dictating, onStart }:
       <span
         className={listening ? "loom-mic-pulse" : undefined}
         style={{ width: 7, height: 7, borderRadius: radius.base, display: "inline-block",
-          background: listening ? color.danger : disabled ? color.text3 : color.live }}
+          background: listening ? color.danger : disabled ? color.text3 : color.text2 }}
       />
       {listening ? "Stop" : requesting ? "starting…" : "Dictate"}
     </Button>
@@ -2218,7 +2225,7 @@ function DescriptionMic({ speech, dictating, onStart }:
 function DescriptionVoiceNote({ speech }: { speech: SpeechRecognitionApi }) {
   const { status, interim, error, secure } = speech;
   let node: React.ReactNode = null;
-  if (!secure) node = <span style={{ color: color.busy }}>voice needs a secure context</span>;
+  if (!secure) node = <span style={{ color: color.attnText }}>voice needs a secure context</span>;
   else if (status === "requesting") node = <span style={{ color: color.text2 }}>requesting microphone…</span>;
   else if (status === "listening") node = (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>

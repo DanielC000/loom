@@ -25,21 +25,21 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
 
   return (
     <Panel data-testid="grant-reach-confirm" role="alertdialog" aria-label="Confirm capability grant"
-      style={{ boxShadow: `inset 0 0 0 1px ${color.busy}`, display: "flex", flexDirection: "column", gap: 10 }}>
+      style={{ boxShadow: `inset 0 0 0 1px ${color.attn}`, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <Badge tone="busy">grant</Badge>
+        <Badge tone="attn">grant</Badge>
         <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>
           This save widens what agents can do
         </strong>
       </div>
 
       <p style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
-        You are granting <strong style={{ color: color.busy }}>{grantKeyList(plan.addedKeys)}</strong> on this profile.
+        You are granting <strong style={{ color: color.attnText }}>{grantKeyList(plan.addedKeys)}</strong> on this profile.
         {" "}
         {unknown ? GRANT_REACH_UNKNOWN : (
           <>
             Profiles are shared across every project, so{" "}
-            <strong style={{ color: color.busy }} data-testid="grant-reach-count">
+            <strong style={{ color: color.attnText }} data-testid="grant-reach-count">
               {plan.agentCount} agent{plan.agentCount === 1 ? "" : "s"}
             </strong>{" "}
             already bound to it {plan.agentCount === 1 ? "picks" : "pick"} this up on their next session.
@@ -51,8 +51,8 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
           line rather than folded into grantKeyList's prose clause. */}
       {plan.roleChange && (
         <p data-testid="grant-reach-role-change" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
-          Role changes from <strong style={{ color: color.busy }}>{plan.roleChange.from ?? "none"}</strong>
-          {" "}to <strong style={{ color: color.busy }}>{plan.roleChange.to ?? "none"}</strong>.
+          Role changes from <strong style={{ color: color.attnText }}>{plan.roleChange.from ?? "none"}</strong>
+          {" "}to <strong style={{ color: color.attnText }}>{plan.roleChange.to ?? "none"}</strong>.
         </p>
       )}
 

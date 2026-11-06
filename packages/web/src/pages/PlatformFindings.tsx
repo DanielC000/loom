@@ -100,7 +100,7 @@ export function PlatformFindings({ edition, projectId }: { edition: PlatformEdit
 const SEVERITY_TONE: Record<string, Tone> = {
   critical: "danger",
   high: "danger",
-  medium: "busy",
+  medium: "attn",
   low: "muted",
 };
 
@@ -117,7 +117,7 @@ function FindingRow({ ts, runId, taskId, detail, onBoard, boardTitle }: {
   const frozenTitle = typeof detail?.title === "string" ? detail.title : undefined;
   const title = boardTitle ?? frozenTitle ?? "finding";
   const severity = typeof detail?.severity === "string" ? detail.severity : undefined;
-  const tone: Tone = severity ? SEVERITY_TONE[severity] ?? "info" : "muted";
+  const tone: Tone = severity ? SEVERITY_TONE[severity] ?? "muted" : "muted";
 
   return (
     <Panel data-testid="platform-finding"
@@ -137,7 +137,7 @@ function FindingRow({ ts, runId, taskId, detail, onBoard, boardTitle }: {
         // its own board rather than the active project's — so one click lands on the card's dialog.
         <Link to={`/platform?tab=board&task=${encodeURIComponent(taskId)}`}
           title="Open this finding's card on the Platform board"
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info, textDecoration: "none",
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.accentFg, textDecoration: "none",
             border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "2px 8px" }}>
           Open on the board →
         </Link>

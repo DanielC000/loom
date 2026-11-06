@@ -45,8 +45,8 @@ function WakeChip({ w, sessionId, onCancelled }: { w: Wake; sessionId: string; o
   return (
     <span title={`"${w.note}"\nfires ${new Date(w.wakeAt).toLocaleString()} (scheduled ${new Date(w.createdAt).toLocaleString()})`}
       style={{ display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "1px 6px 1px 8px", fontFamily: font.mono, fontSize: fs.mono, color: color.text2, maxWidth: 320 }}>
-      <Dot tone="info" />
-      <span style={{ color: color.info, whiteSpace: "nowrap" }}>wake {relTime(inMs)}</span>
+      <Dot tone="muted" />
+      <span style={{ color: color.text2, whiteSpace: "nowrap" }}>wake {relTime(inMs)}</span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {w.note}</span>
       <button onClick={() => cancel.mutate()} disabled={cancel.isPending} title="Cancel this wake"
         style={{ background: "none", border: "none", color: color.text3, cursor: "pointer", padding: "0 2px", marginLeft: 2, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1 }}>×</button>

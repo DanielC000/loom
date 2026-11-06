@@ -3,8 +3,8 @@
 //
 // Reads the REAL token values out of src/styles/global.css (both theme blocks), converts each OKLCH
 // value to sRGB the same way the browser does, and asserts the WCAG 2.x contrast floors for the main
-// pairs in the Graphite spec's contrast table (vault Mockups/2026-11-05 Atlas Design Language/README.md
-// §Contrast): 4.5:1 for text, 3:1 for UI. Then it checks the xterm themes (lib/xtermTheme.ts) the same
+// pairs in Direction C's contrast table (vault Mockups/2026-11-06 Graphite palette/README.md, card
+// d2a44f7b): 4.5:1 for text, 3:1 for UI. Then it checks the xterm themes (lib/xtermTheme.ts) the same
 // way, and that the hex copies of token values kept elsewhere (Board's lane-label guard, the terminal
 // well) still equal the token they mirror.
 import assert from "node:assert/strict";
@@ -47,31 +47,61 @@ function block(selectorRe) {
   const start = m.index + m[0].length;
   return css.slice(start, css.indexOf("}", start));
 }
-function tokens(body) {
+function rawTokens(body) {
   const out = {};
   for (const m of body.matchAll(/--loom-([a-z0-9-]+):\s*oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)\s*\)\s*;/g)) {
-    out[m[1]] = oklchToRgb(Number(m[2]), Number(m[3]), Number(m[4]));
+    out[m[1]] = [Number(m[2]), Number(m[3]), Number(m[4])];
   }
   return out;
 }
-const THEMES = {
-  dark: tokens(block(/:root,\s*:root\[data-theme="dark"\]\s*\{/)),
-  light: tokens(block(/:root\[data-theme="light"\]\s*\{/)),
+const RAW = {
+  dark: rawTokens(block(/:root,\s*:root\[data-theme="dark"\]\s*\{/)),
+  light: rawTokens(block(/:root\[data-theme="light"\]\s*\{/)),
 };
+// `color-mix(in oklab, <a> <pct>%, <b>)`: mix the two tokens' OKLab coordinates, then convert.
+function mixOklab(a, pct, b) {
+  const lab = ([L, C, H]) => [L, C * Math.cos((H * Math.PI) / 180), C * Math.sin((H * Math.PI) / 180)];
+  const p = pct / 100;
+  const [L, A, B] = lab(a).map((x, i) => x * p + lab(b)[i] * (1 - p));
+  return oklchToRgb(L, Math.hypot(A, B), (Math.atan2(B, A) * 180) / Math.PI);
+}
+const THEMES = Object.fromEntries(
+  Object.entries(RAW).map(([theme, raw]) => {
+    const t = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, oklchToRgb(...v)]));
+    // The "needs you" band behind a request row: an 11% attn wash over the panel (wash(color.attn, 11)
+    // laid on --loom-surface, as the app renders it).
+    t["attn-band"] = mixOklab(raw.attn, 11, raw.surface);
+    return [theme, t];
+  }),
+);
 
-// The spec's contrast table, by pair: [label, foreground token, background token, floor].
+// Direction C's contrast table (vault Mockups/2026-11-06 Graphite palette/README.md, §WCAG contrast),
+// by pair: [label, foreground token, background token, floor]. Text needs 4.5:1, UI (dots, edges,
+// borders, the focus ring) 3:1. A dot is measured on the panel, where it sits.
 const PAIRS = [
-  ["Primary text on page", "text", "bg", 4.5],
-  ["Secondary text on page", "text-2", "bg", 4.5],
+  ["Primary text", "text", "bg", 4.5],
+  ["Secondary text", "text-2", "bg", 4.5],
   ["Muted text on page", "text-3", "bg", 4.5],
-  ["Muted text on a panel", "text-3", "surface", 4.5],
+  ["Muted text on panel", "text-3", "surface", 4.5],
   ["Link / accent text", "accent-fg", "bg", 4.5],
   ["Primary button label", "on-accent", "accent", 4.5],
-  ["Live signal", "live", "bg", 3],
-  ["Busy label", "busy", "bg", 4.5],
-  ["Danger label", "danger", "bg", 4.5],
-  ["Input / control border", "line-strong", "bg", 3],
-  ["Focus ring", "ring", "bg", 3],
+  ["Selected row text", "text", "selected", 4.5],
+  ["Live capsule text", "live-text", "live-soft", 4.5],
+  ["Working capsule text", "work-text", "work-soft", 4.5],
+  ["Needs-you capsule text", "attn-text", "attn-soft", 4.5],
+  ["Needs-you text on panel", "attn-text", "surface", 4.5],
+  ["Error capsule text", "danger-text", "danger-soft", 4.5],
+  ["Error text on panel", "danger-text", "surface", 4.5],
+  ["Danger button label", "on-danger", "danger-fill", 4.5],
+  ["Solid needs-you label", "on-attn", "attn", 4.5],
+  ["Text on a needs-you band", "text", "attn-band", 4.5],
+  ["Live dot (UI)", "live", "surface", 3],
+  ["Working dot (UI)", "work", "surface", 3],
+  ["Needs-you edge (UI)", "attn", "surface", 3],
+  ["Error dot (UI)", "danger", "surface", 3],
+  ["Input border (UI)", "line-strong", "field-bg", 3],
+  ["Focus ring (UI)", "ring", "bg", 3],
+  ["Healthy meter fill (UI)", "meter-ok", "track", 3],
 ];
 
 for (const [theme, t] of Object.entries(THEMES)) {
@@ -87,12 +117,7 @@ for (const [theme, t] of Object.entries(THEMES)) {
       assert.ok(r >= need, `${label} in ${theme} is ${r.toFixed(2)}:1, below ${need}:1 (${toHex(t[f])} on ${toHex(t[b])})`);
     });
   }
-  // Two extra pairs the app leans on: a busy badge's label sits ON the busy fill (the rail badge, the
-  // active find match), and the terminal well must stay dark in both themes.
-  check(`${theme}: --loom-on-busy on --loom-busy clears 4.5:1`, () => {
-    const r = ratio(t["on-busy"], t.busy);
-    assert.ok(r >= 4.5, `on-busy in ${theme} is ${r.toFixed(2)}:1`);
-  });
+  // The terminal well must stay dark in both themes.
   check(`${theme}: the terminal well is dark`, () => {
     assert.ok(lum(t["term-bg"]) < 0.05, `--loom-term-bg in ${theme} is ${toHex(t["term-bg"])}, not a dark well`);
   });

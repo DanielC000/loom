@@ -37,13 +37,17 @@ export const color = {
   live: "var(--loom-live)",
   liveText: "var(--loom-live-text)",
   liveSoft: "var(--loom-live-soft)",
-  busy: "var(--loom-busy)",
-  busySoft: "var(--loom-busy-soft)",
-  onBusy: "var(--loom-on-busy)",
-  info: "var(--loom-info)",
-  infoSoft: "var(--loom-info-soft)",
+  work: "var(--loom-work)",
+  workText: "var(--loom-work-text)",
+  workSoft: "var(--loom-work-soft)",
+  attn: "var(--loom-attn)",
+  attnText: "var(--loom-attn-text)",
+  attnSoft: "var(--loom-attn-soft)",
+  onAttn: "var(--loom-on-attn)",
   danger: "var(--loom-danger)",
+  dangerText: "var(--loom-danger-text)",
   dangerSoft: "var(--loom-danger-soft)",
+  dangerFill: "var(--loom-danger-fill)",
   dangerLine: "var(--loom-danger-line)",
   onDanger: "var(--loom-on-danger)",
   track: "var(--loom-track)",
@@ -91,31 +95,36 @@ export const radius = {
 // 4px base grid. space(2) -> "8px".
 export const space = (n: number): string => `${n * 4}px`;
 
-// Signal tones — the semantic status palette used by StatusPill / Dot / Badge / Chip / Meter.
-// Green `live` means live and nothing else; primary, focus and selection are `accent` (cobalt).
-export type Tone = "live" | "busy" | "info" | "danger" | "muted" | "accent";
+// Signal tones: the semantic status palette used by StatusPill / Dot / Badge / Chip / Meter.
+//   live    alive and healthy, or succeeded (saved, merged, passed);
+//   work    an agent is doing something: normal, no action needed;
+//   attn    a human is needed: a pending request, the Review lane, unsaved work, a threshold, P1;
+//   danger  failed, refused, destructive, P0;
+//   muted   identity and metadata: roles, branches, ids, lane names, P2/P3;
+//   accent  ink: the primary action, selection, the healthy meter. Never a status.
+export type Tone = "live" | "work" | "attn" | "danger" | "muted" | "accent";
 
-// The tone's signal colour: what a caller writes into `color:` or a border. `live` is the live TEXT
-// shade (the fill shade is too light to read as text on the light theme's white); a dot or a meter bar
-// reads `toneFill` instead. `accent` is the cobalt that reads as text and as an edge.
+// The tone's signal colour: what a caller writes into `color:` or a border. Each signal reads its
+// -text shade (the fill shade is too light to read as text on the light theme's white); a dot or a
+// meter bar reads `toneFill` instead.
 export const tone: Record<Tone, string> = {
   live: color.liveText,
-  busy: color.busy,
-  info: color.info,
-  danger: color.danger,
+  work: color.workText,
+  attn: color.attnText,
+  danger: color.dangerText,
   muted: color.text3,
   accent: color.accentFg,
 };
 
-// The tone as TEXT laid on its own soft fill (a status capsule, a tag). Today it equals `tone`, which
-// already reads live as its text shade; it stays a separate map so a capsule can diverge later.
-export const toneText: Record<Tone, string> = { ...tone };
+// The tone as TEXT laid on its own soft fill (a status capsule, a tag). Neutral text on the
+// surface-2 capsule is text-2, which keeps a muted tag legible; every other tone equals `tone`.
+export const toneText: Record<Tone, string> = { ...tone, muted: color.text2 };
 
 // The tone as a FILL: a status dot, a meter bar.
 export const toneFill: Record<Tone, string> = {
   live: color.live,
-  busy: color.busy,
-  info: color.info,
+  work: color.work,
+  attn: color.attn,
   danger: color.danger,
   muted: color.text3,
   accent: color.meterOk,
@@ -124,8 +133,8 @@ export const toneFill: Record<Tone, string> = {
 // The tone's tinted background, for a capsule or tag that carries the tone's text on top of it.
 export const toneSoft: Record<Tone, string> = {
   live: color.liveSoft,
-  busy: color.busySoft,
-  info: color.infoSoft,
+  work: color.workSoft,
+  attn: color.attnSoft,
   danger: color.dangerSoft,
   muted: color.surface2,
   accent: color.selected,
@@ -136,14 +145,14 @@ export const toneSoft: Record<Tone, string> = {
 // the Settings ColumnManager (role badge + row border) both read this map. (Mirrors the preset
 // ROLE_ACCENT palette in shared/presets.ts, which is its own — cosmetic, persisted — accent source.)
 export const roleTone: Record<ColumnRole, Tone> = {
-  intake: "info", // info / new arrivals
-  defaultLanding: "accent", // the catch-all landing (green means live only)
+  intake: "muted", // new arrivals: a lane name, not a state
+  defaultLanding: "muted", // the catch-all landing (accent is never a state)
   workReady: "muted", // queued, not yet active
-  active: "busy", // in flight
-  review: "info", // under review
+  active: "work", // in flight
+  review: "attn", // review is exactly where a human is needed
   parked: "muted", // waiting / parked
   terminal: "muted", // done: quiet, never green (green means live only)
-  mergeLanding: "busy", // where a merged card lands, pre-terminal
+  mergeLanding: "work", // a merged card landing, pre-terminal
 };
 
 // A board lane's signal tone, resolved from its lifecycle ROLE — the ONE resolver, so every surface that
@@ -154,18 +163,19 @@ export function columnTone(col: Pick<KanbanColumn, "role">): Tone | null {
   return col.role ? roleTone[col.role] : null;
 }
 
-// Session-ROLE → badge tone. The ONE place a session/profile's orchestration role maps to a signal
-// tone, so every surface that tints a session by its role agrees (Archive / Overview / Profiles /
-// Workspace all read this). null/plain sessions fall back to "muted" at the call site. Distinct from
-// the lane-oriented `roleTone` above (ColumnRole) — this keys on SessionRole.
+// Session-ROLE → badge tone. The ONE place a session/profile's orchestration role maps to a tone, so
+// every surface that tints a session by its role agrees (Archive / Overview / Profiles / Workspace all
+// read this). null/plain sessions fall back to "muted" at the call site. Distinct from the
+// lane-oriented `roleTone` above (ColumnRole) — this keys on SessionRole. A role is identity, not a
+// state, so every role is neutral: the role's word (and glyph, where a surface draws one) carries it.
 export const sessionRoleTone: Record<NonNullable<SessionRole>, Tone> = {
-  manager: "accent",
-  worker: "info",
-  platform: "busy",
+  manager: "muted",
+  worker: "muted",
+  platform: "muted",
   auditor: "muted",
-  setup: "info",
+  setup: "muted",
   "workspace-auditor": "muted",
   run: "muted",
-  assistant: "info",
-  operator: "busy",
+  assistant: "muted",
+  operator: "muted",
 };

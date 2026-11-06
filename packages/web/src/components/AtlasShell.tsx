@@ -460,7 +460,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
               color: color.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {heading}
             </h1>
-            <Badge tone="info">preview</Badge>
+            <Badge tone="muted">preview</Badge>
             {/* A node with live state and lifecycle controls fills this; every other node leaves it
                 empty, and `:empty` hides it so it costs no gap. */}
             <div className="loom-atlas-nodehead-extras" data-testid="atlas-nodehead-extras" ref={setNodeHeadSlot} />

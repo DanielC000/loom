@@ -104,7 +104,7 @@ const MERGE_TITLE =
  */
 export function MergeOutcome({ merge }: { merge: WorkerMerge }) {
   if (merge.data?.pending) {
-    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info }}>still running — {merge.data.reason}</span>;
+    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.workText }}>still running — {merge.data.reason}</span>;
   }
   if (merge.data && !merge.data.pending && merge.data.merged === false) {
     return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>rejected — {merge.data.reason}</span>;
@@ -157,7 +157,7 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
 }) {
   const merge = useWorkerMerge(workerId);
 
-  const accent = analysis?.highRisk ? color.danger : analysis?.mediumRisk ? color.busy : color.live;
+  const accent = analysis?.highRisk ? color.danger : analysis?.mediumRisk ? color.attn : color.live;
   const topRisk = (analysis?.files ?? []).filter((f) => f.risk !== "low").slice(0, 3);
 
   return (
@@ -169,7 +169,7 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
         <span style={{ flex: 1 }} />
         {worker?.projectName && <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>{worker.projectName}</span>}
       </div>
-      {worker?.branch && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{worker.branch} → main</span>}
+      {worker?.branch && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{worker.branch} → main</span>}
 
       {/* auto-summary + stats */}
       {loading && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>loading diff…</span>}
@@ -183,7 +183,7 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
             {analysis.totalDeletions > 0 && <span style={{ color: color.danger }}>−{analysis.totalDeletions}</span>}
             <span style={{ flex: 1 }} />
             {analysis.highRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.danger }}><Dot tone="danger" glow />{analysis.highRisk} high-risk</span>}
-            {analysis.highRisk === 0 && analysis.mediumRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.busy }}><Dot tone="busy" />{analysis.mediumRisk} to watch</span>}
+            {analysis.highRisk === 0 && analysis.mediumRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.attnText }}><Dot tone="attn" />{analysis.mediumRisk} to watch</span>}
             {analysis.highRisk === 0 && analysis.mediumRisk === 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.live }}><Dot tone="live" />low risk</span>}
           </div>
 

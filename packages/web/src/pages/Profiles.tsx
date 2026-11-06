@@ -10,7 +10,7 @@ import {
   provisioningSourceOf, type CapabilityProvisioning as CapabilityProvisioningStatus,
 } from "../lib/capabilityProvisioning";
 import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
-import { color, font, radius, tone, type Tone, fs } from "../theme";
+import { color, font, radius, tone, toneFill, type Tone, fs } from "../theme";
 import { agentProfiles } from "../lib/profileRoles";
 import { RolePicker } from "../components/RolePicker";
 import { HarnessPicker, HarnessDropSummary, HarnessFieldDrop, HarnessRejectWarning, HarnessTag, dropStyle } from "../components/HarnessPicker";
@@ -165,9 +165,9 @@ export default function Profiles() {
 function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reach: ProfileGrantReach; onDismiss: () => void }) {
   return (
     <Panel data-testid="delete-grant-reach-notice" role="alert"
-      style={{ boxShadow: `inset 0 0 0 1px ${color.busy}`, display: "flex", flexDirection: "column", gap: 10 }}>
+      style={{ boxShadow: `inset 0 0 0 1px ${color.attn}`, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <Badge tone="busy">grant</Badge>
+        <Badge tone="attn">grant</Badge>
         <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>
           Deleting {name} widened what agents can do
         </strong>
@@ -175,17 +175,17 @@ function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reac
         <Button onClick={onDismiss}>Dismiss</Button>
       </div>
       <p style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
-        The deleted profile granted <strong style={{ color: color.busy }}>{grantKeyList(reach.addedKeys)}</strong>.
+        The deleted profile granted <strong style={{ color: color.attnText }}>{grantKeyList(reach.addedKeys)}</strong>.
         {" "}Agents bound to it now fall back to the plain default, so{" "}
-        <strong style={{ color: color.busy }} data-testid="delete-grant-reach-count">
+        <strong style={{ color: color.attnText }} data-testid="delete-grant-reach-count">
           {reach.agentCount} agent{reach.agentCount === 1 ? "" : "s"}
         </strong>{" "}
         {reach.agentCount === 1 ? "picks" : "pick"} this up on their next session.
       </p>
       {reach.roleChange && (
         <p data-testid="delete-grant-reach-role-change" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
-          Role changes from <strong style={{ color: color.busy }}>{reach.roleChange.from ?? "none"}</strong>
-          {" "}to <strong style={{ color: color.busy }}>{reach.roleChange.to ?? "none"}</strong>.
+          Role changes from <strong style={{ color: color.attnText }}>{reach.roleChange.from ?? "none"}</strong>
+          {" "}to <strong style={{ color: color.attnText }}>{reach.roleChange.to ?? "none"}</strong>.
         </p>
       )}
       {reach.agentCount > 0 && (
@@ -210,21 +210,20 @@ function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reac
   );
 }
 
-// Compact sidebar status: a cyan dot for "customized", an amber dot for "update available". Restrained —
+// Compact sidebar status: a muted dot for "customized", an attn dot for "update available". Restrained —
 // the full-text badges live in the editor header; here it's a glanceable signal with a hover title.
 // Mirrors Skills.tsx StatusDots.
 function StatusDots({ customized, updateAvailable }: { customized: boolean; updateAvailable: boolean }) {
   if (!customized && !updateAvailable) return null;
   return (
     <span style={{ display: "inline-flex", gap: 4, flexShrink: 0 }}>
-      {customized && <Dot tone="info" title="Customized — you edited this profile" />}
-      {updateAvailable && <Dot tone="busy" title="Update available — Loom shipped a newer version" />}
+      {customized && <Dot tone="muted" title="Customized — you edited this profile" />}
+      {updateAvailable && <Dot tone="attn" title="Update available — Loom shipped a newer version" />}
     </span>
   );
 }
 function Dot({ tone: t, title }: { tone: Tone; title: string }) {
-  const c = { cyan: color.info, amber: color.busy } as Record<string, string>;
-  return <span title={title} style={{ width: 7, height: 7, borderRadius: radius.base, background: c[t] ?? color.text3, display: "inline-block" }} />;
+  return <span title={title} style={{ width: 7, height: 7, borderRadius: radius.base, background: toneFill[t], display: "inline-block" }} />;
 }
 
 // Per-capability provisioning status — ONE widget for every granted capability that reports one (card
@@ -638,8 +637,8 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         <RoleBadge role={role || null} />
         <HarnessTag harness={harness} />
         {bundled && <Badge tone="muted">bundled</Badge>}
-        {customized && <Badge tone="info">customized</Badge>}
-        {updateAvailable && <Badge tone="busy">update available</Badge>}
+        {customized && <Badge tone="muted">customized</Badge>}
+        {updateAvailable && <Badge tone="attn">update available</Badge>}
         <span style={{ flex: 1 }} />
         {confirmDel ? (
           <>
@@ -730,7 +729,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
                 <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   <span style={{ ...fieldLabel, fontSize: fs.body }}>{c.name}</span>
                   {c.builtin && <Badge tone="muted">builtin</Badge>}
-                  {c.requiresConnection && <Badge tone="info">needs connection</Badge>}
+                  {c.requiresConnection && <Badge tone="muted">needs connection</Badge>}
                   {/* Card cd9a78bc: provisioning FETCHES for this kind (pip / a GitHub release asset /
                       `npm install`), so an offline or proxied host is a real reason the MCP won't mount.
                       Muted deliberately — it is a property to know, not a warning to act on. The badge is
@@ -845,8 +844,8 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
             return (
               <button key={n} type="button" onClick={() => toggleSkill(n)} disabled={skillsDropped}
                 style={{ cursor: skillsDropped ? "default" : "pointer", fontFamily: font.mono, fontSize: fs.mono, padding: "3px 9px", borderRadius: radius.lg,
-                  border: `1px solid ${on ? color.live : color.line}`, background: on ? color.inset : "transparent",
-                  color: on ? color.live : color.text3 }}>
+                  border: `1px solid ${on ? color.accentEdge : color.line}`, background: on ? color.inset : "transparent",
+                  color: on ? color.accentFg : color.text3 }}>
                 {on ? "✓ " : ""}{n}
               </button>
             );
@@ -856,7 +855,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         {skills.length > 0 && !dropStyle(harness, "skills") && <button type="button" onClick={() => setSkills([])} style={{ alignSelf: "flex-start", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, padding: "2px 8px", borderRadius: radius.base, border: `1px solid ${color.line}`, background: "transparent", color: color.text3 }}>clear → deliver all</button>}
         {/* A subset name no longer in the store (e.g. a deleted skill) — surfaced so it can be cleared. */}
         {skills.filter((n) => !available.includes(n)).length > 0 && (
-          <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>
+          <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>
             not in store (will be ignored at spawn): {skills.filter((n) => !available.includes(n)).join(", ")}
           </span>
         )}
@@ -869,7 +868,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
           editing cannot be adopted, so Save will overwrite the other write: that one is named here, with
           the two real options, rather than left to be discovered afterwards. */}
       {liveConflicts.length > 0 && (
-        <span data-testid="profile-conflict-notice" style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
+        <span data-testid="profile-conflict-notice" style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
           Changed elsewhere since you opened this: {liveConflicts.map(fieldDisplayName).join(", ")}.
           Saving replaces {liveConflicts.length === 1 ? "it" : "them"} with your version — Reset takes theirs.
         </span>
@@ -889,7 +888,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
       {awaitingAgents && (
         <div data-testid="grant-reach-checking" role="status"
           style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ color: color.info, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
+          <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
             {GRANT_REACH_CHECKING} Your save lands as soon as that is known.
           </span>
           <Button data-testid="grant-reach-checking-cancel" onClick={() => setAwaitingAgents(false)}>Cancel</Button>
@@ -909,7 +908,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         <span style={{ flex: 1 }} />
         {bundled && (confirmRevert ? (
           <>
-            <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>discard edits & restore shipped?</span>
+            <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>discard edits & restore shipped?</span>
             <Button variant="danger" disabled={reverting} onClick={onRevert}>Revert</Button>
             <Button onClick={() => setConfirmRevert(false)}>Cancel</Button>
           </>
@@ -947,10 +946,10 @@ function UpdateBanner({ id, onAdopt, adoptBusy, error }: { id: string; onAdopt: 
     enabled: showDiff,
   });
   return (
-    <div style={{ border: `1px solid ${color.busy}`, borderRadius: radius.base, padding: "8px 10px",
+    <div style={{ border: `1px solid ${color.attn}`, borderRadius: radius.base, padding: "8px 10px",
       background: color.inset, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.mono }}>
           Loom shipped an update to this profile.
         </span>
         <span style={{ flex: 1 }} />
@@ -985,7 +984,7 @@ function FieldDiff({ changed }: { changed: ProfileFieldMerge[] }) {
           <span style={{ color: color.text2, fontSize: fs.sm }}>{fieldDisplayName(c.field)}</span>
           <span style={{ color: color.text3, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{formatFieldValue(c.field, c.base)}</span>
           <span style={{ color: color.text3 }}>→</span>
-          <span style={{ color: color.live, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{formatFieldValue(c.field, c.shipped)}</span>
+          <span style={{ color: color.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{formatFieldValue(c.field, c.shipped)}</span>
         </div>
       ))}
     </div>
@@ -1014,7 +1013,7 @@ function ConflictResolver({
         <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: `1px solid ${color.line}` }}>
             <strong style={{ fontFamily: font.ui, color: color.text }}>Resolve update</strong>
-            <Badge tone="info">{name}</Badge>
+            <Badge tone="muted">{name}</Badge>
             <span style={{ color: color.text3, fontSize: fs.sm }}>
               {n} conflicting {n === 1 ? "field" : "fields"} — keep yours or take shipped
             </span>
@@ -1029,9 +1028,9 @@ function ConflictResolver({
                 <div key={c.field} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>{fieldDisplayName(c.field)}</span>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <FieldSide label="Your version" tone="info" active={choice === "mine"} value={formatFieldValue(c.field, c.mine)}
+                    <FieldSide label="Your version" tone="muted" active={choice === "mine"} value={formatFieldValue(c.field, c.mine)}
                       onPick={() => setChoices((m) => ({ ...m, [c.field]: "mine" }))} />
-                    <FieldSide label="Shipped version" tone="busy" active={choice === "shipped"} value={formatFieldValue(c.field, c.shipped)}
+                    <FieldSide label="Shipped version" tone="muted" active={choice === "shipped"} value={formatFieldValue(c.field, c.shipped)}
                       onPick={() => setChoices((m) => ({ ...m, [c.field]: "shipped" }))} />
                   </div>
                 </div>
@@ -1055,16 +1054,16 @@ function ConflictResolver({
 // One side of a conflict field — clickable to select. The active side gets a phosphor border; the other
 // reads dim, so the chosen resolution is obvious at a glance. Mirrors Skills.tsx HunkSide (value, not lines).
 function FieldSide({ label, tone: t, active, value, onPick }: { label: string; tone: Tone; active: boolean; value: string; onPick: () => void }) {
-  const accent = t === "info" ? color.info : color.busy;
+  const accent = toneFill[t];
   return (
     <button onClick={onPick} title={`Keep this version (${label})`}
       style={{ textAlign: "left", cursor: "pointer", borderRadius: radius.sm, padding: 8,
         background: active ? color.surface : color.inset,
-        border: `1px solid ${active ? color.live : color.line}`,
-        boxShadow: active ? `inset 0 0 0 1px ${color.liveSoft}` : undefined }}>
+        border: `1px solid ${active ? color.accentEdge : color.line}`,
+        boxShadow: active ? `inset 0 0 0 1px ${color.lineStrong}` : undefined }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
         <span style={{ width: 7, height: 7, borderRadius: radius.base, background: accent, display: "inline-block" }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: active ? color.live : color.text2 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: active ? color.accentFg : color.text2 }}>
           {label}{active ? " ✓" : ""}
         </span>
       </div>

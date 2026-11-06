@@ -231,7 +231,7 @@ export default function WorkspaceHome() {
           {live.length === 0 && <BandEmpty>Nothing is running.</BandEmpty>}
           {live.slice(0, 12).map((s) => (
             <DataRow key={s.id} label={`${s.agentName}${s.role ? ` · ${s.role}` : ""}`}
-              tone={s.busy ? "busy" : "live"} value={s.busy ? "busy" : "idle"} title={s.projectName} />
+              tone={s.busy ? "work" : "live"} value={s.busy ? "working" : "idle"} title={s.projectName} />
           ))}
           <BandFoot>Live sessions across every project. Workers are dispatched by a manager, never spawned here.</BandFoot>
         </>
@@ -239,13 +239,13 @@ export default function WorkspaceHome() {
     },
     {
       key: "needs", label: "needs you", value: attention.length,
-      tone: attention.length > 0 ? "busy" : "muted",
+      tone: attention.length > 0 ? "attn" : "muted",
       sub: attentionSummary(attention.map((a) => a.kind)),
       popover: <AttentionList items={attention} cap={8} />,
     },
     {
       key: "gates", label: "gate run · queued", value: `${lanes.running}·${lanes.queued}`,
-      tone: lanes.queued > 0 ? "busy" : lanes.running > 0 ? "live" : "muted",
+      tone: lanes.queued > 0 ? "work" : lanes.running > 0 ? "live" : "muted",
       sub: `cap ${lanes.cap} · daemon-wide`,
       popover: <GateLaneList lanes={lanes} />,
     },
@@ -253,7 +253,7 @@ export default function WorkspaceHome() {
       key: "plan", label: planWindow?.label ?? "plan 5h",
       value: planWindow ? `${Math.round(planWindow.window.utilization)}%` : "—",
       // Highest band FIRST — ordered the other way, `>= 95` is unreachable and red is dead code.
-      tone: !planWindow ? "muted" : planWindow.window.utilization >= 95 ? "danger" : planWindow.window.utilization >= 80 ? "busy" : "live",
+      tone: !planWindow ? "muted" : planWindow.window.utilization >= 95 ? "danger" : planWindow.window.utilization >= 80 ? "attn" : "accent",
       sub: planWindow ? `resets ${relativeResets(planWindow.window.resetsAt)}` : (usageQ.data && !usageQ.data.available ? usageQ.data.reason : "loading…"),
       fill: planWindow ? planWindow.window.utilization / 100 : undefined,
       popover: <PlanUsageDetail usage={usage} />,
@@ -338,13 +338,13 @@ export default function WorkspaceHome() {
   const dashSummary = (
     <>
       <KpiPill value={attention.length} label="needs you" testId="atlas-banddisc-pill-needs"
-        tone={attention.length > 0 ? "busy" : "muted"} title="Attention items waiting on you across every project" />
+        tone={attention.length > 0 ? "attn" : "muted"} title="Attention items waiting on you across every project" />
       <KpiPill value={operators.length} label="operators" testId="atlas-banddisc-pill-operators"
-        tone={operators.length > 0 ? "info" : "muted"} title="Standing cross-project operator sessions" />
+        tone="muted" title="Standing cross-project operator sessions" />
       {/* The event KIND, not its time: "what just happened" is the signal a folded Pulse feed stops
           showing, and the time is one hover away rather than the figure itself. */}
       <KpiPill value={lastEvent?.kind ?? "—"} label="last event" testId="atlas-banddisc-pill-event"
-        tone={lastEvent ? "info" : "muted"}
+        tone="muted"
         title={lastEvent ? `${lastEvent.kind} · ${relativeTime(lastEvent.ts)}` : "No orchestration events yet"} />
     </>
   );
@@ -595,8 +595,8 @@ function OperatorList({ operators }: { operators: ReturnType<typeof standingOper
             <RoleBadge role={role} />
             <strong className="loom-agentrow-name" title={session.agentName}>{session.agentName}</strong>
             <span style={{ flex: 1 }} />
-            <StatusPill tone={session.busy ? "busy" : "live"} glow={session.busy}
-              label={session.busy ? "busy" : "live"} />
+            <StatusPill tone={session.busy ? "work" : "live"} glow={session.busy}
+              label={session.busy ? "working" : "live"} />
           </div>
           <div className="loom-operrow-foot">
             <span className="loom-agentrow-meta">{sessionVitals(session) || session.projectName}</span>
@@ -619,12 +619,12 @@ export function GateLaneList({ lanes }: { lanes: ReturnType<typeof gateLanes> })
     <>
       <MeterRow label={`${lanes.running}·${lanes.queued}`} value={`cap ${lanes.cap}`}
         ratio={lanes.cap > 0 ? lanes.running / lanes.cap : 0}
-        tone={lanes.queued > 0 ? "busy" : "live"} />
+        tone={lanes.queued > 0 ? "work" : "live"} />
       {lanes.runs.length === 0 && <BandEmpty>No gate is running or queued.</BandEmpty>}
       {lanes.runs.map((g) => (
         <DataRow key={g.id}
-          label={<><Dot tone={g.phase === "running" ? "busy" : "muted"} style={{ marginRight: 6 }} />{g.gateType} <span style={{ color: color.text3 }}>{g.projectName}</span></>}
-          tone={g.phase === "running" ? "busy" : "muted"}
+          label={<><Dot tone={g.phase === "running" ? "work" : "muted"} style={{ marginRight: 6 }} />{g.gateType} <span style={{ color: color.text3 }}>{g.projectName}</span></>}
+          tone={g.phase === "running" ? "work" : "muted"}
           value={g.phase === "running" ? relativeTime(g.since).replace(" ago", "") : `queued${g.queuePosition ? ` ·${g.queuePosition}` : ""}`}
           title={g.workerLabel ?? g.branch ?? undefined} />
       ))}

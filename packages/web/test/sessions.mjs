@@ -134,7 +134,7 @@ check("goLiveSessionPill: starting reads as pending; live/busy keep their existi
   // A starting row's own `busy` flag is irrelevant — it has not taken a turn yet.
   assert.deepEqual(goLiveSessionPill({ processState: "starting", busy: true }), { label: "starting", pending: true });
   assert.deepEqual(goLiveSessionPill({ processState: "live", busy: false }), { label: "live", pending: false });
-  assert.deepEqual(goLiveSessionPill({ processState: "live", busy: true }), { label: "busy", pending: true });
+  assert.deepEqual(goLiveSessionPill({ processState: "live", busy: true }), { label: "working", pending: true });
 });
 
 // ── projectFilterOptions: the live set is not the whole option list (card d72994d7) ──────────────

@@ -55,8 +55,8 @@ function RoleCard({ d, selected, locked, onSelect }: {
     overflow: "hidden",
     borderRadius: radius.base,
     background: selected ? color.surface : color.inset,
-    border: `1px solid ${selected ? color.live : color.lineStrong}`,
-    ...(selected ? { boxShadow: `inset 0 0 0 1px ${color.liveSoft}` } : null),
+    border: `1px solid ${selected ? color.accentEdge : color.lineStrong}`,
+    ...(selected ? { boxShadow: `inset 0 0 0 1px ${color.lineStrong}` } : null),
     ...(d.tier === "readonly" ? { opacity: 0.92 } : null),
     cursor: locked ? "not-allowed" : "pointer",
   } as CSSProperties;
@@ -97,7 +97,7 @@ function RoleCard({ d, selected, locked, onSelect }: {
           <span style={{ fontFamily: font.ui, fontSize: fs.body, fontWeight: 600, letterSpacing: "0.01em", color: color.text }}>{d.label}</span>
           <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, marginTop: 2 }}>{d.role ?? "— (no role)"}</span>
         </span>
-        <span aria-hidden style={{ flex: "none", fontSize: fs.body, color: selected ? color.live : "transparent" }}>✓</span>
+        <span aria-hidden style={{ flex: "none", fontSize: fs.body, color: selected ? color.accentFg : "transparent" }}>✓</span>
       </span>
 
       {/* body: description + powers + tier tag; faint tinted wash for elevated tiers */}
@@ -108,7 +108,7 @@ function RoleCard({ d, selected, locked, onSelect }: {
         <span style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {d.powers.map((p, i) => (
             <span key={i} style={{ display: "flex", gap: 7, alignItems: "flex-start", fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.45, color: color.text2 }}>
-              <span aria-hidden style={{ flex: "none", marginTop: 1, fontSize: fs.xs, color: p.has ? color.live : color.text3 }}>▹</span>
+              <span aria-hidden style={{ flex: "none", marginTop: 1, fontSize: fs.xs, color: p.has ? color.accentFg : color.text3 }}>▹</span>
               {p.text}
             </span>
           ))}

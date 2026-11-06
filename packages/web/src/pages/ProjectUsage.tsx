@@ -90,7 +90,7 @@ export default function ProjectUsage() {
         <SortToggle value={sort} onChange={setSort} />
       </div>
 
-      <SectionHead title="Usage by task" tag={`est. consumption · ${spanMeta.window}`} tagTone="busy" />
+      <SectionHead title="Usage by task" tag={`est. consumption · ${spanMeta.window}`} tagTone="muted" />
 
       {usageQ.isLoading && <Panel><span style={{ color: color.text3 }}>Loading usage…</span></Panel>}
       {usageQ.isError && (
@@ -115,8 +115,8 @@ export default function ProjectUsage() {
           <>
             {/* The window's grand total — the figure every row below is a slice of. */}
             <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
-              <Stat label="est. consumption" value={fmtUsd(part.total.costUsd)} tone="busy" testId="project-usage-total-cost" />
-              <Stat label="total tok" value={fmtTokens(taskTotalTokens(part.total))} tone="info" testId="project-usage-total-tokens" />
+              <Stat label="est. consumption" value={fmtUsd(part.total.costUsd)} tone="muted" testId="project-usage-total-cost" />
+              <Stat label="total tok" value={fmtTokens(taskTotalTokens(part.total))} tone="muted" testId="project-usage-total-tokens" />
               <Stat label="cache hit" value={fmtRatio(part.total.cacheHitRatio)} tone={ratioTone(part.total.cacheHitRatio)} />
               <Stat label="tasks" value={String(usageQ.data?.byTask?.length ?? 0)} tone="muted" testId="project-usage-task-count" />
             </div>
@@ -212,7 +212,7 @@ function TaskRow({ node, depth, peak, expanded, onToggle }: {
         style={{
           background: "transparent", border: "none", cursor: "pointer", padding: "0 2px",
           marginLeft: depth * 14, fontFamily: font.mono, fontSize: fs.mono,
-          color: expanded ? color.live : color.text2, minWidth: 14, textAlign: "left",
+          color: color.text2, minWidth: 14, textAlign: "left",
         }}>
         {expanded ? "▾" : "▸"}
       </button>
@@ -226,7 +226,7 @@ function TaskRow({ node, depth, peak, expanded, onToggle }: {
         subtitle={short} />
       {node.columnKey && <Chip value={node.columnKey} />}
       {kids > 0 && (
-        <Badge tone="info">
+        <Badge tone="muted">
           {/* The number IS the claim this row makes: the figure to its right contains that many cards'
               usage as well as its own. */}
           +{node.descendantsWithUsage} rolled up
@@ -239,9 +239,9 @@ function TaskRow({ node, depth, peak, expanded, onToggle }: {
           down disappears exactly where it is hardest to scan. */}
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
-        <Meter value={tok} max={peak} tone="info" width={90} />
+        <Meter value={tok} max={peak} tone="muted" width={90} />
         <span data-testid={`project-usage-cost-${short}`}
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, minWidth: 72, textAlign: "right" }}>{fmtUsd(node.rolled.costUsd)}</span>
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, minWidth: 72, textAlign: "right" }}>{fmtUsd(node.rolled.costUsd)}</span>
       </span>
     </div>
   );
@@ -299,7 +299,7 @@ function RelationRow({ kind, ref_, totals }: { kind: RelationKind; ref_: TaskRef
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, minWidth: 64, textAlign: "right" }}>
           {totals.samples === 0 ? "no usage" : `${fmtTokens(tok)} tok`}
         </span>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: totals.samples === 0 ? color.text3 : color.busy, minWidth: 72, textAlign: "right" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: totals.samples === 0 ? color.text3 : color.text, minWidth: 72, textAlign: "right" }}>
           {totals.samples === 0 ? "—" : fmtUsd(totals.costUsd)}
         </span>
       </span>
@@ -321,7 +321,7 @@ function BucketRow({ label, hint, row, peak, testId }: {
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
         <Meter value={tok} max={peak} tone="muted" width={90} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
       </span>
     </div>
   );

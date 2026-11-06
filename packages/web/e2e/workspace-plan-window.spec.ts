@@ -47,7 +47,7 @@ const OPUS_PCT = 12;
 const FIVE_HOUR_RESET_MS = (2 * 60 + 10) * 60 * 1000;             // ~2h10m → "in 2h 9m"
 const SEVEN_DAY_RESET_MS = ((3 * 24 + 1) * 60 + 10) * 60 * 1000;  // ~3d1h10m → "in 3d 1h"
 
-// The tile's tones are `--loom-live-text` (the live tone as text) and `--loom-busy`, resolved from the live tokens at the
+// The tile's tones are `--loom-accent-fg` (healthy: ink) and `--loom-attn-text` (80%+), resolved from the live tokens at the
 // assertion (`cssColor`): they differ per theme, so a literal would pin one theme only.
 
 /** The two plan shapes, both `available:true`. `withFiveHour:false` is the owner's own account. */
@@ -108,8 +108,8 @@ test.describe("Workspace plan tile — both plan shapes (card 9ccad269)", () => 
     // The 5h countdown, not the weekly one — the two render different grammatical forms, so a
     // weekly reset ("in 3d 1h") cannot satisfy this.
     await expect(tile.locator(".loom-kpi-sub")).toHaveText(/^resets in 2h \d+m$/);
-    // 41% is under 80, so the figure stays phosphor and the fill is the 5h ratio, not the weekly one.
-    await expect(tile.locator(".loom-kpi-value")).toHaveCSS("color", await cssColor(page, "--loom-live-text"));
+    // 41% is under 80, so the figure stays healthy ink and the fill is the 5h ratio, not the weekly one.
+    await expect(tile.locator(".loom-kpi-value")).toHaveCSS("color", await cssColor(page, "--loom-accent-fg"));
     expect(await fillPct(page)).toBeCloseTo(FIVE_HOUR_PCT, 3);
 
     // The pop-over lists every window the plan reports, 5h first, and names the 5h reset.
@@ -132,9 +132,9 @@ test.describe("Workspace plan tile — both plan shapes (card 9ccad269)", () => 
     // Asserted explicitly as well as implied by the line above: "loading…" was the actual symptom,
     // so a future regression that reintroduced it should fail on its own name, not by inference.
     await expect(tile.locator(".loom-kpi-sub")).not.toContainText("loading");
-    // 87% is in the amber band — so this also proves the tone is derived from the window actually
+    // 87% is in the attn band — so this also proves the tone is derived from the window actually
     // shown, not left muted the way the absent-5h branch used to leave it.
-    await expect(tile.locator(".loom-kpi-value")).toHaveCSS("color", await cssColor(page, "--loom-busy"));
+    await expect(tile.locator(".loom-kpi-value")).toHaveCSS("color", await cssColor(page, "--loom-attn-text"));
     expect(await fillPct(page)).toBeCloseTo(SEVEN_DAY_PCT, 3);
 
     // The pop-over omits the 5h row (there is no such window) and still names a reset — the weekly

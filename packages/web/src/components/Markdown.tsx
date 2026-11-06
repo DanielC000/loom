@@ -358,7 +358,7 @@ const MD_CSS = `
 .loom-md .md-props { border-collapse: collapse; margin-bottom: 1em; background: var(--loom-inset); border: 1px solid var(--loom-line); border-radius: 6px; }
 .loom-md .md-props-k { color: var(--loom-text-3); padding: 3px 12px; font-size: 12px; vertical-align: top; white-space: nowrap; }
 .loom-md .md-props-v { color: var(--loom-text); padding: 3px 12px; font-size: 12px; }
-.loom-md .md-wikilink { color: var(--loom-md-wikilink); cursor: pointer; }
+.loom-md .md-wikilink { color: var(--loom-md-wikilink); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .loom-md .md-embed { display: inline-block; color: var(--loom-accent-fg); cursor: pointer; background: var(--loom-inset); border: 1px solid var(--loom-line); border-radius: 4px; padding: 0 6px; font-size: 0.92em; }
 .loom-md .md-broken { color: var(--loom-danger); cursor: default; text-decoration: none; }
 .loom-md .md-ext-img { display: inline-block; color: var(--loom-text-3); background: var(--loom-inset); border: 1px dashed var(--loom-line-strong); border-radius: 4px; padding: 0 6px; font-size: 0.85em; font-family: ui-monospace, Consolas, monospace; }
@@ -366,7 +366,7 @@ const MD_CSS = `
 .loom-md .md-callout-title { font-weight: 600; color: var(--loom-text); margin-bottom: 0.2em; }
 .loom-md .md-callout-body > :first-child { margin-top: 0; } .loom-md .md-callout-body > :last-child { margin-bottom: 0; }
 .loom-md .md-callout-tip, .loom-md .md-callout-success, .loom-md .md-callout-hint, .loom-md .md-callout-done { --md-callout: var(--loom-live); }
-.loom-md .md-callout-warning, .loom-md .md-callout-caution, .loom-md .md-callout-attention { --md-callout: var(--loom-busy); }
+.loom-md .md-callout-warning, .loom-md .md-callout-caution, .loom-md .md-callout-attention { --md-callout: var(--loom-attn); }
 .loom-md .md-callout-danger, .loom-md .md-callout-error, .loom-md .md-callout-bug, .loom-md .md-callout-failure { --md-callout: var(--loom-danger); }
 .loom-md .md-callout-question, .loom-md .md-callout-help, .loom-md .md-callout-faq, .loom-md .md-callout-example { --md-callout: var(--loom-md-callout-question); }
 .loom-md .md-callout-quote, .loom-md .md-callout-cite, .loom-md .md-callout-abstract, .loom-md .md-callout-summary { --md-callout: var(--loom-text-3); }
@@ -376,8 +376,8 @@ const MD_CSS = `
 .loom-md .md-section[data-collapsed="true"] > :not(:first-child) { display: none; }
 /* In-doc find (CSS Custom Highlight API): all matches read as a quiet amber wash; the active match
    is a solid amber so prev/next is obvious. Names match the registry keys in DocFind.tsx. */
-::highlight(loom-find) { background-color: color-mix(in oklab, var(--loom-busy) 30%, transparent); color: var(--loom-text); }
-::highlight(loom-find-active) { background-color: var(--loom-busy); color: var(--loom-on-busy); }
+::highlight(loom-find) { background-color: color-mix(in oklab, var(--loom-attn) 30%, transparent); color: var(--loom-text); }
+::highlight(loom-find-active) { background-color: var(--loom-attn); color: var(--loom-on-attn); }
 .loom-md .md-heading-collapsible { cursor: pointer; }
 .loom-md .md-collapse-toggle {
   display: inline-flex; align-items: center; justify-content: center;

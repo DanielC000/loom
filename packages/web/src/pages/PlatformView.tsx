@@ -182,7 +182,7 @@ function ClassicPlatformLayout({
       <div>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Platform
-          <Badge tone="info">{project.name}</Badge>
+          <Badge tone="muted">{project.name}</Badge>
           <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
             {edition.copy.header.mutedSpan}
           </span>
@@ -295,7 +295,7 @@ function AtlasPlatformLayout({
   // it) and WHAT that home is. Constant across tabs, like every other node's pills (card 5968d7e0) —
   // the scope phrase is identity, not a per-tab reading, so it must not move when a tab does.
   const headPills: NodeHeadPill[] = [
-    { key: "home", text: project.name, tone: "info", title: "The reserved home this node resolved to" },
+    { key: "home", text: project.name, tone: "muted", title: "The reserved home this node resolved to" },
     // The PILL phrasing, never the classic page's full caption: MEASURED at 420px the full span is
     // 462px of text in a 388px box. A pill that wide now ellipsises (card 359bcdaa), but an ellipsised
     // clause is still a clause the reader cannot read, so the short phrasing stays. The caption rides
@@ -413,9 +413,9 @@ function GuidedSetupLauncher({ onStart }: { onStart: () => void }) {
       // characters per line while the button kept its width, so the panel's own words broke before its
       // call to action did. `minWidth` on the copy is what forces the button onto the next line first.
       display: "flex", alignItems: "center", gap: 16, padding: "16px 18px", flexWrap: "wrap",
-      background: `radial-gradient(560px 180px at 12% -40%, ${color.liveSoft}, transparent 70%), ${color.surface}`,
+      background: `radial-gradient(560px 180px at 12% -40%, ${color.surface2}, transparent 70%), ${color.surface}`,
     }}>
-      <span style={{ color: color.live, display: "inline-flex", flexShrink: 0 }}><LogoMark size={26} /></span>
+      <span style={{ color: color.accentFg, display: "inline-flex", flexShrink: 0 }}><LogoMark size={26} /></span>
       <div style={{ flex: 1, minWidth: 220 }}>
         <div style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>New project from a template</div>
         <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, marginTop: 3, lineHeight: 1.5 }}>
@@ -473,14 +473,14 @@ function PlatformSessionsSection({ edition, previewOnly, homeSessions, operatorL
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {edition.copy.operatorSessionLabel}
-          {operatorLive && <StatusPill tone={operatorLive.busy ? "busy" : "live"} glow={operatorLive.busy} label={operatorLive.busy ? "busy" : "idle"} />}
+          {operatorLive && <StatusPill tone={operatorLive.busy ? "work" : "live"} glow={operatorLive.busy} label={operatorLive.busy ? "working" : "idle"} />}
         </SectionLabel>
         <SingleSession session={operatorLive} empty={edition.copy.operatorSessionEmpty} previewOnly={previewOnly} />
       </section>
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {edition.copy.auditorSessionLabel}
-          {auditorLive && <StatusPill tone={auditorLive.busy ? "busy" : "live"} glow={auditorLive.busy} label={auditorLive.busy ? "busy" : "idle"} />}
+          {auditorLive && <StatusPill tone={auditorLive.busy ? "work" : "live"} glow={auditorLive.busy} label={auditorLive.busy ? "working" : "idle"} />}
         </SectionLabel>
         <SingleSession session={auditorLive} empty={edition.copy.auditorSessionEmpty}
           stopTitle={edition.copy.auditorCard.stopTitle} previewOnly={previewOnly} />
@@ -514,7 +514,7 @@ function AuditorCadenceFormSection({ edition, previewOnly, auditor }:
       <SectionLabel>{edition.copy.auditorScheduleLabel}</SectionLabel>
       {auditor
         ? <Panel style={{ padding: 12, maxWidth: 620 }}><AuditorScheduleInline agent={auditor} previewOnly={previewOnly} /></Panel>
-        : <Panel style={{ padding: 12 }}><span style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.mono }}>No Auditor agent — cannot schedule.</span></Panel>}
+        : <Panel style={{ padding: 12 }}><span style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.mono }}>No Auditor agent — cannot schedule.</span></Panel>}
     </section>
   );
 }
@@ -611,7 +611,7 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
   const tone = roleDisplay(role).tone;
 
   if (!agent) {
-    return <Panel style={{ padding: 12 }}><span style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.mono }}>{card.missingLabel}</span></Panel>;
+    return <Panel style={{ padding: 12 }}><span style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.mono }}>{card.missingLabel}</span></Panel>;
   }
   const live = session?.processState === "live";
   const spawnDisabled = !!previewDisabled || !!roleUnknown || gate(edition, { live, pending: spawn.isPending });
@@ -629,7 +629,7 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
           <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>{liveCount} live</span>
         )}
         {live
-          ? <StatusPill tone={session!.busy ? "busy" : "live"} glow={session!.busy} label={session!.busy ? "busy" : "idle"} />
+          ? <StatusPill tone={session!.busy ? "work" : "live"} glow={session!.busy} label={session!.busy ? "working" : "idle"} />
           : <StatusPill tone="muted" label="offline" />}
       </div>
       <div style={{ display: "flex", gap: 8 }}>
@@ -720,7 +720,7 @@ function AuditorScheduleList({ auditorId }: { auditorId?: string }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["schedules"] }),
   });
 
-  if (!auditorId) return <Panel style={{ padding: 12 }}><span style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.mono }}>No Auditor agent — cannot schedule.</span></Panel>;
+  if (!auditorId) return <Panel style={{ padding: 12 }}><span style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.mono }}>No Auditor agent — cannot schedule.</span></Panel>;
   // Surface schedules targeting the Auditor agent (any kind), so an existing cadence is always visible.
   const mine = (schedules.data ?? []).filter((s) => s.agentId === auditorId);
   const cronValid = looksLikeCron(cron);
@@ -756,8 +756,8 @@ function AuditorScheduleRow({ s, onToggle, onRemove, busy }:
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text2,
       border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 8px" }}>
-      <span style={{ color: color.info }}>{s.cron}</span>
-      <span style={{ fontSize: fs.xs, color: s.kind === "auditor" ? color.live : color.busy }}>kind:{s.kind}</span>
+      <span style={{ color: color.text2 }}>{s.cron}</span>
+      <span style={{ fontSize: fs.xs, color: color.text3 }}>kind:{s.kind}</span>
       <span style={{ flex: 1 }}>next · {fmt(s.nextFireAt)}</span>
       <span style={{ fontSize: fs.xs, color: s.enabled ? color.live : color.text3 }}>{s.enabled ? "ON" : "OFF"}</span>
       <Button style={{ padding: "0 8px" }} disabled={busy} onClick={() => onToggle(!s.enabled)}>{s.enabled ? "Disable" : "Enable"}</Button>
@@ -837,7 +837,7 @@ function AuditorScheduleInlineForm({ agentId, existing, previewOnly }:
         )}
       </fieldset>
       {held && <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>{PREVIEW_DISABLED_NOTE}</span>}
-      {!cronValid && cron.trim().length > 0 && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>Expected 5 whitespace-separated fields.</span>}
+      {!cronValid && cron.trim().length > 0 && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>Expected 5 whitespace-separated fields.</span>}
       {existing && <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>next · {fmt(existing.nextFireAt)}</span>}
       {err && <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{err.message.includes("400") ? "Daemon rejected the cron expression." : err.message}</span>}
     </div>

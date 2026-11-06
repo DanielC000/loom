@@ -7,8 +7,8 @@ import { color, font, radius, tone, type Tone, fs } from "../theme";
 // styling from one source (don't fork the priority look across pages).
 export const PRIORITY_META: Record<TaskPriority, { tone: Tone; label: string; short: string }> = {
   p0: { tone: "danger", label: "Critical", short: "P0" },
-  p1: { tone: "busy", label: "High", short: "P1" },
-  p2: { tone: "info", label: "Normal", short: "P2" },
+  p1: { tone: "attn", label: "High", short: "P1" },
+  p2: { tone: "muted", label: "Normal", short: "P2" },
   p3: { tone: "muted", label: "Low", short: "P3" },
 };
 
@@ -40,7 +40,8 @@ export function PriorityChip({ priority }: { priority: TaskPriority }) {
     <span title={`Priority: ${m.label}`} style={{
       flexShrink: 0, fontFamily: font.ui, fontSize: fs.xs, fontWeight: pop ? 700 : 500,
       letterSpacing: "0.06em", lineHeight: "13px", padding: "0 4px", borderRadius: radius.sm,
-      color: pop ? color.bg : c, background: pop ? c : "transparent", border: `1px solid ${c}`,
+      color: pop ? (priority === "p1" ? color.onAttn : color.bg) : c,
+      background: priority === "p1" ? color.attn : pop ? c : "transparent", border: `1px solid ${priority === "p1" ? color.attn : c}`,
       opacity: priority === "p2" ? 0.75 : 1,
     }}>{m.short}</span>
   );

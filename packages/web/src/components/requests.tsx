@@ -28,14 +28,16 @@ import {
 // The REQUESTS INBOX (card 695ebab0 — the durable Requests object generalized from the decision inbox).
 // A manager/orchestrator asks the human NON-BLOCKING for one of four kinds of Request — decision · input ·
 // permission · credential — each answered asynchronously here. Direction A "signal rows": one durable
-// record per row, its left edge signed by the type's color. Native to the terminal-cockpit kit — reuses
-// Panel/Button/Dot/Badge/Select + the `theme` tokens; the four type colors map onto the EXISTING signal
-// palette (decision=cyan · input=phosphor · permission=red · credential=amber), no new color system.
+// record per row, its left edge in the "needs you" attn colour while pending. Native to the cockpit kit —
+// reuses Panel/Button/Dot/Badge/Select + the `theme` tokens. Every pending type is attn (Ink & Signal,
+// card d2a44f7b): a human must answer each one, so the TYPE is told apart by its word, not its hue.
 
 // ── RequestTypeTag ──────────────────────────────────────────────────────────────
-// A bordered pill in the type's signal tone (Badge uppercases the label). One place a type reads as a tag.
+// The type's identity tag. NEUTRAL by design: a request's type is metadata, and every pending type means
+// the same thing to the owner (attn, carried by the row's edge and the needs chip), so colour would only
+// re-create the old one-hue-per-type noise. The word tells the types apart.
 export function RequestTypeTag({ type }: { type: QuestionType }) {
-  return <Badge tone={REQUEST_TYPE_TONE[type]}>{type}</Badge>;
+  return <Badge tone="muted">{type}</Badge>;
 }
 
 // ── RequestNeedsChip ──────────────────────────────────────────────────────────────
@@ -228,7 +230,7 @@ function SshClearConfirm({ q, action, onCancel }: { q: QuestionInboxItem; action
 // bare "task #xxxx" form. `onClick` (when set) navigates to the card; otherwise it's inert metadata.
 function LinkedTaskChip({ taskId, title, columnKey, onClick }: { taskId: string; title?: string | null; columnKey?: string | null; onClick?: () => void }) {
   const label = `task #${taskId.slice(0, 8)}${columnKey ? ` · ${columnKey}` : ""}${title ? ` · ${title}` : ""}`;
-  const style = { fontFamily: font.mono, fontSize: fs.mono, color: color.info, border: `1px solid ${color.line}`,
+  const style = { fontFamily: font.mono, fontSize: fs.mono, color: color.text2, border: `1px solid ${color.line}`,
     borderRadius: radius.sm, padding: "1px 6px", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis",
     whiteSpace: "nowrap" as const };
   if (!onClick) return <span title={label} style={style}>{label}</span>;
@@ -259,8 +261,8 @@ function RequestAttachmentChip({ attachments }: { attachments: QuestionAttachmen
   return (
     <span data-testid="attachment-count-chip" title={chip.title} aria-label={chip.title}
       style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0, fontFamily: font.mono,
-        fontSize: fs.xs, letterSpacing: "0.04em", color: unopened ? color.live : color.text2,
-        border: `1px solid ${unopened ? color.live : color.lineStrong}`, borderRadius: radius.sm,
+        fontSize: fs.xs, letterSpacing: "0.04em", color: unopened ? color.attnText : color.text2,
+        border: `1px solid ${unopened ? color.attn : color.lineStrong}`, borderRadius: radius.sm,
         padding: "1px 7px", whiteSpace: "nowrap" }}>
       <span aria-hidden style={{ fontSize: fs.sm, lineHeight: 1 }}>{ATTACHMENT_CHIP_GLYPH}</span>
       {chip.text && <span>{chip.text}</span>}
@@ -457,14 +459,14 @@ function AttachmentRow({ questionId, a, selected, now, remote, onSelect }: {
   return (
     <div data-testid="attachment-row" data-attachment-id={a.id} data-selected={selected}
       style={{ display: "flex", alignItems: "center", gap: 8, borderBottom: `1px solid ${color.line}`,
-        borderLeft: `2px solid ${selected ? color.live : "transparent"}`,
+        borderLeft: `2px solid ${selected ? color.accentEdge : "transparent"}`,
         background: selected ? color.inset : "transparent" }}>
       <button className="loom-manifest-row" onClick={onSelect} aria-current={selected}
         title={`${a.label} — ${attachmentDetail(a)}`}
         style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, padding: "7px 6px",
           background: "transparent", border: "none", font: "inherit", color: "inherit", cursor: "pointer", textAlign: "left" }}>
         <span aria-hidden style={{ width: MANIFEST_GLYPH_W, flexShrink: 0, textAlign: "center", fontSize: fs.sm, lineHeight: 1,
-          color: a.available ? (a.kind === "html" ? color.live : color.text2) : color.danger }}>
+          color: a.available ? color.text2 : color.danger }}>
           {a.available ? ATTACHMENT_GLYPH[a.kind] : "✕"}
         </span>
         <span style={{ flex: 1, minWidth: 0 }}>
@@ -507,7 +509,7 @@ function RequestAttachments({ question }: { question: QuestionInboxItem }) {
     <Panel style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <SectionLabel style={{ margin: 0 }}>Attached · {attachments.length}</SectionLabel>
-        {chip.unopened > 0 && <Badge tone="accent">{chip.unopened} unopened</Badge>}
+        {chip.unopened > 0 && <Badge tone="attn">{chip.unopened} unopened</Badge>}
         {chip.unavailable > 0 && <Badge tone="danger">{chip.unavailable} unavailable</Badge>}
       </div>
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-start" }}>
@@ -545,8 +547,8 @@ function RequestAttachments({ question }: { question: QuestionInboxItem }) {
 function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onOpen: (id: string) => void }) {
   const watchdog = isDecisionWatchdog(q, now);
   const typeTone = REQUEST_TYPE_TONE[q.type];
-  const edge = q.state === "pending" ? tone[typeTone] : watchdog ? color.busy : "transparent";
-  const metaDot = q.state === "pending" ? typeTone : watchdog ? "busy" : "muted";
+  const edge = q.state === "pending" || watchdog ? color.attn : "transparent";
+  const metaDot = q.state === "pending" || watchdog ? "attn" : "muted";
   const clearAction = sshClearAction(q, now);
   const holdStatus = sshHoldStatus(q, now);
   const [confirmingClear, setConfirmingClear] = useState(false);
@@ -571,7 +573,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
           <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
           <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <Dot tone={metaDot} glow={watchdog} />
-            <span style={{ color: color.info }}>{q.projectName}</span>
+            <span style={{ color: color.text2 }}>{q.projectName}</span>
             <span>· <RequestProvenance q={q} /></span>
             <span>· {q.state === "pending" ? "asked" : q.state === "notice" ? "posted" : "answered"} {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}</span>
             {q.taskId && <LinkedTaskChip taskId={q.taskId} columnKey={q.linkedTaskColumnKey} />}
@@ -617,7 +619,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
       {q.state === "pending" ? (
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone[typeTone] }}>{requestHint(q)}</span>
       ) : (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: watchdog ? color.busy : color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: watchdog ? color.attnText : color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {q.state === "notice" ? "" : watchdog ? "answered, not picked up — " : "answered: "}
           {requestOutcome(q)}
           {holdStatus && <span data-testid="ssh-hold-status"> · {holdStatus}</span>}
@@ -634,11 +636,11 @@ function FilterChip({ label, count, active, dotTone, onClick }:
   return (
     <button onClick={onClick}
       style={{ display: "inline-flex", alignItems: "center", gap: 6, background: active ? color.inset : "transparent",
-        border: `1px solid ${active ? color.live : color.line}`, borderRadius: radius.sm, padding: "2px 8px", cursor: "pointer",
-        fontFamily: font.mono, fontSize: fs.mono, color: active ? color.live : color.text2 }}>
+        border: `1px solid ${active ? color.accentEdge : color.line}`, borderRadius: radius.sm, padding: "2px 8px", cursor: "pointer",
+        fontFamily: font.mono, fontSize: fs.mono, color: active ? color.accentFg : color.text2 }}>
       {dotTone && <Dot tone={dotTone} />}
       {label}
-      <span style={{ color: active ? color.live : color.text3 }}>{count}</span>
+      <span style={{ color: active ? color.accentFg : color.text3 }}>{count}</span>
     </button>
   );
 }
@@ -706,7 +708,7 @@ export function RequestsInbox() {
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
         <FilterChip label="all" count={items.length} active={activeType === "all"} onClick={() => setTypeFacet("all")} />
         {REQUEST_TYPE_ORDER.filter((t) => (typeCounts.get(t) ?? 0) > 0).map((t) => (
-          <FilterChip key={t} label={t} count={typeCounts.get(t) ?? 0} dotTone={REQUEST_TYPE_TONE[t]}
+          <FilterChip key={t} label={t} count={typeCounts.get(t) ?? 0}
             active={activeType === t} onClick={() => setTypeFacet(t)} />
         ))}
       </div>
@@ -797,7 +799,7 @@ export function RequestModal({ id, onClose }: { id: string; onClose: () => void 
           <SectionLabel style={{ margin: 0, flex: 1 }}>Request · {id.slice(0, 8)}</SectionLabel>
           {refused && (
             <span data-testid="request-close-refused" role="status" aria-live="polite"
-              style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy }}>{refused}</span>
+              style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>{refused}</span>
           )}
           <Button onClick={onClose} title="Close (Esc)">✕</Button>
         </div>
@@ -921,7 +923,7 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <RequestTypeTag type={question.type} />
             <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
-              <RequestProvenance q={question} /> · <span style={{ color: color.info }}>{question.projectName}</span>
+              <RequestProvenance q={question} /> · <span style={{ color: color.text2 }}>{question.projectName}</span>
             </span>
             {question.taskId && <LinkedTaskChip taskId={question.taskId} title={linkedTitle} columnKey={linkedColumnKey} onClick={openLinkedTask} />}
             <span style={{ flex: 1 }} />
@@ -931,7 +933,7 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
             <DecisionStateChip q={question} now={now} />
             {question.sessionLive && (
               <button onClick={() => { onClose?.(); navigate(`/session/${question.sessionId}`); }}
-                style={{ background: "transparent", border: "none", cursor: "pointer", color: color.info, fontFamily: font.mono, fontSize: fs.mono, padding: 0 }}>
+                style={{ background: "transparent", border: "none", cursor: "pointer", color: color.text2, fontFamily: font.mono, fontSize: fs.mono, padding: 0 }}>
                 open live session ↗
               </button>
             )}
@@ -939,8 +941,8 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
 
           {/* The asking session is confirmed gone for good — say so before the human answers into a no-op. */}
           {question.sessionOrphaned && (
-            <Panel style={{ borderLeft: `3px solid ${color.busy}` }}>
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy }}>
+            <Panel style={{ borderLeft: `3px solid ${color.attn}` }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>
                 The asking session is gone for good and can never come back to pull an answer — submitting
                 below will record your answer, but nothing will ever act on it automatically.
               </span>
@@ -948,11 +950,11 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
           )}
 
           {/* THE ASK */}
-          <Panel style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `2px solid ${tone[REQUEST_TYPE_TONE[question.type]]}` }}>
+          <Panel style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `2px solid ${question.state === "pending" ? color.attn : color.lineStrong}` }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <SectionLabel style={{ margin: 0 }}>The ask</SectionLabel>
               <span style={{ flex: 1 }} />
-              <Badge tone={REQUEST_TYPE_TONE[question.type]}>{requestAnswerBadge(question)}</Badge>
+              <Badge tone={question.state === "pending" ? "attn" : "muted"}>{requestAnswerBadge(question)}</Badge>
             </div>
             <div style={{ fontFamily: font.mono, fontSize: fs.lg, color: color.text, lineHeight: 1.45 }}>{question.title}</div>
             {question.body && <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text2, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{question.body}</div>}
@@ -1018,7 +1020,7 @@ function AnsweredReadout({ q }: { q: QuestionInboxItem }) {
         <div style={{ fontFamily: font.mono, fontSize: fs.body, color: q.chosenOption === "authorize" ? color.live : color.danger }}>{requestOutcome(q)}</div>
       ) : (
         <>
-          {q.chosenOption && <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Chose: <span style={{ color: color.info }}>{q.chosenOption}</span></div>}
+          {q.chosenOption && <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Chose: <span style={{ color: color.text2 }}>{q.chosenOption}</span></div>}
           {q.note && <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text2, whiteSpace: "pre-wrap" }}>Note: {q.note}</div>}
           {!q.chosenOption && !q.note && <span style={{ color: color.text3, fontSize: fs.sm }}>—</span>}
         </>
@@ -1085,7 +1087,7 @@ function DecisionControl({ q }: { q: QuestionInboxItem }) {
                   border: `2px solid ${selected ? color.accent : color.lineStrong}`, background: selected ? color.accent : "transparent",
                   boxShadow: selected ? `inset 0 0 0 2px ${color.selected}` : "none" }} />
                 <span style={{ flex: 1, fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{opt}</span>
-                {recommended && <Badge tone="accent">recommended</Badge>}
+                {recommended && <Badge tone="muted">recommended</Badge>}
               </Panel>
             );
           })}
@@ -1229,8 +1231,8 @@ function CredentialControl({ q }: { q: QuestionInboxItem }) {
   useEffect(() => () => clearRequestDraft(q.id), [q.id]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <Panel style={{ borderLeft: `3px solid ${color.busy}`, display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.busy }}>Write-only secret</span>
+      <Panel style={{ borderLeft: `3px solid ${color.attn}`, display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.attnText }}>Write-only secret</span>
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5 }}>
           Stored envelope-encrypted (AES-256-GCM) and NEVER echoed back to the agent or shown here again.
           It is NOT auto-injected into any session — wire it into a Connection or the project's config
@@ -1241,7 +1243,7 @@ function CredentialControl({ q }: { q: QuestionInboxItem }) {
         <SectionLabel style={{ margin: 0 }}>Secret value</SectionLabel>
         {q.credentialEnvVar && (
           <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
-            target env var: <span style={{ color: color.busy }}>{q.credentialEnvVar}</span>
+            target env var: <span style={{ color: color.attnText }}>{q.credentialEnvVar}</span>
           </div>
         )}
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -1380,7 +1382,7 @@ export function RequestHistory() {
           {rows.map((q) => (
             <button key={q.id} onClick={() => openRequest(q.id)}
               style={{ display: "flex", alignItems: "center", gap: 10, textAlign: "left", cursor: "pointer",
-                background: color.surface, border: `1px solid ${color.line}`, borderLeft: `3px solid ${tone[REQUEST_TYPE_TONE[q.type]]}`,
+                background: color.surface, border: `1px solid ${color.line}`, borderLeft: `3px solid ${color.lineStrong}`,
                 borderRadius: radius.sm, padding: "6px 10px" }}>
               <RequestTypeTag type={q.type} />
               <span style={{ flex: "2 1 200px", minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>

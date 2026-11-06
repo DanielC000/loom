@@ -47,7 +47,7 @@ export type CapabilityProvisionReason =
 /** One-line human summary per provisioning state — its signal tone + label. */
 export const PROVISION_STATE_META: Record<CapabilityProvisioning["state"], { tone: Tone; label: string }> = {
   idle: { tone: "muted", label: "not provisioned yet" },
-  installing: { tone: "busy", label: "installing…" },
+  installing: { tone: "work", label: "installing…" },
   ready: { tone: "live", label: "ready" },
   failed: { tone: "danger", label: "install failed" },
 };

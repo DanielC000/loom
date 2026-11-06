@@ -263,7 +263,7 @@ export function AgentEditor(
         </Button>
       </div>
       {boundBindsPlain && (
-        <div data-testid="agent-profile-plain-bind" style={{ display: "flex", alignItems: "baseline", gap: 6, color: color.busy, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
+        <div data-testid="agent-profile-plain-bind" style={{ display: "flex", alignItems: "baseline", gap: 6, color: color.attnText, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
           <span aria-hidden>△</span>
           <span>This profile's role isn't one a profile can confer, so sessions from this agent spawn plain.</span>
         </div>
@@ -290,7 +290,7 @@ export function AgentEditor(
           ? <Button onClick={() => setPrompt(seed)}>Reset</Button>
           : <span data-testid={`agent-prompt-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
         {conflict && (
-          <span data-testid="agent-prompt-conflict" style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <span data-testid="agent-prompt-conflict" style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
             This prompt changed elsewhere since you opened it — Save replaces it with your version, Reset takes theirs.
           </span>
         )}
@@ -315,8 +315,8 @@ export function AgentEditor(
               <button key={c.id} type="button" onClick={() => toggleConnection(c.id)}
                 data-testid={`agent-connection-${agent.id}-${c.id}`}
                 style={{ cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, padding: "3px 9px", borderRadius: radius.lg,
-                  border: `1px solid ${on ? color.live : color.line}`, background: on ? color.inset : "transparent",
-                  color: on ? color.live : color.text3 }}>
+                  border: `1px solid ${on ? color.accentEdge : color.line}`, background: on ? color.inset : "transparent",
+                  color: on ? color.accentFg : color.text3 }}>
                 {/* Metadata only — name, target, scheme. ConnectionMetadata carries no key field to render. */}
                 {on ? "✓ " : ""}{c.name} <span style={{ opacity: 0.7 }}>({c.authScheme === "ssh" ? `${c.user}@${c.host}` : c.host})</span>
                 {c.authScheme === "ssh" && <span style={{ marginLeft: 6, fontSize: fs.xs, opacity: 0.8 }}>ssh</span>}
@@ -337,7 +337,7 @@ export function AgentEditor(
               <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{c.name}</span>
-                  {c.requiresConnection && <Badge tone="info">needs connection</Badge>}
+                  {c.requiresConnection && <Badge tone="muted">needs connection</Badge>}
                 </span>
                 {checked && c.requiresConnection && (
                   <>
@@ -379,7 +379,7 @@ export function AgentEditor(
           ? <Button onClick={() => { setConnections(grantSync.seed.connections); setCapabilities(grantSync.seed.capabilities); }}>Reset</Button>
           : <span data-testid={`agent-grants-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
         {grantsConflict && (
-          <span data-testid={`agent-grants-conflict-${agent.id}`} style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <span data-testid={`agent-grants-conflict-${agent.id}`} style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
             Grants changed elsewhere since you opened this — Save replaces them with your version, Reset takes theirs.
           </span>
         )}

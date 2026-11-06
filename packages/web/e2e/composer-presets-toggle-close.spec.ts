@@ -117,10 +117,10 @@ test("the presets popover closes from its own trigger, and Escape / outside-clic
 
   // Consequence: `.loom-btn-on`'s own hover rule is reachable by a real pointer while the popover is up,
   // which it provably was not before (global.css `.loom-btn-on:not(:disabled):hover`). An open state is
-  // a selection, so it is cobalt: `--loom-selected` at rest, the stronger `--loom-ring-soft` on hover.
+  // a selection, so it is ink: `--loom-selected` at rest, the `--loom-pressed` step on hover.
   // Both values are resolved from the live tokens global.css's rules name, never typed as literals.
   const restFill = await cssColor(page, "--loom-selected");
-  const hoverFill = await cssColor(page, "--loom-ring-soft");
+  const hoverFill = await cssColor(page, "--loom-pressed");
   expect(hoverFill, "the open trigger's hover fill differs from its rest fill").not.toBe(restFill);
   await expect(trigger).toHaveClass(/\bloom-btn-on\b/);
   await expect(trigger).toHaveCSS("background-color", restFill);

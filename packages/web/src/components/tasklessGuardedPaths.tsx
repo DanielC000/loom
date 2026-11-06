@@ -62,7 +62,7 @@ export function TasklessGuardedPathsEditor({ project }: { project: Project }) {
         the work on a card. Workers on a card are not affected. Only you can set this list; agents cannot change it.
       </p>
       {seed.error && (
-        <div role="alert" data-testid="taskless-guarded-paths-corrupt" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.busy, lineHeight: 1.5 }}>
+        <div role="alert" data-testid="taskless-guarded-paths-corrupt" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.attnText, lineHeight: 1.5 }}>
           The stored list can’t be read ({seed.error}), so every merge from a worker without a card is refused. Saving
           below replaces it.
         </div>
@@ -74,7 +74,7 @@ export function TasklessGuardedPathsEditor({ project }: { project: Project }) {
         value={text} onChange={(e) => { setJustSaved(false); setText(e.target.value); }}
         placeholder={"packages/daemon/src/git/**\n.github/**\n*.lock"}
         style={{ width: "100%", boxSizing: "border-box", resize: "vertical", minHeight: 96, fontFamily: font.mono, fontSize: fs.body,
-          lineHeight: 1.5, background: color.inset, color: color.text, border: `1px solid ${draft.ok ? color.line : color.busy}`,
+          lineHeight: 1.5, background: color.inset, color: color.text, border: `1px solid ${draft.ok ? color.line : color.attn}`,
           borderRadius: radius.sm, padding: 8 }} />
       <ul style={{ margin: 0, paddingLeft: 18, fontFamily: font.ui, fontSize: fs.xs, color: color.text3, lineHeight: 1.6, maxWidth: "70ch" }}>
         <li>
@@ -99,7 +99,7 @@ export function TasklessGuardedPathsEditor({ project }: { project: Project }) {
         </span>
         <span style={{ flex: 1 }} />
         {dirty && !draft.ok && (
-          <span data-testid="taskless-guarded-paths-draft-error" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.busy }}>{draft.error}</span>
+          <span data-testid="taskless-guarded-paths-draft-error" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.attnText }}>{draft.error}</span>
         )}
         {dirty && <Button onClick={() => { adopt(storedOf(project)); save.reset(); }} disabled={save.isPending}>Discard changes</Button>}
         {!dirty && justSaved && <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.liveText }}>saved</span>}

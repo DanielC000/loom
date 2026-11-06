@@ -128,8 +128,8 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
   const evs = events.data ?? [];
 
   // Status: archived (archivedAt set) → live (running) → exited.
-  const status: { label: string; tone: "live" | "info" | "muted"; glow?: boolean } =
-    run.archivedAt ? { label: "archived", tone: "info" }
+  const status: { label: string; tone: "live" | "muted"; glow?: boolean } =
+    run.archivedAt ? { label: "archived", tone: "muted" }
       : live ? { label: "live", tone: "live", glow: true }
         : { label: "exited", tone: "muted" };
 
@@ -150,11 +150,11 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
     <Panel style={{ padding: 0 }}>
       <div onClick={onToggle} title={open ? "Collapse" : "Expand to read this session’s transcript"}
         style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", cursor: "pointer", flexWrap: "wrap" }}>
-        <span style={{ color: open ? color.live : color.text2, fontFamily: font.mono, fontSize: fs.mono }}>{open ? "▾" : "▸"}</span>
+        <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>{open ? "▾" : "▸"}</span>
         <StatusPill tone={status.tone} glow={status.glow} label={status.label} />
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>{fmt(run.createdAt)}</span>
         <Chip label="dur" value={fmtDur(run.createdAt, end)} />
-        <Chip label={fired ? "cron" : "trigger"} value={trigger} tone={fired ? "info" : "muted"} />
+        <Chip label={fired ? "cron" : "trigger"} value={trigger} tone="muted" />
         {run.model && <Chip label="model" value={run.model} />}
         {run.ctxInputTokens != null && <Chip label="ctx" value={run.ctxInputTokens.toLocaleString()} />}
         {run.ctxTurns != null && <Chip label="turns" value={run.ctxTurns} />}
@@ -166,7 +166,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
             title={previewOnly
               ? "Preview only on a dev install — acting here is disabled"
               : "Resume this exited session (brings it back live)"}
-            style={{ padding: "2px 8px", fontSize: fs.sm, color: color.info, borderColor: color.line }}>
+            style={{ padding: "2px 8px", fontSize: fs.sm, color: color.text2, borderColor: color.line }}>
             {resumeM.isPending ? "resuming…" : "Resume"}
           </Button>
         )}
@@ -195,9 +195,9 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
             return (
               <span key={f.id} title={task ? title : `${title} (no longer on the board)`}
                 style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: font.mono, fontSize: fs.mono,
-                  border: `1px solid ${task ? color.info : color.line}`, borderRadius: radius.sm, padding: "1px 6px",
-                  color: task ? color.info : color.text3, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {severity && <span style={{ color: color.busy }}>{severity}</span>}
+                  border: `1px solid ${task ? color.lineStrong : color.line}`, borderRadius: radius.sm, padding: "1px 6px",
+                  color: task ? color.text2 : color.text3, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {severity && <span style={{ color: color.attnText }}>{severity}</span>}
                 {title}{!task && " ·gone"}
               </span>
             );

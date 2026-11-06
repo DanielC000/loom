@@ -4,7 +4,7 @@ import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindo
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { attentionKindLabel, isRateLimited, isAnswerableRequest, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
-import { fleetRollup, workerBuckets, capArchived, ARCHIVED_ONLY_CAP, type ArchivedOnlyProject } from "../lib/fleet";
+import { fleetRollup, workerBuckets, capArchived, ARCHIVED_ONLY_CAP, WAITING_ON_YOU, type ArchivedOnlyProject } from "../lib/fleet";
 import { harnessOf } from "../lib/harnessFields";
 import { sentenceCase } from "../lib/textCase";
 import { DecisionStateChip } from "./decisions";
@@ -22,10 +22,14 @@ export { fleetRollup, workerBuckets };
 // god-eye view) so the project-scoped Overview page can compose the SAME widgets against a
 // project-filtered session set. Pure presentation off existing endpoints; no new backend.
 
-export function sessionStatus(s: SessionListItem): { tone: Tone; label: string; glow?: boolean } {
+// A session's status pill. Precedence: rate-limited > not live > waiting on you (it holds a PENDING
+// owner Request it filed: pass `waitingOnYou` from `usePendingDecisionsBySession().has(s.id)`) >
+// working > idle. Without the flag a session blocked on the owner would read as green "idle".
+export function sessionStatus(s: SessionListItem, waitingOnYou = false): { tone: Tone; label: string; glow?: boolean; solid?: boolean } {
   if (isRateLimited(s)) return { tone: "danger", label: "rate-limited" };
   if (s.processState !== "live") return { tone: "muted", label: s.processState };
-  if (s.busy) return { tone: "busy", label: "busy", glow: true };
+  if (waitingOnYou) return { ...WAITING_ON_YOU };
+  if (s.busy) return { tone: "work", label: "working", glow: true };
   return { tone: "live", label: "idle" };
 }
 
@@ -47,8 +51,8 @@ export function Stat({ label, value, tone: t = "live" }: { label: string; value:
 // Utilization → tone, consistent with CONTEXT_WARN_RATIO styling: phosphor < 80% ≤ amber < 95% ≤ red.
 function usageTone(utilization: number): Tone {
   if (utilization >= 95) return "danger";
-  if (utilization >= 80) return "busy";
-  return "live";
+  if (utilization >= 80) return "attn";
+  return "accent";
 }
 
 // ms-from-now → "3d 4h" / "1h 42m" / "12m" / "now". "—" when there's no reset instant.
@@ -186,7 +190,7 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   // lets the `compact` band shape re-order the SAME children without a second copy of any of them —
   // and a fragment adds no DOM node, so the classic `head` below renders the element sequence it
   // always did, attributes and inline styles included.
-  const dot = <Dot tone={item.tone} glow={item.tone === "busy"} />;
+  const dot = <Dot tone={item.tone} glow={item.tone === "attn"} />;
   const kindLabel = (
     <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: tone[item.tone], whiteSpace: "nowrap" }}>{attentionKindLabel(item.kind)}</span>
   );
@@ -236,7 +240,7 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   };
   const frame = {
     border: `1px solid ${color.line}`,
-    borderLeft: decision ? `3px solid ${color.info}` : `1px solid ${color.line}`,
+    borderLeft: decision ? `3px solid ${color.attn}` : `1px solid ${color.line}`,
     borderRadius: radius.sm, padding: "6px 10px", marginBottom: 6,
   };
   // ── The BAND shape (card d0d430d4) ───────────────────────────────────────────────────────────
@@ -374,8 +378,8 @@ export function ContextUsage({ ctxInputTokens, model, unmeasured = null }: {
   const hot = ctx > win * CONTEXT_WARN_RATIO;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }} title={`${ctx.toLocaleString()} input tokens · ${Math.round((ctx / win) * 100)}% of the ${(win / 1000).toFixed(0)}k window`}>
-      <Meter value={ctx} max={win} tone={hot ? "busy" : "accent"} width={60} />
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: hot ? color.busy : color.text3 }}>{Math.round((ctx / win) * 100)}%</span>
+      <Meter value={ctx} max={win} tone={hot ? "attn" : "accent"} width={60} />
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: hot ? color.attnText : color.text3 }}>{Math.round((ctx / win) * 100)}%</span>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{(ctx / 1000).toFixed(1)}k</span>
     </span>
   );
@@ -385,11 +389,11 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
   const openRequest = useOpenRequest();
   const decisions = usePendingDecisionsBySession();
   const decision = decisions.get(s.id);
-  const st = sessionStatus(s);
+  const st = sessionStatus(s, decisions.has(s.id));
   const ctx = s.ctxInputTokens ?? 0;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 0", flexWrap: "wrap" }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: star ? color.live : color.text, fontWeight: star ? 700 : 400 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, fontWeight: star ? 700 : 400 }}>
         {star ? "★ " : ""}{star ? "mgr " : "w:"}{s.id.slice(0, 8)}
       </span>
       {/* Which vendor CLI this session actually runs — grouped with the id because it's an identity
@@ -400,20 +404,21 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
           @decision b8e52cfe — the tag renders for codex always, and for claude only inside a
           MIXED-harness view, never unconditionally. */}
       <HarnessTag harness={harnessOf(s.harness)} />
-      <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
-      {/* Decision affordance (surface 5): a manager holding a pending decision flags it inline + jumps
-          straight to the answer page — derived from the SAME pending-decision signal as the inbox + bell. */}
+      <StatusPill tone={st.tone} label={st.label} glow={st.glow} solid={st.solid} data-testid={`fleet-row-status-${s.id}`} />
+      {/* Decision affordance (surface 5): a session holding a pending decision flags it inline + jumps
+          straight to the answer page — derived from the SAME pending-decision signal as the inbox + bell.
+          The status pill beside it already says "waiting on you", so this names only the count. */}
       {decision && (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: font.mono, fontSize: fs.mono, color: color.info,
-            border: `1px solid ${color.info}`, borderRadius: radius.sm, padding: "1px 7px" }}>
-            <Dot tone="info" />{decision.count} decision{decision.count === 1 ? "" : "s"} · waiting on you
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: font.mono, fontSize: fs.mono, color: color.attnText,
+            border: `1px solid ${color.attn}`, borderRadius: radius.sm, padding: "1px 7px" }}>
+            <Dot tone="attn" />{decision.count} decision{decision.count === 1 ? "" : "s"} pending
           </span>
           <Button variant="primary" style={{ padding: "1px 8px", fontSize: fs.sm }} onClick={() => openRequest(decision.questionId)}>Answer →</Button>
         </span>
       )}
       {s.taskId && <Chip label="task" value={s.taskId.slice(0, 8)} />}
-      {s.branch && <Chip label="branch" value={s.branch} tone="info" />}
+      {s.branch && <Chip label="branch" value={s.branch} tone="muted" />}
       {/* A LIVE row hides both "no reading yet" AND a measured zero — neither is worth the width on a
           dense, fast-moving row (the Archive, where a session is final, treats them differently). */}
       {ctx > 0 && <ContextUsage ctxInputTokens={s.ctxInputTokens} model={s.model} />}
@@ -446,8 +451,8 @@ export function WaveConsumption({ sessions }: { sessions: SessionListItem[] }) {
       <span style={{ color: color.text }}>{(total.tokens / 1000).toFixed(0)}k ctx</span>
       <span style={{ color: color.text3 }}>·</span>
       <span style={{ color: color.text3 }}>peak</span>
-      <Meter value={wc.ctx} max={wc.window || 1} tone={hot ? "busy" : "accent"} width={70} />
-      <span style={{ color: hot ? color.busy : color.text3 }}>{wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}</span>
+      <Meter value={wc.ctx} max={wc.window || 1} tone={hot ? "attn" : "accent"} width={70} />
+      <span style={{ color: hot ? color.attnText : color.text3 }}>{wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}</span>
     </span>
   );
 }
@@ -472,12 +477,12 @@ export function worstContext(sessions: SessionListItem[]): { ctx: number; window
   return { ctx, window, ratio };
 }
 
-const SEG_TONE = { busy: "busy", idle: "live", rl: "danger", offline: "muted" } as const;
+const SEG_TONE = { waiting: "attn", busy: "work", idle: "live", rl: "danger", offline: "muted" } as const;
 
 // Stacked horizontal bar of worker states (flex-weighted by count). Degrades cleanly: 0 workers →
 // an empty track; 1 worker → a single full segment.
 function CompBar({ buckets }: { buckets: ReturnType<typeof workerBuckets> }) {
-  const segs = ([["busy", buckets.busy], ["idle", buckets.idle], ["rl", buckets.rl], ["offline", buckets.offline]] as const)
+  const segs = ([["waiting", buckets.waiting], ["busy", buckets.busy], ["idle", buckets.idle], ["rl", buckets.rl], ["offline", buckets.offline]] as const)
     .filter(([, n]) => n > 0);
   return (
     <div style={{ display: "flex", height: 8, width: "100%", borderRadius: radius.sm, overflow: "hidden", background: color.line }}>
@@ -506,24 +511,25 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
   const openRequest = useOpenRequest();
   const decisions = usePendingDecisionsBySession();
   const running = [...managers, ...workers];
-  // A manager on this card holding a pending decision → the cyan card affordance (surface 5). Pick the
-  // first such manager (activity-sorted by the caller) as the "Answer →" jump target.
-  const mgrWithDecision = managers.find((m) => decisions.has(m.id));
+  // A session on this card holding a pending decision → the attn card affordance (surface 5). Managers
+  // first (activity-sorted by the caller), then any other running session, so a session that can file a
+  // Request is never missed because it is not a manager. The first one is the "Answer →" jump target.
+  const mgrWithDecision = managers.find((m) => decisions.has(m.id)) ?? running.find((x) => decisions.has(x.id));
   const decision: PendingDecision | undefined = mgrWithDecision ? decisions.get(mgrWithDecision.id) : undefined;
   // Cap the archived rows folded into the card's buckets so a big archive can't dominate the composition
   // bar; the header below still reports the TRUE archived total. Archived rows are exited → offline bucket.
   const foldedArchived = capArchived(archived);
   const archivedWorkers = foldedArchived.filter((s) => s.role !== "manager");
-  const roll = fleetRollup(running); // severity from live state only (see lib/fleet.ts)
-  const buckets = workerBuckets([...workers, ...archivedWorkers]);
+  const roll = fleetRollup(running, decisions); // severity from live state only (see lib/fleet.ts)
+  const buckets = workerBuckets([...workers, ...archivedWorkers], decisions);
   const wc = worstContext(running); // ctx pressure is a live recycle signal — finished sessions excluded
   const ctxHot = wc.ratio > CONTEXT_WARN_RATIO;
   const topMgr = mgrWithDecision ?? managers[0];
-  const topSt = topMgr ? sessionStatus(topMgr) : null;
+  const topSt = topMgr ? sessionStatus(topMgr, decisions.has(topMgr.id)) : null;
 
   return (
     <Panel style={{ height: 206, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden",
-      ...(decision ? { borderLeft: `3px solid ${color.info}` } : null), ...(muted ? { opacity: 0.6 } : null) }}>
+      ...(decision ? { borderLeft: `3px solid ${color.attn}` } : null), ...(muted ? { opacity: 0.6 } : null) }}>
       {/* header: roll-up dot + name + expand */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Dot tone={roll.tone} glow={roll.glow} />
@@ -540,9 +546,9 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
 
       {/* status + counts */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-        <StatusPill tone={roll.tone} label={roll.label} glow={roll.glow} />
+        <StatusPill tone={roll.tone} label={roll.label} glow={roll.glow} solid={roll.solid} />
         <span style={{ flex: 1 }} />
-        {decision && <Chip label="decision" value={decision.count} tone="info" />}
+        {decision && <Chip label="decision" value={decision.count} tone="attn" />}
         <Chip label="mgr" value={managers.length} />
         <Chip label="wkr" value={workers.length} />
         {attention > 0 && <Chip label="attn" value={attention} tone="danger" />}
@@ -551,8 +557,9 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
       {/* worker-state composition bar + legend */}
       <CompBar buckets={buckets} />
       <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: fs.xs }}>
-        <span style={{ color: color.busy }}>busy {buckets.busy}</span>
-        <span style={{ color: color.live }}>idle {buckets.idle}</span>
+        {buckets.waiting > 0 && <span style={{ color: color.attnText }}>waiting {buckets.waiting}</span>}
+        <span style={{ color: color.workText }}>working {buckets.busy}</span>
+        <span style={{ color: color.liveText }}>idle {buckets.idle}</span>
         {buckets.rl > 0 && <span style={{ color: color.danger }}>rl {buckets.rl}</span>}
         {buckets.offline > 0 && <span style={{ color: color.text3 }}>off {buckets.offline}</span>}
         {buckets.total === 0 && <span style={{ color: color.text3 }}>no workers</span>}
@@ -561,8 +568,8 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
       {/* worst-case context pressure */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3, width: 28 }}>ctx</span>
-        <Meter value={wc.ctx} max={wc.window || 1} tone={ctxHot ? "busy" : "accent"} width={110} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: ctxHot ? color.busy : color.text3 }}>
+        <Meter value={wc.ctx} max={wc.window || 1} tone={ctxHot ? "attn" : "accent"} width={110} />
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: ctxHot ? color.attnText : color.text3 }}>
           {wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}
         </span>
       </div>
@@ -571,7 +578,7 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
       <div style={{ marginTop: "auto", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
         <div style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {topMgr && topSt
-            ? <>★ mgr {topMgr.id.slice(0, 8)} · <span style={{ color: decision ? color.info : tone[topSt.tone] }}>{decision ? "waiting on you" : topSt.label}</span></>
+            ? <>★ mgr {topMgr.id.slice(0, 8)} · <span style={{ color: decision ? color.attnText : tone[topSt.tone] }}>{decision ? "waiting on you" : topSt.label}</span></>
             : <span style={{ color: color.text3 }}>no live manager</span>}
         </div>
         {decision && (
@@ -660,7 +667,7 @@ export function EventRow({ e, projectName }: { e: OrchestrationEvent; projectNam
         </span>
       )}
       <span title={e.kind} data-testid="activity-event-kind"
-        style={{ color: color.info, whiteSpace: "nowrap", flexShrink: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+        style={{ color: color.text2, whiteSpace: "nowrap", flexShrink: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
         {e.kind}
       </span>
       <span title={detail || undefined} data-testid="activity-event-detail"

@@ -67,7 +67,7 @@ export function CodexDefaultConfirm({ layer, scopeNote, onCancel, onConfirm }: {
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 60, display: "flex",
         alignItems: "flex-start", justifyContent: "center", padding: "12vh 16px", overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width: "min(560px, 92vw)", background: color.surface, border: `1px solid ${color.busy}`,
+        style={{ width: "min(560px, 92vw)", background: color.surface, border: `1px solid ${color.attn}`,
           borderRadius: radius.base, padding: 16, display: "flex", flexDirection: "column", gap: 12,
           boxSizing: "border-box" }}>
         <span style={{ fontFamily: font.ui, fontSize: fs.body, fontWeight: 600, color: color.text }}>
@@ -78,10 +78,10 @@ export function CodexDefaultConfirm({ layer, scopeNote, onCancel, onConfirm }: {
           profile pins a harness. Two things are not settled yet:
         </span>
         <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 7 }}>
-          <li style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.busy }}>
+          <li style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.attnText }}>
             A codex branch has never been through a real merge gate (card <code>d991fefd</code>).
           </li>
-          <li style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.busy }}>
+          <li style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.attnText }}>
             A codex submit can report success off the spinner when nothing was sent (card <code>dc254a2a</code>).
           </li>
         </ul>
@@ -163,16 +163,16 @@ function DrainReadout({ data, scoped }: { data: HarnessDrainStatus; scoped: bool
   if (data.done) {
     return (
       <div data-testid="harness-drain" data-done="true" role="status"
-        style={{ border: `1px solid ${color.liveSoft}`, borderRadius: radius.base, padding: "8px 10px",
+        style={{ border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "8px 10px",
           background: color.inset, display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.live, lineHeight: 1.6 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, lineHeight: 1.6 }}>
           Drained — every live session in scope already runs the harness a fresh spawn would pick for it.
         </span>
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.6 }}>{scopeLine}</span>
       </div>
     );
   }
-  const accent = data.blocked.length > 0 ? color.danger : color.busy;
+  const accent = data.blocked.length > 0 ? color.danger : color.workText;
   return (
     <div data-testid="harness-drain" data-done="false" role="status"
       style={{ border: `1px solid ${accent}`, borderRadius: radius.base, padding: "8px 10px",
@@ -185,10 +185,10 @@ function DrainReadout({ data, scoped }: { data: HarnessDrainStatus; scoped: bool
         style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.6 }}>{scopeLine}</span>
       {data.pending.length > 0 && (
         <div data-testid="harness-drain-pending" style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.busy }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.workText }}>
             moves on its next spawn or recycle
           </span>
-          {data.pending.map((s) => <DrainRow key={s.sessionId} s={s} accent={color.busy} />)}
+          {data.pending.map((s) => <DrainRow key={s.sessionId} s={s} accent={color.workText} />)}
         </div>
       )}
       {data.blocked.length > 0 && (

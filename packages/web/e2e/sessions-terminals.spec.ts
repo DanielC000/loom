@@ -171,8 +171,8 @@ test.describe("sessions list (role + state)", () => {
     await expect(tileIdentity(page, new RegExp(`Mgr · manager · ${shortId(mgr.sessionId)}`))).toBeVisible();
     await expect(tileIdentity(page, new RegExp(`Mgr · worker · ${shortId(wkr.sessionId)}`))).toHaveCount(1);
     await expect(tileIdentity(page, new RegExp(`Mgr · worker · ${shortId(wkr.sessionId)}`))).toBeVisible();
-    // The worker was seeded busy → its tile wears a "busy" pill (the seeded live STATE is reflected).
-    await expect(page.getByText("busy", { exact: true })).toBeVisible();
+    // The worker was seeded busy → its tile wears a "working" pill (the seeded live STATE is reflected).
+    await expect(page.getByText("working", { exact: true })).toBeVisible();
   });
 });
 

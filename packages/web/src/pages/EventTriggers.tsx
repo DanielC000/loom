@@ -113,11 +113,11 @@ export default function EventTriggers() {
                   style={{ cursor: "pointer", borderBottom: `1px solid ${color.line}` }}>
                   <td style={{ padding: "10px 12px", color: color.text, fontWeight: 600, whiteSpace: "nowrap" }}>
                     {humanizeKind(t.eventKind)}
-                    <span style={{ display: "block", color: color.info, fontWeight: 400, fontSize: fs.sm }}>{t.eventKind}</span>
+                    <span style={{ display: "block", color: color.text2, fontWeight: 400, fontSize: fs.sm }}>{t.eventKind}</span>
                   </td>
                   <td style={{ padding: "10px 12px", color: t.projectId ? color.text2 : color.text3, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{projectName(t.projectId)}</td>
                   <td style={{ padding: "10px 12px" }}>
-                    <Badge tone={t.mode === "wake" ? "info" : "live"}>{t.mode}</Badge>
+                    <Badge tone="muted">{t.mode}</Badge>
                   </td>
                   <td style={{ padding: "10px 12px", color: color.text2, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{targetLabel(t)}</td>
                   <td style={{ padding: "10px 12px", color: color.text2, whiteSpace: "nowrap" }}>{fmt(t.lastFiredAt)}</td>
@@ -288,8 +288,8 @@ function EventTriggerModal({
               <option value="">{sessionsLoading ? "Loading sessions…" : noSessions ? "— no sessions available —" : "— select a session —"}</option>
               {sessions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
             </Select>
-            {noSessions && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>No sessions exist yet — start one first, or use Spawn instead.</span>}
-            {!targetSessionId && !noSessions && !sessionsLoading && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>Wake mode requires a target session.</span>}
+            {noSessions && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>No sessions exist yet — start one first, or use Spawn instead.</span>}
+            {!targetSessionId && !noSessions && !sessionsLoading && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>Wake mode requires a target session.</span>}
           </label>
         ) : (
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -298,8 +298,8 @@ function EventTriggerModal({
               <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents available —" : "— select an agent —"}</option>
               {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
             </Select>
-            {noAgents && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
-            {!agentId && !noAgents && !agentsLoading && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>Spawn mode requires a target agent.</span>}
+            {noAgents && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
+            {!agentId && !noAgents && !agentsLoading && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>Spawn mode requires a target agent.</span>}
           </label>
         )}
 

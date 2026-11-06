@@ -35,10 +35,10 @@ const iso = (minutesAgo) => new Date(NOW - minutesAgo * 60_000).toISOString();
 
 // ── The five states + their precedence ───────────────────────────────────────────────────────────────
 
-check("cadence=every reads as the healthy phosphor state", () => {
+check("cadence=every reads as the quiet, healthy state (a setting is not a live process: neutral)", () => {
   const r = readMergeGate(st({ cadence: "every" }));
   assert.equal(r.state, "every");
-  assert.equal(r.tone, "live");
+  assert.equal(r.tone, "muted");
   assert.equal(r.glow, false);
   assert.equal(r.badge, "Every merge");
   assert.match(r.sentence, /Every merge runs the gate command/);
@@ -52,10 +52,10 @@ check("cadence=never is RED and counts the damage rather than just saying 'off'"
   assert.match(r.sentence, /17 merges have landed unverified/, "the unverified count IS the readout");
 });
 
-check("cadence=interval mid-count is amber and says how many are left", () => {
+check("cadence=interval mid-count is attn (ungated merges piling up) and says how many are left", () => {
   const r = readMergeGate(st({ cadence: "interval", interval: 5, ungatedSinceLastPass: 3 }));
   assert.equal(r.state, "counting");
-  assert.equal(r.tone, "busy");
+  assert.equal(r.tone, "attn");
   assert.equal(r.badge, "Every 6th merge", "N=5 ungated allowed ⇒ the 6th runs the gate");
   assert.match(r.sentence, /2 more merges land ungated/);
 });
@@ -68,10 +68,10 @@ check("the 'more merges' sentence is singular at exactly one left, and never neg
   assert.ok(!over.sentence.includes("-"), "no negative remainder leaks into the copy");
 });
 
-check("nextLandingGated is CYAN (verification imminent, not a verdict)", () => {
+check("nextLandingGated is NEUTRAL (verification imminent, not a verdict)", () => {
   const r = readMergeGate(st({ cadence: "interval", interval: 5, ungatedSinceLastPass: 5, nextLandingGated: true }));
   assert.equal(r.state, "due");
-  assert.equal(r.tone, "info", "Loom's established non-verdict / info tone");
+  assert.equal(r.tone, "muted", "a non-verdict is neutral, never a state colour");
   assert.equal(r.glow, false);
   assert.match(r.sentence, /A pass resets the counter to 0; a fail keeps every merge gated\./);
 });
@@ -378,7 +378,7 @@ check("the weakening note states the real cost at each non-default cadence", () 
   assert.match(never.text, /No agent can make this change/, "the trust boundary is part of the warning");
 
   const interval = weakeningNote("interval", 5);
-  assert.equal(interval.tone, "busy");
+  assert.equal(interval.tone, "attn");
   assert.match(interval.text, /up to 5 merges reach the default branch/);
   assert.match(interval.text, /not which merge broke it/, "the bisect cost is stated, not implied");
 
@@ -461,7 +461,7 @@ check("the draft round-trips through a stored override", () => {
 
 check("the trailers-off note states every cost the card requires, and the reassurance", () => {
   const note = commitMessageNote("trailers", "off");
-  assert.equal(note.tone, "busy");
+  assert.equal(note.tone, "attn");
   assert.match(note.text, /crashes mid-landing/, "the crash-window gap");
   assert.match(note.text, /already shipped as not merged/, "the merged:null read-out");
   assert.match(note.text, /auto-confirming retained batch branches/, "the cleanup degradation");

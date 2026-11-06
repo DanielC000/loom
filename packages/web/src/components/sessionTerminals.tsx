@@ -156,7 +156,7 @@ function SessionRow({ s, open, onToggle, ids, regionId, showProject }: {
             card 3b563642 kept the tree's own entity tier off. `min-width`, never a fixed `width`: a
             longer badge then pushes its own row by a pixel or two instead of being clipped. */}
         <span className="loom-wsession-state">
-          <StatusPill tone={pill.pending ? "busy" : "live"} glow={pill.pending} label={pill.label} />
+          <StatusPill tone={pill.pending ? "work" : "live"} glow={pill.pending} label={pill.label} />
           <RoleBadge role={s.role ?? null} />
         </span>
         {/* The AGENT carries the weight, not the project. On the Workspace node rows are already

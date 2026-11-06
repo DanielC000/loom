@@ -351,7 +351,7 @@ function RepoPathEditor({ project }: { project: Project }) {
   return (
     <Panel>
       <SectionLabel>Repository Binding</SectionLabel>
-      <p style={{ color: color.busy, fontSize: fs.mono, margin: "0 0 12px", fontFamily: font.mono, lineHeight: 1.5 }}>
+      <p style={{ color: color.attnText, fontSize: fs.mono, margin: "0 0 12px", fontFamily: font.mono, lineHeight: 1.5 }}>
         ⚠ Rebinding repoints <strong>ALL</strong> of this project's git operations — worktrees, diffs,
         merges, branches, log — to the new repository. Change it only when you mean to move the project to
         a different checkout.
@@ -368,7 +368,7 @@ function RepoPathEditor({ project }: { project: Project }) {
           {save.isPending ? "Saving…" : "Rebind"}
         </Button>
         {dirty
-          ? <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
+          ? <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
           : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
         {save.isError && (
@@ -1239,7 +1239,7 @@ function ConfigEditor({ project }: { project: Project }) {
             <Input mono value={ungatedLandingCheckCommand} onChange={(e) => setUngatedLandingCheckCommand(e.target.value)} placeholder="e.g. pnpm build (blank = no check)" />
             <Hint>runs INSTEAD of the real gate, right before an interval-SKIPPED landing's squash — a red refuses the landing without counting as a gated pass or touching the interval counter · {effHint(resolved.orchestration.ungatedLandingCheckCommand || "none")}</Hint>
             {ungatedLandingCheckCommand.trim() && !gateCommand.trim() && (
-              <Hint style={{ color: color.busy }}>no gate command is configured for this project — this check is nested inside the same gate-skip logic, so with no gate command there is no interval to skip and it will never run</Hint>
+              <Hint style={{ color: color.attnText }}>no gate command is configured for this project — this check is nested inside the same gate-skip logic, so with no gate command there is no interval to skip and it will never run</Hint>
             )}
           </label>
           <div style={{ marginTop: 8, maxWidth: 420 }}>
@@ -1312,8 +1312,8 @@ function ConfigEditor({ project }: { project: Project }) {
             note="fewest items that must survive · a floor, never an exact count · ignored while the heading is blank" />
         </div>
         {rotationWeakenings.length > 0 && (
-          <div role="status" style={{ marginTop: 12, padding: "8px 10px", border: `1px solid ${color.busy}`, borderRadius: radius.sm, background: color.inset }}>
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, lineHeight: 1.6 }}>
+          <div role="status" style={{ marginTop: 12, padding: "8px 10px", border: `1px solid ${color.attn}`, borderRadius: radius.sm, background: color.inset }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, lineHeight: 1.6 }}>
               This save weakens the rotation guard: {rotationWeakenings.join(" · ")}. No agent can make this
               change, and re-adding it later is a fresh decision, not an undo.
             </span>
@@ -1375,8 +1375,8 @@ function ConfigEditor({ project }: { project: Project }) {
         </div>
         {/* DoD-6 — the unencrypted-storage warning, at the point of ENTRY rather than in a panel footer,
             because it has to be read before a private key gets pasted, not after. */}
-        <div role="note" style={{ marginTop: 10, padding: "8px 10px", border: `1px solid ${color.busy}`, borderRadius: radius.sm, background: color.inset }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, lineHeight: 1.6 }}>
+        <div role="note" style={{ marginTop: 10, padding: "8px 10px", border: `1px solid ${color.attn}`, borderRadius: radius.sm, background: color.inset }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, lineHeight: 1.6 }}>
             ⚠ A value typed here is stored <strong>unencrypted</strong> in this project's config row, and is
             readable by any surface that can read the project's config. This is the right tool for a
             non-secret variable, and only an honest stopgap for a real secret — prefer the encrypted
@@ -1414,13 +1414,13 @@ function ConfigEditor({ project }: { project: Project }) {
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
-          ? <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
+          ? <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
           : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
         {/* Card 65aa951c. A field the human has NOT touched silently adopts whatever landed while this
             page was open — that is just the truth arriving. A field they ARE editing cannot be adopted,
             so Save will overwrite the other write: name those, with the two real options. */}
         {liveConflicts.length > 0 && (
-          <span data-testid="config-conflict-notice" style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <span data-testid="config-conflict-notice" style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
             changed elsewhere since you opened this: {liveConflicts.map((f) => PROJECT_CONFIG_FIELD_LABELS[f]).join(", ")} — Save keeps your version
           </span>
         )}
@@ -1917,7 +1917,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <Panel>
-        <p style={{ color: color.busy, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.attnText, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           Watcher cadences and git/provision timeouts take effect after a daemon restart. Rate-limit and
           webhook values apply immediately.
         </p>
@@ -1959,7 +1959,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             blocks it. Names both fields rather than pointing at one by position. */}
         {loopBreakerClamp && (
           <span role="status" data-testid="loop-breaker-clamp-note"
-            style={{ display: "block", marginTop: 10, color: color.busy, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+            style={{ display: "block", marginTop: 10, color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
             Backoff base sits above Backoff ceiling — it saves as entered, but the daemon will back off by
             no more than {loopBreakerClamp}.
           </span>
@@ -2053,7 +2053,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
               <label key={kind} style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", padding: "2px 0" }}>
                 <input type="checkbox" data-testid={`notify-${kind}`} checked={notify}
                   onChange={() => toggleNotification(kind)}
-                  style={{ marginTop: 2, accentColor: "var(--loom-live)", width: 16, height: 16, flexShrink: 0 }} />
+                  style={{ marginTop: 2, accentColor: color.accent, width: 16, height: 16, flexShrink: 0 }} />
                 <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
                   <span style={{ ...fieldLabel, fontSize: fs.body,
                     color: notify ? color.text : color.text3 }}>{label}</span>
@@ -2263,7 +2263,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
-          ? <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
+          ? <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
           : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
         {/* A blocked Save is never silent about WHICH entry blocks it — the range errors take the error
@@ -2311,10 +2311,10 @@ function scopeLabel(scope: string): string {
   return known ? known.label : (scope.split("/").pop() || scope);
 }
 
-function oauthStatus(c: { connected?: boolean; needsReauth?: boolean; tokenExpiresAt?: string | null }): { tone: "live" | "danger" | "info"; label: string } {
+function oauthStatus(c: { connected?: boolean; needsReauth?: boolean; tokenExpiresAt?: string | null }): { tone: "live" | "danger" | "muted"; label: string } {
   if (c.needsReauth) return { tone: "danger", label: "Needs re-auth" };
   if (c.connected) return { tone: "live", label: c.tokenExpiresAt ? `Connected · expires ${new Date(c.tokenExpiresAt).toLocaleString()}` : "Connected" };
-  return { tone: "info", label: "Not connected" };
+  return { tone: "muted", label: "Not connected" };
 }
 
 /** The ssh create mutation's cache key — the handle its on-success eviction finds it by. */
@@ -2437,17 +2437,19 @@ function ConnectionsPanel() {
                 <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
                   {c.authScheme}{c.provider ? ` · ${c.provider}` : ""}
                 </span>
-                <Badge tone={c.projectId ? "info" : "live"}>{c.projectId ? projectName(c.projectId) : "Global"}</Badge>
-                {c.autoProvisioned && <Badge tone="info">Auto-provisioned</Badge>}
+                {/* Scope is identity, not liveness: a project name or "Global", both neutral. */}
+                <Badge tone="muted">{c.projectId ? projectName(c.projectId) : "Global"}</Badge>
+                {c.autoProvisioned && <Badge tone="muted">Auto-provisioned</Badge>}
                 {/* A stored host the current validator refuses (e.g. a scheme/port/path pasted into it): this
                     connection can never resolve, so say so instead of letting it read as bound-and-fine. */}
-                {c.invalidHost && <Badge tone="busy" title={c.invalidHostReason} data-testid="connection-invalid-host">Invalid host</Badge>}
-                {c.invalidApiKeyHeader && <Badge tone="busy" title={c.invalidApiKeyHeaderReason} data-testid="connection-invalid-api-key-header">Invalid header</Badge>}
+                {c.invalidHost && <Badge tone="attn" title={c.invalidHostReason} data-testid="connection-invalid-host">Invalid host</Badge>}
+                {c.invalidApiKeyHeader && <Badge tone="attn" title={c.invalidApiKeyHeaderReason} data-testid="connection-invalid-api-key-header">Invalid header</Badge>}
                 {(nameCounts.get(c.name) ?? 0) > 1 && (
-                  <Badge tone="busy" title="Another connection has this name; rename one" data-testid="connection-duplicate-name">Duplicate name</Badge>
+                  <Badge tone="attn" title="Another connection has this name; rename one" data-testid="connection-duplicate-name">Duplicate name</Badge>
                 )}
-                {/* The owner opted this connection into unencrypted http for a private/LAN host: say so on the row. */}
-                {c.allowPlainHttp && <Badge tone="busy" title="The secret is sent unencrypted on your local network" data-testid="connection-plain-http">HTTP (LAN)</Badge>}
+                {/* The owner opted this connection into unencrypted http for a private/LAN host: say so on the row.
+                    attn, not work: it is a standing risk the owner should keep in view, not activity. */}
+                {c.allowPlainHttp && <Badge tone="attn" title="The secret is sent unencrypted on your local network" data-testid="connection-plain-http">HTTP (LAN)</Badge>}
                 {/* Bound/unbound (api-key/bearer ALLOWLIST, matching the server's RAW_SECRET_AUTH_SCHEMES
                     in connections/store.ts): an oauth2 row shows its own connectedness instead, and an ssh
                     row's secret is never resolvable through this static-injection seam either — the
@@ -2455,7 +2457,7 @@ function ConnectionsPanel() {
                 {(c.authScheme === "api-key" || c.authScheme === "bearer") && (
                   boundConnectionIds.has(c.id)
                     ? <Badge tone="live">Bound</Badge>
-                    : <Badge tone="busy">Unbound</Badge>
+                    : <Badge tone="attn">Unbound</Badge>
                 )}
                 {status && <Badge tone={status.tone}>{status.label}</Badge>}
                 {c.authScheme === "oauth2" && c.scopes && c.scopes.length > 0 && (
@@ -2495,7 +2497,7 @@ function ConnectionsPanel() {
 }
 
 // The owner's opt-in to plain http for a private/LAN host (card 1d882a8c), shared by the create and edit forms.
-// The warning uses the existing `busy` tone's colour (no new tokens). The daemon owns every rule (private
+// The warning uses the attn ("needs you") colour (no new tokens). The daemon owns every rule (private
 // address only, checked again at each request); this is only the switch and its honest warning.
 function PlainHttpToggle({ checked, onChange, testId }: { checked: boolean; onChange: (v: boolean) => void; testId: string }) {
   return (
@@ -2506,11 +2508,11 @@ function PlainHttpToggle({ checked, onChange, testId }: { checked: boolean; onCh
         aria-label="Allow plain HTTP (LAN only)"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
-        style={{ accentColor: color.busy, width: 15, height: 15, marginTop: 1, flexShrink: 0 }}
+        style={{ accentColor: color.accent, width: 15, height: 15, marginTop: 1, flexShrink: 0 }}
       />
       <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>
         <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Allow plain HTTP (LAN only)</span>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>
           The token is sent unencrypted on your local network. Only for a private address (10.x, 172.16-31.x, 192.168.x, loopback, link-local); enter the host as host:port, for example 192.168.1.20:32400.
         </span>
       </span>
@@ -2650,9 +2652,9 @@ function PendingBindingsPanel() {
               <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{b.connectionName}</span>
               {b.connectionHost && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{b.connectionHost}</span>}
               <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>→</span>
-              <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.info }}>{b.agentName}</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text2 }}>{b.agentName}</span>
               <Badge tone="muted">profile {b.profileName}</Badge>
-              <Badge tone="info">{b.projectName}</Badge>
+              <Badge tone="muted">{b.projectName}</Badge>
               {b.alreadyGranted && <Badge tone="live">Granted</Badge>}
               <span style={{ flex: 1 }} />
               <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{new Date(b.requestedAt).toLocaleString()}</span>
@@ -2664,7 +2666,7 @@ function PendingBindingsPanel() {
               )}
               {!b.alreadyGranted && b.agentId && confirming === b.questionId && (
                 <div data-testid={`pending-binding-confirm-${b.questionId}`} style={{ display: "flex", alignItems: "center", gap: 8, flexBasis: "100%", flexWrap: "wrap" }}>
-                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy }}>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>
                     Grant {b.connectionName} to agent {b.agentName} only? It reaches only a session spawned fresh afterward.
                   </span>
                   <Button variant="primary" disabled={grant.isPending}
@@ -2903,7 +2905,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
                   type="checkbox"
                   checked={!!gaScopes[p.key]}
                   onChange={(e) => setGaScopes((s) => ({ ...s, [p.key]: e.target.checked }))}
-                  style={{ accentColor: color.live, width: 15, height: 15, marginTop: 1, flexShrink: 0 }}
+                  style={{ accentColor: color.accent, width: 15, height: 15, marginTop: 1, flexShrink: 0 }}
                 />
                 <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>
                   <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{p.label}</span>
@@ -3139,7 +3141,7 @@ const RECLAIM_OUTCOME: Record<NodeModulesReclaimOutcome, { tone: Tone; label: st
     note: "the removal was force-stopped part-way and is never retried, so part of this tree may already be deleted. Scan again to see what is left.",
   },
   "left-on-disk": {
-    tone: "busy", label: "Not removed", freed: "Freed: nothing",
+    tone: "attn", label: "Not removed", freed: "Freed: nothing",
     note: "the removal failed cleanly — most likely a file handle was still held. Nothing was deleted.",
   },
   rejected: {
@@ -3151,7 +3153,7 @@ const RECLAIM_OUTCOME: Record<NodeModulesReclaimOutcome, { tone: Tone; label: st
     note: "node_modules was no longer there when the reclaim ran. Nothing was deleted.",
   },
   "no-longer-eligible": {
-    tone: "busy", label: "Skipped", freed: "Freed: nothing",
+    tone: "muted", label: "Skipped", freed: "Freed: nothing",
     note: "this worktree stopped being eligible between the scan and the reclaim, so it was never touched.",
   },
 };
@@ -3159,7 +3161,7 @@ const RECLAIM_OUTCOME: Record<NodeModulesReclaimOutcome, { tone: Tone; label: st
 // never as a quantity. "Unknown" is the honest reading, and it keeps the same rule as "wedged": we cannot
 // say nothing happened to that tree.
 const RECLAIM_OUTCOME_UNKNOWN = {
-  tone: "busy" as Tone, label: "Unknown outcome", freed: "Freed: unknown",
+  tone: "attn" as Tone, label: "Unknown outcome", freed: "Freed: unknown",
   note: "this version of the UI does not recognise the outcome the daemon reported for this worktree.",
 };
 const reclaimOutcome = (o: NodeModulesReclaimOutcome) => RECLAIM_OUTCOME[o] ?? RECLAIM_OUTCOME_UNKNOWN;
@@ -3243,7 +3245,7 @@ function NodeModulesReclaimPanel() {
       <Panel>
         <p style={{ color: color.text3, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
           Loom keeps a worker's worktree on disk after its session ends, and each one can hold a full
-          <code style={{ color: color.info }}> node_modules</code> install. This clears
+          <code style={{ color: color.text2 }}> node_modules</code> install. This clears
           <strong style={{ color: color.text }}> only the node_modules directory</strong> from worktrees
           whose sessions are all finished and unresumable — never the worktree itself, its branch, or any
           git state. A worktree that is reused later reinstalls on its own.
@@ -3302,7 +3304,7 @@ function NodeModulesReclaimPanel() {
                     {e.worktreePath}
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <Badge tone="info">{e.projectName}</Badge>
+                    <Badge tone="muted">{e.projectName}</Badge>
                     <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>{idleLabel(e.ageHours)}</span>
                     <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
                       last active {new Date(e.lastActivityAt).toLocaleString()}
@@ -3380,8 +3382,8 @@ function ReclaimResultReadout({ result, onDismiss }: { result: NodeModulesReclai
   return (
     <div data-testid="reclaim-result" style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.line}`, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <StatusPill tone={clean ? "live" : "busy"} label="last reclaim" />
-        <span style={{ fontFamily: font.mono, fontSize: fs.body, color: clean ? color.text : color.busy, lineHeight: 1.5 }}>
+        <StatusPill tone={clean ? "live" : "attn"} label="last reclaim" />
+        <span style={{ fontFamily: font.mono, fontSize: fs.body, color: clean ? color.text : color.attnText, lineHeight: 1.5 }}>
           {reclaimHeadline(result)}
         </span>
         <span style={{ flex: 1 }} />
@@ -3517,7 +3519,7 @@ function PollJobsPanel() {
           )}
           {rows.map((job) => (
             editingId === job.id ? (
-              <div key={job.id} style={{ padding: 12, background: color.inset, border: `1px solid ${color.live}`, borderRadius: radius.sm }}>
+              <div key={job.id} style={{ padding: 12, background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.sm }}>
                 <PollJobForm initial={job} connections={conns} sessions={sessionOpts} agents={agentOpts}
                   agentsLoading={agents.isLoading} sessionsLoading={sessions.isLoading}
                   connName={connName(job.connectionId)}
@@ -3545,7 +3547,7 @@ function PollJobRow({ job, connName, target, toggling, deleting, onEdit, onToggl
   const [confirmDel, setConfirmDel] = useState(false);
   const failing = job.consecutiveFailures > 0;
   return (
-    <div style={{ padding: "10px 12px", background: color.inset, border: `1px solid ${failing ? color.busy : color.line}`, borderRadius: radius.sm, display: "flex", flexDirection: "column", gap: 6 }}>
+    <div style={{ padding: "10px 12px", background: color.inset, border: `1px solid ${failing ? color.attn : color.line}`, borderRadius: radius.sm, display: "flex", flexDirection: "column", gap: 6 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{connName}</span>
         <Chip label={job.method} value={job.path} />
@@ -3560,7 +3562,7 @@ function PollJobRow({ job, connName, target, toggling, deleting, onEdit, onToggl
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono }}>
         <span style={{ color: color.text2 }}>last polled · <span style={{ color: color.text }}>{fmtWhen(job.lastPolledAt)}</span></span>
         {failing && (
-          <span style={{ color: color.busy }}>{job.consecutiveFailures} consecutive failure{job.consecutiveFailures === 1 ? "" : "s"}</span>
+          <span style={{ color: color.attnText }}>{job.consecutiveFailures} consecutive failure{job.consecutiveFailures === 1 ? "" : "s"}</span>
         )}
         {job.lastError && (
           <span style={{ color: color.danger, maxWidth: 420, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={job.lastError}>
@@ -3671,14 +3673,14 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Path</span>
           <Input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/notifications" spellCheck={false} />
-          {path.trim().length > 0 && !pathValid && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>Path must start with "/".</span>}
+          {path.trim().length > 0 && !pathValid && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>Path must start with "/".</span>}
         </label>
       </div>
 
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={fieldLabel}>Poll interval (seconds)</span>
         <Input value={intervalSec} onChange={(e) => setIntervalSec(e.target.value)} inputMode="numeric" min={minSec} type="number" placeholder={String(minSec)} />
-        {intervalSec.trim().length > 0 && !intervalValid && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>Minimum {minSec}s (the poll cadence floor).</span>}
+        {intervalSec.trim().length > 0 && !intervalValid && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>Minimum {minSec}s (the poll cadence floor).</span>}
       </label>
 
       <div className="loom-field-grid loom-field-grid-2" style={{ gap: 10 }}>
@@ -3709,7 +3711,7 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
             <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents —" : "— select an agent —"}</option>
             {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
           </Select>
-          {noAgents && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
+          {noAgents && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
         </label>
       ) : (
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -3718,7 +3720,7 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
             <option value="">{sessionsLoading ? "Loading sessions…" : noSessions ? "— no sessions —" : "— select a session —"}</option>
             {sessions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
           </Select>
-          {noSessions && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>No sessions exist yet — start one before targeting a wake.</span>}
+          {noSessions && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>No sessions exist yet — start one before targeting a wake.</span>}
         </label>
       )}
 
@@ -3828,12 +3830,12 @@ function CapabilitiesPanel() {
                       builtin
                     </Badge>
                   )}
-                  {c.requiresConnection && <Badge tone="info">needs connection</Badge>}
+                  {c.requiresConnection && <Badge tone="muted">needs connection</Badge>}
                   {/* Amber, and present on the ROW rather than only inside the editor: a non-empty list
                       widens this capability's env isolation, so it has to be legible while scanning the
                       catalog, not just while editing the one row you already opened. */}
                   {editable && names.length > 0 && (
-                    <Badge tone="busy" data-testid={`capability-passenv-badge-${c.slug}`}>
+                    <Badge tone="attn" data-testid={`capability-passenv-badge-${c.slug}`}>
                       ambient env · {names.length}
                     </Badge>
                   )}
@@ -3931,7 +3933,7 @@ function PassEnvEditor({ capability, onSaved, onClose }: {
       </Hint>
       {/* Kept to two lines on purpose: this is the one sentence that must actually get read, and a
           seven-line block of amber is skipped exactly like a wall of grey. */}
-      <Hint style={{ color: color.busy, lineHeight: 1.5 }}>
+      <Hint style={{ color: color.attnText, lineHeight: 1.5 }}>
         Names only, never values — type <code>HTTPS_PROXY</code>, not the URL. Every session granted this
         capability can read what you name here, so don&apos;t name a variable holding a secret.
       </Hint>
@@ -4123,8 +4125,8 @@ function CapabilityForm({ pending, error, onSubmit, onCancel }: {
             <Input value={argsText} onChange={(e) => setArgsText(e.target.value)} spellCheck={false} />
           </label>
           {kind === "command" && (
-            <div style={{ padding: 10, background: color.surface, border: `1px solid ${color.busy}`, borderRadius: radius.sm, display: "flex", flexDirection: "column", gap: 2 }}>
-              <span style={{ ...fieldLabel, color: color.busy }}>This launches a host process you control</span>
+            <div style={{ padding: 10, background: color.surface, border: `1px solid ${color.attn}`, borderRadius: radius.sm, display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{ ...fieldLabel, color: color.attnText }}>This launches a host process you control</span>
               <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
                 A session granted this capability spawns the command above directly (no shell — args are
                 passed as an argv array, never a shell string). Loom trusts it because you typed it: the same
@@ -4132,8 +4134,8 @@ function CapabilityForm({ pending, error, onSubmit, onCancel }: {
               </span>
             </div>
           )}
-          <div style={{ padding: 10, background: color.surface, border: `1px solid ${color.busy}`, borderRadius: radius.sm, display: "flex", flexDirection: "column", gap: 2 }}>
-            <span style={{ ...fieldLabel, color: color.busy }}>No automatic .env protection here</span>
+          <div style={{ padding: 10, background: color.surface, border: `1px solid ${color.attn}`, borderRadius: radius.sm, display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ ...fieldLabel, color: color.attnText }}>No automatic .env protection here</span>
             <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
               Loom's built-in protection against a tool reading secrets out of a project's own .env files
               applies only to the one capability Loom ships with it already in place. A row you add here —

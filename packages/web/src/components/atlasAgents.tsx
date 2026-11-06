@@ -124,7 +124,7 @@ function AgentIdentity({ entry }: { entry: RosterAgent }) {
         <RoleBadge role={entry.role} />
         <strong className="loom-agentrow-name" title={entry.agent.name}>{entry.agent.name}</strong>
         <span style={{ flex: 1 }} />
-        {pill && <StatusPill tone={pill.pending ? "busy" : "live"} glow={pill.pending} label={pill.label} />}
+        {pill && <StatusPill tone={pill.pending ? "work" : "live"} glow={pill.pending} label={pill.label} />}
       </div>
       {/* The `title` matters here: a band column is ~250px, so this line ellipsises there while the
           node page shows it whole. The hover is what makes the truncated form still answerable.
@@ -191,7 +191,7 @@ export function AgentRosterCard({ entry, onEdit, dispatched = false, cron = [], 
   // Measured on the first eyeball of this card — the dashed edge, the muted rig surface and
   // `padding: 0` were all written as CSS, all three did nothing, and the card still looked close
   // enough to the mockup to pass a glance.
-  const edge = pill ? (pill.pending ? color.busy : color.live) : color.lineStrong;
+  const edge = pill ? (pill.pending ? color.work : color.live) : color.lineStrong;
   const classes = `loom-baycard${dispatched ? " is-dispatched" : ""}`;
   return (
     <Panel className={classes} data-testid={testId ?? `atlas-agent-card-${entry.agent.id}`}
@@ -216,7 +216,7 @@ export function AgentRosterCard({ entry, onEdit, dispatched = false, cron = [], 
               <span className="loom-baycard-tier"> · {role.tierLabel}</span>}
           </span>
         </span>
-        {pill && <StatusPill tone={pill.pending ? "busy" : "live"} glow={pill.pending} label={pill.label} />}
+        {pill && <StatusPill tone={pill.pending ? "work" : "live"} glow={pill.pending} label={pill.label} />}
       </div>
 
       <p className="loom-baymission">{missionLine(entry.agent.startupPrompt, role.description)}</p>

@@ -38,6 +38,8 @@ function cardInLane(page: Page, laneLabel: string, title: string) {
 }
 
 const uniq = (p: string) => `${p}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+// The held card's tag, as rendered: the ⏸ glyph plus the word (held is neutral, so the glyph carries it).
+const HELD_TAG = "⏸ held";
 
 test("renders the default lanes and each seeded card in its own lane", async ({ page, loomDaemon }) => {
   const project = await loomDaemon.createProject(`board-lanes-${Date.now()}`);
@@ -383,9 +385,9 @@ test("a held card shows as held, and releasing the hold in the drawer clears it"
 
   await page.goto(`${loomDaemon.baseURL}/board`);
 
-  // BEFORE: the card wears the "held" badge (the owner's-brake signal), in its To Do lane.
+  // BEFORE: the card wears the "⏸ held" badge (the owner's-brake signal), in its To Do lane.
   await expect(cardInLane(page, "To Do", title)).toBeVisible();
-  await expect(lane(page, "To Do").getByText("held", { exact: true })).toBeVisible();
+  await expect(lane(page, "To Do").getByText(HELD_TAG, { exact: true })).toBeVisible();
 
   // Release the hold through the UI: open the drawer, flip the Hold switch off, Save.
   // Scoped by name — the drawer has a second switch (Defer, card 77d33266), so an unscoped
@@ -398,7 +400,7 @@ test("a held card shows as held, and releasing the hold in the drawer clears it"
   await page.getByRole("button", { name: "Save", exact: true }).click();
 
   // AFTER (observable #1): the badge is gone from the board.
-  await expect(lane(page, "To Do").getByText("held", { exact: true })).toHaveCount(0);
+  await expect(lane(page, "To Do").getByText(HELD_TAG, { exact: true })).toHaveCount(0);
   // AFTER (observable #2): the release persisted to the store.
   await expect
     .poll(async () => {
@@ -430,7 +432,7 @@ test("a deferred card shows as deferred (distinct from held), and un-deferring i
   // BEFORE: the card wears the "deferred" badge — a DISTINCT marker from "held" (never rendered here).
   await expect(cardInLane(page, "To Do", title)).toBeVisible();
   await expect(lane(page, "To Do").getByText("deferred", { exact: true })).toBeVisible();
-  await expect(lane(page, "To Do").getByText("held", { exact: true })).toHaveCount(0);
+  await expect(lane(page, "To Do").getByText(HELD_TAG, { exact: true })).toHaveCount(0);
 
   // Clear the defer through the UI: open the drawer, flip the Defer switch off, Save.
   await cardInLane(page, "To Do", title).click();
@@ -581,7 +583,7 @@ test("a card's title reflows to its own line on a tight lane, stays inline on a 
   const title = `reflowword${Date.now()}longunbrokentitletoken`;
   const task = await loomDaemon.createTask(project.id, { title, columnKey: "todo", priority: "p0" });
   // `held` has no REST create field — set it through the same PATCH the drawer's Hold switch uses, so the
-  // card also wears the amber "held" badge that shares the title's flex line.
+  // card also wears the neutral "⏸ held" badge that shares the title's flex line.
   {
     const res = await fetch(`${loomDaemon.baseURL}/api/tasks/${task.id}`, {
       method: "POST",
@@ -602,7 +604,7 @@ test("a card's title reflows to its own line on a tight lane, stays inline on a 
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(`${loomDaemon.baseURL}/board`);
   await expect(chip()).toBeVisible();
-  await expect(lane(page, "To Do").getByText("held", { exact: true })).toBeVisible();
+  await expect(lane(page, "To Do").getByText(HELD_TAG, { exact: true })).toBeVisible();
   await expect(titleSpan()).toBeVisible();
   {
     const c = await chip().boundingBox();

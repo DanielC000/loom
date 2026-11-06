@@ -304,9 +304,9 @@ function ListRow(
       style={{
         display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", cursor: "pointer",
         background: selected || hover ? color.inset : "transparent",
-        border: "none", borderLeft: `2px solid ${selected ? color.live : "transparent"}`,
+        border: "none", borderLeft: `2px solid ${selected ? color.accentEdge : "transparent"}`,
         borderRadius: radius.sm, padding: "6px 8px",
-        color: selected ? color.live : color.text2, fontFamily: font.mono, fontSize: fs.body,
+        color: selected ? color.accentFg : color.text2, fontFamily: font.mono, fontSize: fs.body,
       }}>
       {children}
     </button>
@@ -346,7 +346,7 @@ function AgentRow(
       {icon && <span aria-hidden>{icon}</span>}
       {role && (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: fs.xs, color: bindsPlain ? color.text3 : roleColor(roleKey), fontFamily: font.mono }}>
-          {bindsPlain && <span data-testid="agent-row-plain-bind" aria-hidden style={{ color: color.busy }}>△</span>}
+          {bindsPlain && <span data-testid="agent-row-plain-bind" aria-hidden style={{ color: color.attnText }}>△</span>}
           {roleDisplay(roleKey).short}
         </span>
       )}

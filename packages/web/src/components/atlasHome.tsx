@@ -723,7 +723,7 @@ export function DayBars({ series, label }: { series: { day: string; branches: nu
           <span style={{
             display: "block", width: "100%", borderRadius: 1,
             height: `${Math.max(2, (d.branches / max) * 100)}%`,
-            background: i === series.length - 1 ? color.live : color.lineStrong,
+            background: i === series.length - 1 ? color.meterOk : color.lineStrong,
           }} />
         </span>
       ))}
@@ -754,7 +754,7 @@ export function PlanUsageDetail({ usage }: { usage: AvailableUsage | null }) {
   if (!usage) return <BandEmpty>Plan usage is unavailable on this daemon.</BandEmpty>;
   // Same thresholds components/fleet.tsx's own `usageTone` uses, and the same ones the CONTEXT
   // meters read: phosphor < 80% ≤ amber < 95% ≤ red.
-  const t = (u: number): Tone => (u >= 95 ? "danger" : u >= 80 ? "busy" : "live");
+  const t = (u: number): Tone => (u >= 95 ? "danger" : u >= 80 ? "attn" : "accent");
   return (
     <>
       {usage.fiveHour && (

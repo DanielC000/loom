@@ -13,7 +13,7 @@ import { ALLOWLIST_NOT_READY, planEndpointAllowlist } from "../lib/endpointAllow
 // plaintext token is returned EXACTLY ONCE on create + rotate — it lives ONLY in transient component state
 // here (the OneTimeSecret panel), never in the query cache and never refetched; it's cleared on dismiss.
 
-const statusTone: Record<ApiKeyStatus, Tone> = { active: "live", paused: "busy", revoked: "danger" };
+const statusTone: Record<ApiKeyStatus, Tone> = { active: "live", paused: "muted", revoked: "danger" };
 const ts = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : "—");
 const capStr = (n: number | null | undefined) => (n == null ? "" : String(n));
 
@@ -162,13 +162,13 @@ function OneTimeSecret({ name, plaintext, onDismiss }: { name: string; plaintext
   const [copied, setCopied] = useState(false);
   const copy = () => { navigator.clipboard?.writeText(plaintext).then(() => setCopied(true)).catch(() => {}); };
   return (
-    <Panel style={{ padding: 14, background: color.busySoft, boxShadow: `inset 0 0 0 1px ${color.busy}` }}>
+    <Panel style={{ padding: 14, background: color.attnSoft, boxShadow: `inset 0 0 0 1px ${color.attn}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <StatusPill tone="busy" label="New secret · store it now" glow />
+        <StatusPill tone="attn" label="New secret · store it now" glow />
         <span style={{ flex: 1 }} />
         <Button variant="ghost" onClick={onDismiss} title="Dismiss — the secret is cleared and can never be shown again">Dismiss</Button>
       </div>
-      <p style={{ margin: "0 0 8px", fontSize: fs.sm, color: color.busy }}>
+      <p style={{ margin: "0 0 8px", fontSize: fs.sm, color: color.attnText }}>
         This is the ONLY time the token for <strong>{name}</strong> is shown. Copy it now — it is never stored in plaintext and
         can never be retrieved again. If you lose it, rotate the key for a new one.
       </p>
@@ -186,7 +186,7 @@ function OneTimeSecret({ name, plaintext, onDismiss }: { name: string; plaintext
 function EndpointRow({ agent, onToggle, pending }: { agent: Agent; onToggle: () => void; pending: boolean }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <StatusPill tone={agent.endpoint ? "info" : "muted"} label={agent.endpoint ? "endpoint" : "off"} />
+      <StatusPill tone="muted" label={agent.endpoint ? "endpoint" : "off"} />
       <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{agent.name}</span>
       <span style={{ flex: 1 }} />
       <Button variant={agent.endpoint ? "default" : "primary"} disabled={pending} onClick={onToggle}>
@@ -219,7 +219,7 @@ function KeyRow({ k, agentName, onEdit, onRotate, onKill, onDelete, onRevoke, on
       <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         <span style={{ fontSize: fs.mono, color: color.text3, fontFamily: font.mono }}>endpoints:</span>
         {k.endpointAgentIds.length === 0 && <span style={{ fontSize: fs.sm, color: color.text3 }}>none</span>}
-        {k.endpointAgentIds.map((id) => <Chip key={id} value={agentName(id)} tone="info" />)}
+        {k.endpointAgentIds.map((id) => <Chip key={id} value={agentName(id)} tone="muted" />)}
       </div>
 
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -306,7 +306,7 @@ function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, 
             loaded-with-rows. The first used to render as the second, which read as a settled fact about
             the project while actually being "we have not fetched this yet". */}
         {endpointAgents === null
-          ? <span style={{ fontSize: fs.sm, color: color.busy }}>{ALLOWLIST_NOT_READY}</span>
+          ? <span style={{ fontSize: fs.sm, color: color.workText }}>{ALLOWLIST_NOT_READY}</span>
           : endpointAgents.length === 0
           ? <span style={{ fontSize: fs.sm, color: color.text3 }}>No endpoint agents yet — flag one above first.</span>
           : (
@@ -322,7 +322,7 @@ function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, 
         {/* Disclose the grants being dropped (see the `staleAllow` note above) — these ids have no row to
             untick because their agent is no longer an endpoint agent, and re-sending one 400s the save. */}
         {staleAllow.length > 0 && (
-          <span style={{ fontSize: fs.sm, color: color.busy, marginTop: 6, display: "block" }}>
+          <span style={{ fontSize: fs.sm, color: color.attnText, marginTop: 6, display: "block" }}>
             {staleAllow.length === 1 ? "1 stored grant is" : `${staleAllow.length} stored grants are`} no longer
             an endpoint agent ({staleAllow.map((id) => agentName(id)).join(", ")}) and will be dropped on
             save. Re-flag the agent as an endpoint first if you meant to keep it.

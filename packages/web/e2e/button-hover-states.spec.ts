@@ -306,7 +306,7 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
 
   // ── PresetPrompts' IconButton, both forms. These are RAW `loom-btn loom-btn-<variant>` elements that
   // used to restate the variant's own `color` inline — identical value, total shadowing. Rest must be
-  // unchanged (--loom-text-2 / --loom-danger, i.e. exactly what the variant class already sets).
+  // unchanged (--loom-text-2 / --loom-danger-text, i.e. exactly what the variant class already sets).
   // The pointer is already parked on the dialog's inert top-left copy — hoisted above the open-trigger
   // readings, which need it just as much since b6896a96 — so this first icon's rest reading is clean.
   const editIcon = dialog.getByRole("button", { name: `Edit ${LABEL}` });
@@ -318,7 +318,7 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
 
   const deleteIcon = dialog.getByRole("button", { name: `Delete ${LABEL}` });
   await expect(deleteIcon).toBeVisible();
-  await expect(deleteIcon).toHaveCSS("color", await cssColor(page, "--loom-danger"));
+  await expect(deleteIcon).toHaveCSS("color", await cssColor(page, "--loom-danger-text"));
   expect(await isTopmostAtCentre(deleteIcon), "the delete icon should be pointer-reachable").toBe(true);
   const del = await restThenHover(page, deleteIcon, { force: true });
   expect(del.hover.background).not.toBe(del.rest.background);
@@ -463,7 +463,7 @@ test("the Gates batch-expand toggle hovers, and its chevron brightens with it (G
 
   // The chevron glyph is a CHILD that restated the same --loom-text-2 one level down, so it would have
   // stayed dim while its own button's label brightened — a half-lit control. It now inherits. `BatchTag`
-  // beside it deliberately keeps its phosphor chip colour: that is a distinct tone, not a restatement of
+  // beside it deliberately keeps its own neutral chip colour: that is a distinct tone, not a restatement of
   // the variant's own rest token, so it must NOT move, and asserting both is what separates the two cases.
   // The pointer is still on the toggle from `restThenSettledHover`, so these are both HOVERED readings —
   // which is the state the two cases differ in. Measured pre-fix: the chevron stayed `rgb(138, 146, 155)`
@@ -471,7 +471,7 @@ test("the Gates batch-expand toggle hovers, and its chevron brightens with it (G
   const chevron = toggle.locator("span[aria-hidden='true']");
   await expect(chevron).toHaveCount(1);
   await expect(chevron).toHaveCSS("color", text);
-  await expect(toggle.getByText("batch", { exact: true })).toHaveCSS("color", await cssColor(page, "--loom-live"));
+  await expect(toggle.getByText("batch", { exact: true })).toHaveCSS("color", await cssColor(page, "--loom-text-2"));
 
   // The control still WORKS — a rest-and-hover reading alone would not prove the toggle does anything.
   await toggle.click();

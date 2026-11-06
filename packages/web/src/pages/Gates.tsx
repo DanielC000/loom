@@ -52,7 +52,7 @@ function relTime(iso: string, now: number): string {
 }
 
 // ── gate-type + outcome + priority styling (kept on the existing token palette) ──
-const KIND_COLOR: Record<GateType, string> = { merge: color.live, deploy: color.busy, worker: color.info };
+const KIND_COLOR: Record<GateType, string> = { merge: color.text2, deploy: color.text2, worker: color.text2 };
 const KIND_LABEL: Record<GateType, string> = { merge: "merge", deploy: "deploy", worker: "worker" };
 // "cancelled" (card 3a6f04cc) gets its OWN neutral cyan, matching Board.tsx's own cancelled-outcome tone
 // for a pending-merge cancel — it must never read as a failure (red), since no verdict was reached.
@@ -60,10 +60,10 @@ const KIND_LABEL: Record<GateType, string> = { merge: "merge", deploy: "deploy",
 // gate that never spawned), distinct from cancelled only in WHY nothing ran, not in whether it's a failure.
 // "error" (card cee17efe) is a FOURTH non-verdict, amber rather than red or cyan: the dist-importer
 // advisory's own machinery broke (a bad cut/build/scan), never a real test red and never a withdrawal.
-const OUTCOME_COLOR: Record<GateOutcome, string> = { pass: color.live, reject: color.danger, timeout: color.danger, kill: color.danger, cancelled: color.info, skipped: color.info, error: color.busy };
+const OUTCOME_COLOR: Record<GateOutcome, string> = { pass: color.live, reject: color.danger, timeout: color.danger, kill: color.danger, cancelled: color.text2, skipped: color.text2, error: color.attnText };
 const OUTCOME_GLOW: Record<GateOutcome, boolean> = { pass: false, reject: false, timeout: true, kill: true, cancelled: false, skipped: false, error: false };
 const PRIORITY_RANK: Record<TaskPriority, number> = { p0: 0, p1: 1, p2: 2, p3: 3 };
-const PRIORITY_COLOR: Record<TaskPriority, string> = { p0: color.danger, p1: color.danger, p2: color.busy, p3: color.text3 };
+const PRIORITY_COLOR: Record<TaskPriority, string> = { p0: color.danger, p1: color.danger, p2: color.text3, p3: color.text3 };
 
 // ── non-run rows (card 04cef8d7) ────────────────────────────────────────────────
 // `gateRan:false` (card 3a6f04cc) means no gate PROCESS ever spawned for this op. Such a row still
@@ -120,7 +120,7 @@ function batchSummary(landed: number | null, requested: number | null): string {
 function BatchTag() {
   return (
     <span style={{
-      fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, padding: "1px 5px", borderRadius: radius.sm, background: color.liveSoft, color: color.live, flex: "none",
+      fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, padding: "1px 5px", borderRadius: radius.sm, background: color.surface2, color: color.text2, flex: "none",
     }}>
       {BATCH_LABEL}
     </span>
@@ -162,7 +162,7 @@ function ForfeitTag() {
   return (
     <span
       style={{
-        fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, padding: "1px 5px", borderRadius: radius.sm, border: `1px solid ${color.busy}`, color: color.busy, flex: "none",
+        fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, padding: "1px 5px", borderRadius: radius.sm, border: `1px solid ${color.attn}`, color: color.attnText, flex: "none",
       }}
       title={FORFEIT_NOTE}
     >
@@ -206,7 +206,7 @@ function FallbackTag({ opId }: { opId: string }) {
     <span
       title={FALLBACK_NOTE(opId)}
       style={{
-        fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, padding: "1px 5px", borderRadius: radius.sm, border: `1px solid ${color.info}`, color: color.info, flex: "none",
+        fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, padding: "1px 5px", borderRadius: radius.sm, border: `1px solid ${color.lineStrong}`, color: color.text2, flex: "none",
       }}
     >
       {FALLBACK_LABEL}
@@ -221,7 +221,7 @@ function FallbackIdentity({ opId, style }: { opId: string; style?: CSSProperties
   return (
     <div
       title={FALLBACK_NOTE(opId)}
-      style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: fs.sm, color: color.info, ...style }}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: fs.sm, color: color.text2, ...style }}
     >
       <FallbackTag opId={opId} />
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -265,7 +265,7 @@ function fallbackGroups(running: GateRun[], queued: GateRun[]): { opId: string; 
 // to scale with batch size K — retune per-K, never widen one band to cover every K.
 const LONG_RUN_WARN_FRACTION = 0.80;
 
-/** The per-ROW long-run verdict for a running gate: `warn` flips its elapsed clock from amber to red once
+/** The per-ROW long-run verdict for a running gate: `warn` flips its elapsed clock from work to red once
  *  the run has consumed {@link LONG_RUN_WARN_FRACTION} of THAT row's own project bound.
  *  A row whose `gateTimeoutMs` is `null` (the project row was unreadable — see `GateRun.gateTimeoutMs`)
  *  NEVER warns: there is ⛔ deliberately no fallback constant, because an unknown bound cannot say whether
@@ -275,7 +275,7 @@ function longRunCue(elapsedSec: number, gateTimeoutMs: number | null): { warn: b
   if (gateTimeoutMs == null || gateTimeoutMs <= 0) {
     return {
       warn: false,
-      title: "This project's gate timeout is unknown, so there is no bound to measure this run against — the clock stays amber however long it runs.",
+      title: "This project's gate timeout is unknown, so there is no bound to measure this run against — the clock never turns red however long it runs.",
     };
   }
   const fraction = (elapsedSec * 1000) / gateTimeoutMs;
@@ -397,7 +397,7 @@ export default function Gates() {
 // @decision 5968d7e0 — do not re-add these lamps inside the Atlas frame, and do not move them into
 // the node head. The node's own KPI strip carries running·queued on this very tab row.
 function PageHead({ cap, activeCount, queuedCount }: { cap: number; activeCount: number; queuedCount: number }) {
-  const laneTone = activeCount > 0 ? color.busy : color.lineStrong;
+  const laneTone = activeCount > 0 ? color.work : color.lineStrong;
   // The whole head, lamps included, is the classic shell's. Inside the frame it renders nothing at
   // all — so this page starts on its filter row, exactly as every other re-homed tab body does.
   if (useFrameOwnsNodeIdentity()) return null;
@@ -413,7 +413,7 @@ function PageHead({ cap, activeCount, queuedCount }: { cap: number; activeCount:
       </div>
       <div style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: space(4) }}>
         <Lamp color={laneTone} glow={activeCount > 0} label={`${activeCount} / ${cap} lane${cap === 1 ? "" : "s"} busy`} />
-        <Lamp color={queuedCount > 0 ? color.info : color.lineStrong} label={`${queuedCount} queued`} />
+        <Lamp color={queuedCount > 0 ? color.text3 : color.lineStrong} label={`${queuedCount} queued`} />
       </div>
     </div>
   );
@@ -457,9 +457,9 @@ function ProjectFilter({
               letterSpacing: "0.04em",
               padding: "3px 10px",
               borderRadius: radius.base,
-              border: `1px solid ${on ? color.live : color.line}`,
-              color: on ? color.live : color.text2,
-              background: on ? color.liveSoft : "transparent",
+              border: `1px solid ${on ? color.accentEdge : color.line}`,
+              color: on ? color.accentFg : color.text2,
+              background: on ? color.selected : "transparent",
             }}
           >
             {c.name}
@@ -509,7 +509,7 @@ function LaneHero({
           Semaphore
         </span>
         <span style={{ fontSize: fs.sm, color: color.text3 }}>
-          <b style={{ color: color.busy, fontWeight: 500 }}>{globalActive}</b> of {cap} lane{cap === 1 ? "" : "s"} busy · {globalQueued} queued · maxConcurrentGates <b style={{ color: color.busy, fontWeight: 500 }}>{cap}</b>
+          <b style={{ color: color.workText, fontWeight: 500 }}>{globalActive}</b> of {cap} lane{cap === 1 ? "" : "s"} busy · {globalQueued} queued · maxConcurrentGates <b style={{ color: color.workText, fontWeight: 500 }}>{cap}</b>
         </span>
       </div>
 
@@ -575,11 +575,11 @@ function LaneHero({
         return (
           <div
             key={g.opId}
-            style={{ marginTop: 12, padding: "8px 12px", border: `1px solid ${color.info}`, borderLeftWidth: 3, borderRadius: radius.base, background: wash(color.info, 5), fontSize: fs.sm, color: color.text }}
+            style={{ marginTop: 12, padding: "8px 12px", border: `1px solid ${color.lineStrong}`, borderLeftWidth: 3, borderRadius: radius.base, background: color.surface2, fontSize: fs.sm, color: color.text }}
           >
-            <b style={{ color: color.info, fontWeight: 500 }}>Batch fallback.</b>{" "}
+            <b style={{ color: color.text2, fontWeight: 500 }}>Batch fallback.</b>{" "}
             {lead}
-            <span style={{ fontFamily: font.mono, color: color.info }}>{shortOpId(g.opId)}</span>
+            <span style={{ fontFamily: font.mono, color: color.text2 }}>{shortOpId(g.opId)}</span>
             {/* The count is a SNAPSHOT of a sequential spawn, never the batch's candidate total — said in
                 one short clause because two groups on screen repeat it, and repeated boilerplate is read
                 past exactly like no caveat at all. */}
@@ -634,16 +634,16 @@ function LaneSlot({
   return (
     <div>
       <div style={slotLblStyle}>{slotLabel}</div>
-      <div style={{ position: "relative", border: `1px solid ${color.busy}`, borderRadius: radius.base, background: `linear-gradient(180deg,${wash(color.busy, 5)},transparent)`, padding: 12, overflow: "hidden" }}>
+      <div style={{ position: "relative", border: `1px solid ${color.work}`, borderRadius: radius.base, background: `linear-gradient(180deg,${wash(color.work, 5)},transparent)`, padding: 12, overflow: "hidden" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: fs.sm, color: color.busy }}>
-            <span style={{ width: 8, height: 8, borderRadius: radius.base, background: color.busy, boxShadow: `0 0 6px ${color.busy}` }} />
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: fs.sm, color: color.workText }}>
+            <span style={{ width: 8, height: 8, borderRadius: radius.base, background: color.work, boxShadow: `0 0 6px ${color.work}` }} />
             Running
           </span>
           <KindTag gate={gate} />
           <span
             title={longRunTitle}
-            style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontSize: fs.lg, color: warn ? color.danger : color.busy }}
+            style={{ marginLeft: "auto", fontVariantNumeric: "tabular-nums", fontSize: fs.lg, color: warn ? color.danger : color.workText }}
           >
             {fmtSeconds(elapsedSec)}
           </span>
@@ -709,7 +709,7 @@ function KindTag({ gate }: { gate: GateRun }) {
   // comment. Two independent non-gate mechanisms share "worker" underneath; neither must ever render as
   // an ordinary worker self-check.
   const label = gate.landingCheckOnly ? "landing check" : gate.distImporterCheckOnly ? "dist importer check" : KIND_LABEL[gate.gateType];
-  const c = gate.landingCheckOnly ? color.info : gate.distImporterCheckOnly ? color.busy : KIND_COLOR[gate.gateType];
+  const c = gate.landingCheckOnly ? color.text2 : gate.distImporterCheckOnly ? color.text2 : KIND_COLOR[gate.gateType];
   return (
     <span style={{ fontSize: fs.xs, padding: "2px 8px", borderRadius: radius.sm, border: `1px solid ${c}`, color: c, flex: "none" }}>
       {label}
@@ -777,7 +777,7 @@ function HistoryTable({
       )}
       {rows.some((r) => !r.gateRan) && (
         <div style={{ padding: "9px 12px", borderTop: `1px solid ${color.line}`, fontSize: fs.sm, lineHeight: 1.55, color: color.text2, maxWidth: "78ch", whiteSpace: "normal" }}>
-          <span style={{ fontSize: fs.xs, color: color.info }}>{NON_RUN_LABEL}</span>
+          <span style={{ fontSize: fs.xs, color: color.text2 }}>{NON_RUN_LABEL}</span>
           {" marks a run where no gate process ever spawned: a merge that reused a green worker self-check, a run withdrawn before it was admitted, or a diff proven inert. Its duration is parenthesised because it is a real number measuring op overhead, not gate execution. Leave those rows out of a gate-duration trend."}
         </div>
       )}
@@ -790,7 +790,7 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
   // but must never render as an ordinary worker self-check — the whole point of `landingCheckOnly` is
   // that a reader can tell it apart from a real gate at a glance, not just in the underlying data.
   const kindLabel = row.landingCheckOnly ? "landing check" : row.distImporterCheckOnly ? "dist importer check" : KIND_LABEL[row.gateType];
-  const kindC = row.landingCheckOnly ? color.info : row.distImporterCheckOnly ? color.busy : KIND_COLOR[row.gateType];
+  const kindC = row.landingCheckOnly ? color.text2 : row.distImporterCheckOnly ? color.text2 : KIND_COLOR[row.gateType];
   const outC = OUTCOME_COLOR[row.outcome];
   const killed = row.outcome === "kill" || row.outcome === "timeout";
   return (
@@ -825,7 +825,7 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
             <span style={{ fontVariantNumeric: "tabular-nums", color: color.text3 }}>
               {row.durationMs == null ? fmtDurationMs(null) : `(${fmtDurationMs(row.durationMs)})`}
             </span>
-            <span style={{ fontSize: fs.xs, color: color.info }}>
+            <span style={{ fontSize: fs.xs, color: color.text2 }}>
               {NON_RUN_LABEL}
             </span>
           </span>
@@ -882,7 +882,7 @@ function BatchBranchCell({ row }: { row: GateHistoryRow }) {
             ))}
           </ul>
           {droppedCount > 0 && (
-            <div style={{ marginTop: space(2), fontSize: fs.xs, lineHeight: 1.5, color: color.busy, maxWidth: "52ch", whiteSpace: "normal", fontFamily: font.ui }}>
+            <div style={{ marginTop: space(2), fontSize: fs.xs, lineHeight: 1.5, color: color.attnText, maxWidth: "52ch", whiteSpace: "normal", fontFamily: font.ui }}>
               {/* Honest about the limit of what this row records: the event carries the REQUESTED set and a
                   LANDED COUNT, never a landed set, so naming which branch dropped would be a guess. */}
               {droppedCount} of these did not land (a conflict at assembly). This row records how many

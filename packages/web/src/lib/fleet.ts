@@ -156,29 +156,46 @@ export function capArchived<T>(archived: readonly T[], cap = ARCHIVED_FOLD_CAP):
   return archived.slice(0, Math.max(0, cap));
 }
 
-// Roll-up status — worst-of across the project's sessions: rate-limited > busy > idle > no-live-mgr.
-// Fed the LIVE (running) set only: severity should reflect live state, never a finished session (an
-// exited row that was parked when archived could still carry a future rateLimitedUntil and spuriously
-// paint the card red). Archived history surfaces in the buckets/header instead.
-export function fleetRollup(sessions: SessionListItem[]): { tone: Tone; label: string; glow?: boolean } {
+// The sessions that are WAITING ON THE OWNER: each holds a PENDING owner Request it filed itself
+// (`usePendingDecisionsBySession()`'s map, keyed by the asking session id). Only that counts. A worker's
+// worker_report(blocked) waits on its MANAGER, not on the owner, so it is deliberately not a signal here.
+export type WaitingOnOwner = { has(sessionId: string): boolean };
+const NOBODY_WAITING: WaitingOnOwner = { has: () => false };
+
+// The one "waiting on you" status: a solid attn capsule, because a human is the only thing that can
+// move this session forward.
+export const WAITING_ON_YOU = { tone: "attn", label: "waiting on you", solid: true } as const;
+
+// Roll-up status — worst-of across the project's sessions: rate-limited > waiting on you > working >
+// idle > no-live-mgr. Fed the LIVE (running) set only: severity should reflect live state, never a
+// finished session (an exited row that was parked when archived could still carry a future
+// rateLimitedUntil and spuriously paint the card red). Archived history surfaces in the buckets/header.
+export function fleetRollup(
+  sessions: SessionListItem[],
+  waiting: WaitingOnOwner = NOBODY_WAITING,
+): { tone: Tone; label: string; glow?: boolean; solid?: boolean } {
   if (sessions.some(isRateLimited)) return { tone: "danger", label: "rate-limited" };
   if (sessions.some(isBailed)) return { tone: "danger", label: "auto-resume abandoned" };
-  if (sessions.some((s) => s.processState === "live" && s.busy)) return { tone: "busy", label: "busy", glow: true };
+  if (sessions.some((s) => s.processState === "live" && waiting.has(s.id))) return { ...WAITING_ON_YOU };
+  if (sessions.some((s) => s.processState === "live" && s.busy)) return { tone: "work", label: "working", glow: true };
   if (sessions.some((s) => s.role === "manager" && s.processState === "live")) return { tone: "live", label: "idle" };
   return { tone: "muted", label: "no live manager" };
 }
 
 // Worker-state tally for the composition bar — each worker lands in exactly one bucket. Fed the running
 // workers PLUS the capped archived workers, which are exited and so land in `offline` (rendered muted).
-export function workerBuckets(workers: SessionListItem[]) {
-  let busy = 0, idle = 0, rl = 0, offline = 0;
+// `waiting` follows the same precedence as `sessionStatus`: rate-limited, then not live, then waiting on
+// the owner, then working, then idle.
+export function workerBuckets(workers: SessionListItem[], waitingOn: WaitingOnOwner = NOBODY_WAITING) {
+  let busy = 0, idle = 0, rl = 0, offline = 0, waiting = 0;
   for (const w of workers) {
     if (isRateLimited(w) || isBailed(w)) rl++;
     else if (w.processState !== "live") offline++;
+    else if (waitingOn.has(w.id)) waiting++;
     else if (w.busy) busy++;
     else idle++;
   }
-  return { busy, idle, rl, offline, total: workers.length };
+  return { busy, idle, rl, offline, waiting, total: workers.length };
 }
 
 // ── Inactive projects (the god-eye "finished wave" tier — surfaced to the user as "inactive") ───────────

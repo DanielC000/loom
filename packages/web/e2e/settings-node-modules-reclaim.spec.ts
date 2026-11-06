@@ -275,7 +275,7 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
     // The headline's own clause for this outcome, alongside the real "removed" figure for the other row.
     await expect(page.getByText(/Cleared 1 of 2 · freed 100 MB · 1 failed to start/)).toBeVisible();
 
-    // The run is not clean: the summary pill wears the amber "attention" tone, never the phosphor clean one.
-    await expect(page.getByText("last reclaim", { exact: true })).toHaveCSS("color", await cssColor(page, "--loom-busy"));
+    // The run is not clean: the summary pill wears the attn "needs you" tone, never the green clean one.
+    await expect(page.getByText("last reclaim", { exact: true })).toHaveCSS("color", await cssColor(page, "--loom-attn-text"));
   });
 });

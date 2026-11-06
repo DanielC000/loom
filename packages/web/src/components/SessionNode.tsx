@@ -55,7 +55,7 @@ function ctxReadout(s: SessionNodeRow) {
   const pct = window > 0 ? Math.round((ctx / window) * 100) : 0;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "busy" : "accent"} width={60} />
+      <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "attn" : "accent"} width={60} />
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
         {(ctx / 1000).toFixed(1)}k ctx · {pct}%
       </span>
@@ -109,7 +109,7 @@ function SessionNodeState({ s }: { s: SessionNodeRow }) {
   return (
     <span data-testid="session-node-state"
       style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
-      <StatusPill tone={s.busy ? "busy" : "live"} glow={s.busy} label={s.busy ? "busy" : "idle"} />
+      <StatusPill tone={s.busy ? "work" : "live"} glow={s.busy} label={s.busy ? "working" : "idle"} />
       <HarnessTag harness={harnessOf(s.harness)} />
       {genReadout(s)}
       {ctxReadout(s)}

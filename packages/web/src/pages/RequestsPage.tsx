@@ -33,9 +33,9 @@ export default function RequestsPage() {
 function TabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
     <button onClick={onClick}
-      style={{ background: active ? color.inset : "transparent", border: `1px solid ${active ? color.live : color.line}`,
+      style={{ background: active ? color.inset : "transparent", border: `1px solid ${active ? color.accentEdge : color.line}`,
         borderRadius: radius.sm, padding: "4px 12px", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono,
-        color: active ? color.live : color.text2 }}>
+        color: active ? color.accentFg : color.text2 }}>
       {label}
     </button>
   );

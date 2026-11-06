@@ -28,9 +28,9 @@ check("relativeAge formats now / minutes / hours / days", () => {
   assert.equal(relativeAge("not-a-date", NOW), "");
 });
 
-check("pending → info Pending", () => {
+check("pending → attn Pending (a pending request needs you)", () => {
   const c = questionStateChip({ state: "pending", answeredAt: null }, NOW);
-  assert.equal(c.tone, "info");
+  assert.equal(c.tone, "attn");
   assert.equal(c.label, "Pending");
 });
 
@@ -52,7 +52,7 @@ check("answered PAST the threshold → busy Waiting on mgr (watchdog re-escalati
   const q = { state: "answered", answeredAt: ago(DECISION_WATCHDOG_MS + 60_000) };
   assert.equal(isDecisionWatchdog(q, NOW), true);
   const c = questionStateChip(q, NOW);
-  assert.equal(c.tone, "busy");
+  assert.equal(c.tone, "attn");
   assert.equal(c.label, "Waiting on mgr");
 });
 
@@ -215,7 +215,7 @@ check("attachmentStateChip: unavailable → new → opened <age>, in that preced
   // ⛔ unavailable WINS over an openedAt stamp: a file opened earlier and reaped since is gone NOW, and
   // reading "opened 4m ago" would describe bytes that no longer exist.
   assert.deepEqual(attachmentStateChip({ available: false, openedAt: ago(4 * 60_000) }, NOW), { tone: "danger", label: "unavailable" });
-  assert.deepEqual(attachmentStateChip({ available: true, openedAt: null }, NOW), { tone: "live", label: "new" });
+  assert.deepEqual(attachmentStateChip({ available: true, openedAt: null }, NOW), { tone: "attn", label: "new" });
   assert.deepEqual(attachmentStateChip({ available: true, openedAt: ago(4 * 60_000) }, NOW), { tone: "muted", label: "opened 4m ago" });
   // An unparseable stamp still reads as opened — the FACT of the stamp is what the column is about.
   assert.deepEqual(attachmentStateChip({ available: true, openedAt: "not-a-date" }, NOW), { tone: "muted", label: "opened" });

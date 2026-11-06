@@ -52,7 +52,7 @@ export function fmtRatio(r: number | null): string {
 export function ratioTone(r: number | null): Tone {
   if (r == null) return "muted";
   if (r >= 0.8) return "live";
-  if (r >= 0.4) return "busy";
+  if (r >= 0.4) return "attn";
   return "danger";
 }
 
@@ -175,8 +175,8 @@ function SegToggle<T extends "tokens" | "cost">({ value, onChange, lead }: {
           return (
             <button key={it.key} onClick={() => onChange(it.key as T)}
               style={{
-                background: active ? color.liveSoft : "transparent",
-                color: active ? color.live : color.text2,
+                background: active ? color.selected : "transparent",
+                color: active ? color.accentFg : color.text2,
                 border: "none", padding: "3px 10px", fontFamily: font.mono, fontSize: fs.mono,
                 cursor: "pointer",
               }}>

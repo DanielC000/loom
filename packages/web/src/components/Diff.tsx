@@ -1,4 +1,4 @@
-import { color, font, radius, tone, wash, fs } from "../theme";
+import { color, font, radius, tone, fs } from "../theme";
 import { type DiffLineKind, type FileDiff, hunkLineKind, rawPatchLineKind, riskTone, statusGlyph } from "../lib/diff";
 import { Dot } from "./ui";
 
@@ -9,7 +9,7 @@ import { Dot } from "./ui";
 const KIND_COLOR: Record<DiffLineKind, string> = {
   add: color.live,
   del: color.danger,
-  hunk: color.info,
+  hunk: color.text2,
   context: color.text2,
   meta: color.text3,
 };
@@ -37,7 +37,7 @@ function FileHunks({ file }: { file: FileDiff }) {
     <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, padding: "4px 10px 8px" }}>
       {file.hunks.map((h, hi) => (
         <div key={hi}>
-          <div style={{ color: color.info, background: wash(color.info, 6), margin: "4px -10px 2px", padding: "1px 10px" }}>{h.header}</div>
+          <div style={{ color: color.text2, background: color.surface2, margin: "4px -10px 2px", padding: "1px 10px" }}>{h.header}</div>
           {h.lines.map((ln, i) => (
             <div key={i} style={{ color: KIND_COLOR[hunkLineKind(ln)] }}>{ln || " "}</div>
           ))}
@@ -81,7 +81,7 @@ export function FileDiffBlock({ file, open, onToggle, anchorId }: { file: FileDi
 
 // A/D/R/M status tag, tinted by meaning (added=phosphor, deleted=red, renamed=cyan, modified=dim).
 export function StatusGlyph({ status }: { status: FileDiff["status"] }) {
-  const c = status === "added" ? color.live : status === "deleted" ? color.danger : status === "renamed" ? color.info : color.text2;
+  const c = status === "added" ? color.live : status === "deleted" ? color.danger : color.text2;
   return (
     <span title={status} style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: c, width: 12, textAlign: "center", flexShrink: 0 }}>
       {statusGlyph(status)}

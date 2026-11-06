@@ -314,8 +314,8 @@ function Row({ depth, active, onClick, children }: { depth: number; active?: boo
     <button onClick={onClick} className="loom-tree-row" title=""
       style={{
         display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left",
-        background: active ? color.liveSoft : "transparent", cursor: "pointer",
-        border: "none", borderLeft: `2px solid ${active ? color.live : "transparent"}`,
+        background: active ? color.selected : "transparent", cursor: "pointer",
+        border: "none", borderLeft: `2px solid ${active ? color.accentEdge : "transparent"}`,
         padding: "3px 8px", paddingLeft: 6 + depth * 14,
         fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.4,
       }}>
@@ -334,14 +334,14 @@ function Chevron({ open }: { open: boolean }) {
 }
 function FolderIcon({ open }: { open: boolean }) {
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden style={{ flexShrink: 0, color: color.info }}>
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden style={{ flexShrink: 0, color: color.text3 }}>
       {open
         ? <path d="M2 4.5 a1 1 0 0 1 1-1 h3 l1.2 1.2 H13 a1 1 0 0 1 1 1 v.3 H4.2 L2.5 11 Z M2 5.8 L3.6 12 a1 1 0 0 0 1 .8 h8.4 a1 1 0 0 0 1-.8 L15 7 a.6 .6 0 0 0-.6-.7 H4.5 a1 1 0 0 0-1 .8 Z" fill="currentColor" opacity="0.85" />
         : <path d="M2 4 a1 1 0 0 1 1-1 h3 l1.2 1.2 H13 a1 1 0 0 1 1 1 V12 a1 1 0 0 1-1 1 H3 a1 1 0 0 1-1-1 Z" fill="currentColor" opacity="0.85" />}
     </svg>
   );
 }
-const KIND_TINT: Record<Kind, string> = { md: color.live, image: color.info, pdf: color.danger, text: color.text2, binary: color.text3 };
+const KIND_TINT: Record<Kind, string> = { md: color.text2, image: color.text2, pdf: color.danger, text: color.text2, binary: color.text3 };
 function FileIcon({ kind }: { kind: Kind }) {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden style={{ flexShrink: 0, color: KIND_TINT[kind] }}>
@@ -523,7 +523,7 @@ function VaultEditor({ content, onSave, saving, onCancel }:
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave(text)}>{saving ? "Saving…" : "Save"}</Button>
         <Button onClick={onCancel}>Cancel</Button>
-        {dirty && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>}
+        {dirty && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>}
       </div>
     </div>
   );

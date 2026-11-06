@@ -59,7 +59,7 @@ check("workerBuckets folds capped archived workers into the offline bucket along
   const liveWorkers = [running({ busy: true }), running({ busy: false })]; // 1 busy, 1 idle
   const archivedWorkers = Array.from({ length: 4 }, () => archivedSess());
   const buckets = workerBuckets([...liveWorkers, ...capArchived(archivedWorkers)]);
-  assert.deepEqual(buckets, { busy: 1, idle: 1, rl: 0, offline: 4, total: 6 });
+  assert.deepEqual(buckets, { busy: 1, idle: 1, rl: 0, offline: 4, waiting: 0, total: 6 });
 });
 
 check("a large archive is capped BEFORE it reaches the buckets, so offline can't run away", () => {
@@ -79,8 +79,38 @@ check("fleetRollup(running) reads live state — a live manager with idle worker
 });
 
 check("fleetRollup escalates to busy on any live busy session, and red on a live rate-limit", () => {
-  assert.equal(fleetRollup([running({ role: "manager" }), running({ busy: true })]).label, "busy");
+  assert.equal(fleetRollup([running({ role: "manager" }), running({ busy: true })]).label, "working");
   assert.equal(fleetRollup([running({ role: "manager", rateLimitedUntil: future() })]).label, "rate-limited");
+});
+
+// Card d2a44f7b: a session holding a PENDING owner Request it filed is "waiting on you" (solid attn), not
+// green idle and not "working". Precedence: rate-limited > waiting on you > working > idle. The waiting
+// set is the pending-decision map keyed by the asking session id; anything with `has(id)` fits.
+check("fleetRollup: a live session waiting on the owner outranks working and idle, but not a rate-limit", () => {
+  const mgr = running({ role: "manager" });
+  const worker = running({ busy: true });
+  const waiting = new Set([mgr.id]);
+  assert.deepEqual(fleetRollup([mgr, worker], waiting), { tone: "attn", label: "waiting on you", solid: true });
+  // Negative control: the SAME set with nobody waiting reads "working", so the set is what flipped it.
+  assert.equal(fleetRollup([mgr, worker], new Set()).label, "working");
+  assert.equal(fleetRollup([mgr, worker]).label, "working", "the waiting set defaults to nobody");
+  // An exited session's stale pending request never drives the live roll-up.
+  const gone = archivedSess({ role: "manager" });
+  assert.equal(fleetRollup([gone, running({ role: "manager" })], new Set([gone.id])).label, "idle");
+  // A rate-limit still wins: it is the more severe state.
+  const rl = running({ role: "manager", rateLimitedUntil: future() });
+  assert.equal(fleetRollup([rl], new Set([rl.id])).label, "rate-limited");
+});
+
+check("workerBuckets: a waiting worker lands in `waiting`, ahead of busy, behind rate-limited and offline", () => {
+  const w1 = running({ busy: true });
+  const w2 = running({ busy: false });
+  const w3 = running({ rateLimitedUntil: future() });
+  const w4 = archivedSess({});
+  const b = workerBuckets([w1, w2, w3, w4], new Set([w1.id, w3.id, w4.id]));
+  assert.deepEqual({ waiting: b.waiting, busy: b.busy, idle: b.idle, rl: b.rl, offline: b.offline },
+    { waiting: 1, busy: 0, idle: 1, rl: 1, offline: 1 });
+  assert.equal(workerBuckets([w1, w2]).waiting, 0, "no waiting set → nobody waiting");
 });
 
 // Card dfef375f round 3 item 1: a BAILED session (auto-resume abandoned — rateLimitedUntil already
@@ -118,7 +148,7 @@ check("fleetRollup is red on a live BAIL too, even though rateLimitedUntil is nu
 check("workerBuckets counts a bailed worker into `rl`, same bucket as an ordinary rate-limited one", () => {
   const bailedAt = new Date().toISOString();
   const buckets = workerBuckets([running({ rateLimitBailedAt: bailedAt }), running({ busy: false })]);
-  assert.deepEqual(buckets, { busy: 0, idle: 1, rl: 1, offline: 0, total: 2 });
+  assert.deepEqual(buckets, { busy: 0, idle: 1, rl: 1, offline: 0, waiting: 0, total: 2 });
 });
 
 check("rateLimitBailedDismissKey is stable within one bailed episode and differs across two", () => {

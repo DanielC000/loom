@@ -182,7 +182,7 @@ export function ProjectManage(
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: "2px 0",
           fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>
-        <span style={{ color: color.live }}>{open ? "▾" : "▸"}</span>Manage project
+        <span style={{ color: color.text2 }}>{open ? "▾" : "▸"}</span>Manage project
       </button>
       {body}
     </div>
@@ -243,7 +243,7 @@ export function ArchivedProjects(
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: "2px 0",
           fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>
-        <span style={{ color: color.live }}>{open ? "▾" : "▸"}</span>Archived · {projects.length}
+        <span style={{ color: color.text2 }}>{open ? "▾" : "▸"}</span>Archived ·{projects.length}
       </button>
       {body}
     </div>
@@ -386,7 +386,7 @@ function RepoRegistryEditor({ project }: { project: Project }) {
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>writable · a card targets one via its repo key</span>
       </div>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5 }}>
-        This project's own repo is the <span style={{ color: color.info }}>primary</span> target — no entry needed.
+        This project's own repo is the <span style={{ color: color.text }}>primary</span> target — no entry needed.
       </span>
       {repos.length === 0 ? (
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "2px 0" }}>No registered repos.</span>
@@ -409,7 +409,7 @@ function RepoRegistryEditor({ project }: { project: Project }) {
                 aria-label={`Repo ${i + 1} ungated landing check command`} style={{ flex: "2 1 200px", minWidth: 0 }} />
             </div>
             {!!r.ungatedLandingCheckCommand?.trim() && !r.gateCommand?.trim() && (
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, lineHeight: 1.5, paddingLeft: 126 }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, lineHeight: 1.5, paddingLeft: 126 }}>
                 no gate command set on this repo — the check is nested inside the same gate-skip logic, so it will never run without one.
               </span>
             )}
@@ -421,7 +421,7 @@ function RepoRegistryEditor({ project }: { project: Project }) {
           FALSE green on code it never tested. Missing is honest ("unverified"); wrong looks verified. */}
       {repos.length > 0 && (
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5 }}>
-          A repo with no gate command merges as <span style={{ color: color.busy }}>unverified</span> — it does not fall back to this project's gate command.
+          A repo with no gate command merges as <span style={{ color: color.attnText }}>unverified</span> — it does not fall back to this project's gate command.
         </span>
       )}
       <div style={{ display: "flex", gap: 6 }}>

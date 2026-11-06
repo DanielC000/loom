@@ -53,7 +53,7 @@ export function CodexProviderField({ value, onChange, connections }: {
               {usable.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.host}</option>)}
             </select>
           </label>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.busy }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.attnText }}>
             Spend surface: sessions under this rig send their work to that endpoint and bill the connection's key.
             https only (http is allowed to a loopback host); the URL host must equal the connection's host.
           </span>

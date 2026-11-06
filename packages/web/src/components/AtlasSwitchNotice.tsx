@@ -1,5 +1,5 @@
 import { Button } from "./ui";
-import { color, font, radius, tone, fs } from "../theme";
+import { color, font, radius, fs } from "../theme";
 import { dismissAtlasUiExternalChange, useAtlasUiExternalChange } from "../lib/atlasUi";
 
 // Offers a cross-tab UI-preference change instead of applying it (card 757c80dd). lib/atlasUi.ts's
@@ -20,7 +20,7 @@ export function AtlasSwitchNotice() {
         // coupling the two, and clears the rail gutter and the Atlas tree in both shells.
         position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: 16, zIndex: 2000, maxWidth: 380,
         display: "flex", alignItems: "center", gap: 10,
-        background: color.surface, border: `1px solid ${color.lineStrong}`, borderLeft: `3px solid ${tone.info}`,
+        background: color.surface, border: `1px solid ${color.lineStrong}`, borderLeft: `3px solid ${color.attn}`,
         borderRadius: radius.base, padding: "9px 12px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
         fontFamily: font.mono, fontSize: fs.mono,
       }}>

@@ -9,8 +9,9 @@ import type { ResolvedTheme } from "./themePref";
 //
 // Values are hex because xterm parses theme colours itself and hex is what it reliably accepts. Each
 // one is an OKLCH value converted once to sRGB, noted beside it, so a retune starts from the OKLCH.
-// The two themes differ only in the well (background, foreground, cursor, selection): oklch L 0.145 on
-// the dark page, a slightly lifted 0.2 on the light page so the well reads as intentional against white.
+// The two themes differ only in the well (background, foreground, cursor, selection): oklch L 0.115 on
+// the dark page, a slightly lifted 0.17 on the light page so the well reads as intentional against white
+// (card d2a44f7b). Selection is neutral, like `--loom-selected`: blue now means "working".
 // The 16 ANSI colours are shared and clear 4.5:1 (white, brightWhite) or 3:1 (the colour slots and
 // brightBlack) on BOTH wells; test/theme-contrast.mjs checks every one. `black` is exempt: it is the
 // slot programs paint backgrounds with, so it is meant to sit close to the well.
@@ -35,22 +36,22 @@ const ANSI = {
 
 const DARK: ITheme = {
   ...ANSI,
-  background: "#090a0c", // oklch(0.145 0.005 260) = --loom-term-bg (dark)
-  foreground: "#e3e5e8", // oklch(0.92 0.005 260) = --loom-term-fg (dark)
-  cursor: "#e3e5e8",
-  cursorAccent: "#090a0c",
-  selectionBackground: "#1c3861", // oklch(0.34 0.08 258)
-  selectionInactiveBackground: "#1d2735", // oklch(0.27 0.03 258)
+  background: "#040506", // oklch(0.115 0.004 260) = --loom-term-bg (dark)
+  foreground: "#e7e8ea", // oklch(0.93 0.003 260) = --loom-term-fg (dark)
+  cursor: "#e7e8ea",
+  cursorAccent: "#040506",
+  selectionBackground: "#313336", // oklch(0.32 0.006 260)
+  selectionInactiveBackground: "#1e1f22", // oklch(0.24 0.005 260)
 };
 
 const LIGHT: ITheme = {
   ...ANSI,
-  background: "#14161a", // oklch(0.2 0.008 260) = --loom-term-bg (light)
-  foreground: "#e6e8ea", // oklch(0.93 0.004 260) = --loom-term-fg (light)
-  cursor: "#e6e8ea",
-  cursorAccent: "#14161a",
-  selectionBackground: "#26426c", // oklch(0.38 0.08 258)
-  selectionInactiveBackground: "#273140", // oklch(0.31 0.03 258)
+  background: "#0e0f12", // oklch(0.17 0.005 260) = --loom-term-bg (light)
+  foreground: "#eaebec", // oklch(0.94 0.002 260) = --loom-term-fg (light)
+  cursor: "#eaebec",
+  cursorAccent: "#0e0f12",
+  selectionBackground: "#3b3d40", // oklch(0.36 0.006 260)
+  selectionInactiveBackground: "#27292b", // oklch(0.28 0.005 260)
 };
 
 export function xtermTheme(t: ResolvedTheme): ITheme {

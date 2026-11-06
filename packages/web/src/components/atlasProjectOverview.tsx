@@ -238,8 +238,8 @@ export function RosterScopeToggle({ value, onChange, counts, testId }: {
 }
 
 export interface RosterCell {
-  /** `sessionStatus`'s own reading — the pill that says busy / idle / exited / rate-limited. */
-  state: { tone: Tone; label: string; glow?: boolean };
+  /** `sessionStatus`'s own reading — the pill that says working / waiting on you / idle / exited / rate-limited. */
+  state: { tone: Tone; label: string; glow?: boolean; solid?: boolean };
   card: { text: string; muted: boolean } | null;
   branch: string | null;
   context: { ratio: number; pct: number; tone: Tone } | null;
@@ -267,7 +267,8 @@ export function RosterTable({ rows, cellFor }: {
               <i>{session.role ?? "session"}</i>
             </span>
             <span className="loom-ovroster-state">
-              <StatusPill tone={c.state.tone} label={c.state.label} glow={c.state.glow} />
+              <StatusPill tone={c.state.tone} label={c.state.label} glow={c.state.glow} solid={c.state.solid}
+                data-testid="atlas-roster-state" />
             </span>
             <span className="loom-ovroster-cell is-card" title={c.card?.text ?? undefined}>
               <span className="loom-ovroster-lbl">Card</span>
@@ -278,7 +279,7 @@ export function RosterTable({ rows, cellFor }: {
             <span className="loom-ovroster-cell is-branch">
               <span className="loom-ovroster-lbl">Branch</span>
               {c.branch
-                ? <span style={{ color: color.info }} title={c.branch}>{c.branch}</span>
+                ? <span style={{ color: color.text2 }} title={c.branch}>{c.branch}</span>
                 : <span style={{ color: color.text3 }}>—</span>}
             </span>
             <span className="loom-ovroster-ctx">

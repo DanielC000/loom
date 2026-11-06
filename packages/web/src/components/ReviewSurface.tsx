@@ -94,8 +94,8 @@ export function ReviewSurface({ workerId, embedded = false }: {
           about THIS REVIEW, not about which session you are looking at, so the pane keeps them. */}
       {embedded ? (
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="info" />}
-          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="info" />}
+          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="muted" />}
+          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="muted" />}
         </div>
       ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -105,11 +105,11 @@ export function ReviewSurface({ workerId, embedded = false }: {
             worker w:{workerId.slice(0, 8)}{worker?.taskId ? ` · task ${worker.taskId.slice(0, 8)}` : ""}
           </span>
           <span style={{ flex: 1 }} />
-          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="info" />}
-          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="info" />}
+          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="muted" />}
+          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="muted" />}
           {ctx > 0 && (
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "busy" : "accent"} width={60} />
+              <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "attn" : "accent"} width={60} />
               <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{(ctx / 1000).toFixed(1)}k ctx</span>
             </span>
           )}
@@ -121,14 +121,14 @@ export function ReviewSurface({ workerId, embedded = false }: {
 
       {/* Auto-summary + risk surface — read this BEFORE the raw diff. */}
       {analysis && (
-        <Panel style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `2px solid ${analysis.highRisk ? color.danger : analysis.mediumRisk ? color.busy : color.live}` }}>
+        <Panel style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `2px solid ${analysis.highRisk ? color.danger : analysis.mediumRisk ? color.attn : color.live}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <SectionLabel style={{ margin: 0 }}>Summary</SectionLabel>
             <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>auto-derived</span>
             <span style={{ flex: 1 }} />
             {merged && <Badge tone="live">already merged</Badge>}
-            {uncommitted && <Badge tone="busy">uncommitted</Badge>}
-            <Badge tone={analysis.highRisk ? "danger" : analysis.mediumRisk ? "busy" : "live"}>
+            {uncommitted && <Badge tone="attn">uncommitted</Badge>}
+            <Badge tone={analysis.highRisk ? "danger" : analysis.mediumRisk ? "attn" : "live"}>
               {analysis.highRisk ? `${analysis.highRisk} high-risk` : analysis.mediumRisk ? `${analysis.mediumRisk} to watch` : "low risk"}
             </Badge>
           </div>
@@ -183,7 +183,7 @@ export function ReviewSurface({ workerId, embedded = false }: {
           <p style={{ color: color.text3, fontSize: fs.sm, marginTop: 8 }}>
             Approve runs the project's build/DoD gate in the worktree (fail-closed) before squash-merging; on green the worktree is removed and the task closed. Request changes sends your note to the worker as a turn.
           </p>
-          {result && <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.body, color: result.startsWith("✓") ? color.live : result.startsWith("error") || result.startsWith("rejected") ? color.danger : color.busy }}>{result}</div>}
+          {result && <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.body, color: result.startsWith("✓") ? color.live : result.startsWith("error") || result.startsWith("rejected") ? color.danger : result.startsWith("still running") ? color.workText : color.attnText }}>{result}</div>}
         </Panel>
       )}
 

@@ -68,13 +68,13 @@ export interface StateChipSpec { tone: Tone; label: string; }
 // read "Answered" nor trigger the watchdog. One source of truth for every surface that renders a request's
 // state. The labels are sentence case HERE, at the source: the kit renders them as given.
 export function questionStateChip(q: WatchdogInput, nowMs: number, thresholdMs = DECISION_WATCHDOG_MS): StateChipSpec {
-  if (q.state === "pending") return { tone: "info", label: "Pending" };
+  if (q.state === "pending") return { tone: "attn", label: "Pending" };
   if (q.state === "cancelled") return { tone: "danger", label: "Cancelled" };
   if (q.state === "consumed") return { tone: "muted", label: "Consumed ✓" };
   if (q.state === "notice") return { tone: "muted", label: "FYI" };
   // answered
   return isDecisionWatchdog(q, nowMs, thresholdMs)
-    ? { tone: "busy", label: "Waiting on mgr" }
+    ? { tone: "attn", label: "Waiting on mgr" }
     : { tone: "muted", label: "Answered" };
 }
 
@@ -133,10 +133,10 @@ export function decisionAttentionText(q: Pick<Question, "sessionId" | "title"> &
 // of the four "actionable" tones (card 59fa6403): nothing here asks for the human's attention the way the
 // other four do, so it gets the same quiet tone questionStateChip already uses for a settled row.
 export const REQUEST_TYPE_TONE: Record<QuestionType, Tone> = {
-  decision: "info",
-  input: "live",
-  permission: "danger",
-  credential: "busy",
+  decision: "attn",
+  input: "attn",
+  permission: "attn",
+  credential: "attn",
   notice: "muted",
 };
 
@@ -392,7 +392,7 @@ export interface AttachmentStateSpec { tone: Tone; label: string; }
  *  real route yet" rather than "you have not glanced at a 232px thumbnail of it". */
 export function attachmentStateChip(a: Pick<QuestionAttachment, "available" | "openedAt">, nowMs: number): AttachmentStateSpec {
   if (!a.available) return { tone: "danger", label: "unavailable" };
-  if (!a.openedAt) return { tone: "live", label: "new" };
+  if (!a.openedAt) return { tone: "attn", label: "new" };
   const age = relativeAge(a.openedAt, nowMs);
   return { tone: "muted", label: age ? `opened ${age}` : "opened" };
 }

@@ -79,13 +79,13 @@ export default function Git() {
                 {feedback.ok ? "✓ " : "✗ "}{feedback.text}
               </span>
               {feedback.warning && (
-                <div data-git-commit-warning style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, marginTop: 6 }}>
+                <div data-git-commit-warning style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, marginTop: 6 }}>
                   ⚠ {feedback.warning}
                 </div>
               )}
               {feedback.mainlineTrustRisk && (
                 <div data-mainline-trust-prompt style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
-                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy }}>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>
                     ⚠ This commit landed on the branch Loom trusts for merges — landing trust will freeze
                     on the next landing unless you re-adopt this head.
                   </span>
@@ -242,8 +242,8 @@ function BranchList({ data, busy, onCheckout }: {
           name (repository.spec keys `getByRole("button", { name: /^(main|master)$/ })` on it). */}
       {current && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: named.length || workers.length ? 12 : 0 }}>
-          <button title="current branch" disabled style={{ ...branchButtonStyle(color.live, true), cursor: "default" }}>
-            <Dot tone="live" glow />{current}
+          <button title="current branch" disabled style={{ ...branchButtonStyle(color.accentFg, true), cursor: "default" }}>
+            <Dot tone="accent" />{current}
           </button>
           <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
             current
@@ -265,7 +265,7 @@ function BranchList({ data, busy, onCheckout }: {
           <button onClick={() => setWorkersOpen((o) => !o)}
             aria-expanded={showWorkers}
             style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", padding: 0, cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
-            <span style={{ color: color.live }}>{showWorkers ? "▾" : "▸"}</span>
+            <span style={{ color: color.text2 }}>{showWorkers ? "▾" : "▸"}</span>
             worker branches ({q === "" ? workers.length : `${workersShown.length} of ${workers.length}`})
           </button>
           {showWorkers && (
@@ -296,7 +296,7 @@ function CommitTable({ commits }: { commits: { hash: string; date: string; messa
       <tbody>
         {commits?.map((c) => (
           <tr key={c.hash} style={{ borderTop: `1px solid ${color.line}` }}>
-            <td style={{ color: color.info, padding: "3px 8px 3px 0", whiteSpace: "nowrap" }}>{c.hash.slice(0, 7)}</td>
+            <td style={{ color: color.text2, padding: "3px 8px 3px 0", whiteSpace: "nowrap" }}>{c.hash.slice(0, 7)}</td>
             <td style={{ color: color.text, padding: "3px 8px 3px 0" }}>{c.message}</td>
             <td style={{ color: color.text3, padding: "3px 0", whiteSpace: "nowrap" }}>{c.author}</td>
           </tr>
@@ -323,7 +323,7 @@ function ReferenceRepoLog({ projectId, index, path }: { projectId: string; index
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: 0,
           fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
-        <span style={{ color: color.live }}>{open ? "▾" : "▸"}</span>{path}
+        <span style={{ color: color.text2 }}>{open ? "▾" : "▸"}</span>{path}
       </button>
       {open && (
         <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }} data-git-pane={`reference-repo-${index}`}>
@@ -354,10 +354,10 @@ function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; ind
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: 0,
           fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
-        <span style={{ color: color.live }}>{open ? "▾" : "▸"}</span>
-        <span style={{ color: color.info }}>{entry.key}</span>
+        <span style={{ color: color.text2 }}>{open ? "▾" : "▸"}</span>
+        <span style={{ color: color.text }}>{entry.key}</span>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.path}</span>
-        <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: fs.sm, color: entry.gateCommand ? color.text3 : color.busy }}
+        <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: fs.sm, color: entry.gateCommand ? color.text3 : color.attnText }}
           title={entry.gateCommand
             ? `This repo's own gate command — the merge gate and a worker's run_gate both run this here`
             : "No gate command configured — work merged here is reported unverified. It does not fall back to this project's gate command."}>

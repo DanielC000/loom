@@ -107,7 +107,7 @@ export function CredentialBanner() {
           : null}
         <span style={{ color: color.text2 }}>
           On the machine running the daemon, print the credential and paste it here —{" "}
-          <code style={{ color: color.info, background: color.inset, border: `1px solid ${color.line}`,
+          <code style={{ color: color.text2, background: color.inset, border: `1px solid ${color.line}`,
             borderRadius: radius.sm, padding: "1px 5px" }}>
             cat ~/.loom/gateway-loopback.key
           </code>{" "}

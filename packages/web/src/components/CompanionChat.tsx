@@ -583,12 +583,12 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           now actively refused, vs. "no route configured at all"). */}
       {homeRouteRefused && (
         <div
-          style={notice("busy")}
+          style={notice("attn")}
           data-testid="companion-home-refused-alert"
           data-session-id={sessionId}
           role="alert"
         >
-          <span aria-hidden style={{ color: color.busy }}>▲</span>
+          <span aria-hidden style={{ color: color.attn }}>▲</span>
           <span>
             <strong style={{ color: color.text }}>{name}'s home route is refused.</strong>{" "}
             Proactive delivery (heartbeat/reminder/attention-push) can't reach it — fix the home under{" "}
@@ -598,8 +598,8 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
       )}
 
       {armed === false && (
-        <div style={notice("busy")} role="status">
-          <span aria-hidden style={{ color: color.busy }}>▲</span>
+        <div style={notice("attn")} role="status">
+          <span aria-hidden style={{ color: color.attn }}>▲</span>
           <span>
             This companion has no in-app route yet, so a message won't reach it — bind one under{" "}
             <strong style={{ color: color.text }}>Manage</strong> first.
@@ -677,7 +677,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
 function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
   const pill =
     conn === "connected" ? { tone: "live" as const, label: "connected", glow: true } :
-    conn === "connecting" ? { tone: "busy" as const, label: "connecting", glow: false } :
+    conn === "connecting" ? { tone: "work" as const, label: "connecting", glow: false } :
     conn === "revoked" ? { tone: "danger" as const, label: "token revoked", glow: false } :
     // Card a6d7bf36: the held credential came back REFUSED from an HTTP probe, not from a close reason —
     // so it is a credential claim (red, banner-bound) but deliberately NOT a NAMED one: a 401 to a probe
@@ -690,7 +690,7 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
     conn === "no-token" ? { tone: "danger" as const, label: "no gateway token", glow: false } :
     // Card 04314fbc: terminal, but NOT a credential claim — amber (the same "attention, not alarm" tone
     // `connecting` uses) and wording that says this pane was refused, with no token to go re-paste.
-    conn === "refused" ? { tone: "busy" as const, label: "refused", glow: false } :
+    conn === "refused" ? { tone: "attn" as const, label: "refused", glow: false } :
     { tone: "danger" as const, label: "reconnecting", glow: false };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -759,7 +759,7 @@ function MessageRow({ msg, title, grouped, groupEnd, time, delivery }: {
               {you ? "You" : title}
             </span>
             {badge && (
-              <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.info, border: `1px solid ${wash(color.info, 30)}`, borderRadius: radius.sm, padding: "0 5px", background: wash(color.info, 10) }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text2, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "0 5px", background: color.surface2 }}>
                 {badge}
               </span>
             )}
@@ -786,8 +786,8 @@ function Bubble({ msg, you, groupEnd }: { msg: ChatMessage; you: boolean; groupE
       style={{
         maxWidth: "100%", padding: "9px 13px", borderRadius: radius.lg, fontFamily: font.mono, fontSize: fs.body,
         lineHeight: 1.6, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: color.text,
-        background: you ? color.liveSoft : color.inset,
-        border: `1px solid ${you ? wash(color.live, 22) : color.line}`,
+        background: you ? color.selected : color.inset,
+        border: `1px solid ${color.line}`,
         borderBottomRightRadius: you && groupEnd ? 4 : 12,
         borderBottomLeftRadius: !you && groupEnd ? 4 : 12,
       }}
@@ -837,11 +837,11 @@ function EventLine({ msg, time, title }: { msg: ChatMessage; time: string; title
       <span
         style={{
           display: "inline-flex", alignItems: "center", gap: 9, maxWidth: "82%", padding: "6px 12px",
-          borderRadius: radius.pill, border: `1px solid ${wash(color.busy, 28)}`, background: wash(color.busy, 9),
+          borderRadius: radius.pill, border: `1px solid ${wash(color.attn, 28)}`, background: wash(color.attn, 9),
           fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.45,
         }}
       >
-        <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.busy, whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.attnText, whiteSpace: "nowrap" }}>
           ⟡ {title}
         </span>
         <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>{msg.text}</span>
@@ -863,10 +863,10 @@ function JumpToLatest({ show, unread, onClick }: { show: boolean; unread: number
       tabIndex={show ? 0 : -1}
       className={`loom-chat-jump${show ? " is-shown" : ""}`}
     >
-      <span aria-hidden style={{ color: color.live, fontSize: fs.body }}>↓</span>
+      <span aria-hidden style={{ color: color.accentFg, fontSize: fs.body }}>↓</span>
       Jump to latest
       {unread > 0 && (
-        <span style={{ fontFamily: font.ui, fontWeight: 700, fontSize: fs.xs, color: color.bg, background: color.live, borderRadius: radius.pill, padding: "1px 7px", letterSpacing: "0.02em" }}>
+        <span style={{ fontFamily: font.ui, fontWeight: 700, fontSize: fs.xs, color: color.onAttn, background: color.attn, borderRadius: radius.pill, padding: "1px 7px", letterSpacing: "0.02em" }}>
           {unread} new
         </span>
       )}
@@ -886,7 +886,7 @@ function Avatar({ label, blank, rowGap }: { label: string; blank?: boolean; rowG
         letterSpacing: "0.02em",
         ...(blank
           ? { background: "transparent", border: "1px solid transparent", color: "transparent" }
-          : { color: color.live, background: color.liveSoft, border: `1px solid ${wash(color.live, 35)}` }),
+          : { color: color.text, background: color.surface2, border: `1px solid ${color.line}` }),
       }}
     >
       {blank ? "" : label}
@@ -960,7 +960,7 @@ function TypingIndicator({ title }: { title: string }) {
 function EmptyState({ connected, title }: { connected: boolean; title: string }) {
   return (
     <div style={{ margin: "auto", textAlign: "center", display: "flex", flexDirection: "column", gap: 10, alignItems: "center", color: color.text3, padding: 40, maxWidth: 340 }}>
-      <span aria-hidden style={{ width: 52, height: 52, borderRadius: radius.lg, display: "grid", placeItems: "center", fontSize: fs.h1, color: color.live, background: color.liveSoft, border: `1px solid ${wash(color.live, 30)}` }}>◇</span>
+      <span aria-hidden style={{ width: 52, height: 52, borderRadius: radius.lg, display: "grid", placeItems: "center", fontSize: fs.h1, color: color.accentFg, background: color.selected, border: `1px solid ${color.accentEdge}` }}>◇</span>
       <span style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>
         Say hello
       </span>
@@ -977,12 +977,12 @@ function EmptyState({ connected, title }: { connected: boolean; title: string })
 // config gap you can go fix), `red` = a live FAULT (the companion is running but has stopped answering).
 // The red tone is deliberately reserved for the zero-reply alert — if everything glowed amber the one
 // notice that means "this is actually broken" would read as the same weight as "you haven't bound a route".
-function notice(t: "busy" | "muted" | "danger"): CSSProperties {
-  const accent = t === "busy" ? color.busy : t === "danger" ? color.danger : color.line;
+function notice(t: "attn" | "muted" | "danger"): CSSProperties {
+  const accent = t === "attn" ? color.attn : t === "danger" ? color.danger : color.line;
   return {
     display: "flex", gap: 8, alignItems: "center", padding: "8px 12px",
     border: `1px solid ${accent}`, borderRadius: radius.base,
-    background: t === "busy" ? wash(color.busy, 6) : t === "danger" ? wash(color.danger, 7) : color.inset,
+    background: t === "attn" ? wash(color.attn, 6) : t === "danger" ? wash(color.danger, 7) : color.inset,
     fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: t === "muted" ? color.text3 : color.text2,
   };
 }
@@ -1098,8 +1098,8 @@ function HistoryRow({ active, primary, secondary, count, live, onClick }: {
       className="loom-toggle"
       style={{
         textAlign: "left", display: "flex", flexDirection: "column", gap: 3, cursor: "pointer",
-        background: active ? color.liveSoft : "transparent",
-        border: `1px solid ${active ? color.live : color.line}`,
+        background: active ? color.selected : "transparent",
+        border: `1px solid ${active ? color.accentEdge : color.line}`,
         borderRadius: radius.base, padding: "7px 9px", fontFamily: font.mono,
       }}
     >
@@ -1143,7 +1143,7 @@ function PastConversationView({ sessionId, seq, title, onBack }: {
         <span style={{ flex: 1, minWidth: 0, fontFamily: font.ui, fontSize: fs.sm, color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {q.data ? formatConversationTime(q.data.conversation.startedAt) : "Conversation"}
         </span>
-        <StatusPill tone="info" label="read-only" />
+        <StatusPill tone="muted" label="read-only" />
       </div>
 
       <div style={{ flex: 1, minHeight: 0, maxHeight: SCROLL_MAX_HEIGHT, overflowY: "auto", display: "flex", flexDirection: "column", padding: "6px 14px 10px" }}>

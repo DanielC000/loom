@@ -38,7 +38,7 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
     <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", alignItems: "baseline", columnGap: 8, rowGap: 2,
       fontFamily: font.mono, fontSize: fs.xs, lineHeight: 1.4 }}>
       {h.blockedByOpen > 0 && (
-        <span style={{ ...metaItem, maxWidth: 150, color: color.busy }}
+        <span style={{ ...metaItem, maxWidth: 150, color: color.attnText }}
           title={h.blockedByFirst
             ? `Blocked by "${h.blockedByFirst.title}"${h.blockedByOpen > 1 ? ` and ${h.blockedByOpen - 1} more` : ""} — open the card for the full list`
             : `Blocked by ${h.blockedByOpen} unresolved ${h.blockedByOpen === 1 ? "card" : "cards"}`}>
@@ -130,7 +130,7 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono,
             color: allDone ? color.live : color.text2 }}>
             <span>{links.children.done}/{links.children.total} done</span>
-            <Meter value={links.children.done} max={links.children.total} width={56} tone={allDone ? "live" : "info"} />
+            <Meter value={links.children.done} max={links.children.total} width={56} tone={allDone ? "live" : "muted"} />
           </div>
           {/* Bounded: `items` is capped at 100 by the contract, and 100 rows would push the edit form off
               the panel. Scroll the list instead of truncating it — `done`/`total` above stay exact either
@@ -161,7 +161,7 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
           <>
             {open.map((r) => (
               <TaskLinkRow key={r.id} ref_={r} columns={columns} titleById={titleById} onOpenTask={onOpenTask}
-                glyph={kind === "blockedBy" ? "⊘" : "·"} tone={kind === "blockedBy" ? color.busy : undefined} />
+                glyph={kind === "blockedBy" ? "⊘" : "·"} tone={kind === "blockedBy" ? color.attnText : undefined} />
             ))}
             {/* Both read as muted history, but they are NOT the same fact and the label says which:
                 `resolved` is a DECLARED dependency whose blocker is done; `released` is auto-released
@@ -197,7 +197,7 @@ export function TaskLinkRow({ ref_, columns, titleById, onOpenTask, glyph, tone,
 }) {
   const col = columns.find((c) => c.key === ref_.columnKey) ?? null;
   const openable = titleById.has(ref_.id);
-  const textColor = muted ? color.text3 : (tone ?? (openable ? color.info : color.text3));
+  const textColor = muted ? color.text3 : (tone ?? (openable ? color.text2 : color.text3));
   const label = (
     <>
       <span aria-hidden style={{ flexShrink: 0, color: color.text3 }}>{glyph}</span>

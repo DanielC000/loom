@@ -45,7 +45,7 @@ check("Dot forwards data-* / aria-* / id, and merges style rather than clobberin
 
 check("StatusPill forwards data-*/aria-* to its root span", () => {
   const html = renderToStaticMarkup(
-    React.createElement(StatusPill, { tone: "info", label: "Idle", "data-testid": "pill-el", "aria-label": "idle" }),
+    React.createElement(StatusPill, { tone: "muted", label: "Idle", "data-testid": "pill-el", "aria-label": "idle" }),
   );
   assert.match(html, /data-testid="pill-el"/);
   assert.match(html, /aria-label="idle"/);

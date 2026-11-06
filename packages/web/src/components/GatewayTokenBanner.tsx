@@ -123,10 +123,10 @@ export function GatewayTokenBanner() {
           ? <span style={{ color: color.text2 }} data-testid="gateway-link-note">{linkCopy.headline} {linkCopy.detail}</span>
           : null}
         <span style={{ color: color.text2 }}>
-          On the machine running the daemon, mint one over loopback (see <code style={{ color: color.info, background: color.inset,
+          On the machine running the daemon, mint one over loopback (see <code style={{ color: color.text2, background: color.inset,
             border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "1px 5px" }}>POST /api/gateway-tokens</code> in
           the remote-access docs), then paste it here — or open this page once as{" "}
-          <code style={{ color: color.info, background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "1px 5px" }}>
+          <code style={{ color: color.text2, background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "1px 5px" }}>
             ?gwtoken=&lt;token&gt;
           </code>.
         </span>

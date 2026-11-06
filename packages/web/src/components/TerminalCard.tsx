@@ -5,6 +5,8 @@ import type { SessionListItem, Wake } from "@loom/shared";
 import { api, type QueuedMessage } from "../lib/api";
 import { useIsCompanionSession } from "../lib/companionGuard";
 import { harnessOf } from "../lib/harnessFields";
+import { usePendingDecisionsBySession } from "../lib/attention";
+import { WAITING_ON_YOU } from "../lib/fleet";
 import { isCompanionSession } from "../lib/sessions";
 import { SESSION_NODE_TAB_LABEL, SESSION_NODE_TAB_ORDER, type SessionNodeTab } from "../lib/sessionNodeTabs";
 import { NodeTabs } from "./atlasHome";
@@ -151,9 +153,14 @@ export function TileTitle({ s, showProject }: { s: TerminalCardSession; showProj
   //     and a block box strips the leading space at the start of its line.
   const prefix = `${showProject ? `${s.projectName} · ` : ""}${s.agentName}${s.role ? ` · ${s.role}` : ""}`;
   const shortId = s.id.slice(0, 8);
+  // A session holding a PENDING owner Request it filed reads "waiting on you" (solid attn), the same
+  // precedence as fleet's sessionStatus: waiting on you > working > idle.
+  const waiting = usePendingDecisionsBySession().has(s.id);
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
-      <StatusPill tone={s.busy ? "busy" : "live"} glow={s.busy} label={s.busy ? "busy" : "idle"} style={{ flexShrink: 0 }} />
+      {waiting
+        ? <StatusPill {...WAITING_ON_YOU} style={{ flexShrink: 0 }} />
+        : <StatusPill tone={s.busy ? "work" : "live"} glow={s.busy} label={s.busy ? "working" : "idle"} style={{ flexShrink: 0 }} />}
       {/* Same rule as FleetRow — codex always, claude only in a mixed-harness view.
           @decision b8e52cfe — never badge claude in a single-harness view.
 

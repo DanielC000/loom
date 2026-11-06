@@ -187,7 +187,7 @@ function RelationChip({ kind, ref_, columns, titleById, onOpenTask, onRemove }: 
           glyph={history ? "✓" : KIND_GLYPH[kind]}
           suffix={ref_.released ? "(released)" : ref_.resolved ? "(resolved)" : undefined}
           muted={history}
-          tone={!history && kind === "blockedBy" ? color.busy : undefined} />
+          tone={!history && kind === "blockedBy" ? color.attnText : undefined} />
       </span>
       {onRemove && (
         <Button variant="ghost" style={{ flexShrink: 0, fontSize: fs.sm, padding: "1px 6px", lineHeight: 1.2 }}

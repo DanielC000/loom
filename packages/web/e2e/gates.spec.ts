@@ -297,7 +297,7 @@ test.describe("Gates page (card a1c86452)", () => {
   // tooltip fragment that cannot drift as the 1s clock ticks during the assertions — a percentage-based
   // locator would go stale mid-test.
   test("the long-run cue scales to each row's own gate timeout, and never warns on an unknown bound", async ({ page, loomDaemon }) => {
-    // AMBER (--loom-busy) is running and healthy; RED (--loom-danger) is close to this row's own bound.
+    // WORK (--loom-work-text) is running and healthy; RED (--loom-danger) is close to this row's own bound.
     // Both are resolved from the live tokens once the page has loaded, below.
     const since = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000).toISOString();
     const base = {
@@ -334,9 +334,9 @@ test.describe("Gates page (card a1c86452)", () => {
     }));
 
     await page.goto(`${loomDaemon.baseURL}/gates`);
-    const AMBER = await cssColor(page, "--loom-busy");
+    const WORK = await cssColor(page, "--loom-work-text");
     const RED = await cssColor(page, "--loom-danger");
-    expect(RED, "the two tones are distinguishable").not.toBe(AMBER);
+    expect(RED, "the two tones are distinguishable").not.toBe(WORK);
     const activeSection = page.locator("section").filter({ hasText: "Lane occupancy" }).first();
     // FIXTURE IDENTITY: this payload is on screen, not the real (empty) registry or a sibling spec's rows.
     await expect(activeSection.getByText("loom/lane-wide-healthy", { exact: true })).toBeVisible();
@@ -354,7 +354,7 @@ test.describe("Gates page (card a1c86452)", () => {
 
     // (A) THE FIX: 8 minutes is no longer red — it is 27% of this project's real bound. Asserted with the
     // SAME toHaveCSS locator shape that just returned RED above.
-    await expect(clock("this project's 30m 00s gate timeout")).toHaveCSS("color", AMBER);
+    await expect(clock("this project's 30m 00s gate timeout")).toHaveCSS("color", WORK);
     // A real measured fraction of the REAL bound, not pinned to the exact integer: the 1s clock keeps
     // ticking through these assertions, and 8m/30m (~27%) only reaches 30% a full minute later.
     await expect(clock("this project's 30m 00s gate timeout")).toHaveAttribute("title", /^2\d% of/);
@@ -367,7 +367,7 @@ test.describe("Gates page (card a1c86452)", () => {
 
     // (D) THE MISSING CASE: 25 minutes with no bound stays amber and says so, rather than warning on an
     // invented default. Under the constant this replaced, this row would have been red since 7 minutes.
-    await expect(clock("gate timeout is unknown")).toHaveCSS("color", AMBER);
+    await expect(clock("gate timeout is unknown")).toHaveCSS("color", WORK);
     await expect(clock("gate timeout is unknown")).toHaveText(/^25m \d{2}s$/);
     // No percentage is fabricated for it — a null bound yields no measured fraction at all.
     await expect(clock("gate timeout is unknown")).not.toHaveAttribute("title", /%/);

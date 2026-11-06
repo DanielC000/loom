@@ -106,9 +106,9 @@ function workspaceTierPages(pages: NavPage[]): NavPage[] {
 const WORKSPACE_TIER_NODES = ["/platform"];
 
 /** A right-aligned metric on a row — the mockup's `.node-meta` (muted, 10.5px). */
-function NodeMeta({ value, title, tone }: { value: ReactNode; title: string; tone?: "amber" }) {
+function NodeMeta({ value, title, tone }: { value: ReactNode; title: string; tone?: "attn" }) {
   return (
-    <span className={`loom-atlas-nodemeta${tone === "amber" ? " is-amber" : ""}`} title={title}>{value}</span>
+    <span className={`loom-atlas-nodemeta${tone === "attn" ? " is-attn" : ""}`} title={title}>{value}</span>
   );
 }
 
@@ -284,7 +284,7 @@ function EntityRow({ entity, to, testId, label, title, dot, metric, active, acti
  * live dot on a project row).
  */
 function SessionDot({ s }: { s: SessionListItem }) {
-  return <span className={`loom-atlas-entdot is-${s.busy ? "busy" : isLiveSession(s) ? "live" : "idle"}`} aria-hidden />;
+  return <span className={`loom-atlas-entdot is-${s.busy ? "work" : isLiveSession(s) ? "live" : "idle"}`} aria-hidden />;
 }
 
 /**
@@ -306,7 +306,7 @@ function sessionMetric(s: SessionListItem): ReactNode {
   if (ctx <= 0 || window <= 0) return undefined;
   const pct = Math.round((ctx / window) * 100);
   return (
-    <NodeMeta value={`${pct}%`} tone={ctx > window * CONTEXT_WARN_RATIO ? "amber" : undefined}
+    <NodeMeta value={`${pct}%`} tone={ctx > window * CONTEXT_WARN_RATIO ? "attn" : undefined}
       title={`${(ctx / 1000).toFixed(1)}k of ${Math.round(window / 1000)}k context used`} />
   );
 }

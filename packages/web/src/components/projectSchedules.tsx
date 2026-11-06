@@ -34,7 +34,7 @@ export function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string
         <span style={{ color: color.text2 }}>Schedules</span>
         <span>· none —</span>
         <button onClick={() => navigate("/automation")} title="Create a schedule on the Automation page"
-          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.info, fontFamily: font.mono, fontSize: fs.mono }}>
+          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.accentFg, fontFamily: font.mono, fontSize: fs.mono }}>
           add one on the Automation page →
         </button>
       </div>
@@ -54,9 +54,9 @@ function ScheduleRow({ s, agentName }: { s: Schedule; agentName: string }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.text2,
       border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 8px" }}>
-      <span style={{ color: color.info }}>{s.cron}</span>
+      <span style={{ color: color.text2 }}>{s.cron}</span>
       <Chip label="agent" value={agentName} />
-      <span style={{ fontSize: fs.xs, color: s.kind === "auditor" ? color.live : color.busy }}>kind:{s.kind}</span>
+      <span style={{ fontSize: fs.xs, color: color.text3 }}>kind:{s.kind}</span>
       <span style={{ flex: 1 }}>next · {s.nextFireAt ? new Date(s.nextFireAt).toLocaleString() : "—"}</span>
       <span style={{ fontSize: fs.xs, color: s.enabled ? color.live : color.text3 }}>{s.enabled ? "ON" : "OFF"}</span>
     </div>

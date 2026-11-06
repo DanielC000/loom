@@ -68,7 +68,7 @@ export function CardPolicyBlock({ taskId, projectId }: { taskId: string; project
   if (q.isError && !q.data) {
     return (
       <div data-testid="card-policy-unavailable" style={{ display: "flex", alignItems: "center", gap: 6, color: color.text3, fontFamily: font.mono, fontSize: fs.xs }}>
-        <Dot tone="busy" />
+        <Dot tone="attn" />
         <span>card policy unavailable: couldn’t read this card’s requirements (retrying…)</span>
       </div>
     );
@@ -85,7 +85,7 @@ export function CardPolicyBlock({ taskId, projectId }: { taskId: string; project
         display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: color.text }}>Card policy</span>
-        <StatusPill data-testid="card-policy-summary" tone={blocking ? "danger" : pending ? "info" : "live"}
+        <StatusPill data-testid="card-policy-summary" tone={blocking ? "danger" : pending ? "muted" : "live"}
           label={blocking ? `${blocking} unmet` : pending ? "Nothing blocking yet" : "Nothing blocking"} />
       </div>
       {policies.map(([policyId, policyName]) => (
@@ -221,7 +221,7 @@ export function CardPoliciesEditor({ project }: { project: Project }) {
         or waive one on a card; agents can read them.
       </p>
       {!seed.ok && (
-        <div role="alert" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.busy, lineHeight: 1.5 }}>
+        <div role="alert" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.attnText, lineHeight: 1.5 }}>
           The stored policy list can’t be read ({seed.error}), so every spawn and merge on a card of this project is
           refused. Saving below replaces it.
         </div>
@@ -240,7 +240,7 @@ export function CardPoliciesEditor({ project }: { project: Project }) {
         </Button>
         <span style={{ flex: 1 }} />
         {dirty && !built.ok && (
-          <span data-testid="card-policy-draft-error" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.busy }}>{built.error}</span>
+          <span data-testid="card-policy-draft-error" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.attnText }}>{built.error}</span>
         )}
         {dirty && <Button onClick={reset} disabled={save.isPending}>Discard changes</Button>}
         {!dirty && justSaved && <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.liveText }}>saved</span>}

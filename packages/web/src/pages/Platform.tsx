@@ -104,8 +104,8 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
               title={o.key === "developer" ? "The dev Loom Platform surface" : "Preview the shipping end-user surface (client-side only)"}
               style={{
                 fontFamily: font.mono, fontSize: fs.mono, padding: "4px 14px", cursor: "pointer", border: "none",
-                background: active ? color.live : "transparent",
-                color: active ? color.bg : color.text2,
+                background: active ? color.accent : "transparent",
+                color: active ? color.onAccent : color.text2,
                 fontWeight: active ? 700 : 400,
               }}>
               {o.label}

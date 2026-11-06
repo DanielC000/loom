@@ -54,7 +54,7 @@ export function PresetPromptsPopover({ onInsert }: { onInsert: (prompt: string) 
       style={{ position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 30, minHeight: "100%",
         maxHeight: 320, overflowY: "auto", background: PRESET_OVERLAY_SURFACE,
         border: `1px solid ${color.lineStrong}`, borderRadius: radius.base,
-        boxShadow: `inset 0 0 0 1px ${color.liveSoft}, ${shadow.pop}`,
+        boxShadow: `inset 0 0 0 1px ${color.lineStrong}, ${shadow.pop}`,
         padding: `8px 8px ${TRIGGER_CLUSTER_RESERVE}px`,
         display: "flex", flexDirection: "column", gap: 6, outline: "none",
         transformOrigin: "bottom right" }}>
@@ -95,7 +95,7 @@ function SuggestionsSection() {
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4, paddingTop: 8,
       borderTop: `1px solid ${color.line}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span aria-hidden style={{ width: 6, height: 6, borderRadius: radius.pill, background: color.info, flex: "0 0 auto" }} />
+        <span aria-hidden style={{ width: 6, height: 6, borderRadius: radius.pill, background: color.text3, flex: "0 0 auto" }} />
         <SectionLabel style={{ margin: 0 }}>Suggested from your usage</SectionLabel>
       </div>
       {list.map((s) => <SuggestionRow key={s.id} suggestion={s} />)}
@@ -152,7 +152,7 @@ export function SuggestionRow({ suggestion }: { suggestion: PresetPromptSuggesti
         {suggestion.prompt}
       </span>
       {suggestion.rationale && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info, lineHeight: 1.4 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.4 }}>
           {suggestion.rationale}
         </span>
       )}

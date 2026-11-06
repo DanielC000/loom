@@ -15,12 +15,12 @@ import {
 // set it; this editor + the loopback REST it drives are the whole grant path, which is exactly why the
 // field needed a control here at all.
 const HARNESS_OPTIONS: ReadonlyArray<{
-  value: Harness; label: string; tone: "live" | "busy"; summary: string; implications: string[];
+  value: Harness; label: string; tone: "muted" | "attn"; summary: string; implications: string[];
 }> = [
   {
     value: "claude",
     label: "Claude Code",
-    tone: "live",
+    tone: "muted",
     summary: "Loom's native harness. Every profile setting on this page applies.",
     implications: [
       "Spawns the claude binary with Loom's full spawn recipe",
@@ -30,7 +30,7 @@ const HARNESS_OPTIONS: ReadonlyArray<{
   {
     value: "codex",
     label: "Codex CLI",
-    tone: "busy",
+    tone: "attn",
     summary: "A different vendor CLI, with a coarser permission model and a narrower Loom integration.",
     implications: [
       "Spawns the codex binary on this host, not claude",
@@ -51,8 +51,8 @@ export function HarnessPicker({ value, onChange }: { value: Harness; onChange: (
           display: "flex", flexDirection: "column", textAlign: "left", padding: 0, overflow: "hidden",
           borderRadius: radius.base, cursor: "pointer",
           background: selected ? color.surface : color.inset,
-          border: `1px solid ${selected ? color.live : color.lineStrong}`,
-          ...(selected ? { boxShadow: `inset 0 0 0 1px ${color.liveSoft}` } : null),
+          border: `1px solid ${selected ? color.accentEdge : color.lineStrong}`,
+          ...(selected ? { boxShadow: `inset 0 0 0 1px ${color.lineStrong}` } : null),
         } as CSSProperties;
         return (
           <button key={o.value} type="button" role="radio" aria-checked={selected} onClick={() => onChange(o.value)}
@@ -65,7 +65,7 @@ export function HarnessPicker({ value, onChange }: { value: Harness; onChange: (
                 <span style={{ fontFamily: font.ui, fontSize: fs.body, fontWeight: 600, color: color.text }}>{o.label}</span>
                 <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, marginTop: 2 }}>{o.value}</span>
               </span>
-              <span aria-hidden style={{ flex: "none", fontSize: fs.body, color: selected ? color.live : "transparent" }}>✓</span>
+              <span aria-hidden style={{ flex: "none", fontSize: fs.body, color: selected ? color.accentFg : "transparent" }}>✓</span>
             </span>
             <span style={{ display: "flex", flexDirection: "column", gap: 7, flex: 1, padding: "9px 11px 11px" }}>
               <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text2 }}>{o.summary}</span>
@@ -99,7 +99,7 @@ export function HarnessDropSummary({ harness }: { harness: Harness }) {
   // five "stay stored", which was false for the two codex also refuses to store (card 6232fe9d).
   const stored = CODEX_DROPPED_BUT_STORED_FIELDS.length;
   const storedLabels = CODEX_DROPPED_BUT_STORED_FIELDS.map((f) => HARNESS_FIELD_LABELS[f]).join(", ");
-  const accent = CODEX_FAIL_OPEN_FIELDS.length > 0 ? color.danger : color.busy;
+  const accent = CODEX_FAIL_OPEN_FIELDS.length > 0 ? color.danger : color.attnText;
   return (
     <div data-testid="harness-drop-summary" role="status"
       style={{ border: `1px solid ${accent}`, borderRadius: radius.base, padding: "8px 10px",
@@ -135,9 +135,9 @@ export function HarnessRejectWarning({ harness, values }: { harness: Harness; va
   if (rejected.length === 0) return null;
   return (
     <div data-testid="harness-reject-warning" role="status"
-      style={{ border: `1px solid ${color.busy}`, borderRadius: radius.base, padding: "8px 10px",
+      style={{ border: `1px solid ${color.attn}`, borderRadius: radius.base, padding: "8px 10px",
         background: color.inset, display: "flex", flexDirection: "column", gap: 5 }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, lineHeight: 1.5 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, lineHeight: 1.5 }}>
         Saving removes {rejected.length === 1 ? "one setting" : `${rejected.length} settings`} Codex cannot
         honour: {rejected.map((f) => HARNESS_FIELD_LABELS[f]).join(", ")}.
       </span>
@@ -207,7 +207,7 @@ export function HarnessMixProvider({ sessions, children }: { sessions: readonly 
 export function HarnessTag({ harness, title }: { harness: Harness; title?: string }): ReactNode {
   const mixed = useHarnessMixed();
   if (harness !== "codex" && !mixed) return null;
-  const accent = harness === "codex" ? color.busy : color.text3;
+  const accent = harness === "codex" ? color.text2 : color.text3;
   return (
     <span data-testid="harness-tag" data-harness={harness}
       title={title ?? (harness === "codex" ? "Spawns the codex CLI, not claude" : "Spawns claude, Loom's native harness")}

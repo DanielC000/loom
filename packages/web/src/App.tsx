@@ -52,17 +52,17 @@ function UpdateBanner() {
 
   return (
     <div role="status" style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 20px",
-      background: wash(color.busy, 8), borderBottom: `1px solid ${color.busy}`, fontFamily: font.mono, fontSize: fs.mono }}>
-      <Dot tone="busy" glow />
+      background: wash(color.attn, 8), borderBottom: `1px solid ${color.attn}`, fontFamily: font.mono, fontSize: fs.mono }}>
+      <Dot tone="attn" glow />
       {started ? (
-        <span style={{ color: color.busy }}>
+        <span style={{ color: color.attnText }}>
           Updating to v{q.data.latest} — the daemon is restarting. This page will reconnect shortly; reload if it doesn’t.
         </span>
       ) : (
         <>
           <span style={{ color: color.text }}>
             A new Loom release is available — <span style={{ color: color.text2 }}>v{q.data.installed}</span>{" "}
-            <span aria-hidden>→</span> <span style={{ color: color.busy }}>v{q.data.latest}</span>{" "}
+            <span aria-hidden>→</span> <span style={{ color: color.attnText }}>v{q.data.latest}</span>{" "}
             <span style={{ color: color.text3 }}>({q.data.channel})</span>
           </span>
           <span style={{ flex: 1 }} />
@@ -193,7 +193,7 @@ function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen:
     const raf = requestAnimationFrame(() => setShown(true));
     return () => cancelAnimationFrame(raf);
   }, []);
-  const c = tone.info;
+  const c = tone.attn;
   return (
     <div onClick={onOpen} role="button" title="open the Inbox" data-testid="request-count-pill"
       style={{
@@ -204,7 +204,7 @@ function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen:
         opacity: shown ? 1 : 0, transform: shown ? "translateY(0)" : "translateY(8px)",
         transition: "opacity 160ms ease, transform 160ms ease",
       }}>
-      <Dot tone="info" glow />
+      <Dot tone="attn" glow />
       <span style={{ color: c, fontVariantNumeric: "tabular-nums" }}>{count}</span>
       <span style={{ color: color.text2 }}>{count === 1 ? "request needs you" : "requests need you"}</span>
       <span aria-hidden style={{ color: color.text3 }}>→ inbox</span>
@@ -233,7 +233,7 @@ function Toast({ item, onDismiss, onOpen }: { item: AttentionItem; onDismiss: ()
         opacity: shown ? 1 : 0, transform: shown ? "translateY(0)" : "translateY(8px)",
         transition: "opacity 160ms ease, transform 160ms ease",
       }}>
-      <Dot tone={item.tone} glow={item.tone === "busy" || item.tone === "danger"} />
+      <Dot tone={item.tone} glow={item.tone === "attn" || item.tone === "danger"} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: c }}>{attentionKindLabel(item.kind)}</div>
         <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, marginTop: 3, wordBreak: "break-word" }}>{item.text}</div>
@@ -278,7 +278,7 @@ function FirstRunWelcome() {
       <div ref={ref} role="dialog" aria-modal="true" aria-label="Welcome to Loom"
         style={{ width: 480, maxWidth: "92vw", background: color.surface, border: `1px solid ${color.lineStrong}`,
           borderRadius: radius.base, padding: "26px 26px 22px", boxShadow: shadow.pop,
-          borderTop: `3px solid ${color.live}` }}>
+          borderTop: `3px solid ${color.accentFg}` }}>
         <div style={{ fontFamily: font.ui, fontSize: fs.h1, color: color.text, letterSpacing: "0.01em" }}>Welcome to Loom</div>
         <p style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.6, margin: "12px 0 22px" }}>
           Loom weaves real Claude Code sessions, your docs, and tasks into one workspace. Let’s stand up your first

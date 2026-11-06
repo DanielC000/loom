@@ -51,9 +51,9 @@ export function requirementLabel(kind: CardPolicyVerdict["requirement"]): string
 export const STATUS_COPY: Record<CardPolicyStatus, { label: string; tone: Tone }> = {
   met: { label: "Met", tone: "live" },
   unmet: { label: "Unmet", tone: "danger" },
-  unreadable: { label: "Unreadable", tone: "busy" },
+  unreadable: { label: "Unreadable", tone: "attn" },
   waived: { label: "Waived", tone: "muted" },
-  deferred: { label: "Checked at merge", tone: "info" },
+  deferred: { label: "Checked at merge", tone: "muted" },
 };
 
 /** Requirements that would refuse the action today: unmet or unreadable (fail closed). */
