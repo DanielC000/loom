@@ -243,7 +243,7 @@ export interface CompanionReminder {
  *   { delivered:false, position:N }  → HELD in the session's FIFO (busy/not-ready) — still accepted
  *   { delivered:false }              → session not alive (DEAD) — nothing queued
  */
-export type SubmitTurn = (sessionId: string, text: string, route?: CompanionRoute, ownerText?: string, senderId?: string | null) => { delivered: boolean; position?: number };
+export type SubmitTurn = (sessionId: string, text: string, route?: CompanionRoute, ownerText?: string, senderId?: string | null, onReplayDead?: () => void) => { delivered: boolean; position?: number };
 
 /**
  * The injected STT transcriber (Companion Voice epic, VOICE-P2 — see companion/stt.ts for the local

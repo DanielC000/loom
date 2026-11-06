@@ -698,6 +698,9 @@ export class ChatGateway {
       submit = this.submitTurn(
         binding.sessionId, body, { channel: msg.channel, chatId: msg.chatId }, body,
         binding.scope === "group" ? (msg.sender?.id ?? null) : null,
+        // A held message was already acked "queued"; if its replay finds the session dead, error-ack the
+        // SAME chat with the SAME text a dead inbound gets (tryAck never throws).
+        () => { void this.tryAck(binding, SESSION_DEAD_ACK); },
       );
     } catch (err) {
       // The submit primitive (pty.enqueueStdin) can THROW: its fail-loud M1/M2 guards, or realistically
@@ -729,10 +732,7 @@ export class ChatGateway {
     }
     // No position ⇒ the bound session is DEAD. Surface it: error-ack the chat + log (don't vanish silently).
     this.debug(`inbound to DEAD session ${binding.sessionId} (channel=${msg.channel} chat=${msg.chatId})`);
-    const acked = await this.tryAck(
-      binding,
-      "⚠️ This companion session isn't currently running, so your message couldn't be delivered.",
-    );
+    const acked = await this.tryAck(binding, SESSION_DEAD_ACK);
     return { accepted: false, reason: "session-dead", sessionId: binding.sessionId, acked };
   }
 
@@ -1426,7 +1426,8 @@ export class ChatGateway {
 
 /** The confirmation sent back to a chat on a successful pairing. Deliberately generic — a failed
  *  redemption NEVER acks (it is indistinguishable from any unallowlisted inbound: no pairing oracle). */
-const PAIRED_ACK = "✅ Paired — you can now message me here.";
+const SESSION_DEAD_ACK = "⚠️ This companion session isn't currently running, so your message couldn't be delivered.";
+const PAIRED_ACK ="✅ Paired — you can now message me here.";
 
 /** Sent when an audio inbound can't be transcribed right now (cold venv / download or subprocess failure)
  *  — Companion Voice epic, VOICE-P2. A friendly nudge, not a silent vanish. */

@@ -86,13 +86,17 @@ export function withCompanionTransitionHeldReinject(
  * OLD engine id here loses the message (recycle) — hold it instead; it replays once through this same wrapper at op end.
  */
 export function withCompanionSelfHeal(submit: SubmitTurn, deps: Pick<ReviveDeps, "resume"> & { transition?: SelfHealTransitionSeam; onReplayDead?: (sessionId: string) => void }): SubmitTurn {
-  const healing: SubmitTurn = (sessionId, text, route, ownerText, senderId) => {
+  const healing: SubmitTurn = (sessionId, text, route, ownerText, senderId, onInboundReplayDead) => {
     const result = submit(sessionId, text, route, ownerText, senderId);
     if (result.delivered || result.position !== undefined) return result;
     const held = deps.transition?.holdIfInFlight(sessionId, () => {
-      const r = healing(sessionId, text, route, ownerText, senderId);
+      const r = healing(sessionId, text, route, ownerText, senderId, onInboundReplayDead);
       // The gateway already acked "queued" for this message; a still-dead replay must not vanish silently.
       if (!r.delivered && r.position === undefined) {
+        // Tell the owner (the gateway's per-inbound error ack) — then the daemon-level hook/log.
+        try { onInboundReplayDead?.(); } catch (err) {
+          console.warn(`[companion] replay-dead ack for ${sessionId} threw: ${err instanceof Error ? err.message : String(err)}`);
+        }
         if (deps.onReplayDead) deps.onReplayDead(sessionId);
         else console.warn(`[companion] held inbound for ${sessionId} could not be delivered after the recycle/upgrade ended (session dead)`);
       }
