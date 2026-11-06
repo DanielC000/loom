@@ -251,11 +251,21 @@ export function FleetSocketProvider() {
       const socket = auth.protocols ? new WebSocket(`${proto}//${location.host}/ws/fleet`, auth.protocols) : new WebSocket(`${proto}//${location.host}/ws/fleet`);
       ws = socket;
 
+      // Card 1859bfb2: the daemon's per-process cap (1013) is enforced AFTER the upgrade, so `onopen` fires
+      // for a socket that is about to be refused. `onopen` therefore only records "the handshake succeeded"
+      // (the credential is good); everything that means "we are connected" — backoff reset, fallback-poll
+      // stop, the REST seeds — waits for the server's `hello`, which is sent only after admission. Without
+      // this an over-cap tab reset its ladder and fired a REST resync burst on every 1 s attempt.
+      let admitted = false;
       socket.onopen = () => {
         if (disposed) return;
         everOpened = true;
-        backoff.reset();
         refusalEpisode.reset(); // this run of failures is over; a later one gets its own probe
+      };
+      const onAdmitted = () => {
+        if (disposed || admitted) return;
+        admitted = true;
+        backoff.reset();
         stopFallbackPoll();
         // @decision 04314fbc round 2 — disarm, never stop: a retry armed by a failure from BEFORE this
         // drop (the seed fetch, independent of the socket) must not fire later and run a second,
@@ -295,7 +305,9 @@ export function FleetSocketProvider() {
           else applyOrchEvent(qc, msg.event);
           return;
         }
-        if (msg.t !== "session:upsert" && msg.t !== "session:remove") return; // hello
+        if (msg.t === "hello") { onAdmitted(); return; }
+        if (!admitted) return; // no frame precedes hello on the wire; never apply one to an unseeded cache
+        if (msg.t !== "session:upsert" && msg.t !== "session:remove") return;
         if (seeding) { buffered.push(msg); return; }
         qc.setQueryData<SessionListItem[]>(["allSessions"], (prev) => applyFleetDelta(prev ?? [], msg));
       };
