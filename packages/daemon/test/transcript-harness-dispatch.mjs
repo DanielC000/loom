@@ -27,7 +27,6 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import path from "node:path";
 import { mkdtempManaged, useOwnLoomHome, finishAndExit } from "./_tmp-fixture.mjs";
-import { withEngineTranscriptFixture } from "./_transcript-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -35,6 +34,8 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpCodexHome = mkdtempManaged("loom-transcript-dispatch-codexhome-");
 process.env.CODEX_HOME = tmpCodexHome;
 useOwnLoomHome("loom-transcript-dispatch-loomhome-");
+// Dynamic, AFTER the LOOM_HOME re-point: the fixture statically imports ../dist, which must not load first.
+const { withEngineTranscriptFixture } = await import("./_transcript-fixture.mjs");
 
 const {
   readTranscript, resolveTranscriptFile, engineTranscriptExists, snapshotTranscript, readArchivedTranscript,
