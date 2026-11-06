@@ -909,7 +909,7 @@ Full `merge-quarantine-d2592cd5-reboot-between-clears.mjs` (171/171) and
   pattern this round closed at `deleteMergeQuarantineLatchByKey`, but neither is exercised by this round's
   own reproduced CRITICAL (which is specific to a full-lift's own `final`), and fixing them correctly
   needs its own investigation of each function's own surrounding invariants — flagged for a follow-up
-  card, not fixed here.
+  card, not fixed here. **Since closed by card `59f4ebe8`** — see `59f4ebe8-surface-swallowed-sweep-unlink-failures.md`.
 - **`clearTokenFromPendingIndices`'s own "remove" branch fix (`removeWriteFailed`, ruling 1's second
   required site) is pinned by scenario P8 (reboot-between-clears test) — a triple-masked, so triple-redundant, pin.** Its own `plan.ownedArmedKeys` loop
   (where the fix lives) is only ever non-empty for a pending entry whose `armedKeys` are STILL "owned" per
