@@ -37,7 +37,7 @@ import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { reminderNextFireAt, reminderNextFireAtBySession } from "../companion/reminders.js";
 import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
-import { buildServedStatus } from "../served-status.js";
+import { buildServedStatusAsync } from "../served-status.js";
 import { advisoryBuildStamp } from "../deploy-staleness.js";
 import { lineageRootId } from "../sessions/lineage.js";
 import { isSupersededByRecycle, retiredCallerMessage, currentUnresolvedSettleSuccessor, unresolvedSettleEscalationHint } from "../orchestration/crash-orphaned-workers.js";
@@ -5933,7 +5933,7 @@ export class OrchestrationMcpRouter {
           "NOT clean. Covers user-level files only; worktree-level hits are logged at spawn, not served here.",
         inputSchema: strictShape({}),
       },
-      async () => ok(buildServedStatus(db)),
+      async () => ok(await buildServedStatusAsync(db)),
     );
 
     server.registerTool(

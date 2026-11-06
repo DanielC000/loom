@@ -13,7 +13,7 @@ import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measur
 import { QUESTION_ID_RE, ATTACHMENT_ID_RE, attachmentServeContentType, resolveStoredAttachmentFile, attachmentContentDisposition, deriveAttachmentKind, sanitizeBasename } from "../mcp/attachments.js";
 import { deleteProjectWorkDir } from "../projects/work-dir.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
-import { buildServedStatus, currentWebBundle } from "../served-status.js";
+import { buildServedStatusAsync, currentWebBundle } from "../served-status.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
@@ -1125,7 +1125,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // is exactly the position you're in when the daemon itself is what's under suspicion. Shares ONE
   // composition (`buildServedStatus`) with the MCP tool so the two surfaces can never drift apart — see
   // that function's own doc. ---
-  app.get("/api/deploy-status", async () => buildServedStatus(deps.db));
+  app.get("/api/deploy-status", async () => buildServedStatusAsync(deps.db));
   // --- Card e98bf784: the CHEAP single-field read the open-tab "a new build is being served" check runs
   // on ws-reconnect and on window focus. It exists precisely BECAUSE /api/deploy-status above is not
   // suitable for that: `buildServedStatus` does a recursive disk walk plus a git call per request and

@@ -5,7 +5,7 @@ import type { Db } from "./db.js";
 import { resolveWebDistDir, WORKTREES_DIR } from "./paths.js";
 import { getCachedProjectsWorkRootUsage, kickProjectsWorkRootUsageRefresh } from "./sessions/project-work-dir-usage.js";
 import { loomVersion } from "./version.js";
-import { computeDeployStaleness, readBuildInfo, type DeployStalenessResult } from "./deploy-staleness.js";
+import { computeDeployStaleness, computeDeployStalenessAsync, readBuildInfo, type DeployStalenessResult } from "./deploy-staleness.js";
 import { skillStoreStaleness, type SkillStoreStaleness } from "./skills/store.js";
 import {
   skillAssetsGitStatus,
@@ -79,6 +79,14 @@ export function __setProcessBuiltInfoForTest(sha: string | null, dirty: boolean 
  */
 export function currentDeployStaleness(): DeployStalenessResult {
   return computeDeployStaleness({ processBuiltSha, processBuiltDirty });
+}
+
+/** Async twin of {@link currentDeployStaleness} (same captured pair, same single chokepoint) whose git
+ *  history reads do not block the event loop — used only by {@link buildServedStatusAsync}. */
+export function currentDeployStalenessAsync(
+  asyncGit?: (repoRoot: string, args: string[]) => Promise<string>,
+): Promise<DeployStalenessResult> {
+  return computeDeployStalenessAsync({ processBuiltSha, processBuiltDirty, asyncGit });
 }
 
 export interface ServedStatus {
@@ -222,6 +230,17 @@ export function currentWebBundle(): string | null {
  * discipline. Both call sites pass their own `db` handle; nothing here is session- or request-scoped.
  */
 export function buildServedStatus(db: Db): ServedStatus {
+  return composeServedStatus(db, currentDeployStaleness());
+}
+
+/** The request-serving twin: identical payload, but the deploy-staleness git history reads run without
+ *  blocking the event loop. The REST route and the MCP `served_status` handler call THIS one; the sync
+ *  {@link buildServedStatus} remains for synchronous callers/tests. */
+export async function buildServedStatusAsync(db: Db): Promise<ServedStatus> {
+  return composeServedStatus(db, await currentDeployStalenessAsync());
+}
+
+function composeServedStatus(db: Db, deployStaleness: DeployStalenessResult): ServedStatus {
   const webBundle = currentWebBundle();
   const liveSessionCount = db.listAllSessions().filter((s) => s.processState === "live").length;
   const storeStaleness = skillStoreStaleness();
@@ -280,7 +299,7 @@ export function buildServedStatus(db: Db): ServedStatus {
     liveSessionCount,
     // Card f26339d7, AMENDMENT 1 / card 062fa934 — `currentDeployStaleness()` reads the SAME
     // module-level, captured-ONCE `processBuiltSha`/`processBuiltDirty` above; see its own doc.
-    deployStaleness: currentDeployStaleness(),
+    deployStaleness,
     skillStoreStaleness: storeStaleness,
     // Card bb76b8d8 — both fresh, uncached reads (same discipline as every other field here).
     skillAssetsGitStatus: assetsGitStatus,

@@ -81,7 +81,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
-const { computeDeployStaleness } = await import("../dist/deploy-staleness.js");
+const { computeDeployStaleness, computeDeployStalenessAsync } = await import("../dist/deploy-staleness.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
@@ -143,9 +143,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // test/deploy-staleness.mjs uses: it keeps retrying a TRANSIENT timeout until the deadline passes. A timeout
 // that persists for the whole deadline still returns available:false, so the check below FAILS and the
 // implausible-distBuiltAt throw fires — an environment failure never reads as a pass.
-const realBuildProbe = withGitTimeoutRetry(computeDeployStaleness, {}, performance.now() + GIT_TIMEOUT_RETRY_DEADLINE_MS, (attempt, result) => {
-  console.log(`RETRY (${attempt}) (4-setup) real-tree probe hit a transient git ETIMEDOUT under host load (reason: ${JSON.stringify(result.reason)}) — retrying`);
-});
+// The probe now goes through the ASYNC twin: its history reads have a 10 s ceiling and no event-loop block,
+// so a ~0.9 s real-tree read can no longer be cut off by the sync path's fixed 1 s cap (that cap, not the
+// load, was what made this probe flake). No retry loop is needed or wanted here.
+const realBuildProbe = await computeDeployStalenessAsync();
 check("(4-setup) real-tree probe: this checkout's own daemon dist is a real source checkout" + reasonSuffix(realBuildProbe), realBuildProbe.available === true);
 const realDistMtimeMs = new Date(realBuildProbe.distBuiltAt).getTime();
 // Card c241d54b — SECONDARY hardening (the production fix is in deploy-staleness.ts itself): refuse an
@@ -168,9 +169,27 @@ if (!(realDistMtimeMs > Date.parse("2020-01-01T00:00:00Z"))) {
 {
   const FAULT_DELAY_MS = 50; // no elapsed-time heuristic reads this here — just simulates "some slowness".
 
+  // The retry-wrapper proofs below need a real, fast git history — NOT this checkout's (a ~0.9 s read the sync
+  // path's fixed 1 s cap can truly time out on, which is host speed, not the property under test). A tiny
+  // throwaway repo makes every real (uninjected) call here take milliseconds, so only the INJECTED fault can fail it.
+  const faultRepo = path.join(tmpHome, "fault-proof-repo");
+  fs.mkdirSync(path.join(faultRepo, "packages", "daemon", "src"), { recursive: true });
+  fs.mkdirSync(path.join(faultRepo, "packages", "daemon", "dist"), { recursive: true });
+  fs.writeFileSync(path.join(faultRepo, "packages", "daemon", "src", "a.ts"), "// a\n");
+  fs.writeFileSync(path.join(faultRepo, "packages", "daemon", "dist", "index.js"), "x");
+  execSync("git init -q", { cwd: faultRepo });
+  execSync("git add -A", { cwd: faultRepo });
+  execSync("git -c user.email=t@loom -c user.name=t commit -q -m init", { cwd: faultRepo });
+  const faultOpts = {
+    repoRoot: faultRepo,
+    distEntry: path.join(faultRepo, "packages", "daemon", "dist", "index.js"),
+    sharedDist: path.join(faultRepo, "packages", "shared", "dist"),
+    webDist: path.join(faultRepo, "packages", "web", "dist"),
+  };
+
   // RED.
   globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 1, delayMs: FAULT_DELAY_MS };
-  const redResult = computeDeployStaleness();
+  const redResult = computeDeployStaleness(faultOpts);
   check("(4-setup-fault-proof) RED: an injected one-shot git-log ETIMEDOUT reproduces the reported failure shape (available:false, could-not-measure, ETIMEDOUT) with no retry wrapper present" + reasonSuffix(redResult),
     isTransientGitTimeout(redResult));
   check("(4-setup-fault-proof) RED: the injected fault actually fired exactly once (proves it's the fault firing, not an unrelated failure)", globalThis.__dsLogFault.fired === 1);
@@ -184,7 +203,7 @@ if (!(realDistMtimeMs > Date.parse("2020-01-01T00:00:00Z"))) {
   // past the injected fault, just with extra real-world noise on top.
   globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 1, delayMs: FAULT_DELAY_MS };
   let greenRetries = 0;
-  const greenResult = withGitTimeoutRetry(computeDeployStaleness, {}, undefined, () => { greenRetries++; });
+  const greenResult = withGitTimeoutRetry(computeDeployStaleness, faultOpts, performance.now() + GIT_TIMEOUT_RETRY_DEADLINE_MS, () => { greenRetries++; });
   check("(4-setup-fault-proof) GREEN: the SAME injected fault no longer fails the probe once wrapped in the bounded retry" + reasonSuffix(greenResult),
     greenResult.available === true);
   check("(4-setup-fault-proof) GREEN: it genuinely took at least one retry to get there (proves the wrapper, not luck), and the injected fault itself fired exactly once (deterministic, host-load-independent)", greenRetries >= 1 && globalThis.__dsLogFault.fired === 1);
@@ -193,7 +212,7 @@ if (!(realDistMtimeMs > Date.parse("2020-01-01T00:00:00Z"))) {
   // GIT_TIMEOUT_RETRY_MIN_ATTEMPTS real attempts — never silently masking a persistent failure.
   globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 999, delayMs: FAULT_DELAY_MS };
   let exhaustedRetries = 0;
-  const exhaustedResult = withGitTimeoutRetry(computeDeployStaleness, {}, undefined, () => { exhaustedRetries++; });
+  const exhaustedResult = withGitTimeoutRetry(computeDeployStaleness, faultOpts, undefined, () => { exhaustedRetries++; });
   check(`(4-setup-fault-proof) NEGATIVE CONTROL: a fault that never clears still fails loud after exactly GIT_TIMEOUT_RETRY_MIN_ATTEMPTS (${GIT_TIMEOUT_RETRY_MIN_ATTEMPTS}) real attempts, never silently succeeding` + reasonSuffix(exhaustedResult),
     exhaustedResult.available === false && exhaustedRetries === GIT_TIMEOUT_RETRY_MIN_ATTEMPTS - 1 && globalThis.__dsLogFault.fired === GIT_TIMEOUT_RETRY_MIN_ATTEMPTS);
   globalThis.__dsLogFault = { armed: false, fired: 0, maxFires: 0, delayMs: 0 };
@@ -202,12 +221,12 @@ if (!(realDistMtimeMs > Date.parse("2020-01-01T00:00:00Z"))) {
   // (5 injected timeouts > 3) is absorbed when a wall-clock deadline is supplied...
   globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 5, delayMs: FAULT_DELAY_MS };
   let burstRetries = 0;
-  const burstResult = withGitTimeoutRetry(computeDeployStaleness, {}, performance.now() + GIT_TIMEOUT_RETRY_DEADLINE_MS, () => { burstRetries++; });
+  const burstResult = withGitTimeoutRetry(computeDeployStaleness, faultOpts,performance.now() + GIT_TIMEOUT_RETRY_DEADLINE_MS, () => { burstRetries++; });
   check("(4-setup-fault-proof) DEADLINE: a burst of 5 consecutive injected timeouts (> the 3-attempt minimum) is absorbed once a wall-clock deadline is supplied" + reasonSuffix(burstResult),
     burstResult.available === true && burstRetries >= 5 && globalThis.__dsLogFault.fired === 5);
   // ...and a timeout that never clears still fails loud once the deadline passes (never a silent pass).
   globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 999, delayMs: FAULT_DELAY_MS };
-  const deadlineExhausted = withGitTimeoutRetry(computeDeployStaleness, {}, performance.now() + 300, () => {});
+  const deadlineExhausted = withGitTimeoutRetry(computeDeployStaleness, faultOpts,performance.now() + 300, () => {});
   check("(4-setup-fault-proof) DEADLINE NEGATIVE CONTROL: a persistent timeout still returns available:false after the deadline (loud, never a pass), having made at least the minimum attempts" + reasonSuffix(deadlineExhausted),
     isTransientGitTimeout(deadlineExhausted) && globalThis.__dsLogFault.fired >= GIT_TIMEOUT_RETRY_MIN_ATTEMPTS);
   globalThis.__dsLogFault = { armed: false, fired: 0, maxFires: 0, delayMs: 0 };

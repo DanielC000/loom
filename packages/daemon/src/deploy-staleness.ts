@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { performance } from "node:perf_hooks";
@@ -270,7 +270,19 @@ const CONTENT_CHECK_PATHSPECS = ["packages/", "scripts/", "bin/"];
 const GIT_TIMEOUT_MS = 1000;
 const UNIT_SEP = "\x1f";
 
+/** Results of the three unconditional history reads, produced ASYNCHRONOUSLY by
+ *  {@link computeDeployStalenessAsync} and consumed by {@link runGit} for exactly one synchronous
+ *  `computeDeployStaleness` run. Set and cleared inside one synchronous block (nothing can interleave), so it
+ *  is call-scoped state, never a cache: `null` on every other path, which is byte-identical to before. */
+let prefetchedGit: Map<string, { out: string } | { err: unknown }> | null = null;
+const prefetchKey = (repoRoot: string, args: string[]): string => [repoRoot, ...args].join("\0");
+
 function runGit(repoRoot: string, args: string[]): string {
+  const pre = prefetchedGit?.get(prefetchKey(repoRoot, args));
+  if (pre) {
+    if ("err" in pre) throw pre.err;
+    return pre.out;
+  }
   return execFileSync(resolveGitBinaryForSpawn(), ["-C", repoRoot, ...args], {
     encoding: "utf8",
     timeout: GIT_TIMEOUT_MS,
@@ -791,6 +803,63 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
     webBuiltSha,
     webBuiltDirty,
   };
+}
+
+/** Ceiling for the ASYNC history reads in {@link computeDeployStalenessAsync}. Unlike the sync path's
+ *  `GIT_TIMEOUT_MS` this does not block the event loop while it waits, so it can be generous; it exists only
+ *  so a genuinely wedged git cannot hang a `served_status` request forever. */
+export const ASYNC_GIT_TIMEOUT_MS = 10_000;
+
+export interface ComputeDeployStalenessAsyncOptions extends ComputeDeployStalenessOptions {
+  /** Test seam: replaces the async git read (default: `execFile` of the resolved git binary). Must resolve
+   *  the stdout of `git -C <repoRoot> <args>`, or reject. */
+  asyncGit?: (repoRoot: string, args: string[]) => Promise<string>;
+}
+
+function runGitAsync(repoRoot: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      resolveGitBinaryForSpawn(),
+      ["-C", repoRoot, ...args],
+      { encoding: "utf8", timeout: ASYNC_GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv(), maxBuffer: 64 * 1024 * 1024 },
+      (err, stdout) => (err ? reject(err) : resolve(stdout)),
+    );
+  });
+}
+
+/**
+ * Async twin of {@link computeDeployStaleness} for the request-serving `served_status` surface (REST + MCP):
+ * the three UNCONDITIONAL git history reads — the ones that cost ~0.9 s on a large repo and used to run as a
+ * synchronous `execFileSync` capped at `GIT_TIMEOUT_MS` — are issued with async `execFile` (event loop free,
+ * {@link ASYNC_GIT_TIMEOUT_MS} ceiling), then the unchanged synchronous computation runs with those results
+ * substituted, so the two paths cannot drift apart. The conditional single-object reads (fourth to sixth call,
+ * see the module doc) still run synchronously, exactly as before. No result is cached or kept: DoD #4 stands.
+ * A failed async read is substituted as that read's own failure, so it degrades to the same
+ * `{available:false}` shape the sync path produces for it.
+ *
+ * @decision 062fa934 — reached through `currentDeployStalenessAsync` (served-status.ts); never add another call site.
+ */
+export async function computeDeployStalenessAsync(options: ComputeDeployStalenessAsyncOptions = {}): Promise<DeployStalenessResult> {
+  const { asyncGit, ...syncOptions } = options;
+  const repoRoot = syncOptions.repoRoot ?? loomRepoRoot();
+  // No `.git` (packaged install): no git is read at all, so there is nothing to move off the loop.
+  if (!fs.existsSync(path.join(repoRoot, ".git"))) return computeDeployStaleness(syncOptions);
+  const read = asyncGit ?? runGitAsync;
+  const calls: string[][] = [
+    ["log", "-1", `--pretty=%H${UNIT_SEP}%cI`],
+    ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...RESTART_RELEVANT_PATHSPECS],
+    ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...REBUILD_ONLY_PATHSPECS],
+  ];
+  const settled = await Promise.all(calls.map((args) => read(repoRoot, args).then((out) => ({ out }), (err: unknown) => ({ err }))));
+  const map = new Map<string, { out: string } | { err: unknown }>();
+  calls.forEach((args, i) => map.set(prefetchKey(repoRoot, args), settled[i]!));
+  // Set and cleared inside one synchronous block: nothing can observe or interleave with `prefetchedGit`.
+  prefetchedGit = map;
+  try {
+    return computeDeployStaleness(syncOptions);
+  } finally {
+    prefetchedGit = null;
+  }
 }
 
 /**

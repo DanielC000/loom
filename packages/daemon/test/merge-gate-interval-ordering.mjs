@@ -207,10 +207,18 @@ try {
     const b2 = await addWorker(db, P, "o2b", { "src/o2b.ts": "export const o2b = 2;\n" });
     const sw = await addWorker(db, P, "o2s", { "src/o2s.ts": "export const o2s = 3;\n" });
     let releaseGate; ctx.gate.hold = new Promise((r) => { releaseGate = r; }); ctx.gate.failNext = true;
+    // The solo takes its skip decision EARLY and only requests the repo guard after a stretch of async prep (git identity,
+    // dirty-tree check, ...) whose length depends on host load. Release the batch gate only once the solo has actually
+    // REQUESTED the guard (the observable event), or a slow solo is not yet queued behind the batch when it fails and
+    // the batch's own fallback solos can take the guard first, run the owed gate, and clear it.
+    let guardRequests = 0;
+    const o2Sem = ctx.sessions.gateSemaphore; const o2OrigAcq = o2Sem.acquireRepoGuardOnly.bind(o2Sem);
+    o2Sem.acquireRepoGuardOnly = (...a) => { guardRequests++; return o2OrigAcq(...a); };
     const batchP = ctx.sessions.mergeBatchTracked(P.mgrId, [b1.workerId, b2.workerId]); // 1+2 > 2 ⇒ gated; its gate will FAIL
     await waitUntil(() => ctx.gate.calls === 1, { timeoutMs: 60000, intervalMs: 20, label: "merge-gate-interval (O2): the batch gate is running" });
     const soloP = confirm(ctx.sessions, P.mgrId, sw.workerId); // 1+0+1 > 2 is false ⇒ skip-decided, waits on the guard
     await waitUntil(() => ctx.spy.decide >= 2, { timeoutMs: 60000, intervalMs: 20, label: "merge-gate-interval (O2): the solo has taken its skip decision" });
+    await waitUntil(() => guardRequests >= 1, { timeoutMs: 60000, intervalMs: 20, label: "merge-gate-interval (O2): the solo is queued on the repo guard" });
     ctx.sessions.mergeGateGateNext(P.projId); // a gate becomes owed AFTER the solo's skip decision
     releaseGate();
     await batchP;

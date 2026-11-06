@@ -63,6 +63,9 @@ export async function load(url, context, nextLoad) {
   if (url === "virtual:deploy-staleness-cp-fault") {
     const src = \`
       import { execFileSync as real } from "node:child_process";
+      // computeDeployStalenessAsync reads its history through async execFile; only the SYNC path is fault-
+      // injected here, so execFile passes straight through (re-exported, never wrapped).
+      export { execFile } from "node:child_process";
       // Card b5416a46: deploy-staleness.ts now resolves an absolute git.exe on win32 (via
       // resolveGitBinaryForSpawn()) instead of the bare literal "git", so this match can no longer pin an
       // exact string — it matches any path whose basename (case-insensitive, optional .exe) is "git".

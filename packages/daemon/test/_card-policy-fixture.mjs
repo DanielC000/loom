@@ -25,7 +25,12 @@ const { PtyHost } = await import("../dist/pty/host.js");
 export const GIT_ID = "-c user.email=cpf@loom -c user.name=cpf";
 const GATE = 'node -e "process.exit(0)"';
 
-export async function makeEnv({ policies, syncAttachBudgetMs } = {}) {
+// A real solo merge (worktree + git squash) can outlast the production 12s sync-attach budget on a loaded host; the
+// call then returns {settled:false} and every `merged === true` check reads it as "not merged". Default to a generous
+// per-instance budget (the DI seam, never the production constant); a test that WANTS the degrade passes its own.
+const DEFAULT_SYNC_ATTACH_BUDGET_MS = 60_000;
+
+export async function makeEnv({ policies, syncAttachBudgetMs = DEFAULT_SYNC_ATTACH_BUDGET_MS } = {}) {
   const now = new Date().toISOString();
   const sfx = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
   const repo = mkdtempManaged("cpf-repo-");
@@ -39,7 +44,7 @@ export async function makeEnv({ policies, syncAttachBudgetMs } = {}) {
   db.insertAgent({ id: agentId, projectId: projId, name: "dev", startupPrompt: "", position: 0 });
   db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; } };
-  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), syncAttachBudgetMs === undefined ? undefined : { syncAttachBudgetMs });
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs });
   class SeamHost extends createSeamHost(PtyHost) {
     constructor(events) { super(events); this.capture = []; }
     createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
