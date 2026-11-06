@@ -3380,7 +3380,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   // @decision 656fdf39 (CR d1e02886 round 3) — and pass `identityWideHumanClear` straight through, unmodified.
   // @decision 25d0d45b — `excludeIdentities: new Set([clearIdentity])`: the caller already removed
   // `clearIdentity` from `activeQuarantines` before this runs — see the decision record.
-  // @decision f8e11853 — `freedKey: key`: this call is the one site that genuinely frees `key` before
+  // @decision f8e11853 — `freedKeys: new Set([key])`: this call is the one site that genuinely frees `key` before
   // it runs, so it also arms/classifies any foreign tmp residue filed under a DIFFERENT hash whose own
   // content canonicalises onto `key`.
   const trailingSweep = sweepTmpResidueForHashIfUnreferenced(
@@ -3390,7 +3390,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
     identityWideHumanClear,
     identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [],
     new Set([clearIdentity]),
-    key,
+    new Set([key]),
   );
   // @decision 1fea8b15 — fold this sweep's own REFERENCE-owned keeps in too, the same way
   // `protectForeignTmpResidueBeforeSweep`'s own result is folded a few lines above (content-checked mode
@@ -6676,10 +6676,12 @@ function canonicalKeyOrUndefined(repoPath: string): string | undefined {
 // (the entry stays active/pending through this call, so `stillBlockedEntryFor` already no-ops on it)
 // passes nothing; only a call site whose own identity may have ALREADY been fully removed from
 // `activeQuarantines`/`pendingUnresolvedQuarantines` by the time this runs needs to pass one.
-// @decision f8e11853 — `freedKey` is OPTIONAL, passed ONLY by `deleteMergeQuarantineLatchByKey`'s own
-// trailing sweep (the one call site that genuinely frees a key before this runs); every other call site
-// passes nothing and is byte-identical to before this card. See the decision record's own call-site census.
-function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: string[], clearedEntry: MergeQuarantineEntry | undefined, identityWideHumanClear: boolean, ownIdentityTokensByFile: ReadonlyArray<{ sourceFile: string; tokens: string[] }>, excludeIdentities?: ReadonlySet<string>, freedKey?: string): { kept: boolean; referencingRepoPaths: string[]; keptEntries: Array<{ repoPath: string; sourceFile: string }>; contentKeptEntries: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>; anyUnattributed: boolean } {
+// @decision f8e11853 — `freedKeys` is OPTIONAL, passed ONLY by a call site that genuinely frees a key
+// before this runs; every other call site passes nothing and is byte-identical to before this card. See
+// the decision record's own call-site census.
+// @decision cdcd55c2 — now a SET so the id-addressed PENDING-tier clear (which frees its entries' keys)
+// reuses the same cross-hash selection; the relevance predicate is the only thing that widened.
+function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: string[], clearedEntry: MergeQuarantineEntry | undefined, identityWideHumanClear: boolean, ownIdentityTokensByFile: ReadonlyArray<{ sourceFile: string; tokens: string[] }>, excludeIdentities?: ReadonlySet<string>, freedKeys?: ReadonlySet<string>): { kept: boolean; referencingRepoPaths: string[]; keptEntries: Array<{ repoPath: string; sourceFile: string }>; contentKeptEntries: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>; anyUnattributed: boolean } {
   const prefix = `${hash}.json.tmp-`;
   let files: string[];
   try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept: false, referencingRepoPaths: [], keptEntries: [], contentKeptEntries: [], anyUnattributed: false }; }
@@ -6779,7 +6781,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
       if (unlinkConfirmed) keptUnreadableLatchFiles.delete(f); else anyUnattributed = true;
     }
   }
-  // When a clear frees `freedKey`, also arm/classify any FOREIGN tmp residue filed under a DIFFERENT
+  // When a clear frees any of `freedKeys`, also arm/classify any FOREIGN tmp residue filed under a DIFFERENT
   // hash whose own content canonicalises onto it — the in-process twin of what boot's own PASS 1b
   // already derives from a full directory read (content-driven, never a hash-prefix lookup; see
   // `1dd00dca`'s own record). A SEPARATE loop, never folded into the one above: that loop's own
@@ -6787,26 +6789,26 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
   // only because it shares `clearedEntry`'s own hash) — a cross-hash candidate has no such guarantee
   // until its own content is read, so it must never reach that branch.
   //
-  // @decision f8e11853 — every file here is gated on its own canonical key matching `freedKey` BEFORE
+  // @decision f8e11853 — every file here is gated on its own canonical key being one of `freedKeys` BEFORE
   // any disposition is decided; a file that cannot be classified is left completely untouched.
-  if (freedKey !== undefined) {
+  if (freedKeys !== undefined && freedKeys.size > 0) {
     for (const f of files) {
       if (f.startsWith(prefix)) continue; // already handled by the loop above
       if (!TMP_RESIDUE_FILENAME_RE.test(f)) continue; // not a tmp-residue-shaped filename at all
-      // The relevance gate (does this file's own content even belong to `freedKey`) runs FIRST, before
+      // The relevance gate (does this file's own content even belong to `freedKeys`) runs FIRST, before
       // any ownership check: unlike the same-hash loop above (where every candidate is, by
       // construction, this call's own business), a cross-hash file "owned" by some unrelated entry can
-      // be entirely unrelated to `freedKey` — folding it in here would contaminate this clear's own
+      // be entirely unrelated to `freedKeys` — folding it in here would contaminate this clear's own
       // result with a different identity's own bookkeeping.
       //
-      // @decision f8e11853 — ownership is checked only AFTER confirming relevance to `freedKey`.
+      // @decision f8e11853 — ownership is checked only AFTER confirming relevance to `freedKeys`.
       //
       // A file this process previously marked unreadable is left exactly as-is — re-ingest only ever
       // applies to a file sharing the SAME hash as the entry being re-ingested into (the loop above).
       if (keptUnreadableLatchFiles.has(f)) continue;
       const safety = orphanSweepSafeToDelete(f, candidateTokens);
       if (safety.readFailed) {
-        // @decision f8e11853 (round 2) — relevance to `freedKey` is unprovable without a read; never
+        // @decision f8e11853 (round 2) — relevance to `freedKeys` is unprovable without a read; never
         // mark/flag a cross-hash read failure the way the same-hash loop above does — leave it untouched.
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] could not read cross-hash tmp residue ${f} while clearing a now-freed key — relevance to the freed key is unprovable without a read; left completely untouched, no mark, no disclosure.`);
@@ -6814,8 +6816,8 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
       }
       if (safety.parsedRepoPath === undefined) continue; // corrupt/unparsable/no repoPath — nothing to classify
       const residueKey = canonicalKeyOrUndefined(safety.parsedRepoPath);
-      if (residueKey !== freedKey) continue; // belongs to a DIFFERENT identity/key entirely — not this call's concern
-      // Only NOW, for a file genuinely confirmed to belong to `freedKey`, does ownership matter — the
+      if (residueKey === undefined || !freedKeys.has(residueKey)) continue; // belongs to a DIFFERENT identity/key entirely — not this call's concern
+      // Only NOW, for a file genuinely confirmed to belong to `freedKeys`, does ownership matter — the
       // SAME in-memory check the same-hash loop above runs, cheap, no I/O.
       const owners = new Set<string>();
       for (const e of activeQuarantines.values()) if (e.orphanLatchFiles?.includes(f)) owners.add(e.repoPath);
@@ -9693,7 +9695,17 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // sibling `.json` sweep above.
     // @decision 25d0d45b — `matchedIdentities` (same set already excluded from the `.json` sweep two
     // lines above): every matched pending entry was ALREADY removed, above, before this runs.
-    const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, pendingCandidateTokens, undefined, false, [], matchedIdentities);
+    // @decision cdcd55c2 — mirrors `findPendingIndicesFor`'s key tiers 3 and 4 exactly: a resolvable entry
+    // blocks its canonical key, and so does an unresolvable one with informative keys (its degraded
+    // walked-up key) — never its resolvedKey(s), which no pending tier consults.
+    const freedKeys = new Set<string>();
+    for (const p of matchedPending) {
+      if (isRepoPathCurrentlyResolvable(p.entry.repoPath) || informativeKeysFor(p.entry).length > 0) {
+        const k = canonicalKeyOrUndefined(p.entry.repoPath);
+        if (k !== undefined) freedKeys.add(k);
+      }
+    }
+    const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, pendingCandidateTokens, undefined, false, [], matchedIdentities, freedKeys);
     // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — deliberately INLINE, never through
     // `foldOrphanSweepResult`: its multi-entry shape doesn't fit that helper's one-sourceFile-per-call form.
     if (tmpSweep.referencingRepoPaths.length > 0) for (const ke of tmpSweep.keptEntries) { keptRepoPaths.add(ke.repoPath); keptCoOccupants.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile)); }

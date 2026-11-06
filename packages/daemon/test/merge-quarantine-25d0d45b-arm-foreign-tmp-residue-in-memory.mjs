@@ -196,11 +196,11 @@ try {
 
     // RED PROOF: the SAME scenario, replayed from scratch against a dist COPY with the exclusion
     // stripped at this exact call site -- r SHOULD get wrongly resurrected from its own stray content.
-    // @decision f8e11853 — the real call site now carries a trailing `freedKey` (`key`) 7th argument;
-    // this mutation targets the 6th (`excludeIdentities`) argument only, leaving `freedKey` untouched.
+    // @decision f8e11853 — the real call site now carries a trailing `freedKeys` (`new Set([key])`) 7th argument;
+    // this mutation targets the 6th (`excludeIdentities`) argument only, leaving `freedKeys` untouched.
     await withDistMutation(
-      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], new Set([clearIdentity]), key);",
-      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], undefined, key);",
+      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], new Set([clearIdentity]), new Set([key]));",
+      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], undefined, new Set([key]));",
       async (mutated) => {
         const r2 = makeRepo("exclb-r2");
         const key2 = canonicalRepoLockKey(r2);
@@ -237,8 +237,8 @@ try {
     check("*** THE FIX IS LOAD-BEARING (exclC) *** p reads UNBLOCKED in-process right after its own REST clear-by-id", mod.assertRepoNotQuarantined(p).ok === true);
 
     await withDistMutation(
-      "const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, pendingCandidateTokens, undefined, false, [], matchedIdentities);",
-      "const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, pendingCandidateTokens, undefined, false, [], undefined);",
+      "const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, pendingCandidateTokens, undefined, false, [], matchedIdentities, freedKeys);",
+      "const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, pendingCandidateTokens, undefined, false, [], undefined, freedKeys);",
       async (mutated) => {
         const p2 = path.join(os.tmpdir(), `loom-mq25d0d4-exclc-p2-never-exists-${freshSfx()}`);
         mutated.enterMergeQuarantine(p2, "loom/p2-branch", "p2's own real raise (unresolvable)");
