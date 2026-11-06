@@ -2146,7 +2146,7 @@ export class OrchestrationMcpRouter {
     const sessions = this.sessions;
     const pty = this.pty;
     const server = new McpServer({ name: "loom-orchestration", version: "0.1.0" });
-    instrumentServer(server, { router: "orchestration", sessionId }); // card 8ef582d0
+    instrumentServer(server, { router: "orchestration", sessionId, attributions }); // card 8ef582d0; bcef7e48
     // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
     // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 

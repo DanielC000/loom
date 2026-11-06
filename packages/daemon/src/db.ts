@@ -3295,6 +3295,7 @@ export class Db {
     this.migrateUsageSamples();
     this.migrateCardPolicyMatchesV2();
     this.migrateCardPolicyWaiversV2();
+    this.migrateMcpCallLog();
   }
 
   /**
@@ -7867,26 +7868,40 @@ export class Db {
    * session to `perSessionCap` newest rows. Identity/shape only — the row has no column that could hold
    * arguments, results or error text.
    */
-  insertMcpCalls(rows: ReadonlyArray<{ sessionId: string; router: string; tool: string; startedAt: number; durationMs: number; outcome: string; errClass: string | null }>, perSessionCap: number): void {
+  insertMcpCalls(rows: ReadonlyArray<{ sessionId: string; router: string; tool: string; startedAt: number; durationMs: number; outcome: string; errClass: string | null; attribution?: string | null; agentId?: string | null; agentType?: string | null }>, perSessionCap: number): void {
     if (rows.length === 0) return;
-    const ins = this.db.prepare("INSERT INTO mcp_call_log (session_id, router, tool, started_at, duration_ms, outcome, err_class) VALUES (?,?,?,?,?,?,?)");
+    const ins = this.db.prepare("INSERT INTO mcp_call_log (session_id, router, tool, started_at, duration_ms, outcome, err_class, attribution, agent_id, agent_type) VALUES (?,?,?,?,?,?,?,?,?,?)");
     const trim = this.db.prepare("DELETE FROM mcp_call_log WHERE session_id = ? AND id <= COALESCE((SELECT id FROM mcp_call_log WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?), 0)");
     this.db.transaction(() => {
       const touched = new Set<string>();
       for (const r of rows) {
-        ins.run(r.sessionId, r.router, r.tool, Math.trunc(r.startedAt), Math.max(0, Math.round(r.durationMs)), r.outcome, r.errClass);
+        ins.run(r.sessionId, r.router, r.tool, Math.trunc(r.startedAt), Math.max(0, Math.round(r.durationMs)), r.outcome, r.errClass, r.attribution ?? null, r.agentId ?? null, r.agentType ?? null);
         touched.add(r.sessionId);
       }
       for (const sid of touched) trim.run(sid, sid, perSessionCap);
     })();
   }
   /** Newest-first page of one session's recorded MCP calls (human REST read only). */
-  listMcpCalls(sessionId: string, limit: number): Array<{ id: number; router: string; tool: string; startedAt: number; durationMs: number; outcome: string; errClass: string | null }> {
-    return (this.db.prepare("SELECT id, router, tool, started_at, duration_ms, outcome, err_class FROM mcp_call_log WHERE session_id = ? ORDER BY id DESC LIMIT ?")
+  listMcpCalls(sessionId: string, limit: number): Array<{ id: number; router: string; tool: string; startedAt: number; durationMs: number; outcome: string; errClass: string | null; attribution: string | null; agentId: string | null; agentType: string | null }> {
+    return (this.db.prepare("SELECT id, router, tool, started_at, duration_ms, outcome, err_class, attribution, agent_id, agent_type FROM mcp_call_log WHERE session_id = ? ORDER BY id DESC LIMIT ?")
       .all(sessionId, limit) as Row[]).map((r) => ({
         id: r.id as number, router: r.router as string, tool: r.tool as string, startedAt: r.started_at as number,
         durationMs: r.duration_ms as number, outcome: r.outcome as string, errClass: (r.err_class as string | null) ?? null,
+        attribution: (r.attribution as string | null) ?? null, agentId: (r.agent_id as string | null) ?? null, agentType: (r.agent_type as string | null) ?? null,
       }));
+  }
+
+  /**
+   * Card bcef7e48: additive migration — `attribution` / `agent_id` / `agent_type` on `mcp_call_log`. Deliberately
+   * ABSENT from the base CREATE TABLE and from any base-SCHEMA index (an index naming a not-yet-added column
+   * would throw at `exec(SCHEMA)` on an already-upgraded install); fresh and upgraded DBs converge here. No
+   * DEFAULT, so pre-existing rows read NULL = "not tracked".
+   */
+  private migrateMcpCallLog(): void {
+    const have = new Set((this.db.prepare("PRAGMA table_info(mcp_call_log)").all() as { name: string }[]).map((c) => c.name));
+    for (const col of ["attribution", "agent_id", "agent_type"]) {
+      if (!have.has(col)) this.db.exec(`ALTER TABLE mcp_call_log ADD COLUMN ${col} TEXT`);
+    }
   }
   /** Age prune: drop call rows that started before `olderThanMs` (epoch ms). Returns rows removed. */
   pruneMcpCalls(olderThanMs: number): number {

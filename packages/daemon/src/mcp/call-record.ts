@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolAttributionResult, ToolAttributionState } from "../pty/tool-attribution.js";
 
 /**
  * Per-call MCP latency + outcome class, recorded where the ANSWERING router's tool handler runs.
@@ -33,6 +34,14 @@ export interface McpCallRecord {
   durationMs: number;
   outcome: McpCallOutcome;
   errClass: McpErrClass | null;
+  /** Who made the call, when known: the sub-agent-call correlation state for a WATCHED tool on a router
+   *  that computes it (loom-tasks, loom-orchestration). `null` = NOT TRACKED (an unwatched tool, or a router
+   *  that never computes attribution) — never "session". Only `"confirmed-main"` may ever be presented as
+   *  "session"; null/unknown/ambiguous must not collapse into it. */
+  attribution: ToolAttributionState | null;
+  /** Set only when `attribution === "confirmed-subagent"`. */
+  agentId: string | null;
+  agentType: string | null;
 }
 
 /** Max rows held in memory between flushes; beyond it new records are dropped and counted. */
@@ -123,8 +132,14 @@ export function stopMcpCallRecorder(): void {
  * Wrap every tool the router registers on `server` so its handler is timed and its outcome classified.
  * Call once, right after `new McpServer(...)`, before any registration. The registration args pass through
  * UNCHANGED; only the callback is wrapped.
+ *
+ * `ctx.attributions` is the gateway's ALREADY-COMPUTED per-request sub-agent attribution map (bare tool name
+ * -> result; see gateway/server.ts `computeAttributions`). It is only READ here (`get`). A router that does
+ * not compute one passes none, and a tool absent from the map records `attribution:null` ("not tracked").
+ *
+ * @decision bcef7e48 — read-only `get` of the gateway's map, never a second consume; null is "not tracked".
  */
-export function instrumentServer(server: McpServer, ctx: { router: string; sessionId: string | undefined }): void {
+export function instrumentServer(server: McpServer, ctx: { router: string; sessionId: string | undefined; attributions?: ReadonlyMap<string, ToolAttributionResult> }): void {
   const s = server as unknown as { registerTool: (name: string, config: unknown, cb: (...a: unknown[]) => unknown) => unknown };
   const orig = s.registerTool.bind(server);
   s.registerTool = (name: string, config: unknown, cb: (...a: unknown[]) => unknown) => {
@@ -142,7 +157,14 @@ export function instrumentServer(server: McpServer, ctx: { router: string; sessi
         throw e;
       } finally {
         try {
-          if (ctx.sessionId !== undefined) recordMcpCall({ sessionId: ctx.sessionId, router: ctx.router, tool: name, startedAt, durationMs: performance.now() - t0, outcome, errClass });
+          if (ctx.sessionId !== undefined) {
+            const attr = ctx.attributions?.get(name);
+            const sub = attr?.state === "confirmed-subagent";
+            recordMcpCall({
+              sessionId: ctx.sessionId, router: ctx.router, tool: name, startedAt, durationMs: performance.now() - t0, outcome, errClass,
+              attribution: attr?.state ?? null, agentId: sub ? attr?.agentId ?? null : null, agentType: sub ? attr?.agentType ?? null : null,
+            });
+          }
         } catch { /* recording must never reach the call path */ }
       }
     };
