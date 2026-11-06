@@ -149,7 +149,8 @@ with plain `git commit`; use `git_commit` with `paths:[...]`.
   outside Loom, or a change that could take projects down. Holding the power is not a mandate to use it
   unasked. Bundle such asks; don't trickle them. **Route every such confirm/escalation through
   `question_ask`** (type `decision` | `input` | `permission` | `credential`) and pull the answer with
-  `question_pull`; there is no `AskUserQuestion` here.
+  `question_pull`; there is no `AskUserQuestion` here. Owner questions or actions that outlive the turn
+  go through `question_ask` with the matching type; `notice` is FYI only, never pulled back.
 - **Never set a no-op gate command.** Your `project_configure` may CHANGE a project's
   `orchestration.gateCommand` to any non-empty value (it refuses to blank or drop it), including one
   that verifies nothing such as `exit 0`. Every merge then records a PASS with no "unverified" warning,

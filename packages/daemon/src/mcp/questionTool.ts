@@ -82,6 +82,24 @@ export const QUESTION_ASK_INPUT_SHAPE = {
     .optional(),
 } as const;
 
+/**
+ * Non-blocking advisory for a `type:"notice"` ask that also carries `action` or `fulfillmentTarget` — fields
+ * that only mean something on a "permission" ask and are silently dropped on a notice. Passing one is a
+ * strong sign the asker wanted the owner to DO something, which a notice never asks for. Deliberately a
+ * structural signal only: prose is never inspected, so an owner action described only in the body is not
+ * caught here (the doctrine line covers that). The notice is still filed either way.
+ */
+export function noticeOwnerActionAdvisory(
+  input: Pick<QuestionAskInput, "type" | "action" | "fulfillmentTarget">,
+): string | undefined {
+  if (input.type !== "notice") return undefined;
+  if (!input.action?.trim() && !input.fulfillmentTarget) return undefined;
+  return 'this was filed as type:"notice", which asks the owner for nothing and is dropped from question_pull — ' +
+    "`action`/`fulfillmentTarget` were ignored. This notice stays as an FYI (a notice cannot be superseded " +
+    "or cancelled). If the owner must approve or do something, file a NEW ask with the right type: " +
+    'type:"permission" (action + optional fulfillmentTarget) or type:"input"/"decision".';
+}
+
 export interface QuestionAskInput {
   type?: QuestionType;
   title: string;

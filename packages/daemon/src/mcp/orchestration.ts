@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { contextWindowForModel, contextPercentFor, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session, type OrchestrationEvent, type GateType } from "@loom/shared";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, finalizeQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, auditRequestItem, pageRequests, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, finalizeQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, auditRequestItem, pageRequests, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede, noticeOwnerActionAdvisory } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 // Card 40f4cae9 — the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8): reuse
 // the SAME generic `pickFields` (mcp/tasks.ts) rather than writing a second projector — see that
@@ -4351,7 +4351,11 @@ export class OrchestrationMcpRouter {
           "terminal 'notice' state — NEVER 'pending', NEVER 'answered', NEVER returned by question_pull, and no " +
           "push nudge (that only fires for a real human answer). Rate-limited per agent lineage (a human-only, " +
           "per-project cap you cannot raise) — exceeding it REFUSES loudly, naming the limit; consolidate " +
-          "repeated status updates into fewer notices. \"permission\" — ask the human to authorize/deny an " +
+          "repeated status updates into fewer notices. A notice is FYI only: anything the owner must answer " +
+          "or DO needs the matching type, since a notice is never pulled back. A notice that also passes " +
+          "`action`/`fulfillmentTarget` is still filed but the result carries an `advisory` string (those " +
+          "fields are ignored on a notice); owner actions described only in the body are NOT detected, so " +
+          "pick the type deliberately. \"permission\" — ask the human to authorize/deny an " +
           "irreversible/outward/spend action; `action` (REQUIRED) describes it, `scope` (\"once\"|\"standing\", " +
           "optional) is the requested grant lifetime, `expiresAt` (optional ISO timestamp) a requested expiry. " +
           "This is an ask/answer channel, not a second gate: it blocks nothing, so if the action must WAIT on " +
@@ -4424,8 +4428,10 @@ export class OrchestrationMcpRouter {
         // Card 788ed7f4: filing a Request is a disposition — clear any open "owner message left without a
         // disposition" episode for THIS session, by occurrence alone (no content matching).
         db.clearPendingOwnerMessage(managerSessionId);
-        const result: { questionId: string; supersede?: typeof supersede; note?: string } = { questionId: question.id };
+        const result: { questionId: string; supersede?: typeof supersede; note?: string; advisory?: string } = { questionId: question.id };
         if (supersede !== undefined) result.supersede = supersede;
+        const advisory = noticeOwnerActionAdvisory(input);
+        if (advisory) result.advisory = advisory;
         // @decision 92c20eb9 — card ca0111a3: confirm to P why this call was let through and what to
         // actually put in the ask, reusing the SAME hint text retiredCallerMessage shows it elsewhere.
         if (unresolvedSuccessor) result.note = unresolvedSettleEscalationHint(unresolvedSuccessor);

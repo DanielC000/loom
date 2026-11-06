@@ -14,7 +14,7 @@ import { eventsSearchQuery, eventsCountQuery, DEFAULT_EVENTS_SEARCH_CAP, EVENT_S
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
 import { isClaudeConfigDirEnvKey } from "../pty/claude-config.js";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, finalizeQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, finalizeQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede, noticeOwnerActionAdvisory } from "./questionTool.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir, resolveProjectInitTarget } from "../setup/bootstrap.js";
@@ -3575,7 +3575,11 @@ export class PlatformMcpRouter {
           "freeform-text ask, no options. \"notice\" — an FYI needing NO answer: it lands in its OWN " +
           "terminal 'notice' state, never 'pending' or 'answered', is never returned by question_pull, and " +
           "triggers no push nudge. Notices are rate-limited per agent lineage (a human-only per-project cap " +
-          "you cannot raise); exceeding it REFUSES loudly, so consolidate status updates. \"permission\" — " +
+          "you cannot raise); exceeding it REFUSES loudly, so consolidate status updates. A notice is FYI only: " +
+          "anything the owner must answer or DO needs the matching type, since a notice is never pulled back. " +
+          "A notice that also passes `action`/`fulfillmentTarget` is still filed but the result carries an " +
+          "`advisory` string (those fields are ignored on a notice); owner actions described only in the body " +
+          "are NOT detected, so pick the type deliberately. \"permission\" — " +
           "ask the human to authorize/deny an irreversible/outward/spend action; `action` (REQUIRED) " +
           "describes it, `scope` (\"once\"|\"standing\") and `expiresAt` (ISO timestamp) are optional " +
           "requested grant lifetime/expiry. This is an ask/answer channel, not a gate: if the action must " +
@@ -3631,7 +3635,8 @@ export class PlatformMcpRouter {
         // Card 788ed7f4: filing a Request is a disposition — clear any open "owner message left without a
         // disposition" episode for THIS session, by occurrence alone (no content matching).
         db.clearPendingOwnerMessage(callerSessionId);
-        return ok(supersede !== undefined ? { questionId: question.id, supersede } : { questionId: question.id });
+        const advisory = noticeOwnerActionAdvisory(input);
+        return ok({ questionId: question.id, ...(supersede !== undefined ? { supersede } : {}), ...(advisory ? { advisory } : {}) });
       },
     );
 

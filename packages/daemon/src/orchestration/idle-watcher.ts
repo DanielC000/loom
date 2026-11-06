@@ -6,6 +6,7 @@ import type { OrchestrationControl } from "./control.js";
 import type { QueueSource, TurnRoute, QueuedMessageKind } from "../pty/host.js";
 import type { IdleWorkerNotifyOutcome } from "../sessions/service.js";
 import { computeBoardDelta, formatBoardDeltaDigest } from "./board-read.js";
+import { findPlatformCardsWithMergedFixes, formatLinkedFixesLine } from "./linked-fixes.js";
 import { requestAnsweredTriggerNotice } from "./deferred-trigger-notice.js";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 
@@ -55,6 +56,13 @@ export interface IdlePty {
 export interface IdleWatcherDeps {
   db: Db;
   pty: IdlePty;
+  /**
+   * Lead-only `[loom:linked-fixes]` source: ids of Platform cards (on `platformProjectId`'s board) whose
+   * linked fix merged on another board. Async and fire-and-forget from `tick()` — the nudge reads the
+   * PREVIOUS refresh's cached line and never awaits this, so a slow or throwing resolver cannot delay or
+   * suppress a nudge. Defaults to the real git-derived scan; tests inject a stub.
+   */
+  resolveLinkedFixes?: (platformProjectId: string) => Promise<string[]>;
   /** §17a pause registry — a human-paused manager is never nudged (parity with worker_spawn). */
   control: OrchestrationControl;
   /**
@@ -181,6 +189,10 @@ export const MCP_SILENCE_LAG_MULTIPLIER = 3;
  * a re-SCAN cadence; the nudge-firing predicate/cap/escalation/parked-lane discount are untouched.
  */
 const IDLE_SCAN_THROTTLE_MINUTES = 5;
+/** An in-flight linked-fixes refresh older than this is abandoned (counted as a failure). */
+export const LINKED_FIXES_INFLIGHT_MAX_MS = 5 * 60_000;
+/** This many consecutive failed refreshes clear a Lead's cached linked-fixes line. */
+export const LINKED_FIXES_MAX_FAILURES = 3;
 
 /**
  * Appended to every idle-manager nudge (card a193398f): the message already embeds current, cheaply-
@@ -280,7 +292,58 @@ export class IdleWatcher {
   /** Card d1521fca — while `nowMs` is before this, `tickMcpSilence` skips its ENTIRE sweep (a detected
    *  tick lag's grace period); `0` means no grace in effect. */
   private mcpSilenceGraceUntilMs = 0;
+  /** Per-Lead cached `[loom:linked-fixes]` line from the last COMPLETED refresh ("" = none). In-memory
+   *  and pruned to live sessions like its siblings; a restart just costs one tick before the line appears. */
+  private linkedFixesLine = new Map<string, string>();
+  /** Lead id -> its refresh currently in flight (one at a time). `token` identifies THIS attempt so a late
+   *  completion of an abandoned or pruned attempt can never write the line. */
+  private linkedFixesInFlight = new Map<string, { startedMs: number; token: number }>();
+  /** Lead id -> when its last refresh was STARTED, for the per-Lead throttle. */
+  private linkedFixesLastStartMs = new Map<string, number>();
+  /** Lead id -> consecutive failed refreshes (reject / sync throw / abandoned-in-flight). */
+  private linkedFixesFailures = new Map<string, number>();
+  private linkedFixesToken = 0;
   constructor(private deps: IdleWatcherDeps) {}
+
+  private noteLinkedFixesFailure(leadId: string): void {
+    const n = (this.linkedFixesFailures.get(leadId) ?? 0) + 1;
+    this.linkedFixesFailures.set(leadId, n);
+    // Better no line than one naming cards that may long since be closed.
+    if (n >= LINKED_FIXES_MAX_FAILURES) this.linkedFixesLine.delete(leadId);
+  }
+
+  /** Kick off (never await) a refresh of the Lead's cached linked-fixes line, at most once per
+   *  `intervalMs` per Lead (the scan does real git work). A failure keeps the previous line until
+   *  LINKED_FIXES_MAX_FAILURES in a row clear it; an in-flight attempt older than
+   *  LINKED_FIXES_INFLIGHT_MAX_MS is abandoned (counted as a failure) so a hung scan cannot stall refreshes. */
+  private refreshLinkedFixes(leadId: string, platformProjectId: string, nowMs: number, intervalMs: number): void {
+    const inflight = this.linkedFixesInFlight.get(leadId);
+    if (inflight) {
+      if (nowMs - inflight.startedMs <= LINKED_FIXES_INFLIGHT_MAX_MS) return;
+      this.linkedFixesInFlight.delete(leadId);
+      this.noteLinkedFixesFailure(leadId);
+    }
+    const last = this.linkedFixesLastStartMs.get(leadId);
+    if (last !== undefined && nowMs - last < intervalMs) return;
+    this.linkedFixesLastStartMs.set(leadId, nowMs);
+    const token = ++this.linkedFixesToken;
+    this.linkedFixesInFlight.set(leadId, { startedMs: nowMs, token });
+    const mine = () => this.linkedFixesInFlight.get(leadId)?.token === token;
+    const resolve = this.deps.resolveLinkedFixes ?? ((pid: string) => findPlatformCardsWithMergedFixes(this.deps.db, pid));
+    let p: Promise<string[]>;
+    try { p = Promise.resolve(resolve(platformProjectId)); } catch {
+      if (mine()) { this.linkedFixesInFlight.delete(leadId); this.noteLinkedFixesFailure(leadId); }
+      return;
+    }
+    p.then((ids) => {
+      // Dropped if this attempt was abandoned/pruned, or the Lead has since exited (never re-add a line for it).
+      if (!mine() || this.deps.db.getSession(leadId)?.processState !== "live") return;
+      this.linkedFixesLine.set(leadId, formatLinkedFixesLine(ids));
+      this.linkedFixesFailures.delete(leadId);
+    })
+      .catch(() => { if (mine()) this.noteLinkedFixesFailure(leadId); })
+      .finally(() => { if (mine()) this.linkedFixesInFlight.delete(leadId); });
+  }
 
   /**
    * Emit `[idle-watcher] skip <id> reason=<reason>` ONLY when `reason` differs from the last one recorded
@@ -337,6 +400,9 @@ export class IdleWatcher {
     const liveManagerIds = new Set(managers.map((mm) => mm.id));
     for (const id of this.lastIdleScanAt.keys()) if (!liveManagerIds.has(id)) this.lastIdleScanAt.delete(id);
     for (const id of this.lastSkipReason.keys()) if (!liveManagerIds.has(id)) this.lastSkipReason.delete(id);
+    for (const map of [this.linkedFixesLine, this.linkedFixesInFlight, this.linkedFixesLastStartMs, this.linkedFixesFailures]) {
+      for (const id of map.keys()) if (!liveManagerIds.has(id)) map.delete(id);
+    }
 
     for (const m of managers) {
       const project = db.getProject(m.projectId);
@@ -344,6 +410,9 @@ export class IdleWatcher {
       const cfg = resolveConfig(project.config).orchestration;
       const idleMinutes = cfg.idleNudgeMinutes;
       if (idleMinutes === 0) { this.logSkipIfChanged(m.id, "disabled"); continue; } // disabled for this project
+      // Lead only. Throttled to once per idle-nudge window, so the cached line is never older than one
+      // window by the time a nudge is due; the scan does real git work, so it must not run every tick.
+      if (m.role === "platform") this.refreshLinkedFixes(m.id, m.projectId, nowMs, idleMinutes * 60_000);
 
       // Reset-on-activity: a manager that produced genuine orchestration work AFTER its last nudge is
       // back at the wheel — re-arm it (watching / unanswered 0 / snooze clear) before we evaluate.
@@ -672,7 +741,7 @@ export class IdleWatcher {
       // openTodos/stranded/live-worker counts this hint refers to) — the platform (Lead) branch above
       // doesn't surface those counts, so the hint wouldn't make sense appended there.
       const finalMsg = isPlatform
-        ? msg + undocumentedDeferralSuffix + boardDeltaSuffix
+        ? msg + undocumentedDeferralSuffix + boardDeltaSuffix + (this.linkedFixesLine.get(m.id) ? ` ${this.linkedFixesLine.get(m.id)}` : "")
         : msg + undocumentedDeferralSuffix + boardDeltaSuffix + IDLE_NUDGE_BOUNDED_HINT;
       // Card f6d72db8: use the return value instead of discarding it — mirrors ContextWatcher's own fix
       // (card 49fdcbbc, same enqueueStdin contract). `delivered:true` and `delivered:false, queued:true`

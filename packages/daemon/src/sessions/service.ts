@@ -33,6 +33,7 @@ import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_S
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry, checkCutBaseRestampEligibility, CUT_BASE_RESTAMP_MAX_SCAN, type CutBaseRestampEligibility, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, firstBranchCommitTime, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, machineReadablePathSet, pathGlobToRegExp, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type WorkerTipLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, fastForwardCanonicalMain, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
+import { resolveEscalationDestMerged } from "../orchestration/linked-fixes.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout, detectShallowCanonicalRepo, defaultTrustedMainRoot, CanonicalGitRefusal } from "../git/bounded.js";
@@ -15174,17 +15175,13 @@ export class SessionService {
     if (terminalKey !== undefined && columnKey === terminalKey) {
       const link = this.db.findEscalationTriage(taskId);
       if (!link) return { status: "triaged", triagedTo: null };
-      const destProject = this.db.getProject(link.destinationProjectId);
-      const destTask = this.db.getTask(link.destinationTaskId);
       // @decision c13666c6 — the branch-gone ledger gate, scoped to the destination task's own repoKey.
       // @decision e8d4fdc3 round 3 (card 03f85c8e item 1) — SAME scope for workerTipLedger: this is a
       // steady-state, post-finalize read of a (possibly different) project's repo, exactly the shape the
       // branch-keyed ledger tier exists to answer; closes d9332365 gap 4.
-      const destRepoKey = destTask?.repoKey ?? "primary";
-      const merged = destProject ? await getTaskMergedInfo(destProject.repoPath, link.destinationTaskId, {
-        goneBranchLedger: this.db.getGoneBranchLedgerFacts(destProject.id, destRepoKey),
-        workerTipLedger: this.db.getWorkerTipLedgerFacts(destProject.id, destRepoKey),
-      }) : null;
+      //
+      // Both scopes live in the shared `resolveEscalationDestMerged` (also read by the Lead's idle nudge).
+      const { destProject, destTask, merged } = await resolveEscalationDestMerged(this.db, link);
       const triagedTo: EscalationStatusItem["triagedTo"] = {
         projectId: link.destinationProjectId,
         projectName: destProject?.name ?? "",

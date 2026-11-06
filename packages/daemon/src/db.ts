@@ -9263,6 +9263,35 @@ export class Db {
     return { destinationProjectId: detail.destinationProjectId, destinationTaskId: detail.destinationTaskId };
   }
   /**
+   * The latest `escalation_triaged` link per escalation card that currently lives on `platformProjectId`'s
+   * board, newest link first, bounded by `limit`. Same event + same "latest link wins" rule as
+   * {@link findEscalationTriage}, read in ONE query so a periodic caller never pays one lookup per card.
+   * Escalation cards in `terminalKey`'s column are excluded IN the query, so `limit` bounds the OPEN
+   * population: a run of newer terminal cards can never crowd an older open one out. Pass `undefined` for
+   * a board with no terminal column. A malformed `detail_json` row is skipped (never asserts a link that
+   * isn't fully there).
+   */
+  listEscalationTriageLinks(
+    platformProjectId: string, terminalKey: string | undefined, limit: number,
+  ): { escalationTaskId: string; columnKey: string; destinationProjectId: string; destinationTaskId: string }[] {
+    const rows = this.db.prepare(
+      "SELECT e.task_id AS taskId, t.column_key AS columnKey, e.detail_json AS detailJson " +
+      "FROM orchestration_events e JOIN tasks t ON t.id = e.task_id " +
+      "WHERE e.kind = 'escalation_triaged' AND t.project_id = ? AND (? IS NULL OR t.column_key <> ?) " +
+      "AND e.seq = (SELECT MAX(x.seq) FROM orchestration_events x WHERE x.kind = 'escalation_triaged' AND x.task_id = e.task_id) " +
+      "ORDER BY e.seq DESC LIMIT ?",
+    ).all(platformProjectId, terminalKey ?? null, terminalKey ?? null, limit) as { taskId: string; columnKey: string; detailJson: string | null }[];
+    const out: { escalationTaskId: string; columnKey: string; destinationProjectId: string; destinationTaskId: string }[] = [];
+    for (const r of rows) {
+      if (!r.detailJson) continue;
+      let d: { destinationProjectId?: string; destinationTaskId?: string };
+      try { d = JSON.parse(r.detailJson); } catch { continue; }
+      if (!d.destinationProjectId || !d.destinationTaskId) continue;
+      out.push({ escalationTaskId: r.taskId, columnKey: r.columnKey, destinationProjectId: d.destinationProjectId, destinationTaskId: d.destinationTaskId });
+    }
+    return out;
+  }
+  /**
    * One worker's audit trail in chronological order — used by boot-reconcile's dangling-merge
    * detector to pair a `merge_request` with its later terminal `merge_done`/`merge_rejected`
    * regardless of which manager id the events were filed under (rowid breaks same-ts ties).
