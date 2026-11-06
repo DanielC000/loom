@@ -2,6 +2,7 @@ import type { PendingMerge, ServerFleetMessage, SessionListItem } from "@loom/sh
 import type { WebSocket } from "ws";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
+import { WS_CLOSE_TRY_AGAIN_LATER, closeSlowSocket } from "./slow-socket.js";
 
 /** Debounce window between a session becoming dirty and its coalesced delta going out — long enough to
  *  fold a burst of rapid mutations on one id into a single broadcast (see `markSessionDirty`). Exported
@@ -13,14 +14,24 @@ export const DIRTY_FLUSH_MS = 200;
 // per-socket subscription map lets any co-resident process grow it without limit (memory DoS).
 export const MAX_EVENT_SUBSCRIPTIONS_PER_SOCKET = 128;
 
-/** WebSocket close code 1013 "Try Again Later" — sent to a fleet client that stopped reading. */
-export const WS_CLOSE_TRY_AGAIN_LATER = 1013;
+export { WS_CLOSE_TRY_AGAIN_LATER };
 
 /** Unsent-bytes ceiling per /ws/fleet socket (card cfd1fe04). 4 MiB: a gate event's outputTail is ~4 KB and
  *  a full-feed burst is a few hundred KB at most, so a client that is merely slow/busy stays far below it,
  *  while a never-reading loopback client (no credential, d5e3fa82) hits it after ~1000 frames and is closed
- *  rather than pinning unbounded memory. The web client resyncs on reopen, so a close loses nothing. */
+ *  rather than pinning unbounded memory. The web client resyncs on reopen, so a close loses nothing.
+ *  SOFT bound: the check runs BEFORE the send, so one socket can overshoot by at most one frame (a frame is
+ *  far smaller than the ceiling; the true worst case is ceiling + one frame). */
 export const MAX_FLEET_SOCKET_BUFFERED_BYTES = 4 * 1024 * 1024;
+
+/** Max concurrent /ws/fleet connections per process (card 1baf6fb6). Worst-case memory is
+ *  N × (MAX_FLEET_SOCKET_BUFFERED_BYTES + one frame) plus slow sockets still inside their terminate grace
+ *  window, so N is bounded: 64 × 4 MiB = 256 MiB worst case. 64 is far above real use (one socket per
+ *  tab/device/remote client: a heavy user has a handful) while stopping a loopback process (no credential)
+ *  opening sockets without limit. Independent of MAX_EVENT_SUBSCRIPTIONS_PER_SOCKET, which bounds one
+ *  socket's subscription map; the two multiply to at most 64 × 128 map entries. Slow sockets leave the
+ *  registry (and so stop counting) the moment they are closed for being slow. A constant, not config. */
+export const MAX_FLEET_CONNECTIONS = 64;
 
 /**
  * C2/C3 of the WS delta-push umbrella (1efde4ba) — the registry backing `/ws/fleet`. Holds every connected
@@ -34,6 +45,8 @@ export const MAX_FLEET_SOCKET_BUFFERED_BYTES = 4 * 1024 * 1024;
  */
 export class FleetHub {
   private readonly sockets = new Map<WebSocket, Map<string, number>>();
+  /** Cancel handles for slow sockets awaiting terminate(); cleared by `remove` (the route's close handler). */
+  private readonly terminateTimers = new Map<WebSocket, () => void>();
   private readonly dirty = new Set<string>();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private db?: Db;
@@ -56,9 +69,17 @@ export class FleetHub {
     this.sockets.set(socket, new Map());
   }
 
-  /** Drop a socket (on close) — idempotent, a no-op if already removed. */
+  /** True when the process is at `MAX_FLEET_CONNECTIONS`; the route refuses a new socket instead of `add`ing. */
+  get full(): boolean {
+    return this.sockets.size >= MAX_FLEET_CONNECTIONS;
+  }
+
+  /** Drop a socket (on close) — idempotent, a no-op if already removed. Also cancels that socket's pending
+   *  terminate-after-grace timer, so no timer outlives the socket. */
   remove(socket: WebSocket): void {
     this.sockets.delete(socket);
+    const cancel = this.terminateTimers.get(socket);
+    if (cancel) { this.terminateTimers.delete(socket); cancel(); }
   }
 
   /** Record (or update) this socket's subscription to a manager's event stream. Bookkeeping only in this
@@ -142,7 +163,9 @@ export class FleetHub {
         this.sockets.delete(socket);
         // Deliberately logs counts only — never frame content.
         console.warn(`[fleet] closing slow /ws/fleet client: bufferedAmount=${socket.bufferedAmount} > ${MAX_FLEET_SOCKET_BUFFERED_BYTES}`);
-        socket.close(WS_CLOSE_TRY_AGAIN_LATER, "slow consumer");
+        // close(1013) then terminate() after a grace: ws queues the close frame behind the backlog, so a
+        // non-reading client would otherwise keep ~MAX bytes pinned until closeTimeout (30 s).
+        this.terminateTimers.set(socket, closeSlowSocket(socket, "slow consumer"));
         return;
       }
       socket.send(data);

@@ -8,6 +8,7 @@ import type { WebSocket } from "ws";
 import type { TerminalInput, TerminalControl, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, ProjectConfigHistoryEntry, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, QuestionAttachmentKind, PermissionScope, PermissionAnswer, ProvisionTarget, FulfillmentTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
 import { POLICY_REQUIREMENT_KINDS, resolveConfig, resolveMergeGateCadence, resolveCodescapeConfig, columnKeyForRole, byRecentlyDone, describeCron, redactSessionEnvInConfig, redactAlertWebhookInConfig, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES, ALL_ORCHESTRATION_EVENT_KINDS, WS_CLOSE_POLICY_VIOLATION, gatewayTokenCloseReason, SHELL_LOOPBACK_ONLY_CLOSE_REASON } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
+import { WS_CLOSE_TRY_AGAIN_LATER, closeSlowSocket } from "./slow-socket.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, questionAttachmentDir } from "../paths.js";
 import { QUESTION_ID_RE, ATTACHMENT_ID_RE, attachmentServeContentType, resolveStoredAttachmentFile, attachmentContentDisposition, deriveAttachmentKind, sanitizeBasename } from "../mcp/attachments.js";
@@ -128,6 +129,11 @@ const REMOTE_REPAINT_MIN_INTERVAL_MS = 1000;
 // Exported so a hermetic test can derive an over/under-cap frame size from this real constant instead of
 // guessing one (same reasoning as fleet-hub.ts's exported DIRTY_FLUSH_MS/MAX_EVENT_SUBSCRIPTIONS_PER_SOCKET).
 export const WS_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+/** Unsent-bytes ceiling per /ws/term viewer socket (card 1baf6fb6). The replay ring is 256 KiB and a normal
+ *  burst is well under 1 MiB, so 4 MiB leaves a busy-but-reading viewer far from it; a viewer past it has
+ *  stopped reading and is closed (1013) — never the pty. Soft by one chunk (the check runs before the send). */
+export const MAX_TERM_SOCKET_BUFFERED_BYTES = 4 * 1024 * 1024;
 
 /** Sane upper bound on a viewer-requested terminal resize — a viewport, not a data buffer, so this is
  * generous headroom over any real pane, not a tuned value. Rejects a frame that would otherwise reach
@@ -7663,9 +7669,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // so a local pane is byte-identical to before. This is a HINT to the viewer, never the enforcement:
     // the drop below runs whatever the client does with (or without) this frame.
     if (remotePeer) socket.send(JSON.stringify({ type: "readOnly", reason: "remote" } satisfies TerminalControl));
-    const unsub = deps.pty.subscribe(sessionId, {
-      onData: (b) => { if (socket.readyState === socket.OPEN) socket.send(b); },
-      onControl: (e) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(e)); },
+    // Card 1baf6fb6: bound THIS viewer's unsent backlog. A viewer that stops reading is closed (1013, then
+    // terminate() after a grace) and detached from the pty's subscriber list; the pty itself is never paused
+    // or touched (sessions outlive viewers) and other viewers are unaffected. Soft by one chunk.
+    let cancelTerminate: (() => void) | null = null;
+    let viewerDropped = false;
+    const dropSlowViewer = (): void => {
+      if (viewerDropped) return;
+      viewerDropped = true;
+      console.warn(`[term] closing slow /ws/term viewer: bufferedAmount=${socket.bufferedAmount} > ${MAX_TERM_SOCKET_BUFFERED_BYTES}`);
+      unsub(); // detach only; does NOT kill the pty
+      cancelTerminate = closeSlowSocket(socket, "slow consumer");
+    };
+    const sendToViewer = (payload: Buffer | string): void => {
+      if (viewerDropped || socket.readyState !== socket.OPEN) return;
+      if (socket.bufferedAmount > MAX_TERM_SOCKET_BUFFERED_BYTES) { dropSlowViewer(); return; }
+      socket.send(payload);
+    };
+    // `unsub` is assigned by the subscribe() call below; subscribe() replays the ring synchronously, so a
+    // drop during the replay (a ring is <= 256 KiB, far under the bound) would need it — guard with a flag.
+    let unsubFn: () => void = () => {};
+    const unsub = (): void => { unsubFn(); };
+    unsubFn = deps.pty.subscribe(sessionId, {
+      onData: (b) => sendToViewer(b),
+      onControl: (e) => sendToViewer(JSON.stringify(e)),
     });
     let lastRemoteRepaintAt = 0;
     socket.on("message", guardWsMessage("/ws/term", (raw: Buffer) => {
@@ -7710,6 +7737,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }));
     socket.on("close", () => {
       unsub(); // detach does NOT kill the pty — sessions/shells outlive viewers
+      cancelTerminate?.();
       if (gatewayTokenId) gatewayTokenSockets.unregister(gatewayTokenId, socket);
     });
   });
@@ -7727,6 +7755,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // registers the socket and sends the hello handshake.
   // See gateway/fleet-hub.ts.
   app.get("/ws/fleet", { websocket: true }, (socket: WebSocket, req) => {
+    // Card 1baf6fb6: per-process connection cap — refuse BEFORE registering anything (no token
+    // registration, no hub entry, no close handler needed), with 1013 so a well-behaved client retries later.
+    if (fleetHub.full) {
+      socket.close(WS_CLOSE_TRY_AGAIN_LATER, "too many fleet connections");
+      return;
+    }
     // Card 3c205fb5: see the matching comment on /ws/term above — same registration, same reason.
     const gatewayTokenId = wsGatewayTokenId.get(req);
     if (gatewayTokenId) gatewayTokenSockets.register(gatewayTokenId, socket);

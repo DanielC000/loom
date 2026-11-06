@@ -21,6 +21,7 @@ process.env.HOME = sandboxHome;
 requireHermeticEnv();
 
 const { FleetHub, MAX_FLEET_SOCKET_BUFFERED_BYTES } = await import("../dist/gateway/fleet-hub.js");
+const { SLOW_SOCKET_TERMINATE_GRACE_MS } = await import("../dist/gateway/slow-socket.js");
 
 let failures = 0;
 function check(label, ok) {
@@ -37,6 +38,7 @@ function stub(bufferedAmount) {
     closed: [],
     send(d) { this.sent.push(d); },
     close(code, reason) { this.closed.push({ code, reason }); this.readyState = 3; },
+    terminate() {},
   };
 }
 
@@ -75,6 +77,54 @@ try {
   check("(3) broadcastEvent closes the slow subscribed socket, no send", slow2.closed.length === 1 && slow2.closed[0].code === 1013 && slow2.sent.length === 0);
   check("(3) broadcastEvent still serves the healthy subscribed socket", healthy2.sent.length === 1);
   check("(3) a non-subscribed socket is untouched by broadcastEvent", unsub.closed.length === 0 && unsub.sent.length === 0);
+
+  // --- (6) fault isolation (card 1baf6fb6): a socket whose send()/close() THROWS, ahead of a healthy one ---
+  // Covers broadcast, broadcastEvent, and the contentless `questions` signal (it rides broadcast()).
+  const throwingSend = () => { const s = stub(0); s.send = () => { throw new Error("send boom"); }; return s; };
+  const throwingClose = () => { const s = stub(MAX_FLEET_SOCKET_BUFFERED_BYTES + 1); s.close = () => { throw new Error("close boom"); }; s.terminate = () => {}; return s; };
+  for (const [name, mk] of [["send throws", throwingSend], ["close throws", throwingClose]]) {
+    for (const [via, fire] of [
+      ["broadcast", (h) => h.broadcast({ t: "session:remove", id: "x" })],
+      ["questions signal", (h) => h.broadcast({ t: "questions" })],
+      ["broadcastEvent", (h) => h.broadcastEvent("mgr", { t: "session:remove", id: "x" })],
+    ]) {
+      const h = new FleetHub();
+      const bad = mk();
+      const good = stub(0);
+      h.add(bad); h.add(good);
+      h.subscribeEvents(bad, "mgr", 0); h.subscribeEvents(good, "mgr", 0);
+      let threw = false;
+      try { fire(h); } catch { threw = true; }
+      check(`(6) ${name}: ${via} does not throw and the healthy socket behind it still gets the frame`, !threw && good.sent.length === 1);
+      h.remove(bad); // cancel any grace timer
+    }
+  }
+
+  // --- (2) memory release (card 1baf6fb6): terminate() after the grace window, cancelled if the socket closes ---
+  {
+    const realSet = globalThis.setTimeout, realClear = globalThis.clearTimeout;
+    const made = new Set(), cleared = new Set();
+    globalThis.setTimeout = (fn, ms, ...r) => { const t = realSet(fn, ms, ...r); if (ms === SLOW_SOCKET_TERMINATE_GRACE_MS) made.add(t); return t; };
+    globalThis.clearTimeout = (t) => { cleared.add(t); return realClear(t); };
+    try {
+      const h = new FleetHub();
+      const stuck = stub(MAX_FLEET_SOCKET_BUFFERED_BYTES + 1);   // never closes on its own -> must be terminated
+      const closesItself = stub(MAX_FLEET_SOCKET_BUFFERED_BYTES + 1); // the close event arrives -> timer cancelled
+      const terminated = { stuck: 0, closesItself: 0 };
+      stuck.terminate = () => { terminated.stuck++; };
+      closesItself.terminate = () => { terminated.closesItself++; };
+      h.add(stuck); h.add(closesItself);
+      h.broadcast({ t: "questions" });
+      check("(2) close(1013) was sent first (the client can still see it)", stuck.closed[0]?.code === 1013 && terminated.stuck === 0);
+      check("(2) one grace timer armed per slow socket", made.size === 2);
+      h.remove(closesItself); // what the route's 'close' handler does
+      check("(2) the timer of a socket that closed on its own is cleared (no leaked timer)", cleared.size === 1 && [...cleared].every((t) => made.has(t)));
+      const deadline = Date.now() + SLOW_SOCKET_TERMINATE_GRACE_MS * 3;
+      await new Promise((r) => { const iv = setInterval(() => { if (terminated.stuck > 0 || Date.now() > deadline) { clearInterval(iv); r(); } }, 25); });
+      check("(2) a socket that never completes the close is terminate()d after the grace", terminated.stuck === 1);
+      check("(2) a socket that closed on its own is never terminate()d", terminated.closesItself === 0);
+    } finally { globalThis.setTimeout = realSet; globalThis.clearTimeout = realClear; }
+  }
 } finally {
   console.warn = origWarn;
 }
