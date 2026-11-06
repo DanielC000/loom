@@ -11081,10 +11081,41 @@ export class SessionService {
    * finalize path leaves them in whatever state it likes — `engineTranscriptExists` is the only transcript
    * pre-check) and `hasSuccessor` (a revive is not a recycle successor).
    */
+  /**
+   * Advisory for `worker_revive`: the SOURCE session's context occupancy, because a fork inherits the whole
+   * conversation. `sourceCtxPct` is the measured percentage, or null when unmeasured. `contextWarning` is
+   * present when the percentage is at or above `workerContextWarnRatio` (the same shared key
+   * {@link workerContextWarningFor} reads), OR when the source is a claude-harness session that completed turns
+   * (`turnSeq > 0`) yet has no measured `ctxInputTokens` — telemetry missing, so silence would hide the
+   * growth. A codex source (no ctx telemetry) yields neither. Advisory only; never refuses.
+   */
+  private reviveSourceContextAdvisory(src: Session): { sourceCtxPct: number | null; contextWarning?: string } {
+    if (!contextTelemetryFor(src.harness)) return { sourceCtxPct: null };
+    if (src.ctxInputTokens == null) {
+      if ((src.turnSeq ?? 0) > 0) {
+        return {
+          sourceCtxPct: null,
+          contextWarning: "source worker's context is UNKNOWN (its context telemetry is missing): check how large its conversation is before reviving — the fork inherits all of it; if it ran long, prefer a fresh worker_spawn (project memory carries the knowledge)",
+        };
+      }
+      return { sourceCtxPct: null };
+    }
+    const pct = contextPercentFor(src.ctxInputTokens, src.model);
+    const project = this.db.getProject(src.projectId);
+    const ratio = project ? resolveConfig(project.config).orchestration.workerContextWarnRatio : 0;
+    if (ratio > 0 && src.ctxInputTokens / contextWindowForModel(src.model) >= ratio) {
+      return {
+        sourceCtxPct: pct,
+        contextWarning: `source worker's context is at ${pct}% and the fork inherits all of it: every revived turn re-reads that history — prefer a fresh worker_spawn (project memory carries the knowledge) unless this follow-up genuinely needs that conversation`,
+      };
+    }
+    return { sourceCtxPct: pct };
+  }
+
   async reviveWorker(
     managerSessionId: string,
     opts: { workerSessionId: string; taskId: string; note?: string },
-  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity | null; revivedFrom: string; commitSha: string | null }> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity | null; revivedFrom: string; commitSha: string | null; sourceCtxPct: number | null; contextWarning?: string }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const src = this.db.getSession(opts.workerSessionId);
@@ -11135,7 +11166,7 @@ export class SessionService {
       { taskId: followUp.id, agentId: src.agentId, kickoffPrompt: kickoff },
       { revive: { sourceSessionId: src.id, sourceHarness: src.harness, sourceEngineSessionId: src.engineSessionId, forkEngineSessionId: randomUUID(), originalTaskId: src.taskId, commitSha } },
     );
-    return { ...worker, revivedFrom: src.id, commitSha };
+    return { ...worker, revivedFrom: src.id, commitSha, ...this.reviveSourceContextAdvisory(src) };
   }
 
   // Card 6ca4155f: a synchronous throw between a row's live-flip and a successful pty.spawn must never
@@ -11316,8 +11347,8 @@ export class SessionService {
   async reviveWorkerTracked(
     managerSessionId: string,
     opts: { workerSessionId: string; taskId: string; note?: string },
-  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity | null; revivedFrom: string; commitSha: string | null }>> {
-    type ReviveResult = Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity | null; revivedFrom: string; commitSha: string | null };
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity | null; revivedFrom: string; commitSha: string | null; sourceCtxPct: number | null; contextWarning?: string }>> {
+    type ReviveResult = Session & { shippedMatch: ShippedCardMatch | null; capacity: WorkerCapacity | null; revivedFrom: string; commitSha: string | null; sourceCtxPct: number | null; contextWarning?: string };
     const key = `spawn:${(opts.taskId ?? "").trim()}`;
     // The key is SHARED with worker_spawn (so the pendingSpawn placeholder + same-card dedupe apply), which
     // means an attach could land on a PLAIN spawn's op — and report that worker as a revive. Refuse both

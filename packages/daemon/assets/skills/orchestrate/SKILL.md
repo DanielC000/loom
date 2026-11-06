@@ -557,6 +557,12 @@ Workers are yours to direct; their one channel up, `worker_report`, reaches **yo
    cap and is refused for an unmerged/live/non-yours worker, a codex-harness worker, or a missing
    transcript (then `worker_spawn` a fresh worker with the offending commit sha in its kickoff). The
    revived worker is told its remembered paths are stale; expect it to re-read before editing.
+   **Revive carries the whole old conversation, so check its size first.** The result reports
+   `sourceCtxPct` (the source's context %) and adds a `contextWarning` when it is high or when the
+   source's context is unknown. Treat either as a cue to `worker_spawn` fresh instead: put the
+   follow-up card and the landed commit sha in the kickoff, and let project memory carry the
+   knowledge. Revive an old worker only when the follow-up needs that conversation, not for
+   unrelated features.
 
 ## A project that runs its own deployed instance
 

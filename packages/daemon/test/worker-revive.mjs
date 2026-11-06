@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { commitAll } from "./_git-commit.mjs";
 
 let failures = 0;
@@ -246,6 +247,33 @@ try {
   const rc3 = await svc.reviveWorkerTracked("mgr1", { workerSessionId: "src", taskId: T_C3 });
   if (rc3.settled && rc3.ok) worktrees.push(rc3.value.worktreePath);
   check("(6) POSITIVE CONTROL: a genuine tracked revive settles ok with revivedFrom === the source", rc3.settled && rc3.ok === true && rc3.value.revivedFrom === "src");
+
+  // ============ (7) source-context advisory: sourceCtxPct + contextWarning (advisory, never a refusal) ============
+  // project pP's workerContextWarnRatio is pinned to 0.5 so the cases don't depend on the platform default.
+  db.setProjectConfig("pP", { orchestration: { maxConcurrentWorkers: 50, workerContextWarnRatio: 0.5 } });
+  const adv = async (label, rowOver, ctx, turns) => {
+    const sid = `srcAdv-${label}`;
+    db.insertSession(workerRow(sid, rowOver)); mergeDone(sid, T_ORIG);
+    if (ctx != null) db.setContextCounters(sid, { ctxInputTokens: ctx, ctxTurns: 3, model: null });
+    for (let i = 0; i < turns; i++) db.incrementTurnSeq(sid);
+    const tid = randomUUID();
+    task(tid, `fix(x): advisory ${label}`);
+    const r = await svc.reviveWorker("mgr1", { workerSessionId: sid, taskId: tid });
+    worktrees.push(r.worktreePath);
+    return r;
+  };
+  const hi = await adv("hi", {}, 900_000, 5);
+  check("(7) high source ctx: sourceCtxPct is a number and contextWarning says the % + recommends a fresh spawn", typeof hi.sourceCtxPct === "number" && hi.sourceCtxPct > 0 && typeof hi.contextWarning === "string" && hi.contextWarning.includes(`${hi.sourceCtxPct}%`) && /worker_spawn/.test(hi.contextWarning));
+  const lo = await adv("lo", {}, 1_000, 5);
+  check("(7) low source ctx: sourceCtxPct present, NO contextWarning key content", typeof lo.sourceCtxPct === "number" && lo.contextWarning === undefined);
+  const unk = await adv("unk", {}, null, 4);
+  check("(7) claude source with completed turns but NULL ctx: sourceCtxPct null WITH an explicit UNKNOWN warning (silence repeats the incident)", unk.sourceCtxPct === null && typeof unk.contextWarning === "string" && /UNKNOWN/.test(unk.contextWarning) && /worker_spawn/.test(unk.contextWarning));
+  const fresh = await adv("fresh", {}, null, 0);
+  check("(7) NEGATIVE CONTROL: NULL ctx but turnSeq 0 (never completed a turn): null pct, NO warning", fresh.sourceCtxPct === null && fresh.contextWarning === undefined);
+  // Codex stays silent. A codex source is refused outright by reviveWorker (no fork primitive), so the silent
+  // branch is exercised on the advisory helper directly.
+  const codexAdv = svc.reviveSourceContextAdvisory({ ...db.getSession("src"), harness: "codex", ctxInputTokens: null, turnSeq: 9 });
+  check("(7) codex source: null pct and NO warning (no ctx telemetry at all)", codexAdv.sourceCtxPct === null && codexAdv.contextWarning === undefined);
 
   // ============ (4) the pure kickoff composer ============
   const k = composeReviveKickoff({ originalTaskId: "O", originalTaskTitle: "T", commitSha: null, oldWorktreePath: null, followUpTaskId: "F", followUpTitle: "FT", followUpBody: "", branch: "loom/f" });

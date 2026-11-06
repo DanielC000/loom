@@ -54,7 +54,7 @@ export function composeReviveKickoff(i: ReviveKickoffInput): string {
   const oldPath = i.oldWorktreePath ? ` (\`${i.oldWorktreePath}\`)` : "";
   const note = i.note?.trim();
   return [
-    "## You have been REVIVED to fix your own landed work",
+    "## You have been REVIVED to follow up on your own landed work",
     "",
     `You are the same worker that finished card \`${i.originalTaskId}\` — "${i.originalTaskTitle}". That card already MERGED as ${sha}. ` +
       `Your old worktree${oldPath} and its branch no longer exist, and the conversation above is your memory of that earlier task.`,
@@ -66,6 +66,6 @@ export function composeReviveKickoff(i: ReviveKickoffInput): string {
     i.followUpBody.trim() || "(no body — see the manager note below)",
     ...(note ? ["", "### Manager note", note] : []),
     "",
-    "Fix what the follow-up card describes in the landed commit, verify it, commit, and `worker_report` as usual. If the premise is wrong (the commit is fine, or the defect lives elsewhere), say so in a `worker_report` rather than inventing a change.",
+    "Do what the follow-up card describes — it may be a fix to the landed commit or a small extension of that work. Verify it, commit, and `worker_report` as usual. If the card describes a defect and its premise is wrong (the commit is fine, or the defect lives elsewhere), say so in a `worker_report` rather than inventing a change.",
   ].join("\n");
 }

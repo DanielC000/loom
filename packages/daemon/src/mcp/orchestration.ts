@@ -4027,11 +4027,12 @@ export class OrchestrationMcpRouter {
       "worker_revive",
       {
         description:
-          "Revive a MERGED worker of yours WITH ITS CONVERSATION CONTEXT to fix its own landed commit. The old worktree and branch are gone after a merge, so this FORKS the worker's engine conversation (the original transcript is left untouched) into a FRESH worktree + branch cut from the CURRENT mainline, as a NEW worker session bound to a follow-up card. " +
+          "Revive a MERGED worker of yours WITH ITS CONVERSATION CONTEXT to follow up on its own landed commit (a fix, or a small extension of that same work). The old worktree and branch are gone after a merge, so this FORKS the worker's engine conversation (the original transcript is left untouched) into a FRESH worktree + branch cut from the CURRENT mainline, as a NEW worker session bound to a follow-up card. " +
           "`taskId` is REQUIRED: file the follow-up card yourself first — its title becomes the fix's squash-commit subject and its body is the worker's instruction. `note` is optional extra direction. " +
           "The revived worker's first turn tells it that the earlier task merged (naming the landed commit), that every file path in its memory is stale, and which card/branch it now owns. It counts against your worker concurrency cap and is NOT cap-queued (a full cap refuses; retry when a slot frees). " +
           "REFUSED (nothing is created): a session that is not YOUR worker; one that is still live (message it instead); one with no `merge_done` (unmerged — it still has its worktree); a codex-harness worker (codex has no fork primitive); a source whose conversation transcript is missing or rotated (fall back to `worker_spawn` on the follow-up card with the offending commit sha in the kickoff); a `taskId` that is the worker's own MERGED card (reopening it would overwrite its ship-state) or that already has a live worker, is held, or is terminal. " +
-          "Result: `{workerSessionId, branch, worktreePath, revivedFrom, commitSha, capacity}`. A slow spawn returns `{opId, status:\"pending\"}` exactly like `worker_spawn`. The revive is recorded as a `worker_revived` orchestration event ({fromSessionId, toSessionId, taskId, commitSha}).",
+          "The fork inherits the WHOLE source conversation, so each revive of a long-lived worker carries more history: for an unrelated follow-up, prefer a fresh `worker_spawn` (project memory carries the knowledge). " +
+          "Result: `{workerSessionId, branch, worktreePath, revivedFrom, commitSha, capacity, sourceCtxPct}`; `sourceCtxPct` is the SOURCE session's measured context % (null when unmeasured). The result MAY carry a `contextWarning` string (advisory only, never a refusal) when that % is at or above the project's worker context warn ratio, or when a claude-harness source that completed turns has NO measured context (unknown — check before reviving). A slow spawn returns `{opId, status:\"pending\"}` exactly like `worker_spawn`. The revive is recorded as a `worker_revived` orchestration event ({fromSessionId, toSessionId, taskId, commitSha}).",
         inputSchema: strictShape({ workerSessionId: z.string(), taskId: z.string(), note: z.string().optional() }),
       },
       async ({ workerSessionId, taskId, note }) => {
@@ -4041,7 +4042,7 @@ export class OrchestrationMcpRouter {
           if (!r.settled) return ok({ opId: r.op.opId, status: "pending", taskId, note: "still spawning — poll worker_list (a pendingSpawn placeholder row) or re-call worker_revive with the SAME arguments to fetch the result." });
           if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });
           const w = r.value;
-          return ok({ workerSessionId: w.id, branch: w.branch, worktreePath: w.worktreePath, revivedFrom: w.revivedFrom, commitSha: w.commitSha, capacity: w.capacity });
+          return ok({ workerSessionId: w.id, branch: w.branch, worktreePath: w.worktreePath, revivedFrom: w.revivedFrom, commitSha: w.commitSha, capacity: w.capacity, sourceCtxPct: w.sourceCtxPct, ...(w.contextWarning ? { contextWarning: w.contextWarning } : {}) });
         } catch (e) {
           return ok({ error: e instanceof Error ? e.message : String(e) });
         }
