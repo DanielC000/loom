@@ -3816,6 +3816,11 @@ export interface ConnectionMetadata {
    */
   projectId: string | null;
   createdAt: string;
+  /** Present (true) only when the STORED host fails the current host validator — e.g. a scheme/port/path in the
+   *  host field — so the connection can never resolve. The UI badges it; absent on a valid row. */
+  invalidHost?: boolean;
+  /** Fixed-text reason paired with `invalidHost` (never echoes the host). */
+  invalidHostReason?: string;
   /** `oauth2` rows only — the provider template this connection was registered under. */
   provider?: OAuthProviderSlug;
   /**

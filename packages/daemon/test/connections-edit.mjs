@@ -109,7 +109,7 @@ check("E: fixture: a profile bound to the connection exists", prof.statusCode ==
 const eBad = await patch(bound.id, { host: "api.moved.example" });
 check("E: a host change that breaks the codexProvider binding is REFUSED (409) naming the profile; host unchanged",
   eBad.statusCode === 409 && /Provider Rig/.test(eBad.json().error) && db.getConnection(bound.id).host === "api.codex-host.example");
-const eOk = await patch(bound.id, { host: "https://API.codex-host.example:8443" });
+const eOk = await patch(bound.id, { host: "API.codex-host.example:8443" }); // host:port form — a scheme in the host is refused by validateConnectionHost
 check("E: a host change whose HOSTNAME still equals the baseUrl host is allowed", eOk.statusCode === 200);
 const eName = await patch(bound.id, { name: "Codex Key renamed" });
 check("E: a non-host edit is never blocked by the binding", eName.statusCode === 200);
@@ -118,7 +118,7 @@ check("E: a connection no profile uses can move host freely", unboundHost.status
 // A combined {host, authScheme} edit is checked with the NEW scheme and the NEW host together.
 const comboBad = await patch(bound.id, { host: "api.moved.example", authScheme: "bearer" });
 check("E: a combined {host, authScheme} edit that breaks the binding is REFUSED (409); NEITHER field is applied",
-  comboBad.statusCode === 409 && db.getConnection(bound.id).authScheme === "api-key" && db.getConnection(bound.id).host === "https://API.codex-host.example:8443");
+  comboBad.statusCode === 409 && db.getConnection(bound.id).authScheme === "api-key" && db.getConnection(bound.id).host === "API.codex-host.example:8443");
 const comboOk = await patch(bound.id, { host: "api.codex-host.example", authScheme: "bearer" });
 check("E: a combined {host, authScheme} edit that keeps the binding applies BOTH fields",
   comboOk.statusCode === 200 && db.getConnection(bound.id).authScheme === "bearer" && db.getConnection(bound.id).host === "api.codex-host.example");

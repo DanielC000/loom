@@ -15,7 +15,7 @@ import {
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory, readProjectMemoryHistory, MAX_MEMORY_HISTORY_LIMIT } from "./memory.js";
 import { registerDecisionTools } from "./decisions.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
-import { resolveUsableConnections, resolveUsableSshConnections } from "../connections/store.js";
+import { resolveUsableConnections, resolveUsableSshConnections, connectionGrantDrift, grantDriftNote } from "../connections/store.js";
 import { performSshExec } from "../connections/sshExec.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { isConfirmedSubagent, type ToolAttributionResult } from "../pty/tool-attribution.js";
@@ -827,6 +827,11 @@ export class TaskMcpRouter {
     const sessionConnections = session?.connections ?? [];
     if (sessionConnections.length > 0) {
       const guard = resolveConfig(undefined, db.getPlatformConfig()).platform.connections;
+      // Grants added to (or revoked from) the AGENT after this session pinned its list — said out loud in the
+      // description and on every refusal, so "none resolvable" never reads as a misconfigured binding.
+      const driftNote = session ? grantDriftNote(connectionGrantDrift(db, db.getAgent(session.agentId)?.connections, sessionConnections, projectId), sessionId) : "";
+      const withDrift = <T extends object>(res: T): T | (T & { grantDrift: string }) =>
+        driftNote && (res as { ok?: unknown }).ok === false ? { ...res, grantDrift: driftNote } : res;
       // card 298b826e: the session's own USABLE allowlist — {id,name,host}, never the secret, already
       // scope-filtered by `resolveUsableConnections` (never lists one this session's own project can't
       // reach) — listed IN the description so an agent never has to guess an id or truncate one by hand.
@@ -853,7 +858,7 @@ export class TaskMcpRouter {
             "size cap; each connection also has a request-rate limit. `connection` may be given as an id, " +
             "or as a NAME when it matches exactly one of this session's usable connections (case-sensitive) " +
             "— an ambiguous or unresolved name is refused and the usable list is named again. This " +
-            `session's usable connections: ${usableConnectionsText}`,
+            `session's usable connections: ${usableConnectionsText}` + (driftNote ? ` NOTE: ${driftNote}` : ""),
           inputSchema: strictShape({
             connection: z.string(),
             path: z.string(),
@@ -862,7 +867,7 @@ export class TaskMcpRouter {
             body: z.union([z.string(), z.record(z.string(), z.any())]).optional(),
           }),
         },
-        async (args) => ok(await performAuthenticatedRequest({ db, fetchImpl: fetchOverride }, sessionConnections, guard, args, projectId)),
+        async (args) => ok(withDrift(await performAuthenticatedRequest({ db, fetchImpl: fetchOverride }, sessionConnections, guard, args, projectId))),
       );
 
       // `ssh_exec`: registered on the SAME session-row `connections` read as above, only when at least one
@@ -889,10 +894,10 @@ export class TaskMcpRouter {
               "call — run or refused — is audited. This Loom-side filtering is defense-in-depth only: the real " +
               "security boundary is the server-side dedicated least-privileged user the owner provisions. " +
               "A refusal returns {ok:false, reason}; a failed connection says whether the host was unreachable or " +
-              `rejected the key. This session's ssh connections: ${sshListText}`,
+              `rejected the key. This session's ssh connections: ${sshListText}` + (driftNote ? ` NOTE: ${driftNote}` : ""),
             inputSchema: strictShape({ connectionId: z.string(), command: z.string() }),
           },
-          async (args) => ok(await performSshExec({ db, sessionId, projectId, guard }, sessionConnections, args)),
+          async (args) => ok(withDrift(await performSshExec({ db, sessionId, projectId, guard }, sessionConnections, args))),
         );
       }
     }

@@ -18,6 +18,7 @@
  */
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { stripSshKeyPassphrase } from "./sshKey.js";
+import { httpsHostRoundTrips } from "./hostForm.js";
 import type { ConnectionRow } from "../db.js";
 import { DEFAULT_SSH_RISKY_COMMAND_PATTERNS } from "@loom/shared";
 
@@ -90,6 +91,10 @@ function parseSshRuleListColumn(json: string): SshCommandRule[] {
 
 function toMetadata(row: ConnectionRow): ConnectionMetadata {
   const base: ConnectionMetadata = { id: row.id, name: row.name, host: row.host, authScheme: row.authScheme, projectId: row.projectId, createdAt: row.createdAt };
+  // A stored host that today's validator refuses (a row written before it existed) — flagged, never fixed
+  // silently. Absent (not false) on a valid row so every existing metadata shape stays byte-identical.
+  const storedHostCheck = validateConnectionHost(row.host, row.authScheme === "ssh" ? "ssh" : "https");
+  if (!storedHostCheck.ok) { base.invalidHost = true; base.invalidHostReason = storedHostCheck.error; }
   if (row.authScheme === "ssh") {
     return {
       ...base,
@@ -207,9 +212,8 @@ export function validateConnectionInput(input: {
   if (!isNonBlankStr(input.name, CONNECTION_NAME_MAX)) {
     return { ok: false, error: `name must be a non-empty string of at most ${CONNECTION_NAME_MAX} characters` };
   }
-  if (!isNonBlankStr(input.host, CONNECTION_HOST_MAX)) {
-    return { ok: false, error: `host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters` };
-  }
+  const hostCheck = validateConnectionHost(input.host, "https");
+  if (!hostCheck.ok) return hostCheck;
   if (typeof input.authScheme !== "string" || !CREATE_CONNECTION_SCHEMES.includes(input.authScheme as ConnectionAuthScheme)) {
     return { ok: false, error: "authScheme must be 'api-key' or 'bearer' (register an oauth2 connection via createOAuthConnection instead)" };
   }
@@ -219,17 +223,63 @@ export function validateConnectionInput(input: {
   return { ok: true };
 }
 
-/** The one host check for an ssh target, shared by `validateSshConnectionInput` (create) and the
- *  Connections form's fingerprint probe route (card b5565d4c) so the two can never drift: non-blank, at
- *  most `CONNECTION_HOST_MAX` chars, and no control characters inside the trimmed value. The error strings
- *  are fixed and never echo the submitted host. */
-export function validateSshHost(host: unknown): { ok: true } | { ok: false; error: string } {
+/**
+ * THE one host validator for every connection kind — the create paths and the update paths all
+ * call this, never a private copy. `"https"` (api-key/bearer/oauth2) accepts a bare host or `host:port`
+ * (port 1-65535; `:443` refused because `request.ts` asserts `url.host === host` and `URL` drops a default
+ * port, so a stored `:443` could never resolve); `"ssh"` accepts a BARE host or IP only (the port is its own
+ * field). Both refuse a scheme, a path/query/fragment/userinfo/backslash, whitespace and control
+ * characters. A bracketed IPv6 literal is accepted (https: with optional port); an unbracketed IPv6 only for
+ * ssh. Error strings are FIXED text and never echo the submitted host. Validates the TRIMMED value, exactly what
+ * callers store.
+ */
+export function validateConnectionHost(host: unknown, kind: "https" | "ssh"): { ok: true } | { ok: false; error: string } {
   if (!isNonBlankStr(host, CONNECTION_HOST_MAX)) {
     return { ok: false, error: `host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters` };
   }
+  const h = host.trim();
   // eslint-disable-next-line no-control-regex
-  if (/[\x00-\x1f\x7f]/.test(host.trim())) return { ok: false, error: "host must not contain control characters" };
+  if (/[\x00-\x1f\x7f]/.test(h)) return { ok: false, error: "host must not contain control characters" };
+  if (/\s/.test(h)) return { ok: false, error: "host must not contain whitespace" };
+  if (h.includes("://")) return { ok: false, error: "host must be a bare hostname, not a URL — remove the scheme (e.g. 'https://' or 'http://')" };
+  if (/[/?#@\\]/.test(h)) return { ok: false, error: "host must not contain a path, query, fragment, user info or backslash (none of / ? # @ \\)" };
+  const bracketed = /^\[([0-9a-fA-F:.]+)\](?::(.*))?$/.exec(h);
+  let portText: string | undefined;
+  if (bracketed) {
+    portText = bracketed[2];
+  } else {
+    const colons = h.split(":").length - 1;
+    if (colons >= 2) {
+      if (kind === "https") return { ok: false, error: "an IPv6 host must be written in [brackets], e.g. [fd00::1]:8443" };
+      if (!/^[0-9a-fA-F:.]+$/.test(h)) return { ok: false, error: "host is not a valid hostname or IP address" };
+    } else if (colons === 1) {
+      portText = h.slice(h.indexOf(":") + 1);
+      if (kind === "ssh") return { ok: false, error: "host must be a bare hostname or IP with no port — set the port in the port field" };
+      if (h.startsWith(":")) return { ok: false, error: "host is missing a hostname before the port" };
+    }
+  }
+  if (bracketed && kind === "ssh") {
+    if (portText !== undefined) return { ok: false, error: "host must be a bare hostname or IP with no port — set the port in the port field" };
+  }
+  if (portText !== undefined) {
+    if (!/^\d{1,5}$/.test(portText) || Number(portText) < 1 || Number(portText) > 65535 || /^0/.test(portText)) {
+      return { ok: false, error: "port must be a number between 1 and 65535 with no leading zero" };
+    }
+    if (portText === "443") return { ok: false, error: "drop ':443' — requests use https, whose default port is 443" };
+  }
+  if (kind === "https") {
+    // eslint-disable-next-line no-control-regex
+    if (/[^\x00-\x7f]/.test(h)) return { ok: false, error: "host must be ASCII — write an internationalised name in its punycode (xn--) form" };
+    if (h.includes("%")) return { ok: false, error: "host must not contain percent-escapes" };
+    if (!httpsHostRoundTrips(h)) return { ok: false, error: "use the canonical host form (lowercase ASCII, compressed IPv6, dotted-decimal IPv4)" };
+  }
   return { ok: true };
+}
+
+/** The ssh-target form of {@link validateConnectionHost}, shared by `validateSshConnectionInput` (create) and the
+ *  Connections form's fingerprint probe route (card b5565d4c) so the two can never drift. */
+export function validateSshHost(host: unknown): { ok: true } | { ok: false; error: string } {
+  return validateConnectionHost(host, "ssh");
 }
 
 /**
@@ -486,10 +536,14 @@ export function updateConnection(
     if (patch.authScheme !== row.authScheme) { scheme = patch.authScheme; next.authScheme = scheme; changed.push("authScheme"); }
   }
   if (patch.host !== undefined) {
+    // The shared host validator, applied to a host that is actually CHANGING: a form that resends an
+    // already-stored (legacy, flagged invalidHost) host must still be able to save its other edits.
+    const hostShape = validateConnectionHost(patch.host, "https");
+    const host = typeof patch.host === "string" ? patch.host.trim() : "";
+    if (!hostShape.ok && host !== row.host) throw new ConnectionInputError(hostShape.error);
     if (!isNonBlankStr(patch.host, CONNECTION_HOST_MAX)) {
       throw new ConnectionInputError(`host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters`);
     }
-    const host = patch.host.trim();
     if (host !== row.host) { assertHostKeepsCodexBindings(db, id, host, scheme); next.host = host; changed.push("host"); }
   }
   let secretRotated = false;
@@ -542,8 +596,9 @@ export function updateSshConnection(
     }
     let host = row.host;
     if (patch.host !== undefined) {
+      // validateSshHost IS the shared validator's ssh form; skipped only for a host that is not changing.
       const ok = validateSshHost(patch.host);
-      if (!ok.ok) throw new SshConnectionInputError(ok.error);
+      if (!ok.ok && !(typeof patch.host === "string" && patch.host.trim() === row.host)) throw new SshConnectionInputError(ok.error);
       host = patch.host.trim();
     }
     let port = row.sshPort ?? SSH_DEFAULT_PORT;
@@ -745,6 +800,42 @@ export function resolveUsableConnections(
   return out;
 }
 
+/**
+ * How the agent's CURRENT connection grants differ from what this session pinned at spawn. `added` counts
+ * granted connections that exist and this caller's project can reach but the session lacks (never counts
+ * one the caller couldn't use anyway, so it can't disclose an out-of-project connection); `removed` counts
+ * pinned ids no longer granted. Counts only — never an id, name or host.
+ */
+export function connectionGrantDrift(
+  db: ConnectionsDbStore,
+  agentConnections: readonly string[] | null | undefined,
+  sessionConnections: readonly string[],
+  callerProjectId?: string | null,
+): { added: number; removed: number } {
+  const agentSet = new Set(agentConnections ?? []);
+  const pinned = new Set(sessionConnections);
+  let added = 0;
+  for (const id of agentSet) {
+    if (pinned.has(id)) continue;
+    const meta = getConnectionMetadata(db, id);
+    if (meta && isConnectionUsableByProject(meta.projectId, callerProjectId ?? null)) added++;
+  }
+  let removed = 0;
+  for (const id of pinned) if (!agentSet.has(id)) removed++;
+  return { added, removed };
+}
+
+/** The agent-facing sentence for a non-zero {@link connectionGrantDrift}; "" when there is no drift. Names the
+ *  only real fixes: a human re-pinning the session's grants, or a fresh session. A recycle or resume does NOT
+ *  pick grants up, so this never suggests one. */
+export function grantDriftNote(drift: { added: number; removed: number }, sessionId: string): string {
+  if (drift.added === 0 && drift.removed === 0) return "";
+  const parts: string[] = [];
+  if (drift.added > 0) parts.push(`${drift.added} connection(s) were granted to your agent after this session started and are NOT usable here`);
+  if (drift.removed > 0) parts.push(`${drift.removed} connection(s) this session still holds are no longer granted to your agent`);
+  return `${parts.join("; ")}. Recycling or resuming does not change this: ask your owner or manager to re-pin this session's grants (POST /api/sessions/${sessionId}/repin-grants) or to start a fresh session.`;
+}
+
 /** The `ssh` connections among `sessionConnections` that this caller's project can reach — the list the
  *  `ssh_exec` tool registers on and describes. `{id,name,host}` only, never any key material. */
 export function resolveUsableSshConnections(
@@ -824,9 +915,8 @@ export function createOAuthConnection(
   if (!isNonBlankStr(input.name, CONNECTION_NAME_MAX)) {
     throw new Error(`name must be a non-empty string of at most ${CONNECTION_NAME_MAX} characters`);
   }
-  if (!isNonBlankStr(input.host, CONNECTION_HOST_MAX)) {
-    throw new Error(`host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters`);
-  }
+  const oauthHostCheck = validateConnectionHost(input.host, "https");
+  if (!oauthHostCheck.ok) throw new Error(oauthHostCheck.error);
   if (input.provider !== "google" && input.provider !== "github" && input.provider !== "custom") {
     throw new Error("provider must be 'google', 'github', or 'custom'");
   }

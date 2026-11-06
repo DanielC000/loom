@@ -2435,6 +2435,9 @@ function ConnectionsPanel() {
                 </span>
                 <Badge tone={c.projectId ? "info" : "live"}>{c.projectId ? projectName(c.projectId) : "Global"}</Badge>
                 {c.autoProvisioned && <Badge tone="info">Auto-provisioned</Badge>}
+                {/* A stored host the current validator refuses (e.g. a scheme/port/path pasted into it): this
+                    connection can never resolve, so say so instead of letting it read as bound-and-fine. */}
+                {c.invalidHost && <Badge tone="busy" title={c.invalidHostReason} data-testid="connection-invalid-host">Invalid host</Badge>}
                 {/* Bound/unbound (api-key/bearer ALLOWLIST, matching the server's RAW_SECRET_AUTH_SCHEMES
                     in connections/store.ts): an oauth2 row shows its own connectedness instead, and an ssh
                     row's secret is never resolvable through this static-injection seam either — the

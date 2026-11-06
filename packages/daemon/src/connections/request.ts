@@ -37,6 +37,7 @@ import {
 } from "./store.js";
 import { ensureFreshOAuthToken } from "./oauth.js";
 import { boundedFetch } from "./boundedFetch.js";
+import { httpsHostRoundTrips } from "./hostForm.js";
 
 export interface AuthenticatedRequestInput {
   /** The P1 connection's id, OR — card 298b826e — a NAME that matches exactly one connection in the
@@ -89,8 +90,14 @@ function validatePath(path: unknown): { ok: true } | { ok: false; error: string 
  * it explicitly makes that guarantee load-bearing rather than merely believed.
  */
 function buildRequestUrl(host: string, path: string): URL {
+  // `URL` lowercases the host, so the shared round-trip compares against the lowercased stored host: a
+  // mixed-case host names the same server and must not fail the allowlist assertion. Checked BEFORE building
+  // so a host URL would throw on (e.g. `[1.2.3.4]`) fails with the same allowlist error.
+  if (!httpsHostRoundTrips(host)) {
+    throw new Error("constructed request URL failed the host/protocol allowlist assertion");
+  }
   const url = new URL(`https://${host}${path}`);
-  if (url.protocol !== "https:" || url.host !== host) {
+  if (url.protocol !== "https:" || url.host !== host.toLowerCase()) {
     throw new Error("constructed request URL failed the host/protocol allowlist assertion");
   }
   return url;

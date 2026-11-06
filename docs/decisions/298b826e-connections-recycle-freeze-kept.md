@@ -40,3 +40,7 @@ possible human-triggered "re-pin grants on this session" action instead.
 
 Full investigation, the hermetic repro, and the fixes shipped alongside this ruling are in the `298b826e`
 board card and its `worker_report` history.
+
+## Addendum — drift is now stated, the freeze is unchanged
+
+A session whose pinned `connections` differ from its AGENT's current grants now says so (the `authenticated_request` / `ssh_exec` tool description, and a `grantDrift` field on every refused call). The text names the only two real fixes — a human re-pinning the session's grants (`POST /api/sessions/:id/repin-grants`) or a fresh session — and never suggests a recycle or resume, which keep the pinned list. The re-pin route already resolves exactly as a fresh spawn does (agent grants included, revocations dropped); `test/connections-grant-drift.mjs` pins that. Do not point the drift text at `recycle_me`.
