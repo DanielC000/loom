@@ -247,6 +247,28 @@ const REAL_MODEL_ASSISTANT_RECORD = (text) => ({
   check("(10c) a local-command-output system record does NOT supersede the marker — still detected", result !== null);
 }
 
+// ===== (10d) card c58f5e9d: a typed slash-command ECHO (`<command-name>/compact…`, type:"user", no
+// isMeta) after the marker must NOT supersede it (a failed /compact leaves the session exhausted).
+// SHAPE IS BINARY-DERIVED (66ff7321 record round 3), UNVERIFIED against a real transcript. =====
+{
+  const echo = "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>";
+  const strEcho = { type: "user", message: { role: "user", content: echo } };
+  const arrEcho = { type: "user", message: { role: "user", content: [{ type: "text", text: echo }] } };
+  check("(10d-i) string-content command echo after the marker does NOT supersede it — still detected",
+    detectContextExhaustionInTail(jsonl(REAL_EXHAUSTION_RECORD, strEcho))?.matchedText === "Prompt is too long");
+  check("(10d-ii) array/text-block command echo after the marker does NOT supersede it — still detected",
+    detectContextExhaustionInTail(jsonl(REAL_EXHAUSTION_RECORD, arrEcho)) !== null);
+  // a SUCCESSFUL /compact still supersedes via compact_boundary
+  const boundary = { type: "system", subtype: "compact_boundary", content: "Conversation compacted", level: "info" };
+  check("(10d-iii) echo followed by compact_boundary IS superseded (not detected)",
+    detectContextExhaustionInTail(jsonl(REAL_EXHAUSTION_RECORD, strEcho, boundary)) === null);
+  // positive controls: a plain prompt, and one merely MENTIONING the tag mid-text, still supersede
+  check("(10d-iv) a plain user prompt still supersedes the marker",
+    detectContextExhaustionInTail(jsonl(REAL_EXHAUSTION_RECORD, { type: "user", message: { role: "user", content: "hello" } })) === null);
+  check("(10d-v) a prompt that merely mentions <command-name> mid-text still supersedes the marker",
+    detectContextExhaustionInTail(jsonl(REAL_EXHAUSTION_RECORD, { type: "user", message: { role: "user", content: "what does <command-name> mean?" } })) === null);
+}
+
 // ===== (11) card 5f825506 item 1: a notBeforeMs cutoff AFTER the record's own timestamp rejects a
 // shape-matching marker as STALE (predates the current turn) — the fix's whole point. =====
 {

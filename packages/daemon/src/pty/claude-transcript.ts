@@ -391,8 +391,16 @@ function isGenuineUserTurn(rec: Record<string, unknown>): boolean {
   if (rec.type !== "user") return false;
   if (rec.isMeta === true) return false;
   const content = (rec.message as { content?: unknown } | undefined)?.content;
-  if (typeof content === "string") return true;
+  // A typed slash-command ECHO (`<command-name>…`) is not a recovery signal: a failed `/compact`
+  // (or `/context`, `/cost`) after an exhaustion marker must not reset it. A SUCCESSFUL /compact
+  // still supersedes via the compact_boundary/summary check at the call site. This shape is
+  // BINARY-DERIVED and UNVERIFIED against a real transcript (66ff7321 record, round 3 section); if the
+  // real shape differs this is a no-op, never a regression.
+  if (typeof content === "string") return !content.trimStart().startsWith("<command-name>");
   if (!Array.isArray(content)) return false;
+  const first = content[0] as Record<string, unknown> | null | undefined;
+  if (first && typeof first === "object" && first.type === "text" && typeof first.text === "string"
+    && first.text.trimStart().startsWith("<command-name>")) return false;
   return !(content.length > 0 &&
     content.every((b) => b !== null && typeof b === "object" && (b as Record<string, unknown>).type === "tool_result"));
 }
