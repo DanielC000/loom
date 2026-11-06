@@ -64,6 +64,23 @@ export interface SelfHealTransitionSeam {
   holdIfInFlight(sessionId: string, replay: () => void): number | null;
 }
 
+// @decision 564eaffb — the persona reinject must park behind the held `/clear` (FIFO), never bypass the hold,
+// or a replayed `/clear` lands after the persona and wipes it. Returns true while held (it WILL apply at op end).
+
+export function withCompanionTransitionHeldReinject(
+  reinject: (sessionId: string) => boolean,
+  transition: SelfHealTransitionSeam,
+): (sessionId: string) => boolean {
+  return (sessionId) => {
+    const held = transition.holdIfInFlight(sessionId, () => {
+      try { reinject(sessionId); } catch (err) {
+        console.warn(`[companion] held persona reinject for ${sessionId} threw: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+    return held != null ? true : reinject(sessionId);
+  };
+}
+
 /**
  * @decision d10ac47e — while a recycle/upgrade is in flight the dead pty is the op's own doing: resuming the
  * OLD engine id here loses the message (recycle) — hold it instead; it replays once through this same wrapper at op end.

@@ -72,7 +72,7 @@ import { buildServer } from "./gateway/server.js";
 import { resolveAllCompanionConfigs } from "./companion/store.js";
 import { CompanionController, type CompanionReplyHooks } from "./companion/controller.js";
 import { InAppChannel, IN_APP_CHANNEL } from "./companion/in-app.js";
-import { reviveCompanionSessionAtBoot, withCompanionSelfHeal } from "./companion/revive.js";
+import { reviveCompanionSessionAtBoot, withCompanionSelfHeal, withCompanionTransitionHeldReinject } from "./companion/revive.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
@@ -1047,7 +1047,7 @@ async function main(): Promise<void> {
     // (source:"system", kind defaults "warning" — mirrors the resume-half memory-recall reinject at
     // sessions/service.ts). No prompt (session gone / no longer assistant) ⇒ no enqueue. Returns whether a
     // prompt was actually composed+enqueued, so "/new" and "/refresh" can both report an accurate outcome.
-    reinjectPersona: (sid) => {
+    reinjectPersona: withCompanionTransitionHeldReinject((sid) => {
       const prompt = sessions.composeCompanionReinjectPrompt(sid);
       // Card 78a16dc5: `kind` defaults "warning", and enqueueStdin's shape guard now requires a
       // "warning"-kind entry to start with its own `[loom:*]` tag — the composed prompt itself starts
@@ -1055,7 +1055,7 @@ async function main(): Promise<void> {
       // every real reinject as malformed.
       if (prompt) pty.enqueueStdin(sid, `[loom:persona-reinject] ${prompt}`, "system");
       return !!prompt;
-    },
+    }, { holdIfInFlight: (sid, replay) => sessions.holdInboundDuringCompanionTransition(sid, replay) }),
     // CONVERSATION-PRESERVING respawn (Companion Capability & Permission-Lever Framework §6): re-resolve +
     // re-pin the companion's CURRENT profile-driven capability surface, then stop+`--resume` the OS process
     // so a newly-granted tool-bearing lever reaches an already-running companion without losing its
