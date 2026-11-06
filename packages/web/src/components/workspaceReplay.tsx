@@ -33,7 +33,7 @@ export function WorkspaceReplay() {
   // a recent-history read, not the full cross-project archive (2137 rows / 2.4MB measured live).
   const archivedQ = useQuery({
     queryKey: ["allArchivedSessions", ARCHIVED_PAGE],
-    queryFn: () => api.allArchivedSessions({ limit: ARCHIVED_PAGE }),
+    queryFn: ({ signal }) => api.allArchivedSessions({ limit: ARCHIVED_PAGE }, signal),
     refetchInterval: 15000,
   });
   // Archived MANAGERS ONLY, for the replay picker — a SEPARATE role-scoped page, never a client-side
@@ -43,7 +43,7 @@ export function WorkspaceReplay() {
   // 300 managers in existence (card 9f010283).
   const archivedManagersQ = useQuery({
     queryKey: ["allArchivedSessions", "manager", ARCHIVED_PAGE],
-    queryFn: () => api.allArchivedSessions({ limit: ARCHIVED_PAGE, role: "manager" }),
+    queryFn: ({ signal }) => api.allArchivedSessions({ limit: ARCHIVED_PAGE, role: "manager" }, signal),
     refetchInterval: 15000,
   });
   // The reserved/system homes, discovered read-only exactly as the Platform pages do (retry:false —
@@ -51,8 +51,8 @@ export function WorkspaceReplay() {
   // inactive tier: they sit in the archive with zero live sessions, but they are hidden from every
   // ordinary project surface and must not read as an "inactive" user project here either. Shared query
   // keys ⇒ cache reuse, no extra poll.
-  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
-  const setupHome = useQuery({ queryKey: ["setupHome"], queryFn: api.setupHome, retry: false });
+  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: ({ signal }) => api.platformHome(signal), retry: false });
+  const setupHome = useQuery({ queryKey: ["setupHome"], queryFn: ({ signal }) => api.setupHome(signal), retry: false });
 
   const all = sessionsQ.data ?? [];
   const managers = all.filter((s) => s.role === "manager");

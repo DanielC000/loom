@@ -53,11 +53,11 @@ export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, show
     showFindings?: boolean; previewOnly?: boolean }) {
   const archived = useQuery({
     queryKey: ["archive", reservedProjectId, RUN_HISTORY_ARCHIVE_LIMIT],
-    queryFn: () => api.archivedSessions(reservedProjectId, { limit: RUN_HISTORY_ARCHIVE_LIMIT }),
+    queryFn: ({ signal }) => api.archivedSessions(reservedProjectId, { limit: RUN_HISTORY_ARCHIVE_LIMIT }, signal),
     refetchInterval: 8000,
   });
-  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
-  const board = useQuery({ queryKey: ["board", reservedProjectId], queryFn: () => api.board(reservedProjectId), refetchInterval: 8000, enabled: showFindings });
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: ({ signal }) => api.schedules(signal) });
+  const board = useQuery({ queryKey: ["board", reservedProjectId], queryFn: ({ signal }) => api.board(reservedProjectId, undefined, signal), refetchInterval: 8000, enabled: showFindings });
 
   // SINGLE-OPEN / LAZY-MOUNT: at most one expanded run's TranscriptPane is mounted (it refetches ~5s, so
   // mounting N would hammer the daemon). Mirrors the Overview Fleet accordion's openId pattern.
@@ -123,7 +123,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
   });
   const events = useQuery({
     queryKey: ["orchestrationEvents", run.id],
-    queryFn: () => api.orchestrationEvents(run.id), // pushed over /ws/fleet — no poll (card 670b2081)
+    queryFn: ({ signal }) => api.orchestrationEvents(run.id, signal), // pushed over /ws/fleet — no poll (card 670b2081)
   });
   const evs = events.data ?? [];
 

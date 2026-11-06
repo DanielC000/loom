@@ -34,7 +34,7 @@ export default function SessionView() {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const live = (sessions.data ?? []).find((s) => s.id === id);
   const archived = useQuery({
-    queryKey: ["archivedSessionById", id], queryFn: () => api.archivedSessionById(id), refetchInterval: 15000,
+    queryKey: ["archivedSessionById", id], queryFn: ({ signal }) => api.archivedSessionById(id, signal), refetchInterval: 15000,
     enabled: !!id && !live,
   });
   const session: SessionListItem | undefined = live ?? archived.data ?? undefined;

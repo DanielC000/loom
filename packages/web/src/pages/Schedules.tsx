@@ -42,7 +42,7 @@ export default function Schedules() {
   const { projectId } = useActiveProject();
   const [modal, setModal] = useState<ModalState>(null);
 
-  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: ({ signal }) => api.schedules(signal) });
   // The boot-time cron-Scheduler gate. The daemon only starts the ticker when this is true, so a
   // schedule created while it's off is saved but never fires — surface that honestly (below). Gate the
   // warning on an explicit `=== false` so it doesn't flash while the status is still loading. Reads the
@@ -55,7 +55,7 @@ export default function Schedules() {
   const agents = useAllAgentLabels();
   const agentLabel = (id: string) => agents.data?.find((a) => a.id === id)?.label ?? id;
   // The builder's agent dropdown is scoped to the ACTIVE project's agents (re-scopes on project switch).
-  const projectAgents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
+  const projectAgents = useQuery({ queryKey: ["agents", projectId], queryFn: ({ signal }) => api.agents(projectId, signal), enabled: !!projectId });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["schedules"] });
   const create = useMutation({
@@ -244,13 +244,13 @@ function ScheduleRunHistory({ schedules }: { schedules: Schedule[] }) {
 
   const history = useInfiniteQuery({
     queryKey: ["scheduleHistory", outcome, scheduleId],
-    queryFn: ({ pageParam }) =>
+    queryFn: ({ pageParam, signal }) =>
       api.scheduleHistory({
         limit: HISTORY_PAGE_SIZE,
         offset: pageParam,
         outcome: outcome === "all" ? undefined : outcome,
         scheduleId: scheduleId || undefined,
-      }),
+      }, signal),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       const loaded = allPages.reduce((n, p) => n + p.items.length, 0);

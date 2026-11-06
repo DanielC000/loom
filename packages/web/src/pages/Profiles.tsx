@@ -55,8 +55,8 @@ export default function Profiles() {
   // instant the delete succeeds (`selected` goes null), and the notice needs to outlive that unmount.
   const [deleteReach, setDeleteReach] = useState<{ name: string; reach: ProfileGrantReach } | null>(null);
 
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const current = useQuery({ queryKey: ["profile", selected], queryFn: () => api.profile(selected!), enabled: !!selected });
+  const profiles = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
+  const current = useQuery({ queryKey: ["profile", selected], queryFn: ({ signal }) => api.profile(selected!, signal), enabled: !!selected });
 
   const create = useMutation({
     mutationFn: (name: string) =>
@@ -245,7 +245,7 @@ function CapabilityProvisioningRow({ capability }: { capability: CapabilitySumma
   const queryKey = source === "global-python" ? ["pythonProvisioning"] : ["capabilityProvisioning", slug];
   const q = useQuery({
     queryKey,
-    queryFn: () => (source === "global-python" ? api.pythonProvisioning() : api.capabilityProvisioning(slug)),
+    queryFn: ({ signal }) => (source === "global-python" ? api.pythonProvisioning(signal) : api.capabilityProvisioning(slug, signal)),
     refetchInterval: (query) => (query.state.data?.state === "installing" ? 2000 : false),
   });
   const retry = useMutation({
@@ -455,7 +455,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
   const adoptBusy = preview.isPending || adopting;
 
   // The store's skill names — the menu of what a subset can pick from (same list the Skills page edits).
-  const skillList = useQuery({ queryKey: ["skills"], queryFn: api.skills });
+  const skillList = useQuery({ queryKey: ["skills"], queryFn: ({ signal }) => api.skills(signal) });
   const available = (skillList.data ?? []).map((s) => s.name);
   const toggleSkill = (n: string) => setSkills((cur) => (cur.includes(n) ? cur.filter((s) => s !== n) : [...cur, n]));
 
@@ -481,9 +481,9 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
 
   // @decision afe1bc90 — only the two RESERVED builtins (browser-testing / document-conversion) are still
   // profile-level; every other registry capability is granted per AGENT (agent editor), not here.
-  const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
-  // Card 2ef54430: the stored Connections a custom codex endpoint can bind (the field filters to api-key/bearer).
-  const connectionList = useQuery({ queryKey: ["connections"], queryFn: api.connections });
+  const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: ({ signal }) => api.capabilities(signal) });
+// Card 2ef54430: the stored Connections a custom codex endpoint can bind (the field filters to api-key/bearer).
+  const connectionList = useQuery({ queryKey: ["connections"], queryFn: ({ signal }) => api.connections(signal) });
   const availableConnections = connectionList.data ?? [];
   const availableCapabilities = (capabilityList.data ?? []).filter((c) => c.slug === "browser-testing" || c.slug === "document-conversion");
   const isCapabilityChecked = (slug: string) =>
@@ -942,7 +942,7 @@ function UpdateBanner({ id, onAdopt, adoptBusy, error }: { id: string; onAdopt: 
   const [showDiff, setShowDiff] = useState(false);
   const diff = useQuery({
     queryKey: ["profile", id, "update-diff"],
-    queryFn: () => api.profileUpdateDiff(id),
+    queryFn: ({ signal }) => api.profileUpdateDiff(id, signal),
     enabled: showDiff,
   });
   return (

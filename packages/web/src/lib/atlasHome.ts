@@ -182,7 +182,7 @@ export function plural(n: number, one: string, many = `${one}s`): string {
 
 /** `["gates-active"]` — the SAME entry pages/Gates.tsx fills, so opening Gates from here is warm. */
 export function useGatesActive() {
-  return useQuery({ queryKey: ["gates-active"], queryFn: api.gatesActive, refetchInterval: 4000 });
+  return useQuery({ queryKey: ["gates-active"], queryFn: ({ signal }) => api.gatesActive(signal), refetchInterval: 4000 });
 }
 
 /**
@@ -194,7 +194,7 @@ export function useGatesActive() {
 export function useGateHistoryRecent(projectId?: string) {
   return useQuery({
     queryKey: ["gates-history-recent", projectId ?? null],
-    queryFn: () => api.gatesHistory({ projectId, limit: 200 }),
+    queryFn: ({ signal }) => api.gatesHistory({ projectId, limit: 200 }, signal),
     refetchInterval: 15_000,
   });
 }

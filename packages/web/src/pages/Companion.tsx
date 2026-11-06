@@ -74,15 +74,15 @@ export default function Companion() {
   // Everything either layout needs arrives as a prop.
   const [atlasOn] = useAtlasUi();
 
-  const configs = useQuery({ queryKey: ["companionConfigs"], queryFn: api.companionConfigs });
-  const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: api.companionBindings });
+  const configs = useQuery({ queryKey: ["companionConfigs"], queryFn: ({ signal }) => api.companionConfigs(signal) });
+  const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: ({ signal }) => api.companionBindings(signal) });
   // RUNTIME reply-health for every companion (card 8bda9fc6) — a DEDICATED read, never joined onto the
   // config read above (config is read-modify-write; this is per-turn telemetry). Used ONLY to mark a stuck
   // companion in the switcher below: with several companions the chat banner is scoped to the focused one,
   // so without this a silent companion sitting behind an unselected tab shows nothing at all.
   const replyStatuses = useQuery({
     queryKey: ["companionReplyStatuses"],
-    queryFn: api.companionReplyStatuses,
+    queryFn: ({ signal }) => api.companionReplyStatuses(signal),
     refetchInterval: 5000,
   });
   const alertingIds = useMemo(
@@ -396,7 +396,7 @@ function CompanionSwitcher({ companions, alertingIds, selectedId, onSelect, onNe
 // sibling companion. Styled as a Manage `<section>` to match its siblings (no nested card).
 function ProactiveHomeSection({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
-  const home = useQuery({ queryKey: ["companionHome", sessionId], queryFn: () => api.companionHome(sessionId) });
+  const home = useQuery({ queryKey: ["companionHome", sessionId], queryFn: ({ signal }) => api.companionHome(sessionId, signal) });
   const [editing, setEditing] = useState(false);
   const [channel, setChannel] = useState("");
   const [chatId, setChatId] = useState("");
@@ -470,7 +470,7 @@ function ProactiveHomeSection({ sessionId }: { sessionId: string }) {
 // (human-only) daemon tuning uses.
 function VoiceProvisioningSection() {
   const qc = useQueryClient();
-  const { data, isLoading, isError, error } = useQuery({ queryKey: ["platformConfig"], queryFn: api.getPlatformConfig });
+  const { data, isLoading, isError, error } = useQuery({ queryKey: ["platformConfig"], queryFn: ({ signal }) => api.getPlatformConfig(signal) });
   const save = useMutation({
     meta: { inlineError: true },
     // Send ONLY this key (card 654869e2) — never the whole cached override spread back. The platform
@@ -1327,7 +1327,7 @@ function AllowedSenders({ sessionId, channel }: { sessionId: string; channel: st
   const [senderId, setSenderId] = useState("");
   const [label, setLabel] = useState("");
   const [localErr, setLocalErr] = useState<string | null>(null);
-  const senders = useQuery({ queryKey: ["companionSenders", sessionId], queryFn: () => api.companionAllowedSenders(sessionId) });
+  const senders = useQuery({ queryKey: ["companionSenders", sessionId], queryFn: ({ signal }) => api.companionAllowedSenders(sessionId, signal) });
   const invalidate = () => qc.invalidateQueries({ queryKey: ["companionSenders", sessionId] });
 
   const add = useMutation({
@@ -1388,7 +1388,7 @@ function ReadonlyBlock({ children, dim }: { children: ReactNode; dim?: boolean }
 // Human-only REST, resolved by sessionId. Edits apply on the companion's next (re)start.
 function PersonaSection({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["companionPrompt", sessionId], queryFn: () => api.companionPrompt(sessionId) });
+  const q = useQuery({ queryKey: ["companionPrompt", sessionId], queryFn: ({ signal }) => api.companionPrompt(sessionId, signal) });
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [localErr, setLocalErr] = useState<string | null>(null);
@@ -1469,7 +1469,7 @@ function PersonaSection({ sessionId }: { sessionId: string }) {
 // one's full SKILL.md, and DELETES one for curation/dedup. There is deliberately NO create/edit here.
 function SkillsSection({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["companionSkills", sessionId], queryFn: () => api.companionSkills(sessionId) });
+  const q = useQuery({ queryKey: ["companionSkills", sessionId], queryFn: ({ signal }) => api.companionSkills(sessionId, signal) });
   const skills = q.data ?? [];
 
   const del = useMutation({
@@ -1509,7 +1509,7 @@ function SkillsSection({ sessionId }: { sessionId: string }) {
 function SkillRow({ sessionId, skill, onDelete, deleting }: { sessionId: string; skill: CompanionSkillEntry; onDelete: () => void; deleting: boolean }) {
   const [open, setOpen] = useState(false);
   const [confirm, setConfirm] = useState(false);
-  const content = useQuery({ queryKey: ["companionSkill", sessionId, skill.name], queryFn: () => api.companionSkill(sessionId, skill.name), enabled: open });
+  const content = useQuery({ queryKey: ["companionSkill", sessionId, skill.name], queryFn: ({ signal }) => api.companionSkill(sessionId, skill.name, signal), enabled: open });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset }}>
@@ -1543,7 +1543,7 @@ function SkillRow({ sessionId, skill, onDelete, deleting }: { sessionId: string;
 // pinned ones), reads one's full MEMORY.md, and DELETES one to curate. Read + prune only — no authoring.
 function MemorySection({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["companionMemories", sessionId], queryFn: () => api.companionMemories(sessionId) });
+  const q = useQuery({ queryKey: ["companionMemories", sessionId], queryFn: ({ signal }) => api.companionMemories(sessionId, signal) });
   const memories = q.data ?? [];
 
   const del = useMutation({
@@ -1583,7 +1583,7 @@ function MemorySection({ sessionId }: { sessionId: string }) {
 function MemoryRow({ sessionId, memory, onDelete, deleting }: { sessionId: string; memory: CompanionMemoryEntry; onDelete: () => void; deleting: boolean }) {
   const [open, setOpen] = useState(false);
   const [confirm, setConfirm] = useState(false);
-  const content = useQuery({ queryKey: ["companionMemory", sessionId, memory.name], queryFn: () => api.companionMemory(sessionId, memory.name), enabled: open });
+  const content = useQuery({ queryKey: ["companionMemory", sessionId, memory.name], queryFn: ({ signal }) => api.companionMemory(sessionId, memory.name, signal), enabled: open });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset }}>
@@ -1618,7 +1618,7 @@ function MemoryRow({ sessionId, memory, onDelete, deleting }: { sessionId: strin
 // enabled state / next fire) and DELETES one to curate. Read + prune only — no authoring, no create/edit.
 function RemindersSection({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["companionReminders", sessionId], queryFn: () => api.companionReminders(sessionId) });
+  const q = useQuery({ queryKey: ["companionReminders", sessionId], queryFn: ({ signal }) => api.companionReminders(sessionId, signal) });
   const reminders = q.data ?? [];
 
   const del = useMutation({
@@ -1703,7 +1703,7 @@ function ReminderRow({ reminder, onDelete, deleting }: { reminder: CompanionRemi
 // CONFIRM-GATED and never fires on its own (it would interrupt the owner's live companion).
 function RestrictToolsSection({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["companionRestrictedTools", sessionId], queryFn: () => api.companionRestrictedTools(sessionId) });
+  const q = useQuery({ queryKey: ["companionRestrictedTools", sessionId], queryFn: ({ signal }) => api.companionRestrictedTools(sessionId, signal) });
   const [needsRestart, setNeedsRestart] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
 
@@ -2006,12 +2006,12 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
 
 function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: string; companionName: string }) {
   const qc = useQueryClient();
-  const grants = useQuery({ queryKey: ["companionGrants", sessionId], queryFn: () => api.companionGrants(sessionId) });
+  const grants = useQuery({ queryKey: ["companionGrants", sessionId], queryFn: ({ signal }) => api.companionGrants(sessionId, signal) });
   // Lead mode supersedes every per-project grant below (owner-only, fleet-wide). Its own hero card owns the
   // GET/PUT; here we only read the flag to SHROUD the grant surface when it's on.
-  const leadModeQuery = useQuery({ queryKey: ["companionLeadMode", sessionId], queryFn: () => api.companionLeadMode(sessionId) });
+  const leadModeQuery = useQuery({ queryKey: ["companionLeadMode", sessionId], queryFn: ({ signal }) => api.companionLeadMode(sessionId, signal) });
   const leadMode = leadModeQuery.data?.leadMode ?? false;
-  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: ({ signal }) => api.projects(signal) });
   // A within-session hint: a mode/config CHANGE (or a revoke) doesn't move a grant's createdAt, so the
   // server-derived signal below can't see it after the fact — flag it locally so the banner shows THIS
   // session. It's the belt to the server-derived braces (which own the survives-a-reload case).

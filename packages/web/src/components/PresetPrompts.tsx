@@ -36,7 +36,7 @@ const TRIGGER_CLUSTER_RESERVE = 26;
 // rescales. `onInsert(prompt)` hands the text up to the composer's own text state (writeText), so an
 // insert round-trips with the inline box + the large editor. The parent (Composer) owns open/close.
 export function PresetPromptsPopover({ onInsert }: { onInsert: (prompt: string) => void }) {
-  const presets = useQuery({ queryKey: PRESETS_KEY, queryFn: () => api.presetPrompts() });
+  const presets = useQuery({ queryKey: PRESETS_KEY, queryFn: ({ signal }) => api.presetPrompts(signal) });
   const [editing, setEditing] = useState<string | "new" | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -87,7 +87,7 @@ export function PresetPromptsPopover({ onInsert }: { onInsert: (prompt: string) 
 // drops it. A 409 (already adopted/dismissed elsewhere — stale list / double-click) refetches + shows a
 // quiet inline note instead of crashing. Buttons disable while their row's mutation is in flight.
 function SuggestionsSection() {
-  const suggestions = useQuery({ queryKey: SUGGESTIONS_KEY, queryFn: () => api.presetPromptSuggestions() });
+  const suggestions = useQuery({ queryKey: SUGGESTIONS_KEY, queryFn: ({ signal }) => api.presetPromptSuggestions(signal) });
   const list = [...(suggestions.data ?? [])].sort((a, b) => a.position - b.position);
   if (list.length === 0) return null;
 

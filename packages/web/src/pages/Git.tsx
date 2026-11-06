@@ -17,8 +17,8 @@ export default function Git() {
   // retry:false (matches Platform.tsx/MissionControl.tsx/requests.tsx's own expected-error queries): a
   // git read failure (corrupt repo, blocked env var) is deterministic, not transient — retrying 3x with
   // react-query's default backoff just delays the error by several seconds for no chance of success.
-  const branches = useQuery({ queryKey: ["git-branches", projectId], queryFn: () => api.gitBranches(projectId), enabled: !!projectId, retry: false });
-  const log = useQuery({ queryKey: ["git-log", projectId], queryFn: () => api.gitLog(projectId), enabled: !!projectId, retry: false });
+  const branches = useQuery({ queryKey: ["git-branches", projectId], queryFn: ({ signal }) => api.gitBranches(projectId, signal), enabled: !!projectId, retry: false });
+  const log = useQuery({ queryKey: ["git-log", projectId], queryFn: ({ signal }) => api.gitLog(projectId, signal), enabled: !!projectId, retry: false });
 
   // `mainlineTrustRisk` (card 40646822) mirrors the commit response's `willFreezeMainlineTrust` — set
   // only on an ok commit that landed on the branch Loom currently trusts, cleared once the human clicks
@@ -313,7 +313,7 @@ function ReferenceRepoLog({ projectId, index, path }: { projectId: string; index
   const [open, setOpen] = useState(false);
   const log = useQuery({
     queryKey: ["reference-repo-git-log", projectId, index],
-    queryFn: () => api.referenceRepoGitLog(projectId, index),
+    queryFn: ({ signal }) => api.referenceRepoGitLog(projectId, index, signal),
     enabled: open,
     retry: false, // a git read failure is deterministic — see the primary branches/log queries above
   });
@@ -344,7 +344,7 @@ function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; ind
   const [open, setOpen] = useState(false);
   const log = useQuery({
     queryKey: ["registered-repo-git-log", projectId, index],
-    queryFn: () => api.registeredRepoGitLog(projectId, index),
+    queryFn: ({ signal }) => api.registeredRepoGitLog(projectId, index, signal),
     enabled: open,
     retry: false, // a git read failure is deterministic — see the primary branches/log queries above
   });

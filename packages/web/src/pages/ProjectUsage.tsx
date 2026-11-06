@@ -45,7 +45,7 @@ export default function ProjectUsage() {
   // project — but the derivation treats them as optional anyway (see usagePartition's `present`).
   const usageQ = useQuery({
     queryKey: ["projectUsageHistory", projectId, span],
-    queryFn: () => api.sessionUsageHistory(sinceIsoFor(span), projectId, true),
+    queryFn: ({ signal }) => api.sessionUsageHistory(sinceIsoFor(span), projectId, true, signal),
     enabled: !!projectId,
     refetchInterval: 30000,
   });
@@ -53,7 +53,7 @@ export default function ProjectUsage() {
   // parentage here come from one cache entry rather than a second request.
   const boardQ = useQuery({
     queryKey: ["board", projectId],
-    queryFn: () => api.board(projectId),
+    queryFn: ({ signal }) => api.board(projectId, undefined, signal),
     enabled: !!projectId,
     staleTime: 30_000,
   });
@@ -258,7 +258,7 @@ function TaskRow({ node, depth, peak, expanded, onToggle }: {
 function RelationRows({ taskId, rolled }: { taskId: string; rolled: Map<string, SessionUsageTotals> }) {
   // The SAME key + fetcher the board drawer uses for a card's full row, so expanding a card here and
   // opening it there share one cache entry.
-  const q = useQuery({ queryKey: ["task", taskId], queryFn: () => api.getTask(taskId), staleTime: 30_000 });
+  const q = useQuery({ queryKey: ["task", taskId], queryFn: ({ signal }) => api.getTask(taskId, signal), staleTime: 30_000 });
   const rows = relationRows(taskId, taskLinks(q.data).relations, rolled);
   if (q.isLoading) {
     return <Note indent={28}>Loading related cards…</Note>;

@@ -163,7 +163,7 @@ export function Sidebar() {
   // observe ONE cache entry rather than three hand-written configs.
   const status = useQuery({ ...orchStatusQuery() });
   const globalPaused = status.data?.pausedScopes.includes("global") ?? false;
-  const version = useQuery({ queryKey: ["version"], queryFn: api.version, staleTime: Infinity, refetchOnWindowFocus: false });
+  const version = useQuery({ queryKey: ["version"], queryFn: ({ signal }) => api.version(signal), staleTime: Infinity, refetchOnWindowFocus: false });
 
   const togglePin = () => setPinned((p) => { const next = !p; localStorage.setItem(PIN_KEY, next ? "1" : "0"); return next; });
 

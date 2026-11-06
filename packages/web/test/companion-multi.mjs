@@ -94,7 +94,7 @@ check("ProactiveHomeSection is rendered INSIDE the Manage tab panel", () => {
 check("proactive-home behavior is preserved (set / change / clear THIS companion's OWN home, per-session)", () => {
   assert.ok(compSrc.includes("api.setCompanionHome(sessionId"), "set/change home write preserved, scoped to sessionId");
   assert.ok(compSrc.includes("api.clearCompanionHome(sessionId)"), "clear home write preserved, scoped to sessionId");
-  assert.ok(compSrc.includes("api.companionHome(sessionId)"), "home read preserved, scoped to sessionId");
+  assert.ok(compSrc.includes("api.companionHome(sessionId, signal)"), "home read preserved, scoped to sessionId");
 });
 
 // ── 5. The Manage-tab copy is correct; nothing leaked into Settings ───────────────────────────────────

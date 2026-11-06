@@ -155,7 +155,7 @@ export function ColumnManager({ project }: { project: Project }) {
 
   // Live card counts per column key — so each row shows its load, a rename can preview "moves N cards",
   // and a delete can warn how many cards will re-home. Polls in step with the board view.
-  const board = useQuery({ queryKey: ["board", project.id], queryFn: () => api.board(project.id), refetchInterval: 4000 });
+  const board = useQuery({ queryKey: ["board", project.id], queryFn: ({ signal }) => api.board(project.id, undefined, signal), refetchInterval: 4000 });
   const counts = useMemo(() => {
     const m = new Map<string, number>();
     for (const t of board.data?.tasks ?? []) m.set(t.columnKey, (m.get(t.columnKey) ?? 0) + 1);

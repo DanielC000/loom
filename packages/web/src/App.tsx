@@ -30,7 +30,7 @@ import { errorText } from "./lib/loopbackCredential";
 // its expected network error on restart) as "update started" and show a reconnect notice. Human-dismissable
 // per target version (a newer release re-shows it), so it never nags after the user defers.
 function UpdateBanner() {
-  const q = useQuery({ queryKey: ["updateStatus"], queryFn: api.updateStatus, refetchInterval: 5 * 60_000, refetchOnWindowFocus: true });
+  const q = useQuery({ queryKey: ["updateStatus"], queryFn: ({ signal }) => api.updateStatus(signal), refetchInterval: 5 * 60_000, refetchOnWindowFocus: true });
   const [started, setStarted] = useState(false);
   const latest = q.data?.latest ?? "";
   const dismissKey = `loom.updateDismissed.${latest}`;
@@ -254,7 +254,7 @@ const WELCOME_DISMISSED_KEY = "loom.setupWelcomeDismissed";
 
 function FirstRunWelcome() {
   const navigate = useNavigate();
-  const projectsQ = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  const projectsQ = useQuery({ queryKey: ["projects"], queryFn: ({ signal }) => api.projects(signal) });
   const [dismissed, setDismissed] = useState<boolean>(() => localStorage.getItem(WELCOME_DISMISSED_KEY) === "1");
   // Entry B — the first-run welcome opens the guided-setup WIZARD directly (the fast path to a
   // ready-to-run workspace), a peer of "Open Platform" (hand the operator agent the reins instead).

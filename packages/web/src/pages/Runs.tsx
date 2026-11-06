@@ -66,7 +66,7 @@ function RunsView({ projectId }: { projectId: string }) {
 
   const runs = useQuery({
     queryKey: ["runs", projectId],
-    queryFn: () => api.runs(projectId),
+    queryFn: ({ signal }) => api.runs(projectId, signal),
     enabled: !!projectId,
     refetchInterval: 4000, // keep in-flight rows + the open detail fresh
   });
@@ -75,7 +75,7 @@ function RunsView({ projectId }: { projectId: string }) {
   // so a throttled key is otherwise invisible here). Compact strip above the runs list.
   const events = useQuery({
     queryKey: ["run-events", projectId],
-    queryFn: () => api.runEvents(projectId),
+    queryFn: ({ signal }) => api.runEvents(projectId, signal),
     enabled: !!projectId,
     refetchInterval: 4000,
   });
@@ -86,7 +86,7 @@ function RunsView({ projectId }: { projectId: string }) {
   const selected = rows.find((r) => r.id === runId) ?? null;
 
   // Map agentId → name for readable rows (the run row only carries the id). Cheap, project-scoped.
-  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
+  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: ({ signal }) => api.agents(projectId, signal), enabled: !!projectId });
   const agentName = useMemo(() => {
     const m = new Map<string, string>();
     for (const a of agents.data ?? []) m.set(a.id, a.name);

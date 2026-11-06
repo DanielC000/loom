@@ -46,7 +46,7 @@ export function useMergeGateStatus(projectId: string | null, repoKey?: string | 
     // repoKey is part of the key: the endpoint is per-repo, so two repos' statuses must never share a
     // cache entry (one would silently render the other's counter).
     queryKey: ["mergeGateStatus", projectId, repoKey ?? null],
-    queryFn: () => api.mergeGateStatus(projectId!, repoKey),
+    queryFn: ({ signal }) => api.mergeGateStatus(projectId!, repoKey, signal),
     enabled: !!projectId,
     refetchInterval: MERGE_GATE_POLL_MS,
     retry: false,

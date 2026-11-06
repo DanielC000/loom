@@ -13,7 +13,7 @@ import { api } from "./api";
 
 /** The ONE fetcher behind the `["allAgents"]` cache. Shared by both hooks below so the key can never be
  *  populated with two different shapes depending on which page mounted first. */
-const ALL_AGENTS_QUERY = { queryKey: ["allAgents"] as const, queryFn: api.allAgents };
+const ALL_AGENTS_QUERY = { queryKey: ["allAgents"] as const, queryFn: ({ signal }: { signal: AbortSignal }) => api.allAgents(signal) };
 
 /**
  * Every agent across every project, RAW — each row carries `profileId`, `projectId` and `projectName`.

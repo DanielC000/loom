@@ -66,7 +66,7 @@ export function SessionQueue({
   const bulkMode = bulkPending !== undefined;
   const q = useQuery({
     queryKey: ["queue", sessionId],
-    queryFn: () => api.sessionQueue(sessionId),
+    queryFn: ({ signal }) => api.sessionQueue(sessionId, signal),
     refetchInterval: 3000,
     enabled: !bulkMode,
   });

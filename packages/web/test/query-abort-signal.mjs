@@ -87,4 +87,51 @@ const settleWithin = (p, ms, label) =>
   assert.ok(!/new QueryCache\(/.test(main), "no QueryCache onError that could toast a cancelled query");
 }
 
+// (6) Source scan (card ae30209f): EVERY `get`/`getOrNull`/`getErr` call in lib/api.ts forwards a `signal`, and
+//     every `queryFn:` under src/ forwards the query's `{signal}` — except the two non-GET sites below (a POST
+//     preview and a HEAD probe, which the GET helpers don't carry). Scans the shipped source text.
+{
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const matchClose = (t, i) => { let d = 0; for (let k = i; k < t.length; k++) { if (t[k] === "(") d++; else if (t[k] === ")" && --d === 0) return k; } return t.length; };
+  const unsignalledGets = (t) => {
+    const out = [], re = /(?<![.\w])(get|getOrNull|getErr)<|(?<![.\w])(get|getOrNull|getErr)\(/g;
+    let m;
+    while ((m = re.exec(t))) {
+      if (/function\s+$/.test(t.slice(Math.max(0, m.index - 20), m.index))) continue;
+      let open;
+      if (m[1]) { let d = 0, j = m.index + m[0].length - 1; for (; j < t.length; j++) { if (t[j] === "<") d++; else if (t[j] === ">" && t[j - 1] !== "=" && --d === 0) break; } open = t.indexOf("(", j); }
+      else open = t.indexOf("(", m.index);
+      if (!/signal/.test(t.slice(m.index, matchClose(t, open) + 1))) out.push(t.slice(0, m.index).split("\n").length);
+    }
+    return out;
+  };
+  const unsignalledQueryFns = (t) => {
+    const out = [], re = /queryFn:\s*/g;
+    let x;
+    while ((x = re.exec(t))) {
+      let d = 0, e = x.index + x[0].length;
+      for (; e < t.length; e++) { const c = t[e]; if ("([{".includes(c)) d++; else if (")]}".includes(c)) { if (d === 0) break; d--; } else if (c === "," && d === 0) break; }
+      if (!/signal/.test(t.slice(x.index, e))) out.push(t.slice(x.index, e).replace(/\s+/g, " ").trim());
+    }
+    return out;
+  };
+  // Negative controls: the scanners must see a bare call / bare reference, and must pass a forwarded one.
+  assert.equal(unsignalledGets('a: (id: string) => get<X>(`/api/x/${id}`),').length, 1, "control: a get() without signal is flagged");
+  assert.equal(unsignalledGets('a: (id: string, signal?: AbortSignal) => getErr<X>(`/api/x/${id}`, signal),').length, 0, "control: a forwarded get is clean");
+  assert.equal(unsignalledQueryFns("useQuery({ queryFn: api.projects })").length, 1, "control: a bare queryFn reference is flagged");
+  assert.equal(unsignalledQueryFns("useQuery({ queryFn: () => api.agents(id) })").length, 1, "control: a signal-less arrow is flagged");
+  assert.equal(unsignalledQueryFns("useQuery({ queryFn: ({ signal }) => api.agents(id, signal) })").length, 0, "control: a forwarded queryFn is clean");
+
+  const src = new URL("../src/", import.meta.url);
+  assert.deepEqual(unsignalledGets(readFileSync(new URL("lib/api.ts", src), "utf8")), [], "every api GET call forwards a signal");
+  const walk = (u) => readdirSync(u, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(new URL(`${e.name}/`, u)) : /\.tsx?$/.test(e.name) ? [new URL(e.name, u)] : []);
+  const files = walk(src);
+  assert.ok(files.length > 100, `precondition: scanned the real tree (${files.length} files)`);
+  const bare = files.flatMap((f) => unsignalledQueryFns(readFileSync(f, "utf8")).map((s) => `${f.pathname.split("/src/")[1]}: ${s}`));
+  assert.deepEqual(bare, [
+    "pages/Schedules.tsx: queryFn: () => api.previewSchedule(cron)", // POST
+    "pages/Vault.tsx: queryFn: () => api.vaultRawHead(projectId, path)", // HEAD
+  ], "every queryFn forwards {signal} except the two documented non-GET probes");
+}
+
 console.log("query-abort-signal: all assertions passed");

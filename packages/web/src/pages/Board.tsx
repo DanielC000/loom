@@ -158,7 +158,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // picker + badge. A project with an EMPTY registry (the overwhelmingly common case) renders no picker
   // and no badge at all — zero UI tax for a single-repo project, which is the point. Reuses the
   // already-cached ["projects"] query every other page shares, so this costs no extra round trip.
-  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: ({ signal }) => api.projects(signal) });
   const project = (projects.data ?? []).find((p) => p.id === projectId) ?? null;
   const repos = project?.repos ?? [];
   const multiRepo = repos.length > 0;
@@ -338,7 +338,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   const needsBodyFetch = !!openTask && openTask.body === undefined;
   const taskDetail = useQuery({
     queryKey: ["task", openTask?.id],
-    queryFn: () => api.getTask(openTask!.id),
+    queryFn: ({ signal }) => api.getTask(openTask!.id, signal),
     enabled: !!openTask,
     refetchInterval: 4000,
     // retry:false (matches Git.tsx/mergeGate.tsx/platformHome's own expected-error reads): fail FAST into

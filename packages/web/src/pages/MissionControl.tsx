@@ -58,7 +58,7 @@ export default function MissionControl() {
   // usages below). Polled lazily (15s) — archived rows don't change second-to-second. PAGINATED — this
   // god-eye view only needs RECENT history, so it fetches one bounded page rather than the full
   // cross-project archived set (previously 2137 rows / 2.4MB measured live).
-  const archived = useQuery({ queryKey: ["allArchivedSessions", 300], queryFn: () => api.allArchivedSessions({ limit: 300 }), refetchInterval: 15000 });
+  const archived = useQuery({ queryKey: ["allArchivedSessions", 300], queryFn: ({ signal }) => api.allArchivedSessions({ limit: 300 }, signal), refetchInterval: 15000 });
   const archivedItems = archived.data?.items ?? [];
   // Wave Replay is a forensic scrub/compare tool, not an operational-home widget — so it's COLLAPSED by
   // default (persisted open-state below). Its archived-manager picker feed (`archivedManagersQ`) is the
@@ -85,7 +85,7 @@ export default function MissionControl() {
   // limit/role are unchanged, so on expand the picker still lists old archived managers (guardrail 3a93313).
   const archivedManagersQ = useQuery({
     queryKey: ["allArchivedSessions", "manager", 300],
-    queryFn: () => api.allArchivedSessions({ limit: 300, role: "manager" }),
+    queryFn: ({ signal }) => api.allArchivedSessions({ limit: 300, role: "manager" }, signal),
     enabled: replayOpen,
     refetchInterval: 15000,
   });
@@ -95,8 +95,8 @@ export default function MissionControl() {
   // project ids exclude the reserved homes from
   // the INACTIVE strip below: they sit in the archive with zero live sessions, but they're hidden from every
   // ordinary project surface and must not leak in here either. Shared query keys ⇒ cache reuse, no extra poll.
-  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
-  const setupHome = useQuery({ queryKey: ["setupHome"], queryFn: api.setupHome, retry: false });
+  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: ({ signal }) => api.platformHome(signal), retry: false });
+  const setupHome = useQuery({ queryKey: ["setupHome"], queryFn: ({ signal }) => api.setupHome(signal), retry: false });
   const { items: attention } = useAttention();
 
   const all = sessions.data ?? [];

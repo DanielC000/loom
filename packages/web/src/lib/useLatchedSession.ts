@@ -30,7 +30,7 @@ export function useLatchedSession(sessionId: string): SessionListItem | undefine
   // Only once the live feed has ANSWERED without this row — `!sessions.data` would fire the lookup on
   // every first paint, for a session that is about to resolve as perfectly live.
   const archived = useQuery({
-    queryKey: ["archivedSessionById", sessionId], queryFn: () => api.archivedSessionById(sessionId),
+    queryKey: ["archivedSessionById", sessionId], queryFn: ({ signal }) => api.archivedSessionById(sessionId, signal),
     refetchInterval: 15000,
     enabled: !!sessionId && !!sessions.data && !live,
   });

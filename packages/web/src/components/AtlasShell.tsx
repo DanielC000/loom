@@ -155,7 +155,7 @@ function useParamAddress(
   // it still costs no request; `enabled` keeps it off every non-session route exactly as before.
   const session = useLatchedSession(atlas?.kind === "session" && id ? id : "");
   const question = useQuery({
-    queryKey: ["question", id], queryFn: () => api.question(id),
+    queryKey: ["question", id], queryFn: ({ signal }) => api.question(id, signal),
     enabled: atlas?.kind === "detail" && !!id, retry: false,
   });
 

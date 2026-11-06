@@ -47,7 +47,7 @@ export default function Archive() {
   // (a fresh page-0 fetch under the new filter) rather than re-filtering already-accumulated pages.
   const archived = useInfiniteQuery({
     queryKey: ["archive", projectId, query],
-    queryFn: ({ pageParam }) => api.archivedSessions(projectId, { limit: ARCHIVE_PAGE_SIZE, offset: pageParam, q: query || undefined }),
+    queryFn: ({ pageParam, signal }) => api.archivedSessions(projectId, { limit: ARCHIVE_PAGE_SIZE, offset: pageParam, q: query || undefined }, signal),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       const loaded = allPages.reduce((n, p) => n + p.items.length, 0);

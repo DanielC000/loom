@@ -130,7 +130,7 @@ function DrainNote({ children, tone }: { children: ReactNode; tone?: string }) {
 export function HarnessDrainBanner({ projectId }: { projectId?: string }) {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["harnessDrain", projectId ?? "fleet"],
-    queryFn: () => api.harnessDrain(projectId),
+    queryFn: ({ signal }) => api.harnessDrain(projectId, signal),
   });
 
   if (isLoading) return <DrainNote>reading harness drain status…</DrainNote>;

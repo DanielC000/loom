@@ -169,7 +169,7 @@ export function OrchestrationChip() {
   // entry the Workspace node and the classic PlanUsageStrip fill, so an open pop-over reuses whatever
   // is already cached rather than issuing its own read.
   const usageQ = useQuery<UsageLimitsStatus>({
-    queryKey: ["usageLimits"], queryFn: api.usageLimits, enabled: open,
+    queryKey: ["usageLimits"], queryFn: ({ signal }) => api.usageLimits(signal), enabled: open,
   });
   const usage = usageQ.data?.available ? usageQ.data : null;
 

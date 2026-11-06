@@ -34,8 +34,8 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
   const [creating, setCreating] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
 
-  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
-  const keys = useQuery({ queryKey: ["keys", projectId], queryFn: () => api.keys(projectId), enabled: !!projectId });
+  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: ({ signal }) => api.agents(projectId, signal), enabled: !!projectId });
+  const keys = useQuery({ queryKey: ["keys", projectId], queryFn: ({ signal }) => api.keys(projectId, signal), enabled: !!projectId });
 
   // NULL until the agents query has loaded SUCCESSFULLY at least once — never `[]`. `agents.data` is
   // undefined on a first load and on an outright failure, and collapsing that to an empty array makes

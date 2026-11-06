@@ -86,7 +86,7 @@ function UsageGauge({ label, window: w }: { label: string; window: UsageWindow }
 
 export function PlanUsageStrip() {
   // The daemon caches; a light refetch keeps the countdowns and percentages fresh.
-  const usage = useQuery<UsageLimitsStatus>({ queryKey: ["usageLimits"], queryFn: api.usageLimits, refetchInterval: 30_000 });
+  const usage = useQuery<UsageLimitsStatus>({ queryKey: ["usageLimits"], queryFn: ({ signal }) => api.usageLimits(signal), refetchInterval: 30_000 });
   const data = usage.data;
 
   if (!data || !data.available) {

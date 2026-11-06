@@ -26,7 +26,7 @@ import { color, font, fs, radius } from "../theme";
 
 export function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string>; agentName: (id: string) => string }) {
   const navigate = useNavigate();
-  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: ({ signal }) => api.schedules(signal) });
   const mine = (schedules.data ?? []).filter((s) => agentIds.has(s.agentId));
   if (mine.length === 0) {
     return (

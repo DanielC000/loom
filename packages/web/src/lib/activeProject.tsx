@@ -27,7 +27,7 @@ const Ctx = createContext<ActiveProjectValue | null>(null);
 export function ActiveProjectProvider({ children }: { children: ReactNode }) {
   const [storedId, setStoredId] = useState<string>(() => localStorage.getItem(STORAGE_KEY) ?? "");
 
-  const projectsQ = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  const projectsQ = useQuery({ queryKey: ["projects"], queryFn: ({ signal }) => api.projects(signal) });
   // Shared cache with the pages that already poll this; used only to pick a fallback when the stored
   // project no longer resolves, so a one-time read suffices (no refetchInterval of our own here).
   const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });

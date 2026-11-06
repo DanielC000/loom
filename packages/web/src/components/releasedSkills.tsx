@@ -44,7 +44,7 @@ function ReleasedSkillsBody({ project }: { project: Project }) {
 
   const list = useQuery({
     queryKey: ["releasedSkills", project.id],
-    queryFn: () => api.releasedSkills(project.id),
+    queryFn: ({ signal }) => api.releasedSkills(project.id, signal),
     enabled: bound,
   });
   const released = list.data?.released ?? [];
@@ -172,7 +172,7 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
 
   const diff = useQuery({
     queryKey: ["releasedSkillDiff", projectId, entry.name],
-    queryFn: () => api.releasedSkillDiff(projectId, entry.name),
+    queryFn: ({ signal }) => api.releasedSkillDiff(projectId, entry.name, signal),
     // Pinned deliberately: a background refetch would move the fingerprint out from under the content on
     // screen. "Re-read the copy" below is the ONE way this snapshot advances, and it is explicit.
     staleTime: Infinity,
@@ -330,7 +330,7 @@ function FileRow({ projectId, name, path, open, onToggle }: {
 }) {
   const file = useQuery({
     queryKey: ["releasedSkillDiffFile", projectId, name, path],
-    queryFn: () => api.releasedSkillDiffFile(projectId, name, path),
+    queryFn: ({ signal }) => api.releasedSkillDiffFile(projectId, name, path, signal),
     enabled: open,
   });
   const d = file.data;

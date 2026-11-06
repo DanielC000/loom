@@ -84,10 +84,10 @@ export function McpActivity({ sessionId, harness, busy = false }: {
   const qc = useQueryClient();
   const t = useQuery({
     queryKey: ["transcript", sessionId],
-    queryFn: () => fetchTranscriptIncremental(
+    queryFn: ({ signal }) => fetchTranscriptIncremental(
       qc.getQueryData<TranscriptTurn[]>(["transcript", sessionId]),
-      (offset) => api.transcriptTail(sessionId, offset),
-      () => api.transcript(sessionId),
+      (offset) => api.transcriptTail(sessionId, offset, signal),
+      () => api.transcript(sessionId, signal),
     ),
     refetchInterval: mcpPollInterval({ hidden, expanded, busy }),
   });

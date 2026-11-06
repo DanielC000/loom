@@ -21,7 +21,7 @@ export function SessionWakes({
   const bulkMode = bulkWakes !== undefined;
   const q = useQuery({
     queryKey: ["wakes", sessionId],
-    queryFn: () => api.sessionWakes(sessionId),
+    queryFn: ({ signal }) => api.sessionWakes(sessionId, signal),
     refetchInterval: 15000,
     enabled: !bulkMode,
   });

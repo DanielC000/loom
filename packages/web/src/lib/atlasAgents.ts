@@ -309,8 +309,8 @@ export function standingOperators(sessions: readonly SessionListItem[] | undefin
  * either invalidates both identically.
  */
 export function useAgentRoster(projectId: string): { roster: AgentRoster; isLoading: boolean } {
-  const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
-  const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: ({ signal }) => api.agents(projectId, signal), enabled: !!projectId });
+  const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
   const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   return {
     roster: splitRoster(agentsQ.data, profilesQ.data, sessionsQ.data),

@@ -60,23 +60,23 @@ export default function Projects() {
   const [creating, setCreating] = useState<null | "project" | "agent">(null);
   const [filter, setFilter] = useState("");
 
-  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
-  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: ({ signal }) => api.projects(signal) });
+  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: ({ signal }) => api.agents(projectId, signal), enabled: !!projectId });
   // Profiles are platform-level (cross-project), so this is a single global query, not project-scoped.
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const profiles = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
   // Edition discovery (the SAME shared query key Platform.tsx/Skills.tsx use → one cached fetch): the
   // dev/self-host edition has the reserved Platform home; an end-user npm install gets `project: null`
   // back (card 8d82be67 — the route is always 200). Gates which profiles the agent bind-dropdown offers
   // (see AgentEditor). `isSuccess &&` holds it false until the query settles, so an end user never
   // flashes a dev-layer rig mid-load.
-  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
+  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: ({ signal }) => api.platformHome(signal), retry: false });
   const isDev = platformHome.isSuccess && !!platformHome.data?.project;
   // Cross-project live sessions — the source for the rail's live-dot AND the "stop the fleet first" guard
   // on destructive project/agent ops (archive/delete disable while a related session is live). Archived
   // projects feed the restore / permanent-delete footer. Both are cheap loopback reads, invalidated by
   // the mutations (the live set also polls, mirroring the header picker's live marker).
   const globalSessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
-  const archivedProjects = useQuery({ queryKey: ["archivedProjects"], queryFn: api.archivedProjects });
+  const archivedProjects = useQuery({ queryKey: ["archivedProjects"], queryFn: ({ signal }) => api.archivedProjects(signal) });
   const { liveByProject, liveByAgent } = useMemo(() => {
     const byProject = new Map<string, number>();
     const byAgent = new Map<string, number>();

@@ -467,7 +467,7 @@ function ProjectLifecyclePanel({ project }: { project: Project | null }) {
 // of that text would be a header under a header — and would break `atlas-settings-scope.spec.ts`, which
 // asserts a section's own label appears exactly ONCE inside its wrapper.
 function ArchivedProjectsPanel() {
-  const archived = useQuery({ queryKey: ["archivedProjects"], queryFn: api.archivedProjects });
+  const archived = useQuery({ queryKey: ["archivedProjects"], queryFn: ({ signal }) => api.archivedProjects(signal) });
   const { restore, remove } = useProjectLifecycleWrites();
   return (
     <Panel>
@@ -756,7 +756,7 @@ function ConfigEditor({ project }: { project: Project }) {
   // on this page whose honest answer needs both layers, so it resolves them directly.
   const [harnessDefault, setHarnessDefault] = useState<DefaultValue>(mounted.harnessDefault);
   const [harnessScope, setHarnessScope] = useState<ScopeValue>(mounted.harnessScope);
-  const platformConfig = useQuery({ queryKey: ["platformConfig"], queryFn: () => api.getPlatformConfig() });
+  const platformConfig = useQuery({ queryKey: ["platformConfig"], queryFn: ({ signal }) => api.getPlatformConfig(signal) });
   const platformOverride = platformConfig.data?.override;
   const harnessEffective = resolveHarnessConfig(ov, platformOverride);
   const harnessInherited = resolveHarnessConfig(undefined, platformOverride);
@@ -1514,7 +1514,7 @@ const GLOBAL_FIELDS: GlobalFieldDesc[] = [
 function GlobalConfigEditor() {
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["platformConfig"],
-    queryFn: () => api.getPlatformConfig(),
+    queryFn: ({ signal }) => api.getPlatformConfig(signal),
   });
   if (isLoading) {
     return <Panel><Hint>loading daemon config…</Hint></Panel>;
@@ -2326,11 +2326,11 @@ function ConnectionsPanel() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["connections"],
-    queryFn: () => api.connections(),
+    queryFn: ({ signal }) => api.connections(signal),
   });
   // Project scope (card f2abce7e): loaded once here for BOTH the create form's scope selector and the
   // list row's scope badge (project id -> name), same pattern as ProjectLinksPanel below.
-  const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: () => api.projects() });
+  const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: ({ signal }) => api.projects(signal) });
   const projectName = (id: string) => projects?.find((p) => p.id === id)?.name ?? id;
   // Bound/unbound state (card 12dc7fc9): a connection is "bound" once at least one AGENT allowlists it
   // (card afe1bc90: grants live on the agent row, not the profile). Derived client-side from the
@@ -2604,7 +2604,7 @@ function PendingBindingsPanel() {
   const qc = useQueryClient();
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["pendingBindings"],
-    queryFn: () => api.pendingBindings(),
+    queryFn: ({ signal }) => api.pendingBindings(signal),
   });
   const rows = data ?? [];
   const [confirming, setConfirming] = useState<string | null>(null); // questionId whose inline confirm is open
@@ -3031,10 +3031,10 @@ function fmtWhen(iso: string | null): string {
 // picker; project names are resolved from the already-loaded active-project list (api.projects()).
 function ProjectLinksPanel() {
   const qc = useQueryClient();
-  const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: () => api.projects() });
+  const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: ({ signal }) => api.projects(signal) });
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["projectLinks"],
-    queryFn: () => api.projectLinks(),
+    queryFn: ({ signal }) => api.projectLinks(signal),
   });
 
   const nameFor = (id: string) => projects?.find((p) => p.id === id)?.name ?? id;
@@ -3208,7 +3208,7 @@ function NodeModulesReclaimPanel() {
 
   const listing = useQuery({
     queryKey: ["nodeModulesReclaimable", minAgeHours],
-    queryFn: () => api.nodeModulesReclaimable(minAgeHours),
+    queryFn: ({ signal }) => api.nodeModulesReclaimable(minAgeHours, signal),
   });
   const entries = listing.data?.entries ?? [];
 
@@ -3434,9 +3434,9 @@ function PollJobsPanel() {
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  const jobs = useQuery({ queryKey: ["pollJobs"], queryFn: () => api.pollJobs() });
-  const connections = useQuery({ queryKey: ["connections"], queryFn: () => api.connections() });
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: () => api.allSessions() });
+  const jobs = useQuery({ queryKey: ["pollJobs"], queryFn: ({ signal }) => api.pollJobs(signal) });
+  const connections = useQuery({ queryKey: ["connections"], queryFn: ({ signal }) => api.connections(signal) });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // Flat cross-project "Project / Agent" labels for the spawn-mode target picker. Poll jobs are
   // daemon-global, so the target can be any project's agent.
   const agents = useAllAgentLabels();
@@ -3758,7 +3758,7 @@ function CapabilitiesPanel() {
   const [openPassEnv, setOpenPassEnv] = useState<string | null>(null);
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["capabilities"],
-    queryFn: () => api.capabilities(),
+    queryFn: ({ signal }) => api.capabilities(signal),
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["capabilities"] });

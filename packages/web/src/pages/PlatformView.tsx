@@ -84,10 +84,10 @@ export function PlatformView({ edition, previewOnly = false }: { edition: Platfo
   const [atlasOn] = useAtlasUi();
   // Map the edition's home key → the real (api-free config stays clean) read-only discovery fn. Same query
   // key as useVisibleNavPages / Platform.tsx → one shared, cached fetch.
-  const load = edition.homeQueryKey === "platformHome" ? api.platformHome : api.setupHome;
-  const home = useQuery({ queryKey: [edition.homeQueryKey], queryFn: load });
+  const load = (signal: AbortSignal) => (edition.homeQueryKey === "platformHome" ? api.platformHome(signal) : api.setupHome(signal));
+  const home = useQuery({ queryKey: [edition.homeQueryKey], queryFn: ({ signal }) => load(signal) });
   // Profiles resolve each agent's role (operator/auditor) — the human spawn role + chip.
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const profiles = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // Entry A — the guided-onboarding wizard, launched from the band below. Human-only; stands up a new
   // project + a templated team over the existing setup REST (nothing here spawns an agent).
@@ -703,7 +703,7 @@ function fmt(iso: string | null): string { return iso ? new Date(iso).toLocaleSt
 // kind:"auditor" so the Scheduler routes it right. ──
 function AuditorScheduleList({ auditorId }: { auditorId?: string }) {
   const qc = useQueryClient();
-  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: ({ signal }) => api.schedules(signal) });
   const [cron, setCron] = useState("0 9 * * *");
 
   const create = useMutation({
@@ -772,7 +772,7 @@ function AuditorScheduleRow({ s, onToggle, onRemove, busy }:
 // lets the user create / edit-cron / enable-disable / remove a SINGLE cadence. A fired schedule boots a
 // fresh suggest-only Auditor run via startWorkspaceAuditor (role locked server-side) — human-only REST. ──
 function AuditorScheduleInline({ agent, previewOnly }: { agent: Agent; previewOnly: boolean }) {
-  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: ({ signal }) => api.schedules(signal) });
   const existing = (schedules.data ?? []).find((s) => s.agentId === agent.id && s.kind === "workspace-auditor");
   return <AuditorScheduleInlineForm key={existing?.id ?? "new"} agentId={agent.id} existing={existing}
     previewOnly={previewOnly} />;

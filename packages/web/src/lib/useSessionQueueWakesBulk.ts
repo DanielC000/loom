@@ -9,7 +9,7 @@ import { api } from "./api";
 export function useSessionQueuesBulk(ids: string[]) {
   return useQuery({
     queryKey: ["queues-bulk", ids],
-    queryFn: () => api.sessionQueuesBulk(ids),
+    queryFn: ({ signal }) => api.sessionQueuesBulk(ids, signal),
     refetchInterval: 3000,
   });
 }
@@ -17,7 +17,7 @@ export function useSessionQueuesBulk(ids: string[]) {
 export function useSessionWakesBulk(ids: string[]) {
   return useQuery({
     queryKey: ["wakes-bulk", ids],
-    queryFn: () => api.sessionWakesBulk(ids),
+    queryFn: ({ signal }) => api.sessionWakesBulk(ids, signal),
     refetchInterval: 15000,
   });
 }

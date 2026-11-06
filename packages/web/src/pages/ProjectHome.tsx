@@ -149,18 +149,18 @@ export default function ProjectHome() {
   };
 
   const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
-  const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
-  const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: ({ signal }) => api.agents(projectId, signal), enabled: !!projectId });
+  const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
   const boardQ = useQuery({ queryKey: ["board", projectId], queryFn: ({ signal }) => api.board(projectId, undefined, signal), enabled: !!projectId, staleTime: 30_000 });
-  const archivedQ = useQuery({ queryKey: ["archive", projectId, 100], queryFn: () => api.archivedSessions(projectId), enabled: !!projectId });
+  const archivedQ = useQuery({ queryKey: ["archive", projectId, 100], queryFn: ({ signal }) => api.archivedSessions(projectId, undefined, signal), enabled: !!projectId });
   // The two tab counts no existing read on this page already answers (card 25c08fba). Both reuse the
   // EXACT query key + fetcher their own tab body uses — ["projectMemory", id] in pages/Memory.tsx,
   // ["runs", id] in pages/Runs.tsx — so the count on a tab and the rows inside it share one cache
   // entry and cannot disagree, and opening the tab issues no second request. Neither adds an api.ts
   // member. Deliberately NO refetchInterval: the Runs body sets its own 4s poll while it is mounted,
   // and the node has no reason to poll faster than the figure is read.
-  const memoryQ = useQuery({ queryKey: ["projectMemory", projectId], queryFn: () => api.projectMemory(projectId), enabled: !!projectId });
-  const runsQ = useQuery({ queryKey: ["runs", projectId], queryFn: () => api.runs(projectId), enabled: !!projectId });
+  const memoryQ = useQuery({ queryKey: ["projectMemory", projectId], queryFn: ({ signal }) => api.projectMemory(projectId, signal), enabled: !!projectId });
+  const runsQ = useQuery({ queryKey: ["runs", projectId], queryFn: ({ signal }) => api.runs(projectId, signal), enabled: !!projectId });
   // The node head's `<branch> <sha>` pill. The two EXISTING keys pages/Git.tsx reads — same keys,
   // same fetchers — so opening the Repository tab's Git pane issues no second request and the pill
   // and that pane can never disagree about where the repo's head is.
@@ -169,8 +169,8 @@ export default function ProjectHome() {
   // the deliberate cost of the pill: a long `staleTime` (the head moves on a merge, not on a tab
   // click) and `retry: false`, because the expected failure here — a project with no repo bound, or
   // a repo with no commits yet — is a permanent one and the pill's answer to it is to not render.
-  const branchesQ = useQuery({ queryKey: ["git-branches", projectId], queryFn: () => api.gitBranches(projectId), enabled: !!projectId, retry: false, staleTime: 30_000 });
-  const gitLogQ = useQuery({ queryKey: ["git-log", projectId], queryFn: () => api.gitLog(projectId), enabled: !!projectId, retry: false, staleTime: 30_000 });
+  const branchesQ = useQuery({ queryKey: ["git-branches", projectId], queryFn: ({ signal }) => api.gitBranches(projectId, signal), enabled: !!projectId, retry: false, staleTime: 30_000 });
+  const gitLogQ = useQuery({ queryKey: ["git-log", projectId], queryFn: ({ signal }) => api.gitLog(projectId, signal), enabled: !!projectId, retry: false, staleTime: 30_000 });
   const activeGatesQ = useGatesActive();
   const historyQ = useGateHistoryRecent(projectId || undefined);
   const { items: attention } = useAttention();

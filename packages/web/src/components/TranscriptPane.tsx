@@ -40,8 +40,8 @@ function highlight(text: string, q: string): ReactNode {
 export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRef?: { projectId: string; runId: string } }) {
   const t = useQuery(
     runRef
-      ? { queryKey: ["run-transcript", runRef.projectId, runRef.runId], queryFn: () => api.runTranscript(runRef.projectId, runRef.runId), refetchInterval: 5000 }
-      : { queryKey: ["transcript", sessionId], queryFn: () => api.transcript(sessionId), refetchInterval: 5000 },
+      ? { queryKey: ["run-transcript", runRef.projectId, runRef.runId], queryFn: ({ signal }) => api.runTranscript(runRef.projectId, runRef.runId, signal), refetchInterval: 5000 }
+      : { queryKey: ["transcript", sessionId], queryFn: ({ signal }) => api.transcript(sessionId, signal), refetchInterval: 5000 },
   );
   const turns = t.data;
 

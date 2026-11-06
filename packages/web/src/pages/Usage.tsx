@@ -96,13 +96,13 @@ export default function Usage() {
   const spanMeta = TIMESPANS.find((t) => t.key === span)!;
   const history = useQuery({
     queryKey: ["usageHistory", span, scope],
-    queryFn: () => api.usageHistory(sinceIsoFor(span), scope),
+    queryFn: ({ signal }) => api.usageHistory(sinceIsoFor(span), scope, signal),
     refetchInterval: 10000,
   });
   // The owner's interactive-session usage (estimated plan consumption) over the same window + scope (the headline new plane).
   const sessionHistory = useQuery({
     queryKey: ["sessionUsageHistory", span, scope],
-    queryFn: () => api.sessionUsageHistory(sinceIsoFor(span), scope),
+    queryFn: ({ signal }) => api.sessionUsageHistory(sinceIsoFor(span), scope, undefined, signal),
     refetchInterval: 30000,
   });
 

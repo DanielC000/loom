@@ -43,15 +43,15 @@ export default function Overview() {
 
   // The project's agents (for go-live + schedule attribution) and the platform-level profiles (which
   // resolve each agent's role → which agents are managers). Both already cached elsewhere.
-  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
-  const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const agents = useQuery({ queryKey: ["agents", projectId], queryFn: ({ signal }) => api.agents(projectId, signal), enabled: !!projectId });
+  const profiles = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // Polled (not just invalidation-driven): the accordion below now folds archived rows in as the
   // durable Resume path (finding #15), so a session that just auto-archived should surface here
   // promptly, not only after some other mutation happens to invalidate this query. PAGINATED — this is
   // a recency-ordered summary view (not the primary browse-everything Archive page), so the default
   // page is fetched as-is with no "load more"; the header "archived" count reads the server-side `total`.
-  const archived = useQuery({ queryKey: ["archive", projectId, 100], queryFn: () => api.archivedSessions(projectId), enabled: !!projectId, refetchInterval: 5000 });
+  const archived = useQuery({ queryKey: ["archive", projectId, 100], queryFn: ({ signal }) => api.archivedSessions(projectId, undefined, signal), enabled: !!projectId, refetchInterval: 5000 });
   const archivedItems = archived.data?.items ?? [];
   const { items: attention } = useAttention();
 

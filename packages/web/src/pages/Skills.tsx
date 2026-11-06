@@ -28,14 +28,14 @@ export default function Skills() {
   const [newName, setNewName] = useState("");
   const [reloadNonce, setReloadNonce] = useState(0); // bumped on reset/adopt to remount the editor onto fresh content
 
-  const skills = useQuery({ queryKey: ["skills"], queryFn: api.skills });
-  const current = useQuery({ queryKey: ["skill", selected], queryFn: () => api.skill(selected!), enabled: !!selected });
+  const skills = useQuery({ queryKey: ["skills"], queryFn: ({ signal }) => api.skills(signal) });
+  const current = useQuery({ queryKey: ["skill", selected], queryFn: ({ signal }) => api.skill(selected!, signal), enabled: !!selected });
 
   // Edition discovery (same shared query key as Platform.tsx → one cached fetch). The dev/self-host
   // edition has a Platform home; an end-user npm install gets `project: null` back (card 8d82be67 — the
   // route is always 200). "Publish to repo" is dev-only — held hidden until this settles so an end user
   // never flashes it.
-  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
+  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: ({ signal }) => api.platformHome(signal), retry: false });
   const isDev = platformHome.isSuccess && !!platformHome.data?.project;
 
   const create = useMutation({
@@ -389,7 +389,7 @@ function UpdateBanner({ name, onAdopt, adoptBusy, error }: { name: string; onAdo
   const [showDiff, setShowDiff] = useState(false);
   const diff = useQuery({
     queryKey: ["skill", name, "update-diff"],
-    queryFn: () => api.skillUpdateDiff(name),
+    queryFn: ({ signal }) => api.skillUpdateDiff(name, signal),
     enabled: showDiff,
   });
   return (
@@ -426,7 +426,7 @@ function UpdateBanner({ name, onAdopt, adoptBusy, error }: { name: string; onAdo
 // cache rather than issuing an extra read.
 function FilesDivergedBanner({ name }: { name: string }) {
   const [showFiles, setShowFiles] = useState(false);
-  const diff = useQuery({ queryKey: ["skill", name, "update-diff"], queryFn: () => api.skillUpdateDiff(name) });
+  const diff = useQuery({ queryKey: ["skill", name, "update-diff"], queryFn: ({ signal }) => api.skillUpdateDiff(name, signal) });
   const diverged = (diff.data?.files ?? []).filter((f) => f.path !== "SKILL.md" && (f.customized || f.updateAvailable));
   if (!diverged.length) return null;
   return (
@@ -479,7 +479,7 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
   const [confirmTake, setConfirmTake] = useState(false);
   const diff = useQuery({
     queryKey: ["skill", name, "file-diff", file.path],
-    queryFn: () => api.skillFileDiff(name, file.path),
+    queryFn: ({ signal }) => api.skillFileDiff(name, file.path, signal),
     enabled: open, // content tier: fetched only when this row is actually expanded
   });
   // Resolve one file. `meta.inlineError` is REQUIRED, not decorative: main.tsx installs a global
@@ -596,7 +596,7 @@ function DivergedBanner({ name, mine, onSync, syncing }: { name: string; mine: s
   // way to fetch the current shipped content here. We diff the SAVED store copy (`mine`) against shipped.
   const diff = useQuery({
     queryKey: ["skill", name, "update-diff"],
-    queryFn: () => api.skillUpdateDiff(name),
+    queryFn: ({ signal }) => api.skillUpdateDiff(name, signal),
     enabled: showDiff,
   });
   return (

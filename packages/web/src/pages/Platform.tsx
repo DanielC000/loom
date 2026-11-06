@@ -27,7 +27,7 @@ const VIEW_AS_KEY = "loom.platformViewAs";
 export default function Platform() {
   // retry:false so a shipping user's expected 404 settles to "shipping" without spinning the default 3
   // retries first. Same query key as useVisibleNavPages → one shared, cached fetch.
-  const home = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
+  const home = useQuery({ queryKey: ["platformHome"], queryFn: ({ signal }) => api.platformHome(signal), retry: false });
   const isDev = home.isSuccess && !!home.data?.project;
 
   const [viewAs, setViewAs] = useState<ViewAs>(() =>

@@ -185,14 +185,14 @@ export function AgentEditor(
   // agentCredentialGrantCrossProjectError / connections/store.ts's isConnectionUsableByProject): a GLOBAL
   // connection (projectId === null) is reachable by any agent, a project-scoped one only by an agent in
   // THAT SAME project — the unfiltered list used to offer every other project's scoped connections too.
-  const connectionList = useQuery({ queryKey: ["connections"], queryFn: api.connections });
+  const connectionList = useQuery({ queryKey: ["connections"], queryFn: ({ signal }) => api.connections(signal) });
   const availableConnections = (connectionList.data ?? []).filter((c) => c.projectId == null || c.projectId === agent.projectId);
   const toggleConnection = (id: string) => setConnections((cur) => (cur.includes(id) ? cur.filter((c) => c !== id) : [...cur, id]));
   // The capability registry catalog, MINUS the two reserved legacy slugs (browser-testing/document-
   // conversion) — those stay credential-free and PROFILE-only (its own browserTesting/documentConversion
   // booleans), never grantable through an agent's own capabilities array (agents/validate.ts rejects
   // them at write time too; this filter just keeps the picker from ever offering what the server refuses).
-  const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities });
+  const capabilityList = useQuery({ queryKey: ["capabilities"], queryFn: ({ signal }) => api.capabilities(signal) });
   const availableCapabilities = (capabilityList.data ?? []).filter((c) => c.slug !== "browser-testing" && c.slug !== "document-conversion");
   const toggleCapability = (slug: string) =>
     setCapabilities((cur) => (cur.some((g) => g.slug === slug) ? cur.filter((g) => g.slug !== slug) : [...cur, { slug }]));

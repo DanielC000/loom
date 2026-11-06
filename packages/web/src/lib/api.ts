@@ -507,7 +507,7 @@ function questionAttachmentPath(questionId: string, attachmentId: string): strin
 }
 
 export const api = {
-  projects: () => get<Project[]>("/api/projects"),
+  projects: (signal?: AbortSignal) => get<Project[]>("/api/projects", signal),
   // Platform Manager P6 — discover the reserved "Loom Platform" home (hidden from the ordinary picker)
   // + its seeded agents (the Lead + Auditor), for the dedicated Platform section. READ-ONLY discovery;
   // spawn/stop/schedule reuse the existing startSession / stopSession / createSchedule routes below.
@@ -516,14 +516,14 @@ export const api = {
   // Card 8d82be67: this route is ALWAYS 200 — `project: null` (no dev home on this install) replaced the
   // old 404, so every one of its 4 consumers (Platform.tsx/Projects.tsx/Skills.tsx/MissionControl.tsx)
   // keeps working off the SAME `!!data?.project` / optional-chained `.project?.id` check unchanged.
-  platformHome: () => get<{
+  platformHome: (signal?: AbortSignal) => get<{
     project: Project | null;
     agents: Agent[];
     liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
     // Optional — unlike setupHome below, this route doesn't send it (always undefined in practice); kept
     // on this type only so PlatformView's shared union access type-checks without a cast.
     resolvedLead?: { agentId: string | null; role: "platform" | "setup" | null };
-  }>("/api/platform/home"),
+  }>("/api/platform/home", signal),
   // Setup Assistant E1-7 — discover the reserved "Getting Started" home (hidden from the ordinary
   // picker, like the Platform home) + its Setup Assistant agent(s), for the dedicated Setup page.
   // MIRRORS platformHome but NAME-SCOPED server-side to the SETUP home. READ-ONLY discovery; spawn =
@@ -534,19 +534,19 @@ export const api = {
   // directly instead of re-deriving "the Lead" by list order/name, which can disagree with the server
   // when a second human-bound platform agent exists. Both null when no operator agent resolves (e.g. a
   // dev install's "View as: End-user" preview).
-  setupHome: () => get<{
+  setupHome: (signal?: AbortSignal) => get<{
     project: Project;
     agents: Agent[];
     liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
     resolvedLead: { agentId: string | null; role: "platform" | "setup" | null };
-  }>("/api/setup/home"),
+  }>("/api/setup/home", signal),
   // --- Guided onboarding & templates (onboarding C3/C5). HUMAN-only loopback REST mirror of the
   // agent-facing template_list/template_apply MCP tools — the setup wizard consumes these directly.
   // `setupTemplates` lists the bundled workflow presets (name + purpose + agent→profile roster);
   // `applyTemplate` stands up a template's agents + starter card into an ALREADY-EXISTING project and
   // returns the created agents/tasks. applyTemplate surfaces the server's `{ error }` body verbatim (an
   // unknown template / elevated-role guard 400s) via postErr, so the wizard shows the reason inline. ---
-  setupTemplates: () => get<SetupTemplate[]>("/api/setup/templates"),
+  setupTemplates: (signal?: AbortSignal) => get<SetupTemplate[]>("/api/setup/templates", signal),
   applyTemplate: (projectId: string, templateName: string) =>
     postErr<TemplateApplyResult>("/api/setup/templates/apply", { projectId, templateName }),
   // `referenceRepos` (optional) binds read-only sibling repos at creation — each validated absolute +
@@ -577,7 +577,7 @@ export const api = {
   // Soft-archive (reversible "delete"). 400s on the reserved home or a live fleet (surfaced via delErr).
   archiveProject: (id: string) => delErr<{ ok: boolean }>(`/api/projects/${id}`),
   // Soft-archived projects (the "Archived" section) → restore / permanent-delete.
-  archivedProjects: () => get<Project[]>("/api/projects/archived"),
+  archivedProjects: (signal?: AbortSignal) => get<Project[]>("/api/projects/archived", signal),
   restoreProject: (id: string) => postErr<Project>(`/api/projects/${id}/restore`),
   // IRREVERSIBLE cascade (agents/sessions/tasks/schedules/keys/runs + on-disk snapshots) — distinct from
   // the bare archive. The strong type-the-name confirm is the web's job; the server just runs the guards.
@@ -589,8 +589,8 @@ export const api = {
   // endpoint already carries each project's stored override, so `projectConfig` reads it from there
   // (no single-project GET exists); `updateProjectConfig` PATCHes the replacement override and returns
   // the updated Project. The PATCH validator is strict zod — an invalid override 400s with a reason. ---
-  projectConfig: (id: string) =>
-    get<Project[]>("/api/projects").then((ps) => {
+  projectConfig: (id: string, signal?: AbortSignal) =>
+    get<Project[]>("/api/projects", signal).then((ps) => {
       const p = ps.find((x) => x.id === id);
       if (!p) throw new Error("project not found");
       return p.config;
@@ -606,8 +606,8 @@ export const api = {
   // UI degrades by hiding the strip — NOT an error to surface. Cadence and interval themselves are WRITTEN
   // through updateProjectConfig above (the existing human-only config PATCH), never through these. ---
   // `repoKey` selects one entry of the project's repo REGISTRY; omitted = the project's PRIMARY repo.
-  mergeGateStatus: (projectId: string, repoKey?: string | null) =>
-    getOrNull<MergeGateStatus>(`/api/projects/${projectId}/merge-gate/status${repoKey ? `?repoKey=${encodeURIComponent(repoKey)}` : ""}`),
+  mergeGateStatus: (projectId: string, repoKey?: string | null, signal?: AbortSignal) =>
+    getOrNull<MergeGateStatus>(`/api/projects/${projectId}/merge-gate/status${repoKey ? `?repoKey=${encodeURIComponent(repoKey)}` : ""}`, signal),
   // "Gate the next merge" — sets gateOwed, so the next landing runs the real gate whatever the cadence.
   // Human-only loopback REST (no agent MCP path), same trust posture as the config writers above.
   gateNextMerge: (projectId: string, repoKey?: string | null) =>
@@ -618,8 +618,8 @@ export const api = {
   // out-of-range value 400s with a reason the Global section shows verbatim (same as projectConfig). ---
   // `resolved.remoteAccess` (the daemon-global bind posture) rides along on this same GET — see
   // gateway/server.ts's handler, which merges it onto the resolved `platform` group in one response.
-  getPlatformConfig: () =>
-    get<{ override: PlatformConfigOverride; resolved: PlatformConfig & { remoteAccess: RemoteAccessConfig } }>("/api/platform/config"),
+  getPlatformConfig: (signal?: AbortSignal) =>
+    get<{ override: PlatformConfigOverride; resolved: PlatformConfig & { remoteAccess: RemoteAccessConfig } }>("/api/platform/config", signal),
   // `config` is a `PlatformConfigPatch` (not a plain `PlatformConfigOverride`): the clearable top-level
   // keys (the tri-state toggles + maxConcurrentGates + the ms-keyed rateLimit/watchers/timeouts groups)
   // accept an explicit `null` as the clear-to-inherit sentinel — see GlobalConfigForm's buildGlobalOverride.
@@ -633,13 +633,13 @@ export const api = {
   // spawn made right now would not pick. There is no stored drain state and no write surface: this is a
   // status readout, so a GET is the whole API. `projectId` narrows to one project (404 for an unknown
   // id); omitted = the whole fleet.
-  harnessDrain: (projectId?: string) =>
-    get<HarnessDrainStatus>(projectId ? `/api/harness/drain?projectId=${encodeURIComponent(projectId)}` : "/api/harness/drain"),
-  agents: (projectId: string) => get<Agent[]>(`/api/projects/${projectId}/agents`),
+  harnessDrain: (projectId?: string, signal?: AbortSignal) =>
+    get<HarnessDrainStatus>(projectId ? `/api/harness/drain?projectId=${encodeURIComponent(projectId)}` : "/api/harness/drain", signal),
+  agents: (projectId: string, signal?: AbortSignal) => get<Agent[]>(`/api/projects/${projectId}/agents`, signal),
   // Every agent across every project, enriched with its project name — ONE round-trip in place of the
   // client N+1 (api.projects() + Promise.all(projects.map(p => api.agents(p.id)))) that Schedules/
   // Settings/EventTriggers each used to run independently to build a "Project / Agent" label map.
-  allAgents: () => get<AgentListItem[]>("/api/agents"),
+  allAgents: (signal?: AbortSignal) => get<AgentListItem[]>("/api/agents", signal),
   createAgent: (projectId: string, b: { name: string; startupPrompt?: string }) =>
     post<Agent>(`/api/projects/${projectId}/agents`, b),
   // `endpoint` flags an agent as API-exposable (Agent Runs R1) — only an endpoint=true agent may be put
@@ -658,13 +658,13 @@ export const api = {
   // Full entries incl. the note `text`, so client-side search (title+key+content) + the note-detail
   // body render off this one read. Human-only; there is deliberately no write/forget counterpart. Each
   // row also carries `backlinks` (card d371a9bf) — structured `{keys, totalFound}`, resolved server-side.
-  projectMemory: (projectId: string) => get<ProjectMemoryEntryWithBacklinks[]>(`/api/projects/${projectId}/memory`),
+  projectMemory: (projectId: string, signal?: AbortSignal) => get<ProjectMemoryEntryWithBacklinks[]>(`/api/projects/${projectId}/memory`, signal),
   // `repoKey` (multi-repo epic 49136451) routes the card at a NON-primary registered repo; omitted /
   // null = the project's primary repo. postErr so the server's `resolveRepoKeyOrError` 400 (which names
   // the registered keys) surfaces verbatim instead of a bare `-> 400`.
   createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string; priority?: Task["priority"]; repoKey?: string | null }) =>
     postErr<Task>(`/api/projects/${projectId}/tasks`, b),
-  sessions: (agentId: string) => get<Session[]>(`/api/agents/${agentId}/sessions`),
+  sessions: (agentId: string, signal?: AbortSignal) => get<Session[]>(`/api/agents/${agentId}/sessions`, signal),
   // role omitted/undefined = auto (the agent's profile role applies, server-side); "manager"/"platform"
   // = explicit role; "auditor" = the read-and-file-only Platform Auditor (P5; locked role server-side);
   // "setup" = the ungated, user-facing Setup Assistant (singleton, reused server-side — startSetup);
@@ -685,7 +685,7 @@ export const api = {
   // Re-pin a live session's frozen connection/capability grants from its agent's CURRENT grants (HUMAN-only
   // REST, Tier 0, no agent MCP surface). Row-write only — it never restarts the session. The drift read is
   // the counts-only dry-run of the same resolution (it carries no ids), so the badge cannot disagree with it.
-  sessionGrantDrift: (id: string) => get<SessionGrantDrift>(`/api/sessions/${id}/grant-drift`),
+  sessionGrantDrift: (id: string, signal?: AbortSignal) => get<SessionGrantDrift>(`/api/sessions/${id}/grant-drift`, signal),
   repinSessionGrants: (id: string) =>
     post<{ sessionId: string; session: Session; diff: Record<string, { old: unknown; new: unknown }> }>(`/api/sessions/${id}/repin-grants`),
   // Manual per-session rate-limit override + retry-now (HUMAN-only; mirrors stop — no agent MCP
@@ -703,8 +703,8 @@ export const api = {
   // server-side (id/agent/role/task/branch) BEFORE the limit/offset apply, so a search reaches the FULL
   // archived set rather than only whatever's already been "load more"'d — Archive.tsx sends its debounced
   // search text here instead of filtering the loaded pages itself. ---
-  archivedSessions: (projectId: string, opts?: { limit?: number; offset?: number; q?: string }) =>
-    get<ArchivedSessionsPage>(`/api/projects/${projectId}/archive?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.q ? `&q=${encodeURIComponent(opts.q)}` : ""}`),
+  archivedSessions: (projectId: string, opts?: { limit?: number; offset?: number; q?: string }, signal?: AbortSignal) =>
+    get<ArchivedSessionsPage>(`/api/projects/${projectId}/archive?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.q ? `&q=${encodeURIComponent(opts.q)}` : ""}`, signal),
   // Cross-project (god-eye) archive: archived sessions across ALL projects, each enriched with
   // projectId/projectName + snapshotExists — feeds the grouped Project → Agent Archive page + Mission
   // Control/Overview/RunHistory's history views. PAGINATED, same `{items, total}` shape as above.
@@ -712,22 +712,22 @@ export const api = {
   // limit/offset apply, so a role-scoped caller's page budget isn't diluted by unrelated rows. Optional
   // `q` is the same server-side search as archivedSessions above (plus project name, since this spans
   // projects), also applied before limit/offset.
-  allArchivedSessions: (opts?: { limit?: number; offset?: number; role?: string; q?: string }) =>
-    get<ArchivedSessionsPage>(`/api/archived-sessions?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.role ? `&role=${opts.role}` : ""}${opts?.q ? `&q=${encodeURIComponent(opts.q)}` : ""}`),
+  allArchivedSessions: (opts?: { limit?: number; offset?: number; role?: string; q?: string }, signal?: AbortSignal) =>
+    get<ArchivedSessionsPage>(`/api/archived-sessions?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.role ? `&role=${opts.role}` : ""}${opts?.q ? `&q=${encodeURIComponent(opts.q)}` : ""}`, signal),
   // A single archived session BY ID, cross-project — for a by-id consumer (SessionView resolving a
   // deep-linked/attention-queue session) that must not depend on that session still being on the FIRST
   // page of the bounded list above. Resolves to `null` (not a thrown error) on the expected 404 — "not
   // archived (or never existed)" is a normal outcome for a caller that's still also checking the live feed.
-  archivedSessionById: (id: string) => getOrNull<ArchivedSessionListItem>(`/api/archived-sessions/${id}`),
+  archivedSessionById: (id: string, signal?: AbortSignal) => getOrNull<ArchivedSessionListItem>(`/api/archived-sessions/${id}`, signal),
   restoreSession: (id: string) => postErr<{ restored: string }>(`/api/sessions/${id}/restore`),
   deleteArchivedSession: (id: string) => delErr<{ deleted: string[] }>(`/api/sessions/${id}/archive`),
-  vaultTree: (projectId: string) => get<VaultEntry[]>(`/api/projects/${projectId}/vault`),
+  vaultTree: (projectId: string, signal?: AbortSignal) => get<VaultEntry[]>(`/api/projects/${projectId}/vault`, signal),
   // `getErr`, not `get`: the Vault page RENDERS this failure (card 4bd4e4a6 — a note an agent renamed
   // out from under the viewer 404s), and the daemon's own `{ error: "file not found" }` says far more to
   // the reader than an opaque `… -> 404`. The echoed `path` is load-bearing too — it is what lets the
   // page prove a loaded body belongs to the file currently selected.
-  vaultFile: (projectId: string, path: string) =>
-    getErr<{ path: string; content: string }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`),
+  vaultFile: (projectId: string, path: string, signal?: AbortSignal) =>
+    getErr<{ path: string; content: string }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`, signal),
   // Raw bytes of a vault file, served with a content-type by extension + X-Content-Type-Options: nosniff
   // (daemon `vault/raw`). Returns the URL string — used directly as an `<img>`/`<iframe>`/`<object>`/
   // download `src`/`href` (the vite dev proxy forwards /api to the live daemon); the browser fetches it.
@@ -771,20 +771,20 @@ export const api = {
   // getErr (not get): a failed read now comes back as a structured `{error}` body (gateway/server.ts
   // catches into `gitError(e)`, card 60b53c8d) — getErr surfaces that named cause as the thrown message
   // instead of an opaque "<url> -> 500".
-  gitLog: (projectId: string) =>
-    getErr<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`),
-  gitBranches: (projectId: string) =>
-    getErr<{ current: string; all: string[] }>(`/api/projects/${projectId}/git/branches`),
+  gitLog: (projectId: string, signal?: AbortSignal) =>
+    getErr<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`, signal),
+  gitBranches: (projectId: string, signal?: AbortSignal) =>
+    getErr<{ current: string; all: string[] }>(`/api/projects/${projectId}/git/branches`, signal),
   // Read-only git log for a bound reference repo (reference-repos epic Phase 5). `index` is the position
   // in the project's OWN referenceRepos[] — the server resolves the path server-side, so this can never
   // reach an arbitrary host path. An out-of-range index 404s.
-  referenceRepoGitLog: (projectId: string, index: number) =>
-    getErr<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/reference-repos/${index}/log`),
+  referenceRepoGitLog: (projectId: string, index: number, signal?: AbortSignal) =>
+    getErr<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/reference-repos/${index}/log`, signal),
   // Read-only git log for a REGISTERED (writable-registry) repo (multi-repo epic 49136451, phase 3) —
   // same index-by-construction contract as the reference-repo log above, indexing the project's OWN
   // repos[]. Read only: the registry itself is written via updateProject, never here.
-  registeredRepoGitLog: (projectId: string, index: number) =>
-    getErr<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/repos/${index}/log`),
+  registeredRepoGitLog: (projectId: string, index: number, signal?: AbortSignal) =>
+    getErr<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/repos/${index}/log`, signal),
   // Git WRITE (HUMAN-only; mirrors the vault writer — no agent MCP surface). Each returns a structured
   // { ok, error? } so the UI shows an expected git failure (dirty tree, no upstream, conflict) instead
   // of a generic throw. commit takes ONLY a message (repo-configured identity, no overrides/trailer).
@@ -817,7 +817,7 @@ export const api = {
       `/api/projects/${projectId}/board${doneLimit === undefined ? "" : `?doneLimit=${doneLimit}`}`, signal),
   // One task's full row (incl. body) — the board drawer's lazy fetch for a DONE card, whose body the
   // board() list route above omits (card 4fa2c146).
-  getTask: (id: string) => get<Task>(`/api/tasks/${id}`),
+  getTask: (id: string, signal?: AbortSignal) => get<Task>(`/api/tasks/${id}`, signal),
   // Atomic safe board-column layout change (card B's endpoint) — the column-manager editor's ONLY
   // mutation path, NOT the blind config PATCH (which still owns every other setting). Sends the FULL
   // desired layout; the server diffs vs current, re-keys cards (renames + removals → defaultLanding) in
@@ -867,9 +867,9 @@ export const api = {
   // --- Card policies (card 61d32daf). Both reads render the daemon's ONE evaluation (the tasks_get `policy` view);
   // the policies themselves are WRITTEN through updateProjectConfig (orchestration.cardPolicies). A daemon without
   // the status route answers 404, which getOrNull reads as "no badges", not an error.
-  taskPolicy: (id: string) => get<{ policy: CardPolicyVerdict[] }>(`/api/tasks/${id}/policy`),
-  cardPolicyStatus: (projectId: string) =>
-    getOrNull<{ tasks: Record<string, CardPolicyCardStatus> }>(`/api/projects/${projectId}/card-policy-status`),
+  taskPolicy: (id: string, signal?: AbortSignal) => get<{ policy: CardPolicyVerdict[] }>(`/api/tasks/${id}/policy`, signal),
+  cardPolicyStatus: (projectId: string, signal?: AbortSignal) =>
+    getOrNull<{ tasks: Record<string, CardPolicyCardStatus> }>(`/api/projects/${projectId}/card-policy-status`, signal),
   // Waive / un-waive ONE requirement of one policy on one card. HUMAN-only loopback REST (there is no MCP path);
   // a waiver needs a reason (1..500 chars) and both write an audit event. The 400 reasons surface verbatim.
   waiveCardPolicy: (taskId: string, body: { policyId: string; requirement: PolicyRequirementKind; reason: string }) =>
@@ -880,29 +880,29 @@ export const api = {
     if (!r.ok) throw new Error(await errorMessageFrom(url, r));
     return r.json() as Promise<{ ok: boolean; removed: boolean }>;
   },
-  transcript: (sessionId: string) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`),
+  transcript: (sessionId: string, signal?: AbortSignal) => get<TranscriptTurn[]>(`/api/sessions/${sessionId}/transcript`, signal),
   // Tail read: the daemon's page envelope from turn `offset` on (mirrors pageTranscript's TranscriptPage).
-  transcriptTail: (sessionId: string, offset: number) =>
+  transcriptTail: (sessionId: string, offset: number, signal?: AbortSignal) =>
     get<{ turns: TranscriptTurn[]; totalTurns: number; offset: number; returned: number; nextOffset: number | null }>(
-      `/api/sessions/${sessionId}/transcript?offset=${offset}`),
+      `/api/sessions/${sessionId}/transcript?offset=${offset}`, signal),
 
   // --- Agent Runs (R4b Runs UI; HUMAN/loopback REST, project-scoped, no auth — mirrors the other
   // /api/projects/:id surfaces, DELIBERATELY off the R3 key-authed path). list returns FULL AgentRun
   // rows newest-first (across every key); run is one full row; cancelRun teardowns an in-flight run
   // (idempotent no-op on a terminal one) and returns its now-final status. The key-admin / endpoint-flag
   // surface (the trust-boundary write side) lives in the separate block below + the Keys & Endpoints view. ---
-  runs: (projectId: string) => get<AgentRun[]>(`/api/projects/${projectId}/runs`),
-  run: (projectId: string, runId: string) => get<AgentRun>(`/api/projects/${projectId}/runs/${runId}`),
+  runs: (projectId: string, signal?: AbortSignal) => get<AgentRun[]>(`/api/projects/${projectId}/runs`, signal),
+  run: (projectId: string, runId: string, signal?: AbortSignal) => get<AgentRun>(`/api/projects/${projectId}/runs/${runId}`, signal),
   // A run's transcript: the live engine JSONL while it exists, else the retained snapshot (transcriptRef).
   // Run-scoped (NOT the session-transcript route, which only snapshot-falls-back on archivedAt — runs
   // never get it, so old runs read "" there despite a retained snapshot).
-  runTranscript: (projectId: string, runId: string) =>
-    get<TranscriptTurn[]>(`/api/projects/${projectId}/runs/${runId}/transcript`),
+  runTranscript: (projectId: string, runId: string, signal?: AbortSignal) =>
+    get<TranscriptTurn[]>(`/api/projects/${projectId}/runs/${runId}/transcript`, signal),
   cancelRun: (projectId: string, runId: string) =>
     post<{ runId: string; status: AgentRun["status"] }>(`/api/projects/${projectId}/runs/${runId}/cancel`),
   // Run audit trail (follow-up #1) — chiefly cap-rejections (a 429 at POST /api/runs makes NO run row, so
   // it's invisible in the runs list). Project-scoped, newest-first, bounded; same unauthed-loopback posture.
-  runEvents: (projectId: string) => get<RunEvent[]>(`/api/projects/${projectId}/run-events`),
+  runEvents: (projectId: string, signal?: AbortSignal) => get<RunEvent[]>(`/api/projects/${projectId}/run-events`, signal),
 
   // --- Agent Runs key & endpoint admin (R1 + R4a kill-switch). HUMAN/loopback REST, project-scoped,
   // NO auth and NO agent MCP path — the trust-boundary key surface (mint/rotate/revoke/kill a key,
@@ -911,7 +911,7 @@ export const api = {
   // — the caller must store it immediately; it is never recoverable after (never persist/refetch it).
   // `killKey` pauses the key + cancels its in-flight runs (`{ cancelled }`). Mutations 400 with a
   // readable `{ error }` (bad caps / non-endpoint agent in the allowlist), surfaced inline via postErr. ---
-  keys: (projectId: string) => get<ApiKey[]>(`/api/projects/${projectId}/keys`),
+  keys: (projectId: string, signal?: AbortSignal) => get<ApiKey[]>(`/api/projects/${projectId}/keys`, signal),
   createKey: (projectId: string, b: { name: string; endpointAgentIds: AgentId[]; caps: ApiKeyCaps; status?: ApiKeyStatus }) =>
     postErr<{ key: ApiKey; plaintext: string }>(`/api/projects/${projectId}/keys`, b),
   updateKey: (keyId: string, patch: { name?: string; endpointAgentIds?: AgentId[]; caps?: ApiKeyCaps; status?: ApiKeyStatus }) =>
@@ -920,24 +920,24 @@ export const api = {
   killKey: (keyId: string) => postErr<{ cancelled: number }>(`/api/keys/${keyId}/kill`),
   deleteKey: (keyId: string) => delErr<{ ok: boolean }>(`/api/keys/${keyId}`),
   // Pending one-shot wake-ups scheduled for a session (the wake_me primitive).
-  sessionWakes: (sessionId: string) => get<Wake[]>(`/api/sessions/${sessionId}/wakes`),
+  sessionWakes: (sessionId: string, signal?: AbortSignal) => get<Wake[]>(`/api/sessions/${sessionId}/wakes`, signal),
   cancelWake: (sessionId: string, wakeId: string) =>
     del<{ cancelled: boolean }>(`/api/sessions/${sessionId}/wakes/${wakeId}`),
   // Queued inbound messages held for a session (worker reports / turns waiting for it to free up).
   // Entries carry a stable id so the UI can address a specific one for delete/edit/reorder.
-  sessionQueue: (sessionId: string) => get<{ pending: QueuedMessage[] }>(`/api/sessions/${sessionId}/queue`),
+  sessionQueue: (sessionId: string, signal?: AbortSignal) => get<{ pending: QueuedMessage[] }>(`/api/sessions/${sessionId}/queue`, signal),
   // Bulk counterparts of the two above — ONE round-trip for a whole grid of session cards (Overview's
   // ProjectTerminals + the Terminals page) instead of 2×N per poll window. Keyed by sessionId; a
   // session absent from the response has nothing pending. Empty `ids` short-circuits to `{}` client-side
   // (no round-trip for an empty grid).
-  sessionQueuesBulk: (ids: string[]) =>
+  sessionQueuesBulk: (ids: string[], signal?: AbortSignal) =>
     ids.length === 0
       ? Promise.resolve<Record<string, QueuedMessage[]>>({})
-      : get<Record<string, QueuedMessage[]>>(`/api/sessions/queues?ids=${ids.join(",")}`),
-  sessionWakesBulk: (ids: string[]) =>
+      : get<Record<string, QueuedMessage[]>>(`/api/sessions/queues?ids=${ids.join(",")}`, signal),
+  sessionWakesBulk: (ids: string[], signal?: AbortSignal) =>
     ids.length === 0
       ? Promise.resolve<Record<string, Wake[]>>({})
-      : get<Record<string, Wake[]>>(`/api/sessions/wakes?ids=${ids.join(",")}`),
+      : get<Record<string, Wake[]>>(`/api/sessions/wakes?ids=${ids.join(",")}`, signal),
   // Mutate the held queue (human-only; id-addressed). A stale id (already drained) is a graceful no-op.
   deleteQueued: (sessionId: string, entryId: string) =>
     del<{ deleted: boolean }>(`/api/sessions/${sessionId}/queue/${entryId}`),
@@ -959,7 +959,7 @@ export const api = {
   // polled for the live lane-hero. `gatesHistory` = the paginated settled gate-run events; `projectId`
   // scopes it server-side (undefined = ALL). PAGINATED `{items,total,limit}` (mirrors archivedSessions):
   // a "load more" consumer accumulates by offset and reads the effective `limit` back to detect a cap. ---
-  gatesActive: () => get<GatesActive>("/api/gates/active"),
+  gatesActive: (signal?: AbortSignal) => get<GatesActive>("/api/gates/active", signal),
   // --- node_modules reclaim (card 1008e305's two human-only loopback routes; consumed by the Settings
   // panel card 08ac5925 built). READ is safe to poll and reclaims nothing; POST PERMANENTLY DELETES the
   // named worktrees' `node_modules` directories on this host and is irreversible.
@@ -969,19 +969,21 @@ export const api = {
   // paths; a variant silently lands in `noLongerEligible` and the caller sees a no-op with no error).
   // Pass the SAME `minAgeHours` the listing was read at: the POST re-derives eligibility at whatever
   // threshold it is given, so a mismatch makes every requested path ineligible. ---
-  nodeModulesReclaimable: (minAgeHours?: number) =>
+  nodeModulesReclaimable: (minAgeHours?: number, signal?: AbortSignal) =>
     get<NodeModulesReclaimListing>(
       `/api/worktrees/node-modules-reclaimable${minAgeHours === undefined ? "" : `?minAgeHours=${encodeURIComponent(String(minAgeHours))}`}`,
+      signal,
     ),
   reclaimNodeModules: (body: { minAgeHours?: number; worktreePaths?: string[] }) =>
     postErr<NodeModulesReclaimRunResult>("/api/worktrees/reclaim-node-modules", body),
-  gatesHistory: (opts?: { projectId?: string; limit?: number; offset?: number }) =>
+  gatesHistory: (opts?: { projectId?: string; limit?: number; offset?: number }, signal?: AbortSignal) =>
     get<GateHistoryPage>(
       `/api/gates/history?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.projectId ? `&projectId=${encodeURIComponent(opts.projectId)}` : ""}`,
+      signal,
     ),
   // The freshness policy for this one lives in `workerDiffQuery` below — every consumer spreads that
   // rather than hand-writing the key/fetcher, so the cache entry is genuinely shared.
-  workerDiff: (sessionId: string) => get<BranchDiff>(`/api/sessions/${sessionId}/diff`),
+  workerDiff: (sessionId: string, signal?: AbortSignal) => get<BranchDiff>(`/api/sessions/${sessionId}/diff`, signal),
   // Human-initiated merge of a worker's branch — runs the daemon's fail-closed build gate then
   // merges (manager derived from the worker's parentSessionId server-side). `merged:null` (card
   // 361520a0, Half Four) is a THIRD state, distinct from `false` — the bounded wait ceiling was hit
@@ -1001,7 +1003,7 @@ export const api = {
   // created schedules will NOT fire because the scheduler is off (the default).
   // The cache key and freshness policy for this one live in `orchStatusQuery` below — every consumer
   // (and the /ws/fleet feed that seeds it) spreads that rather than hand-writing the key.
-  orchestrationStatus: () => get<{ pausedScopes: string[]; schedulerEnabled: boolean }>("/api/orchestration/status"),
+  orchestrationStatus: (signal?: AbortSignal) => get<{ pausedScopes: string[]; schedulerEnabled: boolean }>("/api/orchestration/status", signal),
 
   // --- Manager→human DECISION INBOX (card 8701bdbb, child B). READ side: `openQuestions` is the GLOBAL
   // "waiting on me" queue (pending+answered across ALL projects, enriched with the asking agent/project
@@ -1112,36 +1114,36 @@ export const api = {
   // `auditWave` = a manager + all its workers, de-duped. `auditDiff` aligns two timelines (scope applies
   // to both sides); omit `b` to compare A against its recycledFrom predecessor — that case 400s with a
   // readable reason when A has none, surfaced via getErr. ---
-  auditSession: (id: string) => get<AuditTimeline>(`/api/audit/session/${encodeURIComponent(id)}`),
-  auditWave: (managerId: string) => get<AuditTimeline>(`/api/audit/wave/${encodeURIComponent(managerId)}`),
-  auditDiff: (a: string, b: string | undefined, scope: AuditScope) => {
+  auditSession: (id: string, signal?: AbortSignal) => get<AuditTimeline>(`/api/audit/session/${encodeURIComponent(id)}`, signal),
+  auditWave: (managerId: string, signal?: AbortSignal) => get<AuditTimeline>(`/api/audit/wave/${encodeURIComponent(managerId)}`, signal),
+  auditDiff: (a: string, b: string | undefined, scope: AuditScope, signal?: AbortSignal) => {
     const params = new URLSearchParams({ a, scope });
     if (b) params.set("b", b);
-    return getErr<AuditDiff>(`/api/audit/diff?${params.toString()}`);
+    return getErr<AuditDiff>(`/api/audit/diff?${params.toString()}`, signal);
   },
   // Releases v1 Part 3 — the daemon's `loom` package version, surfaced unobtrusively in the header.
-  version: () => get<{ version: string }>("/api/version"),
+  version: (signal?: AbortSignal) => get<{ version: string }>("/api/version", signal),
   // Epic 2c-2 — the daemon's npm "update available" status (read-only, polled into the banner).
-  updateStatus: () => get<UpdateStatus>("/api/update-status"),
+  updateStatus: (signal?: AbortSignal) => get<UpdateStatus>("/api/update-status", signal),
   // Card e98bf784 — the served `assets/index-<hash>.js` filename, for the stale-tab reload notice. The
   // CHEAP read: deliberately NOT /api/deploy-status, which costs a recursive disk walk plus a git call.
-  webBundle: () => get<{ webBundle: string | null }>("/api/web-bundle"),
+  webBundle: (signal?: AbortSignal) => get<{ webBundle: string | null }>("/api/web-bundle", signal),
   // Epic 2c-2 — trigger the self-update (stop→install→start). Loopback-only + packaged-only on the daemon
   // (a source daemon 409s); NOT an agent MCP tool — same trust boundary as /internal/shutdown. The daemon
   // acks then restarts, so this connection drops mid-flight — the caller treats that as "update started".
   triggerUpdate: () => postErr<{ ok: boolean; updating?: boolean }>("/internal/update"),
   // The user's REAL Claude plan-usage (account-wide rate-limit headroom) — one daemon-side cached
   // poll of the OAuth usage endpoint. Always 200; `available:false`+reason when the daemon can't fetch it.
-  usageLimits: () => get<UsageLimitsStatus>("/api/usage/limits"),
+  usageLimits: (signal?: AbortSignal) => get<UsageLimitsStatus>("/api/usage/limits", signal),
   // HISTORICAL run usage (GET /api/usage/history) — timespan + project-scoped token/cost totals
   // aggregated from the `runs` table (Loom's only persisted time-series usage; interactive sessions
   // keep none). `sinceIso` is the window cutoff (server-clamped to (now-1yr, now]); `projectId` omitted
   // or "all" = every project. The applied since + filter are echoed back. Human-only loopback, like
   // usageLimits — NOT an agent MCP tool. DISTINCT from the live per-session occupancy on the Usage page.
-  usageHistory: (sinceIso: string, projectId?: string) => {
+  usageHistory: (sinceIso: string, projectId?: string, signal?: AbortSignal) => {
     const params = new URLSearchParams({ since: sinceIso });
     if (projectId && projectId !== "all") params.set("projectId", projectId);
-    return get<UsageHistory>(`/api/usage/history?${params.toString()}`);
+    return get<UsageHistory>(`/api/usage/history?${params.toString()}`, signal);
   },
   // INTERACTIVE-SESSION usage telemetry (GET /api/usage/sessions/history) — the OWNER'S OWN
   // interactive-session BILLED usage over time, sampled token-free from transcripts (epic c9924bcd).
@@ -1153,11 +1155,11 @@ export const api = {
   // `taskBreakdown` (card 58d5a36f/30266229) adds byTask + orchestrationOverhead + unattributed — a
   // strict partition of the window's totals. The server returns all three only when the request is
   // ALSO scoped to one real project, so passing it with no/"all" projectId is a no-op, not an error.
-  sessionUsageHistory: (sinceIso: string, projectId?: string, taskBreakdown?: boolean) => {
+  sessionUsageHistory: (sinceIso: string, projectId?: string, taskBreakdown?: boolean, signal?: AbortSignal) => {
     const params = new URLSearchParams({ since: sinceIso });
     if (projectId && projectId !== "all") params.set("projectId", projectId);
     if (taskBreakdown) params.set("taskBreakdown", "true");
-    return get<SessionUsageHistory>(`/api/usage/sessions/history?${params.toString()}`);
+    return get<SessionUsageHistory>(`/api/usage/sessions/history?${params.toString()}`, signal);
   },
   // Drop the GLOBAL usage-awareness latch so new worker_spawn is unblocked without touching any
   // session — for a transient overload with real headroom (HUMAN-only; no agent MCP surface).
@@ -1169,17 +1171,17 @@ export const api = {
   killOrchestration: () => post<{ stopped: number }>("/api/orchestration/kill"),
 
   // --- Plain shell terminals (HUMAN-only; spawned via REST, never an MCP tool) ---
-  terminals: () => get<ShellTerminal[]>("/api/terminals"),
-  defaultShell: () => get<{ command: string }>("/api/terminals/default-shell"),
+  terminals: (signal?: AbortSignal) => get<ShellTerminal[]>("/api/terminals", signal),
+  defaultShell: (signal?: AbortSignal) => get<{ command: string }>("/api/terminals/default-shell", signal),
   createTerminal: (b: { projectId: string; command?: string; args?: string[]; label?: string }) =>
     post<ShellTerminal>("/api/terminals", b),
   killTerminal: (id: string) => del<{ ok: boolean }>(`/api/terminals/${id}`),
 
   // --- Loom-managed skills (UI-editable; injected into every session as project-local) ---
-  skills: () => get<SkillSummary[]>("/api/skills"),
+  skills: (signal?: AbortSignal) => get<SkillSummary[]>("/api/skills", signal),
   // Carries `permissionWidening` too (card 87a51903), on the same omit-when-clean convention the list
   // response uses — the Skills page reads it off the LIST entry, so this is for a non-UI reader.
-  skill: (name: string) => get<{ name: string; content: string; permissionWidening?: SkillPermissionVector[] }>(`/api/skills/${encodeURIComponent(name)}`),
+  skill: (name: string, signal?: AbortSignal) => get<{ name: string; content: string; permissionWidening?: SkillPermissionVector[] }>(`/api/skills/${encodeURIComponent(name)}`, signal),
   saveSkill: (name: string, content: string) => put<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`, { content }),
   createSkill: (name: string) => post<{ name: string }>("/api/skills", { name }),
   deleteSkill: (name: string) => del<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}`),
@@ -1187,10 +1189,10 @@ export const api = {
   publishSkill: (name: string) => post<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}/publish`),
   // --- Skill update adoption (3-way merge; only meaningful when a skill reports updateAvailable). ---
   // The raw base→shipped pair (SKILL.md) + the content-free per-file flag summary for the whole dir.
-  skillUpdateDiff: (name: string) => get<SkillUpdateDiff>(`/api/skills/${encodeURIComponent(name)}/update-diff`),
+  skillUpdateDiff: (name: string, signal?: AbortSignal) => get<SkillUpdateDiff>(`/api/skills/${encodeURIComponent(name)}/update-diff`, signal),
   // One tracked file's three versions — fetched only when that file's row is expanded (the content tier).
-  skillFileDiff: (name: string, path: string) =>
-    get<SkillFileDiff>(`/api/skills/${encodeURIComponent(name)}/file-diff?path=${encodeURIComponent(path)}`),
+  skillFileDiff: (name: string, path: string, signal?: AbortSignal) =>
+    get<SkillFileDiff>(`/api/skills/${encodeURIComponent(name)}/file-diff?path=${encodeURIComponent(path)}`, signal),
   // Resolve ONE diverged reference/script file. take:"mine" keeps the user's copy byte-identical and just
   // advances base (discards nothing, clears the stuck "update available"); take:"shipped" takes shipped
   // for that ONE file. `shippedHash` comes from the file-diff that is currently on screen and 409s if the
@@ -1199,7 +1201,7 @@ export const api = {
     postErr<{ ok: true; path: string; take: "mine" | "shipped" }>(
       `/api/skills/${encodeURIComponent(name)}/file-resolve`, { path, take, shippedHash }),
   // Dry-run the 3-way merge: { clean } → one-click adopt; otherwise conflicts to resolve. 409 if no update.
-  skillMergePreview: (name: string) => get<SkillMergePreview>(`/api/skills/${encodeURIComponent(name)}/merge-preview`),
+  skillMergePreview: (name: string, signal?: AbortSignal) => get<SkillMergePreview>(`/api/skills/${encodeURIComponent(name)}/merge-preview`, signal),
   // Adopt the update: empty content one-clicks the clean auto-merge; resolved full content lands a
   // conflict resolution. Advances base=shipped. 409 (surfaced via postErr) if it isn't a clean auto-merge
   // and no content was supplied, or there's no update to adopt.
@@ -1209,17 +1211,17 @@ export const api = {
   // --- Released skill copies at ONE PROJECT's shared doctrine dir (cards 8b38b920 / 75ea3f73). ---
   // The list. A project with no repoPath has no doctrine dir and always answers `{released:[]}` — the
   // panel distinguishes that from a genuinely empty list off the project row, not off this response.
-  releasedSkills: (projectId: string) =>
-    get<{ released: ReleasedSkill[] }>(`/api/projects/${encodeURIComponent(projectId)}/skills/released`),
+  releasedSkills: (projectId: string, signal?: AbortSignal) =>
+    get<{ released: ReleasedSkill[] }>(`/api/projects/${encodeURIComponent(projectId)}/skills/released`, signal),
   // The summary tier: reason, age, the live fingerprint to send back, and the content-free file list.
   // `getErr` so the server's own 404 reason ("not currently released at this project") is shown verbatim
   // rather than an opaque "-> 404" — a name CAN stop being released between the list and this read.
-  releasedSkillDiff: (projectId: string, name: string) =>
-    getErr<ReleasedSkillDiff>(`/api/projects/${encodeURIComponent(projectId)}/skills/${encodeURIComponent(name)}/released-diff`),
+  releasedSkillDiff: (projectId: string, name: string, signal?: AbortSignal) =>
+    getErr<ReleasedSkillDiff>(`/api/projects/${encodeURIComponent(projectId)}/skills/${encodeURIComponent(name)}/released-diff`, signal),
   // One file's two sides, fetched only when that file's row is expanded.
-  releasedSkillDiffFile: (projectId: string, name: string, path: string) =>
+  releasedSkillDiffFile: (projectId: string, name: string, path: string, signal?: AbortSignal) =>
     getErr<ReleasedSkillFileContent>(
-      `/api/projects/${encodeURIComponent(projectId)}/skills/${encodeURIComponent(name)}/released-diff?path=${encodeURIComponent(path)}`),
+      `/api/projects/${encodeURIComponent(projectId)}/skills/${encodeURIComponent(name)}/released-diff?path=${encodeURIComponent(path)}`, signal),
   // Overwrite the released copy with the current store copy and hand management back to Loom.
   // ⛔ `fingerprint` MUST be the one from the diff the human actually reviewed — NEVER a value refetched
   // at click time, which would defeat the server's whole TOCTOU guard and silently discard a hand edit
@@ -1235,8 +1237,8 @@ export const api = {
   // → 201; updateProfile is a partial-merge (omitted fields are preserved server-side); resetProfile
   // restores a bundled profile to its shipped fields. The list/get/reset/adopt responses carry the
   // computed customization state (bundled + customized/updateAvailable for bundled-by-name rows). ---
-  profiles: () => get<ProfileSummary[]>("/api/profiles"),
-  profile: (id: string) => get<ProfileSummary>(`/api/profiles/${encodeURIComponent(id)}`),
+  profiles: (signal?: AbortSignal) => get<ProfileSummary[]>("/api/profiles", signal),
+  profile: (id: string, signal?: AbortSignal) => get<ProfileSummary>(`/api/profiles/${encodeURIComponent(id)}`, signal),
   createProfile: (b: Omit<Profile, "id">) => post<Profile>("/api/profiles", b),
   // The save/reset/adopt responses may carry `grantReach` (card 3c4e0df6) — present ONLY when that write
   // ADDED a human-only grant, naming which agents (in which projects) were already bound to this GLOBAL
@@ -1252,9 +1254,9 @@ export const api = {
   // profile reports updateAvailable). The profiles analog of the skill adoption routes, but FIELD-level
   // (profiles are structured, not text). ---
   // "What shipped changed" since last sync: the base→shipped field changes (each carries mine/base/shipped).
-  profileUpdateDiff: (id: string) => get<{ changed: ProfileFieldMerge[] }>(`/api/profiles/${encodeURIComponent(id)}/update-diff`),
+  profileUpdateDiff: (id: string, signal?: AbortSignal) => get<{ changed: ProfileFieldMerge[] }>(`/api/profiles/${encodeURIComponent(id)}/update-diff`, signal),
   // Dry-run the field-level 3-way merge: { clean } → one-click adopt; otherwise conflicts to resolve. 409 if no update.
-  profileMergePreview: (id: string) => get<ProfileMergeResult>(`/api/profiles/${encodeURIComponent(id)}/merge-preview`),
+  profileMergePreview: (id: string, signal?: AbortSignal) => get<ProfileMergeResult>(`/api/profiles/${encodeURIComponent(id)}/merge-preview`, signal),
   // Adopt the update: empty/absent resolutions one-clicks a clean auto-merge; a resolutions map (per
   // conflict field → mine|shipped) lands a conflict resolution. Advances base=shipped, returns the updated
   // profile + computed state. 409 (surfaced via postErr) if conflicts are left unresolved or there's no update.
@@ -1265,7 +1267,7 @@ export const api = {
   // launches a host process (venv create + pip install), same trust posture as the git/vault writers, so
   // there is NO agent MCP path. `pythonProvisioning` reads the live status (poll while `installing`);
   // `retryPythonProvisioning` re-kicks it off the daemon's event loop and returns the same status shape. ---
-  pythonProvisioning: () => get<CapabilityProvisioning>("/api/python/provisioning"),
+  pythonProvisioning: (signal?: AbortSignal) => get<CapabilityProvisioning>("/api/python/provisioning", signal),
   retryPythonProvisioning: () => post<CapabilityProvisioning>("/api/python/provisioning/retry"),
 
   // --- GENERIC per-slug capability provisioning (card e7d6e43b's REST pair; card cd9a78bc's reader).
@@ -1273,8 +1275,8 @@ export const api = {
   // kind the daemon's per-slug tracker populates (lib/capabilityProvisioning.ts owns that predicate — an
   // untracked kind answers a hardcoded `idle` here forever, so don't read one). The retry POST clears a
   // TERMINAL `failed` status first, so it is never suppressed by npm-pinned's own backoff. ---
-  capabilityProvisioning: (slug: string) =>
-    get<CapabilityProvisioning>(`/api/capabilities/${encodeURIComponent(slug)}/provisioning`),
+  capabilityProvisioning: (slug: string, signal?: AbortSignal) =>
+    get<CapabilityProvisioning>(`/api/capabilities/${encodeURIComponent(slug)}/provisioning`, signal),
   retryCapabilityProvisioning: (slug: string) =>
     post<CapabilityProvisioning>(`/api/capabilities/${encodeURIComponent(slug)}/provisioning/retry`),
 
@@ -1284,7 +1286,7 @@ export const api = {
   // nextFireAt server-side on a cron change. Both the create and the cron patch 400 on an invalid cron
   // expression. `prompt` (optional, editable in BOTH create and edit — unlike agentId) is a custom task
   // description appended to the agent's own startupPrompt when the schedule fires. ---
-  schedules: () => get<Schedule[]>("/api/schedules"),
+  schedules: (signal?: AbortSignal) => get<Schedule[]>("/api/schedules", signal),
   // `kind` (Platform Manager P5 / B6) selects what a fire spawns — "manager" (default), "auditor" (the
   // dev read-and-file-only Platform Auditor), or "workspace-auditor" (the end-user Workspace Auditor).
   // The Platform page's Auditor card puts the Workspace Auditor on a cadence with it.
@@ -1301,8 +1303,8 @@ export const api = {
   // all schedules; optional `scheduleId` scopes to one. PAGINATED — the caller accumulates TRUE offset
   // pages for "Load more" (`{items, total, limit}`, same contract as the archive lists). Lazy: the
   // Schedules page only calls this once its collapsed history section is expanded.
-  scheduleHistory: (opts?: { scheduleId?: string; outcome?: "fired" | "deferred" | "failed" | "missed"; limit?: number; offset?: number }) =>
-    get<ScheduleHistoryPage>(`/api/schedules/history?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.scheduleId ? `&scheduleId=${encodeURIComponent(opts.scheduleId)}` : ""}${opts?.outcome ? `&outcome=${opts.outcome}` : ""}`),
+  scheduleHistory: (opts?: { scheduleId?: string; outcome?: "fired" | "deferred" | "failed" | "missed"; limit?: number; offset?: number }, signal?: AbortSignal) =>
+    get<ScheduleHistoryPage>(`/api/schedules/history?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.scheduleId ? `&scheduleId=${encodeURIComponent(opts.scheduleId)}` : ""}${opts?.outcome ? `&outcome=${opts.outcome}` : ""}`, signal),
 
   // --- Event Triggers (Loom Event Triggers subsystem, card f5d07121): when an INTERNAL orchestration
   // event of kind `eventKind` fires (optionally scoped to `projectId` — null = every project), WAKE an
@@ -1314,7 +1316,7 @@ export const api = {
   // update 400/404 with a readable `{ error }` (unknown kind, missing project/session/agent, or a
   // wake-without-session / spawn-without-agent mismatch) surfaced verbatim via *Err so the modal shows the
   // reason inline. Toggling `enabled` re-seeds the watermark server-side (no history replay on re-enable). ---
-  eventTriggers: () => get<EventTrigger[]>("/api/event-triggers"),
+  eventTriggers: (signal?: AbortSignal) => get<EventTrigger[]>("/api/event-triggers", signal),
   createEventTrigger: (b: { eventKind: EventTriggerEventKind; projectId: string | null; mode: EventTrigger["mode"]; targetSessionId?: string | null; agentId?: string | null; enabled?: boolean }) =>
     postErr<EventTrigger>("/api/event-triggers", b),
   updateEventTrigger: (id: string, patch: { eventKind?: EventTriggerEventKind; projectId?: string | null; mode?: EventTrigger["mode"]; targetSessionId?: string | null; agentId?: string | null; enabled?: boolean }) =>
@@ -1325,7 +1327,7 @@ export const api = {
   // terminal card). HUMAN/UI data managed inline in the terminal popover; there is intentionally NO MCP
   // path. POST appends (→201); PUT is a partial patch (→200/404); DELETE is idempotent (→200). create/
   // update surface the server's `{ error }` body verbatim (label/prompt bounds) via *Err for inline display. ---
-  presetPrompts: () => get<PresetPrompt[]>("/api/preset-prompts"),
+  presetPrompts: (signal?: AbortSignal) => get<PresetPrompt[]>("/api/preset-prompts", signal),
   createPresetPrompt: (b: { label: string; prompt: string }) => postErr<PresetPrompt>("/api/preset-prompts", b),
   updatePresetPrompt: (id: string, patch: { label?: string; prompt?: string; position?: number }) =>
     putErr<PresetPrompt>(`/api/preset-prompts/${id}`, patch),
@@ -1337,7 +1339,7 @@ export const api = {
   // suggestion's label+prompt (201) and drops it off pending; dismiss drops it (200). Both surface the
   // server's `{ error }` body via *Err — a 409 (already adopted/dismissed: stale list / double-click)
   // carries a reason the UI shows verbatim before it refetches. There is NO MCP path (human/UI data). ---
-  presetPromptSuggestions: () => get<PresetPromptSuggestion[]>("/api/preset-prompt-suggestions"),
+  presetPromptSuggestions: (signal?: AbortSignal) => get<PresetPromptSuggestion[]>("/api/preset-prompt-suggestions", signal),
   adoptPresetPromptSuggestion: (id: string) => postErr<PresetPrompt>(`/api/preset-prompt-suggestions/${id}/adopt`),
   dismissPresetPromptSuggestion: (id: string) => postErr<{ ok: boolean }>(`/api/preset-prompt-suggestions/${id}/dismiss`),
 
@@ -1348,14 +1350,14 @@ export const api = {
   // only — the bot token is ENCRYPTED at rest on the daemon and NEVER returned in clear (configured +
   // last-4 only). create/update surface the server's `{ error }` body verbatim (token/cadence/home
   // validation) via *Err for inline display; an omitted `botToken` on update keeps the stored token. ---
-  companionConfigs: () => get<CompanionConfigMasked[]>("/api/companion/config"),
+  companionConfigs: (signal?: AbortSignal) => get<CompanionConfigMasked[]>("/api/companion/config", signal),
   // RUNTIME reply-health (card 8bda9fc6) — a DEDICATED read, deliberately NOT part of the config shape
   // above: config is read-modify-write, this is per-turn telemetry that is never written back. `alerting`
   // is the zero-reply detector's live state (N turns completed with zero chat_reply deliveries), which the
   // chat panel renders as an alert banner — the detector's named reader.
-  companionReplyStatuses: () => get<CompanionReplyStatus[]>("/api/companion/status"),
-  companionReplyStatus: (sessionId: string) =>
-    get<CompanionReplyStatus>(`/api/companion/status/${encodeURIComponent(sessionId)}`),
+  companionReplyStatuses: (signal?: AbortSignal) => get<CompanionReplyStatus[]>("/api/companion/status", signal),
+  companionReplyStatus: (sessionId: string, signal?: AbortSignal) =>
+    get<CompanionReplyStatus>(`/api/companion/status/${encodeURIComponent(sessionId)}`, signal),
   // The simple, in-app-first create: a bare `{ name }` provisions a working IN-APP-ONLY companion (spawns
   // the assistant session + writes the in-app binding + arms it) with ZERO external config. Status-aware
   // (409 = single-companion guard) so the create flow can render a friendly precondition message.
@@ -1366,7 +1368,7 @@ export const api = {
   deleteCompanionConfig: (sessionId: string) => del<{ ok: boolean }>(`/api/companion/config/${encodeURIComponent(sessionId)}`),
   // Access routes: the durable session↔chat bindings + the per-binding group sender allowlist. The
   // binding create 409s ({ error }) when the (channel, chatId) route is already bound to another session.
-  companionBindings: () => get<CompanionBinding[]>("/api/companion/bindings"),
+  companionBindings: (signal?: AbortSignal) => get<CompanionBinding[]>("/api/companion/bindings", signal),
   createCompanionBinding: (b: { sessionId: string; channel: string; chatId: string; scope: "dm" | "group" }) =>
     postErr<CompanionBinding>("/api/companion/bindings", b),
   // Delete a session's binding(s). With `channel` set, removes ONLY that channel's binding and keeps the
@@ -1376,8 +1378,8 @@ export const api = {
     del<{ ok: boolean }>(
       `/api/companion/bindings/${encodeURIComponent(sessionId)}${channel ? `?channel=${encodeURIComponent(channel)}` : ""}`,
     ),
-  companionAllowedSenders: (sessionId: string) =>
-    get<CompanionAllowedSender[]>(`/api/companion/allowed-senders?sessionId=${encodeURIComponent(sessionId)}`),
+  companionAllowedSenders: (sessionId: string, signal?: AbortSignal) =>
+    get<CompanionAllowedSender[]>(`/api/companion/allowed-senders?sessionId=${encodeURIComponent(sessionId)}`, signal),
   addCompanionAllowedSender: (b: { sessionId: string; channel: string; senderId: string; label?: string | null }) =>
     postErr<CompanionAllowedSender>("/api/companion/allowed-senders", b),
   removeCompanionAllowedSender: (id: string) => del<{ ok: boolean }>(`/api/companion/allowed-senders/${encodeURIComponent(id)}`),
@@ -1389,8 +1391,8 @@ export const api = {
   // app_meta value keyed by sessionId, never shared across companions — the multi-companion
   // cross-delivery fix). `setCompanionHome` surfaces the server's `{ error }` verbatim; clearing turns
   // THIS companion's proactive heartbeat OFF (no route ⇒ nothing to chat_reply) until a home is set again.
-  companionHome: (sessionId: string) =>
-    get<{ channel: string; chatId: string } | null>(`/api/companion/home?sessionId=${encodeURIComponent(sessionId)}`),
+  companionHome: (sessionId: string, signal?: AbortSignal) =>
+    get<{ channel: string; chatId: string } | null>(`/api/companion/home?sessionId=${encodeURIComponent(sessionId)}`, signal),
   setCompanionHome: (sessionId: string, b: { channel: string; chatId: string }) =>
     putErr<{ channel: string; chatId: string } | null>("/api/companion/home", { sessionId, ...b }),
   clearCompanionHome: (sessionId: string) =>
@@ -1403,23 +1405,23 @@ export const api = {
   // putErr). SKILLS: read (list + single content) + curate (delete) over the companion's OWN isolated skill
   // store — authoring stays the companion's on-demand MCP job, this surface only reviews + prunes. delete
   // returns the updated list (404 with a reason on an unknown skill, surfaced via delErr). ---
-  companionPrompt: (sessionId: string) =>
-    getErr<CompanionPrompt>(`/api/companion/prompt/${encodeURIComponent(sessionId)}`),
+  companionPrompt: (sessionId: string, signal?: AbortSignal) =>
+    getErr<CompanionPrompt>(`/api/companion/prompt/${encodeURIComponent(sessionId)}`, signal),
   updateCompanionPrompt: (sessionId: string, startupPrompt: string) =>
     putErr<CompanionPrompt>(`/api/companion/prompt/${encodeURIComponent(sessionId)}`, { startupPrompt }),
-  companionSkills: (sessionId: string) =>
-    get<{ skills: CompanionSkillEntry[] }>(`/api/companion/skills/${encodeURIComponent(sessionId)}`).then((r) => r.skills),
-  companionSkill: (sessionId: string, name: string) =>
-    getErr<{ name: string; content: string }>(`/api/companion/skills/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
+  companionSkills: (sessionId: string, signal?: AbortSignal) =>
+    get<{ skills: CompanionSkillEntry[] }>(`/api/companion/skills/${encodeURIComponent(sessionId)}`, signal).then((r) => r.skills),
+  companionSkill: (sessionId: string, name: string, signal?: AbortSignal) =>
+    getErr<{ name: string; content: string }>(`/api/companion/skills/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`, signal),
   deleteCompanionSkill: (sessionId: string, name: string) =>
     delErr<{ ok: boolean; skills: CompanionSkillEntry[] }>(`/api/companion/skills/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
 
   // MEMORY: the sibling read/curate surface over the companion's OWN isolated MEMORY.md store — same
   // posture as SKILLS above (authoring stays the companion's own on-demand job, this only reviews + prunes).
-  companionMemories: (sessionId: string) =>
-    get<{ memories: CompanionMemoryEntry[] }>(`/api/companion/memory/${encodeURIComponent(sessionId)}`).then((r) => r.memories),
-  companionMemory: (sessionId: string, name: string) =>
-    getErr<{ name: string; content: string }>(`/api/companion/memory/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
+  companionMemories: (sessionId: string, signal?: AbortSignal) =>
+    get<{ memories: CompanionMemoryEntry[] }>(`/api/companion/memory/${encodeURIComponent(sessionId)}`, signal).then((r) => r.memories),
+  companionMemory: (sessionId: string, name: string, signal?: AbortSignal) =>
+    getErr<{ name: string; content: string }>(`/api/companion/memory/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`, signal),
   deleteCompanionMemory: (sessionId: string, name: string) =>
     delErr<{ ok: boolean; memories: CompanionMemoryEntry[] }>(`/api/companion/memory/${encodeURIComponent(sessionId)}/${encodeURIComponent(name)}`),
 
@@ -1431,28 +1433,29 @@ export const api = {
   // The durable in-app chat history seed for the cockpit chat panel (GET /api/companion/messages/:sessionId).
   // CompanionChat loads this BEFORE opening its WebSocket (load-then-connect, bug 0f01f234). Same human-only
   // loopback posture as the reads above (NO agent MCP path).
-  companionMessages: (sessionId: string) =>
-    get<{ messages?: CompanionHistoryRow[] }>(`/api/companion/messages/${encodeURIComponent(sessionId)}`),
-  companionConversations: (sessionId: string) =>
-    get<{ conversations: CompanionConversationSummary[] }>(`/api/companion/conversations/${encodeURIComponent(sessionId)}`).then((r) => r.conversations),
-  companionConversation: (sessionId: string, seq: number) =>
+  companionMessages: (sessionId: string, signal?: AbortSignal) =>
+    get<{ messages?: CompanionHistoryRow[] }>(`/api/companion/messages/${encodeURIComponent(sessionId)}`, signal),
+  companionConversations: (sessionId: string, signal?: AbortSignal) =>
+    get<{ conversations: CompanionConversationSummary[] }>(`/api/companion/conversations/${encodeURIComponent(sessionId)}`, signal).then((r) => r.conversations),
+  companionConversation: (sessionId: string, seq: number, signal?: AbortSignal) =>
     getErr<{ conversation: { seq: number; startedAt: string; endedAt: string | null }; messages: CompanionMessage[] }>(
       `/api/companion/conversations/${encodeURIComponent(sessionId)}/${seq}`,
+      signal,
     ),
 
   // REMINDERS: the sibling read/curate surface over the companion's OWN `companion_reminders` rows — same
   // VIEW + PRUNE posture as MEMORY/SKILLS (authoring is the companion's own MCP job; this only lists +
   // deletes). List unwraps { reminders }; DELETE returns the post-prune { ok, reminders } to refresh the cache.
-  companionReminders: (sessionId: string) =>
-    get<{ reminders: CompanionReminderEntry[] }>(`/api/companion/reminders/${encodeURIComponent(sessionId)}`).then((r) => r.reminders),
+  companionReminders: (sessionId: string, signal?: AbortSignal) =>
+    get<{ reminders: CompanionReminderEntry[] }>(`/api/companion/reminders/${encodeURIComponent(sessionId)}`, signal).then((r) => r.reminders),
   deleteCompanionReminder: (sessionId: string, reminderId: string) =>
     delErr<{ ok: boolean; reminders: CompanionReminderEntry[] }>(`/api/companion/reminders/${encodeURIComponent(sessionId)}/${encodeURIComponent(reminderId)}`),
 
   // Session-ROW restrictedTools (live-apply fix): GET/PUT the flag the running companion's PTY actually
   // spawned with — distinct from the Profile default, and re-read on every resume. A write here needs a
   // restart (stop+resume) to take effect; the caller drives that explicitly (see RestrictToolsSection).
-  companionRestrictedTools: (sessionId: string) =>
-    getErr<CompanionRestrictedTools>(`/api/companion/restricted-tools/${encodeURIComponent(sessionId)}`),
+  companionRestrictedTools: (sessionId: string, signal?: AbortSignal) =>
+    getErr<CompanionRestrictedTools>(`/api/companion/restricted-tools/${encodeURIComponent(sessionId)}`, signal),
   updateCompanionRestrictedTools: (sessionId: string, restrictedTools: boolean) =>
     putErr<CompanionRestrictedTools>(`/api/companion/restricted-tools/${encodeURIComponent(sessionId)}`, { restrictedTools }),
 
@@ -1475,8 +1478,8 @@ export const api = {
   //
   // The Capabilities panel renders them as a persistent risk banner — a risky pair stays flagged across
   // reloads, since GET re-derives it every refetch.
-  companionGrants: (sessionId: string) =>
-    get<{ grants: CompanionCapabilityGrant[]; liveProcessStartedAt: string | null; warnings: CompanionCoGrantWarning[] }>(`/api/companion/${encodeURIComponent(sessionId)}/grants`),
+  companionGrants: (sessionId: string, signal?: AbortSignal) =>
+    get<{ grants: CompanionCapabilityGrant[]; liveProcessStartedAt: string | null; warnings: CompanionCoGrantWarning[] }>(`/api/companion/${encodeURIComponent(sessionId)}/grants`, signal),
   upsertCompanionGrant: (sessionId: string, b: { capability: string; projectId?: string | null; mode?: "read" | "act"; config?: Record<string, unknown> }) =>
     postErr<CompanionCapabilityGrant & { warnings: CompanionCoGrantWarning[] }>(`/api/companion/${encodeURIComponent(sessionId)}/grants`, b),
   deleteCompanionGrant: (sessionId: string, capability: string, projectId?: string | null) => {
@@ -1491,8 +1494,8 @@ export const api = {
   // agent MCP path (an injection-exposed companion must never widen its own scope; same trust posture as
   // every other companion writer here). GET reads the flag; PUT sets it (400 if not boolean). When ON, the
   // per-capability grants above are SUPERSEDED — saved but inactive — until it's turned back off. ---
-  companionLeadMode: (sessionId: string) =>
-    get<{ sessionId: string; leadMode: boolean }>(`/api/companion/${encodeURIComponent(sessionId)}/lead-mode`),
+  companionLeadMode: (sessionId: string, signal?: AbortSignal) =>
+    get<{ sessionId: string; leadMode: boolean }>(`/api/companion/${encodeURIComponent(sessionId)}/lead-mode`, signal),
   setCompanionLeadMode: (sessionId: string, leadMode: boolean) =>
     putErr<{ sessionId: string; leadMode: boolean }>(`/api/companion/${encodeURIComponent(sessionId)}/lead-mode`, { leadMode }),
 
@@ -1514,11 +1517,11 @@ export const api = {
   // loopback REST — INTENTIONALLY NO agent MCP path (same trust posture as the companion/vault/git
   // human-only writers). Reads are ALWAYS metadata only (name/host/authScheme/createdAt); the secret is
   // write-only (accepted on create, never returned by any read). ---
-  connections: () => get<ConnectionMetadata[]>("/api/connections"),
+  connections: (signal?: AbortSignal) => get<ConnectionMetadata[]>("/api/connections", signal),
   // Pending profile→connection grants awaiting the owner's deliberate approval (credential
   // auto-provisioning v1 binding UX, card 12dc7fc9). READ-ONLY — the grant is committed by an explicit
   // Save on the Profile's connection allowlist (updateProfile), never by a write here.
-  pendingBindings: () => get<PendingBinding[]>("/api/pending-bindings"),
+  pendingBindings: (signal?: AbortSignal) => get<PendingBinding[]>("/api/pending-bindings", signal),
   // `projectId` (card f2abce7e) scopes the connection to that ONE project — usable only by its own
   // sessions; omitted/null creates a GLOBAL connection, reachable by any profile that allowlists it.
   createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null; allowPlainHttp?: boolean; apiKeyHeader?: string }) =>
@@ -1567,7 +1570,7 @@ export const api = {
   // the server's `{ error }` body verbatim (path/interval-floor/target-exists validation) via postErr;
   // `connectionId` is immutable after create (the update handler doesn't accept it — mirrors a schedule's
   // fixed agentId). ---
-  pollJobs: () => get<PollJob[]>("/api/poll-jobs"),
+  pollJobs: (signal?: AbortSignal) => get<PollJob[]>("/api/poll-jobs", signal),
   createPollJob: (b: {
     connectionId: string; path: string; method?: string; intervalMs: number;
     itemsPath?: string; idPath?: string; mode: PollJob["mode"]; sessionId?: string; agentId?: string; enabled?: boolean;
@@ -1581,7 +1584,7 @@ export const api = {
   // --- Capability registry catalog (agent-tooling epic P4): the two BUILTIN capabilities PLUS any
   // owner-added rows, as ONE unified list — the Profile editor's capability picker + a future Settings
   // catalog panel both read this. HUMAN-only loopback REST — NO agent MCP path. ---
-  capabilities: () => get<CapabilitySummary[]>("/api/capabilities"),
+  capabilities: (signal?: AbortSignal) => get<CapabilitySummary[]>("/api/capabilities", signal),
   createCapability: (b: {
     slug: string; name: string; description: string; transport: "stdio" | "http"; kind: CapabilityProvisionKind;
     provision: unknown; toolAllowlist: string[]; wantsScratchDir?: boolean; requiresConnection?: boolean; secretEnvVar?: string;
@@ -1600,7 +1603,7 @@ export const api = {
   // --- Owner-declared project links (board card 2349d90c): a symmetric link between two projects — the
   // sole gate for the manager↔manager `peer_message` cross-project channel. HUMAN-only loopback REST —
   // INTENTIONALLY NO agent MCP path (same trust posture as connections/capabilities above). ---
-  projectLinks: () => get<ProjectLink[]>("/api/project-links"),
+  projectLinks: (signal?: AbortSignal) => get<ProjectLink[]>("/api/project-links", signal),
   createProjectLink: (b: { projectA: string; projectB: string }) => postErr<ProjectLink>("/api/project-links", b),
   deleteProjectLink: (id: string) => delErr<{ ok: boolean }>(`/api/project-links/${encodeURIComponent(id)}`),
 };
@@ -1625,7 +1628,7 @@ export const WORKER_DIFF_STALE_MS = 10_000;
 // ReviewPanel's `enabled`, Overview's `placeholderData`).
 export const workerDiffQuery = (sessionId: string) => ({
   queryKey: ["workerDiff", sessionId] as const,
-  queryFn: () => api.workerDiff(sessionId),
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.workerDiff(sessionId, signal),
   staleTime: WORKER_DIFF_STALE_MS,
 });
 
@@ -1644,7 +1647,7 @@ export const ORCH_STATUS_STALE_MS = 10_000;
 // that one-shot refetch is what preserves button feedback while the socket is down.
 export const orchStatusQuery = () => ({
   queryKey: ["orchStatus"] as const,
-  queryFn: api.orchestrationStatus,
+  queryFn: ({ signal }: { signal: AbortSignal }) => api.orchestrationStatus(signal),
   staleTime: ORCH_STATUS_STALE_MS,
 });
 

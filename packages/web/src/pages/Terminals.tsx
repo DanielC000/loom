@@ -336,7 +336,7 @@ function RowHeader({ row }: { row: SessionRow }) {
 function ShellsSection() {
   const qc = useQueryClient();
   const [spawning, setSpawning] = useState(false);
-  const shells = useQuery({ queryKey: ["terminals"], queryFn: api.terminals, refetchInterval: 4000 });
+  const shells = useQuery({ queryKey: ["terminals"], queryFn: ({ signal }) => api.terminals(signal), refetchInterval: 4000 });
   const kill = useMutation({
     mutationFn: (id: string) => api.killTerminal(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["terminals"] }),
@@ -414,8 +414,8 @@ function ShellTile({ t, onKill, killing }: { t: ShellTerminal; onKill: () => voi
 // detected default), and optional args. The spawn is a HUMAN-only REST call (never an MCP tool).
 function SpawnShellModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
-  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
-  const defaultShell = useQuery({ queryKey: ["defaultShell"], queryFn: api.defaultShell });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: ({ signal }) => api.projects(signal) });
+  const defaultShell = useQuery({ queryKey: ["defaultShell"], queryFn: ({ signal }) => api.defaultShell(signal) });
   const [projectId, setProjectId] = useState("");
   const [command, setCommand] = useState("");
   const [argsText, setArgsText] = useState("");

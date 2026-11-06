@@ -122,7 +122,7 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
 }) {
   const q = useQuery({
     queryKey: ["auditDiff", scope, rootId, compareTo],
-    queryFn: () => api.auditDiff(rootId, compareTo === "predecessor" ? undefined : compareTo, scope),
+    queryFn: ({ signal }) => api.auditDiff(rootId, compareTo === "predecessor" ? undefined : compareTo, scope, signal),
     retry: false,
   });
 
@@ -261,7 +261,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
 
   const q = useQuery({
     queryKey: ["audit", scope, rootId],
-    queryFn: () => (scope === "wave" ? api.auditWave(rootId) : api.auditSession(rootId)),
+    queryFn: ({ signal }) => (scope === "wave" ? api.auditWave(rootId, signal) : api.auditSession(rootId, signal)),
     enabled: !!rootId,
     refetchInterval: 5000,
   });

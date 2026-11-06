@@ -158,7 +158,7 @@ export const BROWSER_NOTIFICATION_LABELS: Record<BrowserNotificationKind, { labe
  * asked to keep is worse than one extra ping they asked to mute.
  */
 export function useMutedBrowserNotifications(): Set<BrowserNotificationKind> {
-  const cfg = useQuery({ queryKey: ["platformConfig"], queryFn: () => api.getPlatformConfig() });
+  const cfg = useQuery({ queryKey: ["platformConfig"], queryFn: ({ signal }) => api.getPlatformConfig(signal) });
   const muted = cfg.data?.resolved.mutedBrowserNotifications;
   return useMemo(() => new Set(muted ?? []), [muted]);
 }

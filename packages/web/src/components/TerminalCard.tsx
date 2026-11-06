@@ -323,7 +323,7 @@ export function TerminalCard({
     // `{ id }`); it never actually fetches with an empty id because `enabled` also requires a taskId, which
     // only a real project session carries — and such a session always has a projectId.
     queryKey: ["tasks", session.projectId],
-    queryFn: () => api.tasks(session.projectId ?? ""),
+    queryFn: ({ signal }) => api.tasks(session.projectId ?? "", signal),
     staleTime: 4000,
     enabled: wantTaskCard && !!session.taskId,
   });

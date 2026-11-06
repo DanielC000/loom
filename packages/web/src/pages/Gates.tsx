@@ -293,16 +293,16 @@ export default function Gates() {
   // god-eye view, not the header-picker-scoped kind.
   const [filter, setFilter] = useState<string>("*");
 
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.projects() });
+  const projects = useQuery({ queryKey: ["projects"], queryFn: ({ signal }) => api.projects(signal) });
   const active = useQuery({
     queryKey: ["gates-active"],
-    queryFn: () => api.gatesActive(),
+    queryFn: ({ signal }) => api.gatesActive(signal),
     refetchInterval: 2000, // the live lane occupancy changes as gates are admitted/settle
   });
   const history = useInfiniteQuery({
     queryKey: ["gates-history", filter],
-    queryFn: ({ pageParam }) =>
-      api.gatesHistory({ projectId: filter === "*" ? undefined : filter, limit: HISTORY_PAGE, offset: pageParam }),
+    queryFn: ({ pageParam, signal }) =>
+      api.gatesHistory({ projectId: filter === "*" ? undefined : filter, limit: HISTORY_PAGE, offset: pageParam }, signal),
     initialPageParam: 0,
     getNextPageParam: (last, pages) => {
       const loaded = pages.reduce((n, p) => n + p.items.length, 0);

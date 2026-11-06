@@ -23,7 +23,7 @@ export function useCardPolicyStatus(projectId: string | null | undefined, projec
   const enabled = !!projectId && hasStoredCardPolicies(project?.config?.orchestration as { cardPolicies?: unknown } | undefined);
   return useQuery({
     queryKey: ["cardPolicyStatus", projectId],
-    queryFn: () => api.cardPolicyStatus(projectId!),
+    queryFn: ({ signal }) => api.cardPolicyStatus(projectId!, signal),
     enabled,
     // Slower than the board's 4s: every badge is one evaluation per card. A waiver invalidates it directly.
     refetchInterval: 10_000,
@@ -57,7 +57,7 @@ export function CardPolicyBlock({ taskId, projectId }: { taskId: string; project
   const qc = useQueryClient();
   const q = useQuery({
     queryKey: ["taskPolicy", taskId],
-    queryFn: () => api.taskPolicy(taskId),
+    queryFn: ({ signal }) => api.taskPolicy(taskId, signal),
     refetchInterval: 4000,
     retry: false,
   });

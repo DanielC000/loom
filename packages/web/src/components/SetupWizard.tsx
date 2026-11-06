@@ -84,8 +84,8 @@ function WizardBody({ onClose }: { onClose: () => void }) {
   const [created, setCreated] = useState<{ projectId: string; projectName: string; result: TemplateApplyResult | null } | null>(null);
   const narrow = useNarrowViewport();
 
-  const templatesQ = useQuery({ queryKey: ["setupTemplates"], queryFn: api.setupTemplates });
-  const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const templatesQ = useQuery({ queryKey: ["setupTemplates"], queryFn: ({ signal }) => api.setupTemplates(signal) });
+  const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
   const profileByName = useMemo(() => {
     const m = new Map<string, Profile>();
     for (const p of profilesQ.data ?? []) m.set(p.name, p);

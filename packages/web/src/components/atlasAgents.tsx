@@ -504,13 +504,13 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
   // `editing` tracks which agent the dialog is on, so a CREATE can hand off to the fresh agent's own
   // editor without the host having to re-render the dialog around it.
   const [editing, setEditing] = useState<string | null>(agentId);
-  const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
-  const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
+  const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: ({ signal }) => api.agents(projectId, signal), enabled: !!projectId });
+  const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
   const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // Edition discovery, off the SAME shared key pages/Projects.tsx reads it from — one cached fetch
   // for the whole app. It gates which rigs the bind dropdown offers; `isSuccess &&` holds it false
   // until the query settles so an end user never flashes a dev-layer rig mid-load.
-  const platformHomeQ = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
+  const platformHomeQ = useQuery({ queryKey: ["platformHome"], queryFn: ({ signal }) => api.platformHome(signal), retry: false });
   const isDev = platformHomeQ.isSuccess && !!platformHomeQ.data?.project;
   const { create, update, saveGrants, remove } = useAgentWrites(projectId, {
     onCreated: (agent) => setEditing(agent.id),

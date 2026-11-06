@@ -26,7 +26,7 @@ export function NewBuildNotice() {
   const enabled = !import.meta.env.DEV;
   const q = useQuery({
     queryKey: WEB_BUNDLE_QUERY_KEY,
-    queryFn: api.webBundle,
+    queryFn: ({ signal }) => api.webBundle(signal),
     enabled,
     refetchOnWindowFocus: true,
     // No refetchInterval by design — see the header.

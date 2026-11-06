@@ -119,7 +119,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
   // pushed) because the state only changes on a completed turn, and the read is a cheap derived row.
   const replyHealth = useQuery({
     queryKey: ["companionReplyStatus", sessionId],
-    queryFn: () => api.companionReplyStatus(sessionId),
+    queryFn: ({ signal }) => api.companionReplyStatus(sessionId, signal),
     refetchInterval: 5000,
   });
   const stuck = replyHealth.data?.alerting ? replyHealth.data : null;
@@ -1008,7 +1008,7 @@ export function CompanionChatPanel({ sessionId, title, armed, visible = true }: 
   const qc = useQueryClient();
   const convos = useQuery({
     queryKey: ["companionConversations", sessionId],
-    queryFn: () => api.companionConversations(sessionId),
+    queryFn: ({ signal }) => api.companionConversations(sessionId, signal),
   });
   // null = the live chat; a number = viewing that archived conversation's read-only transcript.
   const [viewingSeq, setViewingSeq] = useState<number | null>(null);
@@ -1131,7 +1131,7 @@ function PastConversationView({ sessionId, seq, title, onBack }: {
 }) {
   const q = useQuery({
     queryKey: ["companionConversation", sessionId, seq],
-    queryFn: () => api.companionConversation(sessionId, seq),
+    queryFn: ({ signal }) => api.companionConversation(sessionId, seq, signal),
   });
   const messages: ChatMessage[] = (q.data?.messages ?? []).map(historyMessage);
   const timeline = buildTimeline(messages);

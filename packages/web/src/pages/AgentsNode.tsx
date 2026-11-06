@@ -48,7 +48,7 @@ export default function AgentsNode() {
   // so a card's own `CRON` fact costs no second request and cannot disagree with the strip. The two
   // are deliberately not the same statement: the fact says "this agent is on a clock", the strip
   // says when it next fires, whether it is on, and where it is managed from.
-  const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
+  const schedules = useQuery({ queryKey: ["schedules"], queryFn: ({ signal }) => api.schedules(signal) });
   const cronFor = (entry: RosterAgent): string[] =>
     (schedules.data ?? []).filter((s) => s.agentId === entry.agent.id).map((s) => s.cron);
 

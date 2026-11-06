@@ -259,7 +259,7 @@ const MEMORY_CSS = `
 
 export default function Memory() {
   const { projectId, projects } = useActiveProject();
-  const q = useQuery({ queryKey: ["projectMemory", projectId], queryFn: () => api.projectMemory(projectId), enabled: !!projectId });
+  const q = useQuery({ queryKey: ["projectMemory", projectId], queryFn: ({ signal }) => api.projectMemory(projectId, signal), enabled: !!projectId });
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortKey>("recall");
   const [openKey, setOpenKey] = useState<string | null>(null);

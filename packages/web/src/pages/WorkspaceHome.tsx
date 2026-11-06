@@ -97,7 +97,7 @@ export default function WorkspaceHome() {
   const [dashOpen, setDashOpen] = useDashboardOpen();
 
   const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
-  const usageQ = useQuery<UsageLimitsStatus>({ queryKey: ["usageLimits"], queryFn: api.usageLimits, refetchInterval: 30_000 });
+  const usageQ = useQuery<UsageLimitsStatus>({ queryKey: ["usageLimits"], queryFn: ({ signal }) => api.usageLimits(signal), refetchInterval: 30_000 });
   const activeGatesQ = useGatesActive();
   const historyQ = useGateHistoryRecent();
   const { items: attention } = useAttention();
@@ -179,8 +179,8 @@ export default function WorkspaceHome() {
   // they are the same keys pages/Schedules.tsx and pages/EventTriggers.tsx fill, so landing on that tab
   // finds its own tables already warm rather than paying twice.
   const questionsQ = useQuery<QuestionInboxItem[]>({ queryKey: ["openQuestions"], queryFn: ({ signal }) => api.openQuestions(false, signal) });
-  const schedulesQ = useQuery<Schedule[]>({ queryKey: ["schedules"], queryFn: api.schedules, staleTime: 30_000 });
-  const triggersQ = useQuery<EventTrigger[]>({ queryKey: ["eventTriggers"], queryFn: api.eventTriggers, staleTime: 30_000 });
+  const schedulesQ = useQuery<Schedule[]>({ queryKey: ["schedules"], queryFn: ({ signal }) => api.schedules(signal), staleTime: 30_000 });
+  const triggersQ = useQuery<EventTrigger[]>({ queryKey: ["eventTriggers"], queryFn: ({ signal }) => api.eventTriggers(signal), staleTime: 30_000 });
   // The Inbox page's OWN headline figure ("Waiting on me (N)", components/requests.tsx): pending plus
   // answered-awaiting-pickup, with NOTICES excluded — nobody is waiting on anything for a notice, so
   // counting one here would make the tab claim work that does not exist. Deliberately NOT

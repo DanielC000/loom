@@ -99,7 +99,7 @@ export function RepinGrantsControl({ session }: { session: Partial<Pick<Session,
   const [confirming, setConfirming] = useState(false);
   const drift = useQuery({
     queryKey: ["grantDrift", session.id],
-    queryFn: () => api.sessionGrantDrift(session.id),
+    queryFn: ({ signal }) => api.sessionGrantDrift(session.id, signal),
     enabled: eligible,
     retry: false,
     staleTime: 15_000,

@@ -115,7 +115,7 @@ export default function Vault() {
   useEffect(() => { setFile(""); setEditing(false); setNewName(""); setQuery(""); setExpanded(new Set()); }, [projectId]);
   useEffect(() => { setEditing(false); }, [file]); // leave edit mode when switching files
 
-  const tree = useQuery({ queryKey: ["vault", projectId], queryFn: () => api.vaultTree(projectId), enabled: !!projectId && hasVault });
+  const tree = useQuery({ queryKey: ["vault", projectId], queryFn: ({ signal }) => api.vaultTree(projectId, signal), enabled: !!projectId && hasVault });
   const entries = tree.data ?? [];
   const kind = file ? classify(file) : null;
   const isTextual = kind === "md" || kind === "text";
@@ -124,7 +124,7 @@ export default function Vault() {
   // raw endpoint (URL only) — never read as text, so a binary can't garble the pane.
   const content = useQuery({
     queryKey: ["vaultFile", projectId, file],
-    queryFn: () => api.vaultFile(projectId, file),
+    queryFn: ({ signal }) => api.vaultFile(projectId, file, signal),
     enabled: !!projectId && !!file && isTextual,
     placeholderData: keepPreviousData,
     // A vault read is a local file read: a failure is a real answer ("renamed", "deleted", "no vault"),
