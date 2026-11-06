@@ -299,6 +299,15 @@ export const COMPANION_EXHAUSTED_OWNER_MESSAGE =
   "\"Recycle onto a fresh session\" (then \"Confirm recycle\") to bring me back. Messages you send meanwhile " +
   "are kept and delivered once I'm recycled, unless Loom restarts first.";
 
+/** Card 1837a542: the same ONE-per-episode owner message when the owner opted this Companion into
+ *  auto-recycle and Loom has already recycled it. Also a constant string (no session text, ids or names). */
+export const COMPANION_AUTO_RECYCLED_OWNER_MESSAGE =
+  "♻️ My context filled up, so Loom automatically recycled me onto a fresh session. I've lost the earlier " +
+  "conversation context (my memory notes and chat bindings are kept), and messages sent meanwhile are delivered " +
+  "now. Tell me if I should pick something back up.";
+
+export type CompanionExhaustionMessageKind = "exhausted" | "auto-recycled";
+
 export class CompanionController implements CompanionControl {
   /** ONE gateway/heartbeat/reminder-watcher/config PER live companion session — the diff source for a
    *  reconcile. A session present here is "live"; absent ⇒ OFF for that session. */
@@ -565,7 +574,7 @@ export class CompanionController implements CompanionControl {
    * row, `latestCompanionUserMessageAt`), else the first by (channel, chatId). Sends through the gateway's
    * `sendToChannel` (same per-chunk suppression + timeout as chat_reply). Never throws; never retries.
    */
-  async notifyOwnerContextExhausted(sessionId: string): Promise<{ outcome: "sent" | "no-binding" | "send-failed"; channel?: string; reason?: string }> {
+  async notifyOwnerContextExhausted(sessionId: string, kind: CompanionExhaustionMessageKind = "exhausted"): Promise<{ outcome: "sent" | "no-binding" | "send-failed"; channel?: string; reason?: string }> {
     const gateway = this.gateways.get(sessionId);
     if (!gateway) return { outcome: "no-binding", reason: "no-gateway" };
     const eligible = gateway.bindingsForSession(sessionId)
@@ -580,7 +589,7 @@ export class CompanionController implements CompanionControl {
       if (t != null && (best == null || t > best)) { best = t; target = b; }
     }
     try {
-      const result = await gateway.sendToChannel(sessionId, target.channel, target.chatId, COMPANION_EXHAUSTED_OWNER_MESSAGE);
+      const result = await gateway.sendToChannel(sessionId, target.channel, target.chatId, kind === "auto-recycled" ? COMPANION_AUTO_RECYCLED_OWNER_MESSAGE : COMPANION_EXHAUSTED_OWNER_MESSAGE);
       if (result.delivered) return { outcome: "sent", channel: target.channel };
       return { outcome: "send-failed", channel: target.channel, reason: result.reason };
     } catch (err) {

@@ -767,7 +767,37 @@ function CompanionIdentity({ companion, label }: { companion: CompanionRow; labe
       {companion.config?.envPinned && <Badge tone="attn">pinned by env</Badge>}
       {companion.config && companion.bindings.length === 0 && <Badge tone="attn">not reachable — no binding</Badge>}
       <RecycleExhaustedControl sessionId={companion.sessionId} label={label} />
+      {companion.config && <AutoRecycleToggle sessionId={companion.sessionId} on={companion.config.autoRecycleOnExhaustion} />}
     </>
+  );
+}
+
+// Card 1837a542: the owner's per-Companion opt-in (default off) to recycle this Companion by itself when its
+// context is exhausted. Human-only loopback PUT; the stored value comes back on the masked config read.
+function AutoRecycleToggle({ sessionId, on }: { sessionId: string; on: boolean }) {
+  const qc = useQueryClient();
+  const save = useMutation({
+    meta: { inlineError: true },
+    mutationFn: (next: boolean) => api.setCompanionAutoRecycle(sessionId, next),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["companionConfigs"] }),
+  });
+  return (
+    <label
+      data-testid="companion-auto-recycle"
+      data-session-id={sessionId}
+      title="When this Companion runs out of context, Loom recycles it onto a fresh session by itself (the conversation context is lost). It waits while there is an unfinished draft in the terminal."
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: fs.sm, color: color.text2 }}
+    >
+      <input
+        type="checkbox"
+        data-testid="companion-auto-recycle-toggle"
+        checked={on}
+        disabled={save.isPending}
+        onChange={(e) => save.mutate(e.target.checked)}
+      />
+      Auto-recycle when out of context
+      {save.error && <span style={errStyle}>{errorText(save.error)}</span>}
+    </label>
   );
 }
 

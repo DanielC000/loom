@@ -1514,6 +1514,10 @@ export const api = {
   // path. 409 with a reason (e.g. codex harness, not stopping in time).
   recycleCompanionSession: (sessionId: string) =>
     postErr<{ sessionId: string; session: Session }>(`/api/companion/${encodeURIComponent(sessionId)}/recycle`),
+  // Owner opt-in (card 1837a542): recycle this Companion automatically when its context is exhausted. Human-only
+  // loopback, no MCP path; default off. The current value rides the masked config read (`autoRecycleOnExhaustion`).
+  setCompanionAutoRecycle: (sessionId: string, autoRecycleOnExhaustion: boolean) =>
+    putErr<{ sessionId: string; autoRecycleOnExhaustion: boolean }>(`/api/companion/${encodeURIComponent(sessionId)}/auto-recycle`, { autoRecycleOnExhaustion }),
 
   // --- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). HUMAN-only
   // loopback REST — INTENTIONALLY NO agent MCP path (same trust posture as the companion/vault/git

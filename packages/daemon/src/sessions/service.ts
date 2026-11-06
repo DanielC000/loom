@@ -83,7 +83,7 @@ import { recordUndeliveredReport, isCrashRecoveryEligible, willRecoverAutomatica
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, checkCanonicalIndexLockNotPresent, literalRepoPathKey } from "../git/repo-lock.js";
-import { ASSISTANT_EXHAUSTION_TITLE_SUFFIX, CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS, WORKER_CONTEXT_INTERRUPT_TAG } from "../orchestration/context-watcher.js";
+import { isRetirableAssistantExhaustionTitle, CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS, WORKER_CONTEXT_INTERRUPT_TAG } from "../orchestration/context-watcher.js";
 import { isSupersededByRecycle, currentHaltedSuccessor, isSanctionedHaltedPartner, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, openUnresolvedRecycleFleetAlert, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
@@ -5762,7 +5762,7 @@ export class SessionService {
    *  dismissal followed by a recovery retire never double-stamps. Returns the ids actually dismissed. */
   private dismissOpenAssistantExhaustionNotices(sessionId: string): string[] {
     const open = this.db.listQuestionsForSession(sessionId)
-      .filter((q) => q.type === "notice" && q.dismissedAt == null && q.title.endsWith(ASSISTANT_EXHAUSTION_TITLE_SUFFIX))
+      .filter((q) => q.type === "notice" && q.dismissedAt == null && isRetirableAssistantExhaustionTitle(q.title))
       .map((q) => q.id);
     return this.db.dismissNotices(open, new Date().toISOString());
   }

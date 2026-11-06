@@ -1587,7 +1587,8 @@ async function main(): Promise<void> {
       return { fired: true, delivered: r.result.delivered, interrupting: r.result.interrupting };
     },
     // Loom-authored owner chat message for an exhausted Companion (one per episode, DM binding only).
-    notifyCompanionOwner: (sid) => companionController.notifyOwnerContextExhausted(sid),
+    notifyCompanionOwner: (sid, kind) => companionController.notifyOwnerContextExhausted(sid, kind),
+    recycleCompanion: (sid) => companionController.recycle(sid),
   });
   contextWatcher.start();
   console.log(`[boot] context-recycle watcher on (${recycleRatio > 0 ? `env-forced ratio ${recycleRatio}` : `per-project ratio, platform default ${resolved.orchestration.recycleAtContextRatio}`}, tick ${ctxWatchMs}ms)`);

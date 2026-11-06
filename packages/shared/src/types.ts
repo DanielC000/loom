@@ -1442,6 +1442,10 @@ export type OrchestrationEventKind =
   // the inbox notice). Filed under the Companion's own session id. `detail` = { outcome: "sent" |
   // "no-binding" | "send-failed", channel?, reason?, noticeId } — never message or session text.
   | "assistant_exhaustion_chat_notice"
+  // Outcome of the ONE automatic recycle the context watcher attempts per Companion exhaustion episode when
+  // the owner opted that Companion in (`autoRecycleOnExhaustion`). Filed under the Companion's own session id.
+  // `detail` = { outcome: "recycled" | "failed" | "superseded", noticeId, reason? } — never message or session text.
+  | "assistant_auto_recycle"
   // MCP-silence watchdog (IdleWatcher, card d1521fca): a LIVE, non-recycled session whose MCP traffic
   // has gone quiet — one router stale while another stays recent (ASYMMETRIC), or every established
   // router stale at once (ALL-SILENT) — while the session itself shows no sign of having simply gone
@@ -2377,7 +2381,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   idle_report: true, idle_escalated: true, context_escalated: true, context_blind_turn: true, context_emergency_interrupt: true,
   worker_context_high: true, worker_context_interrupt: true,
   give_up_recovery_escalated: true, worker_stuck: true, mcp_silence_detected: true,
-  worker_context_exhausted: true, manager_context_exhausted: true, assistant_context_exhausted: true, assistant_exhaustion_chat_notice: true,
+  worker_context_exhausted: true, manager_context_exhausted: true, assistant_context_exhausted: true, assistant_exhaustion_chat_notice: true, assistant_auto_recycle: true,
   worktree_vanished: true,
   manager_manage: true, session_message: true, session_steer_dropped: true, platform_escalate: true, escalation_triaged: true,
   cross_project_message: true, audit_finding: true, workspace_audit_suggestion: true,
@@ -3604,6 +3608,10 @@ export interface CompanionConfigMasked {
    * home (`homeChatId`) whenever no explicit home is set, seeded or not.
    */
   bindingsSeeded: boolean;
+  /** Owner opt-in (card 1837a542, default false): when this Companion's context is exhausted, Loom recycles it
+   *  onto a fresh engine session by itself (the same path as the Recycle button) instead of waiting for the
+   *  owner to press it. Written only via the human REST route; no MCP tool can set it. */
+  autoRecycleOnExhaustion: boolean;
   /** Proactive heartbeat cadence in minutes (0 = off). */
   heartbeatIntervalMinutes: number;
   /**

@@ -242,6 +242,13 @@ export interface CompanionConfigRow {
    * ONLY place this is ever set; never reintroduce a second caller-side mark.
    */
   bindingsSeeded: boolean;
+  /**
+   * Card 1837a542: TRUE ⇒ the owner opted this Companion into an AUTOMATIC recycle (the same path as the
+   * human Recycle button) when the context watcher finds its context exhausted. Default FALSE; written only
+   * by the human REST route (`setCompanionAutoRecycle`), never by `upsertCompanionConfig` (an ordinary
+   * config write leaves it untouched) and never reachable from any MCP surface.
+   */
+  autoRecycleOnExhaustion: boolean;
 }
 
 /**
@@ -1180,7 +1187,10 @@ CREATE TABLE IF NOT EXISTS companion_config (
   -- bindings right now" would silently UNDO a deliberate revoke on the next gateway build (daemon restart).
   -- DEFAULT 0 here (a brand-new row has never been seeded yet); see COMPANION_CONFIG_ADDED_COLUMNS below for
   -- why an existing DB's ADD COLUMN backfill uses a DIFFERENT default.
-  bindings_seeded INTEGER NOT NULL DEFAULT 0
+  bindings_seeded INTEGER NOT NULL DEFAULT 0,
+  -- Card 1837a542: owner opt-in AUTO-RECYCLE on context exhaustion. HUMAN-only (REST + UI), default 0 (OFF);
+  -- no index/FK references it, so the additive ADD COLUMN migration below is its only upgrade path.
+  auto_recycle_on_exhaustion INTEGER NOT NULL DEFAULT 0
 );
 -- Companion RECURRING reminders (Companion Memory & Reminders Design, Surface 2 s3): N named cron jobs
 -- that fire a proactive turn into the companion's OWN long-lived session — generalizes the single
@@ -2634,6 +2644,8 @@ const COMPANION_CONFIG_ADDED_COLUMNS: Record<string, string> = {
   // so backfilling it to "already seeded" is what stops factory.ts from re-seeding a binding the owner may
   // have since deliberately revoked (same shape as pending_gate_ops' surfaced_pending backfilling to 1).
   bindings_seeded: "INTEGER NOT NULL DEFAULT 1",
+  // Card 1837a542: default OFF for every legacy row (an existing Companion is never auto-recycled).
+  auto_recycle_on_exhaustion: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `wakes` after its initial ship (route-aware wake engine); applied to existing DBs
@@ -6182,7 +6194,7 @@ export class Db {
     // `bindingsSeeded?` is also gone — see CompanionConfigRow.bindingsSeeded's own doc, or the record.
     return this.db.transaction((): CompanionConfigRow => {
       const existing = this.db.prepare(
-        "SELECT created_at, provisioned, name, last_chat_reply_turn_seq, zero_reply_alert_turn_seq, bindings_seeded FROM companion_config WHERE session_id = ?",
+        "SELECT created_at, provisioned, name, last_chat_reply_turn_seq, zero_reply_alert_turn_seq, bindings_seeded, auto_recycle_on_exhaustion FROM companion_config WHERE session_id = ?",
       ).get(input.sessionId) as Row | undefined;
       const now = new Date().toISOString();
       const row: CompanionConfigRow = {
@@ -6209,6 +6221,9 @@ export class Db {
         // so the RETURNED row just reads back whatever is currently stored (null on a fresh insert).
         lastChatReplyTurnSeq: (existing?.last_chat_reply_turn_seq as number | null) ?? null,
         zeroReplyAlertTurnSeq: (existing?.zero_reply_alert_turn_seq as number | null) ?? null,
+        // Card 1837a542: like the zero-reply columns, NOT part of the SQL below — this method never writes it
+        // (only setCompanionAutoRecycle does), so the returned row just reads back what is stored.
+        autoRecycleOnExhaustion: (existing?.auto_recycle_on_exhaustion as number | undefined) === 1,
       };
       this.db.prepare(
         `INSERT INTO companion_config (session_id, bot_token_blob, channel, allowed_chat_id, chat_scope, heartbeat_interval_minutes, heartbeat_prompt, enabled, provisioned, name, bindings_seeded, created_at, updated_at)
@@ -6220,6 +6235,16 @@ export class Db {
       ).run({ ...row, enabledInt: row.enabled ? 1 : 0, provisionedInt: row.provisioned ? 1 : 0, bindingsSeededInt: row.bindingsSeeded ? 1 : 0 });
       return row;
     })();
+  }
+  /**
+   * Card 1837a542: set the owner's auto-recycle opt-in for one Companion. Returns false when the session has
+   * no `companion_config` row (nothing to attach the flag to — the caller 404/409s rather than inventing a
+   * config row with fabricated token/chat fields). Deliberately does NOT bump `updated_at`'s other semantics
+   * beyond the timestamp. HUMAN REST only; no MCP caller.
+   */
+  setCompanionAutoRecycle(sessionId: string, on: boolean): boolean {
+    return this.db.prepare("UPDATE companion_config SET auto_recycle_on_exhaustion = ?, updated_at = ? WHERE session_id = ?")
+      .run(on ? 1 : 0, new Date().toISOString(), sessionId).changes > 0;
   }
   // card 3d19ecc7: the former standalone markCompanionBindingsSeeded(sessionId) is REMOVED — it had exactly
   // one caller (factory.ts's bootstrap-seed) and was the asymmetry card a8480338's review flagged: a mark
@@ -13286,6 +13311,7 @@ function toCompanionConfigRow(r0: unknown): CompanionConfigRow {
     lastChatReplyTurnSeq: (r.last_chat_reply_turn_seq as number | null) ?? null,
     zeroReplyAlertTurnSeq: (r.zero_reply_alert_turn_seq as number | null) ?? null,
     bindingsSeeded: (r.bindings_seeded as number) === 1,
+    autoRecycleOnExhaustion: (r.auto_recycle_on_exhaustion as number | undefined) === 1,
   };
 }
 function toConnectionRow(r0: unknown): ConnectionRow {

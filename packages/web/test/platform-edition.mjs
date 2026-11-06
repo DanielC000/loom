@@ -768,14 +768,17 @@ check("the exact read/write split is unchanged by card 66b9e590's fail-closed fi
   // path: 237→239 total, 101→102 reads, 136→137 writes.
   // Card 79e030d9 added ONE WRITE member, `recycleCompanionSession` (POST /api/companion/:sessionId/recycle,
   // human-only loopback REST, no MCP path): 239→240 total, 137→138 writes, reads unchanged.
-  assert.equal(API_MEMBERS.total, 240, `api.ts now has ${API_MEMBERS.total} members, not 240`);
+  // Card 1837a542 added ONE WRITE member, `setCompanionAutoRecycle` (PUT /api/companion/:sessionId/auto-recycle,
+  // human-only loopback REST, no MCP path): 240→241 total, 138→139 writes, reads unchanged.
+  assert.equal(API_MEMBERS.total, 241, `api.ts now has ${API_MEMBERS.total} members, not 241`);
+  assert.ok(API_MEMBERS.writes.has("setCompanionAutoRecycle"), "api.setCompanionAutoRecycle must classify as a WRITE (card 1837a542)");
   assert.ok(API_MEMBERS.writes.has("recycleCompanionSession"), "api.recycleCompanionSession must classify as a WRITE (card 79e030d9)");
   assert.ok(API_MEMBERS.reads.has("sessionGrantDrift"), "api.sessionGrantDrift must classify as a READ (card 158cb01a)");
   assert.ok(API_MEMBERS.writes.has("repinSessionGrants"), "api.repinSessionGrants must classify as a WRITE (card 158cb01a)");
   assert.ok(API_MEMBERS.writes.has("dismissNotices"), "api.dismissNotices must classify as a WRITE (card f549a0ae)");
   assert.ok(API_MEMBERS.writes.has("updateConnection"), "api.updateConnection must classify as a WRITE (card 923dfc9d)");
   assert.equal(API_MEMBERS.reads.size, 102, `api.ts now has ${API_MEMBERS.reads.size} reads, not 102`);
-  assert.equal(API_MEMBERS.writes.size, 138, `api.ts now has ${API_MEMBERS.writes.size} writes, not 138`);
+  assert.equal(API_MEMBERS.writes.size, 139, `api.ts now has ${API_MEMBERS.writes.size} writes, not 139`);
   assert.ok(API_MEMBERS.writes.has("addAgentConnection"), "api.addAgentConnection must classify as a WRITE (card b1df40f2)");
   // Card 61d32daf, pinned by name: the two reads are Tier-1 routes (gateway/trust-tier.ts) and the waiver pair is
   // the human-only escape from a card policy. A flipped verdict means re-reviewing that route's trust posture.

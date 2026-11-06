@@ -2838,6 +2838,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { sessionId, leadMode: b.leadMode };
   });
 
+  // --- Companion AUTO-RECYCLE opt-in (card 1837a542): the owner's per-Companion switch for "recycle me onto a
+  // fresh engine session by yourself when my context is exhausted". HUMAN-ONLY loopback REST (Tier 0, same as
+  // the lead-mode writer above), INTENTIONALLY NO MCP path: an injection-exposed Companion must never arm the
+  // wipe of its own context or the closing of its own trust window. Default OFF; the current value rides the
+  // masked config read (`autoRecycleOnExhaustion`), so there is no GET here.
+  app.put("/api/companion/:sessionId/auto-recycle", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const b = (req.body ?? {}) as { autoRecycleOnExhaustion?: unknown };
+    if (typeof b.autoRecycleOnExhaustion !== "boolean") {
+      return reply.code(400).send({ error: "autoRecycleOnExhaustion must be a boolean" });
+    }
+    if (!deps.db.setCompanionAutoRecycle(sessionId, b.autoRecycleOnExhaustion)) {
+      return reply.code(409).send({ error: "this companion has no run config yet — configure it first, then set auto-recycle" });
+    }
+    return { sessionId, autoRecycleOnExhaustion: b.autoRecycleOnExhaustion };
+  });
+
   // --- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). HUMAN-ONLY
   // loopback REST, INTENTIONALLY NO MCP path (of ANY router): an agent in an ordinary project session must
   // never create, list, or read a connection's secret (same trust posture as the companion/vault/git

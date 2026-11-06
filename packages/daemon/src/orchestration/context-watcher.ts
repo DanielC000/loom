@@ -2,11 +2,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { resolveConfig, contextWindowForModel } from "@loom/shared";
 import type { OrchestrationConfig, Session } from "@loom/shared";
 import type { Db } from "../db.js";
+import type { PtyHost } from "../pty/host.js";
 import { contextTelemetryFor } from "../pty/adapter.js";
 import { checkContextExhaustion, checkRecoveryEvidence } from "./context-exhaustion.js";
 
-/** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
-export interface ContextPty {
+/** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free).
+ *  Card 1837a542: `isComposerDirty` is the OWNER's unsubmitted raw-terminal draft (`composerLen > 0`, the same gate the
+ *  drain defers on) and is `Pick`ed from PtyHost so a rename fails to compile. It is deliberately NOT
+ *  `getComposerDirtyLen` (characters Loom's own submit() may have stranded). Called as `pty.isComposerDirty?.(id)`
+ *  so a fixture that omits it reads as "no draft". */
+export interface ContextPty extends Pick<PtyHost, "isComposerDirty"> {
   isAlive(sessionId: string): boolean;
   /**
    * Nudge text into the session's busy-gated queue (waits if the manager is mid-turn). The real
@@ -61,7 +66,14 @@ export interface ContextWatcherDeps {
    * durably in app_meta by the inbox notice id). Optional: omitted ⇒ no chat message, inbox notice only.
    * Must not throw; a rejection is recorded as a send-failed event and never retried.
    */
-  notifyCompanionOwner?: (companionSessionId: string) => Promise<{ outcome: "sent" | "no-binding" | "send-failed"; channel?: string; reason?: string }>;
+  notifyCompanionOwner?: (companionSessionId: string, kind?: "exhausted" | "auto-recycled") => Promise<{ outcome: "sent" | "no-binding" | "send-failed"; channel?: string; reason?: string }>;
+  /**
+   * Card 1837a542 — the SAME recycle the human `POST /api/companion/:sessionId/recycle` runs (index.ts wraps
+   * `CompanionController.recycle`; never a second implementation). Invoked at most once per exhaustion
+   * episode, and only for a Companion whose owner set `autoRecycleOnExhaustion`. Optional: omitted ⇒ the
+   * opt-in is inert and behavior is exactly the notice-only path.
+   */
+  recycleCompanion?: (companionSessionId: string) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 /**
@@ -306,7 +318,7 @@ export class ContextWatcher {
       // Already marked on an earlier tick: re-assert the notice by its deterministic id. No-op when it exists
       // (covers every later tick AND a daemon restart); heals a crash between the mark and the notice insert.
       if (a.contextExhaustedAt != null) {
-        this.maybeNotifyAssistantOwnerChat(db, a, this.ensureAssistantExhaustionNotice(db, a, a.contextExhaustedAt));
+        this.afterAssistantExhausted(db, pty, a, this.ensureAssistantExhaustionNotice(db, a, a.contextExhaustedAt));
       } else {
         this.endAssistantEpisodeIfRecovered(db, a);
       }
@@ -443,9 +455,145 @@ export class ContextWatcher {
       });
       // eslint-disable-next-line no-console
       console.log(`[context-watcher] companion ${a.id} CONTEXT-EXHAUSTED (${exhaustion.error ?? "unknown error"}) — busy cleared, queue held, owner notice filed`);
-      this.maybeNotifyAssistantOwnerChat(db, a, noticeId);
+      this.afterAssistantExhausted(db, pty, a, noticeId);
     }
     return true;
+  }
+
+  /**
+   * What happens once per tick for an exhausted Companion whose notice is in force. Flag OFF (the default) or
+   * no recycle hook wired: exactly the pre-existing path — the ONE owner chat message, "press Recycle".
+   *
+   * @decision 1837a542 — never retry; claim BEFORE the recycle, never while deferred; no second episode key.
+   *
+   * Flag ON: run the same recycle the human button runs, at most once per episode.
+   *   - DEFER while the composer holds an unsubmitted draft: no claim, no recycle, no chat message; the next tick
+   *     re-checks, with no upper bound (an abandoned draft holds auto-recycle off; the owner can still press
+   *     Recycle). A draft is never destroyed.
+   *   - The episode claim is app_meta `ASSISTANT_AUTO_RECYCLE_META_PREFIX+id` = the notice id, taken BEFORE the
+   *     recycle runs: at most one attempt per episode, no retry on any outcome. The notice id IS the episode
+   *     identity 62279e05's chat claim already uses; a new episode files a new id.
+   *   - The owner's ONE chat message waits for the outcome: "auto-recycled" on success, the ordinary
+   *     "exhausted, press Recycle" on failure.
+   */
+  private afterAssistantExhausted(db: Db, pty: ContextPty, a: Session, noticeId: string | null): void {
+    const recycle = this.deps.recycleCompanion;
+    let auto = false;
+    try { auto = !!recycle && !!noticeId && db.getCompanionConfig(a.id)?.autoRecycleOnExhaustion === true; } catch { auto = false; }
+    if (!auto || !recycle || !noticeId) { this.maybeNotifyAssistantOwnerChat(db, a, noticeId, "exhausted"); return; }
+    let draft = false;
+    try { draft = pty.isComposerDirty?.(a.id) === true; } catch { draft = false; }
+    if (draft) return; // never destroy the owner's unfinished draft; retried next tick
+    const key = `${ASSISTANT_AUTO_RECYCLE_META_PREFIX}${a.id}`;
+    try {
+      if (!db.claimMeta(key, noticeId)) return; // already attempted (or in flight) this episode
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[context-watcher] could not claim the auto-recycle for companion ${a.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[context-watcher] companion ${a.id} exhausted with auto-recycle ON — recycling onto a fresh session`);
+    let p: ReturnType<typeof recycle>;
+    try { p = recycle(a.id); } catch (err) { p = Promise.reject(err); }
+    void p.then(
+      (r) => (r.ok ? this.onAutoRecycled(db, a, noticeId) : this.onAutoRecycleFailed(db, a, noticeId, r.error)),
+      (err) => this.onAutoRecycleFailed(db, a, noticeId, err instanceof Error ? err.message : String(err)),
+    );
+  }
+
+  private onAutoRecycled(db: Db, a: Session, noticeId: string): void {
+    try {
+      db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.id,
+        kind: "assistant_auto_recycle", detail: { outcome: "recycled", noticeId },
+      });
+      // The recycle dismissed the "has run out of context" notice; leave the owner an UNREAD record of what happened.
+      const name = this.assistantDisplayName(db, a);
+      this.insertAssistantNotice(db, a, assistantExhaustionNoticeId(a.id, `auto-recycled|${noticeId}`),
+        `${name}${ASSISTANT_AUTO_RECYCLED_TITLE_SUFFIX}`,
+        `${name} (session ${a.id.slice(0, 8)}) hit its context limit and, because you turned on auto-recycle for it, ` +
+        `Loom recycled it onto a fresh session. It keeps its chat bindings, memory and grants, and anything queued ` +
+        `meanwhile was delivered. It lost the earlier conversation context, and its trust window and any inline ` +
+        `authored-content grant are closed. You can turn auto-recycle off on this Companion's page.`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[context-watcher] could not record the auto-recycle for companion ${a.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[context-watcher] companion ${a.id} AUTO-RECYCLED`);
+    this.maybeNotifyAssistantOwnerChat(db, a, noticeId, "auto-recycled");
+  }
+
+  /** A failed auto-recycle is never retried. The original "press Recycle" notice stays open and a SECOND, fresh
+   *  (unread) notice says the automatic attempt failed — the notice store has no re-surface-on-edit, so a new row
+   *  is the way to put it back in front of the owner. */
+  private onAutoRecycleFailed(db: Db, a: Session, noticeId: string, reason: string): void {
+    // SUPERSEDED: the owner recovered it by hand while this attempt was in flight (or the recycle refused for "not
+    // exhausted"). Record that and tell the owner NOTHING — a "failed" notice or "press Recycle" message about a
+    // Companion that is already healthy would be false. The signal is the episode's OWN notice being DISMISSED
+    // (the manual recycle and the recovery sweep both dismiss it), NEVER `contextExhaustedAt == null`: that mark
+    // also goes null transiently on ANY turn's busy rising edge (handleBusyEdge), e.g. an owner message sent
+    // mid-attempt, after which the turn fails and re-marks into the SAME open notice — a real failure that must
+    // not be swallowed (the claim is held, so nothing would ever tell the owner).
+    let superseded = false;
+    try { superseded = db.getQuestion(noticeId)?.dismissedAt != null; } catch { superseded = false; }
+    if (superseded) {
+      try {
+        db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.id,
+          kind: "assistant_auto_recycle", detail: { outcome: "superseded", noticeId },
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[context-watcher] could not record the superseded auto-recycle for companion ${a.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      // eslint-disable-next-line no-console
+      console.log(`[context-watcher] companion ${a.id} auto-recycle attempt superseded (no longer exhausted) — owner not notified`);
+      return;
+    }
+    try {
+      db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.id,
+        kind: "assistant_auto_recycle", detail: { outcome: "failed", noticeId, reason: reason.slice(0, 200) },
+      });
+      const name = this.assistantDisplayName(db, a);
+      this.insertAssistantNotice(db, a, assistantExhaustionNoticeId(a.id, `auto-recycle-failed|${noticeId}`),
+        `${name}${ASSISTANT_AUTO_RECYCLE_FAILED_TITLE_SUFFIX}`,
+        `${name} (session ${a.id.slice(0, 8)}) hit its context limit and Loom tried to recycle it automatically, but ` +
+        `the recycle failed (${reason.slice(0, 200)}). Loom will not retry. Open this Companion's page and press ` +
+        `"Recycle onto a fresh session" to bring it back.`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[context-watcher] could not record the failed auto-recycle for companion ${a.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[context-watcher] companion ${a.id} AUTO-RECYCLE FAILED (${reason.slice(0, 200)}) — not retrying; owner told`);
+    this.maybeNotifyAssistantOwnerChat(db, a, noticeId, "exhausted");
+  }
+
+  private assistantDisplayName(db: Db, a: Session): string {
+    return db.getCompanionConfig(a.id)?.name?.trim() || db.getAgent(a.agentId)?.name || "Your Companion";
+  }
+
+  /** File one daemon-authored inbox `notice` for a Companion (same row shape as the exhaustion notice;
+   *  `insertQuestion` directly, so the per-agent notice throttle is bypassed). Idempotent on a deterministic id. */
+  private insertAssistantNotice(db: Db, a: Session, id: string, title: string, body: string): void {
+    if (db.getQuestion(id)) return;
+    const now = new Date().toISOString();
+    db.insertQuestion({
+      id, sessionId: a.id, filedBySessionId: a.id, projectId: a.projectId, type: "notice",
+      title, body,
+      options: null, recommendation: null, taskId: null,
+      permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
+      decidedScope: null, decidedExpiresAt: null,
+      credentialEnvVar: null, credentialByteLength: null, provisionTarget: null, fulfillmentTarget: null,
+      provisionConnectionId: null, provisionBindingState: "none",
+      state: "notice", chosenOption: null, note: null,
+      createdAt: now, answeredAt: now, consumedAt: null,
+      cancelledReason: null, cancelledBy: null, cancelledAt: null,
+      escalatedAt: null, acknowledgedUntil: null, readAt: null, dismissedAt: null, attachments: [],
+    });
   }
 
   /**
@@ -464,16 +612,21 @@ export class ContextWatcher {
   private endAssistantEpisodeIfRecovered(db: Db, a: Session): void {
     if (!this.deps.notifyCompanionOwner || a.busy || a.harness === "codex" || !a.engineSessionId) return;
     const key = `${ASSISTANT_EXHAUSTION_CHAT_META_PREFIX}${a.id}`;
+    const autoKey = `${ASSISTANT_AUTO_RECYCLE_META_PREFIX}${a.id}`;
     let open: string[];
     try {
       const claimed = !!db.getMeta(key);
+      const autoClaimed = !!db.getMeta(autoKey);
       open = db.listQuestionsForSession(a.id)
-        .filter((q) => q.type === "notice" && q.dismissedAt == null && q.title.endsWith(ASSISTANT_EXHAUSTION_TITLE_SUFFIX))
+        .filter((q) => q.type === "notice" && q.dismissedAt == null && isRetirableAssistantExhaustionTitle(q.title))
         .map((q) => q.id);
       // Nothing to end and nothing to retire: the transcript is not even read.
-      if (!claimed && open.length === 0) return;
+      if (!claimed && !autoClaimed && open.length === 0) return;
       // POSITIVE evidence only: a missing/unreadable/empty transcript, or a user record alone, is "keep watching".
       if (!checkRecoveryEvidence(a.cwd, a.engineSessionId, a.harness)) return;
+      // Card 1837a542: the auto-recycle claim ends WITH the episode, cleared FIRST like the chat claim, so a notice
+      // left open across the recovery (the next episode reuses its id) can never silence the next auto-recycle.
+      if (autoClaimed) db.setMeta(autoKey, "");
       if (claimed) db.setMeta(key, "");
     } catch (err) {
       // eslint-disable-next-line no-console
@@ -496,7 +649,7 @@ export class ContextWatcher {
    * duplicates it — the inbox notice stays the durable path). A new episode files a new notice id, so it
    * sends again. No retry on any outcome. Logs/events carry the outcome + channel name only, never text.
    */
-  private maybeNotifyAssistantOwnerChat(db: Db, a: Session, noticeId: string | null): void {
+  private maybeNotifyAssistantOwnerChat(db: Db, a: Session, noticeId: string | null, kind: "exhausted" | "auto-recycled"): void {
     const notify = this.deps.notifyCompanionOwner;
     if (!notify || !noticeId) return;
     const key = `${ASSISTANT_EXHAUSTION_CHAT_META_PREFIX}${a.id}`;
@@ -519,7 +672,7 @@ export class ContextWatcher {
       }
     };
     let p: ReturnType<NonNullable<ContextWatcherDeps["notifyCompanionOwner"]>>;
-    try { p = notify(a.id); } catch (err) {
+    try { p = notify(a.id, kind); } catch (err) {
       record({ outcome: "send-failed", reason: err instanceof Error ? err.name : "error" });
       return;
     }
@@ -559,7 +712,11 @@ export class ContextWatcher {
           `long, so it will not answer any more messages or alerts.\n\n` +
           `What you can do now: open this Companion's page in Loom and press "Recycle onto a fresh session". ` +
           `It keeps its chat bindings, memory and grants, restarts with a clean context, and delivers anything ` +
-          `queued meanwhile. (Its trust window and any inline authored-content grant are closed.)`,
+          `queued meanwhile. (Its trust window and any inline authored-content grant are closed.)` +
+          (db.getCompanionConfig(a.id)?.autoRecycleOnExhaustion === true
+            ? `\n\nAuto-recycle is ON for this Companion, so Loom will recycle it by itself (it waits while there is an ` +
+              `unfinished draft in its terminal). If this notice is still open after a while, press Recycle yourself.`
+            : ``),
         options: null, recommendation: null, taskId: null,
         permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
         decidedScope: null, decidedExpiresAt: null,
@@ -808,6 +965,21 @@ export class ContextWatcher {
 export const ASSISTANT_EXHAUSTION_CHAT_META_PREFIX = "companion_exhaustion_chat_sent:";
 
 export const ASSISTANT_EXHAUSTION_TITLE_SUFFIX = " has run out of context and cannot reply";
+
+/** app_meta key prefix of the per-Companion "auto-recycle already attempted for this episode" claim; value = notice id. */
+export const ASSISTANT_AUTO_RECYCLE_META_PREFIX = "companion_auto_recycle_claim:";
+
+/** Title suffixes of the two follow-up notices an auto-recycle files. Deliberately NOT ending in
+ *  `ASSISTANT_EXHAUSTION_TITLE_SUFFIX`, so the recycle's own dismissal of exhaustion notices never sweeps them up. */
+export const ASSISTANT_AUTO_RECYCLED_TITLE_SUFFIX = " was automatically recycled onto a fresh session";
+export const ASSISTANT_AUTO_RECYCLE_FAILED_TITLE_SUFFIX = " could not be recycled automatically";
+
+/** Notices a recovery (a manual recycle, or the sweep that sees a healed Companion) retires: the exhaustion notice
+ *  and the "could not be recycled automatically" one. NOT the "was automatically recycled" success notice, which
+ *  is a record the owner reads and dismisses themself. */
+export function isRetirableAssistantExhaustionTitle(title: string): boolean {
+  return title.endsWith(ASSISTANT_EXHAUSTION_TITLE_SUFFIX) || title.endsWith(ASSISTANT_AUTO_RECYCLE_FAILED_TITLE_SUFFIX);
+}
 
 /** Deterministic v4-SHAPED UUID of (session, episode stamp): every question id is a v4 UUID (QUESTION_ID_RE). */
 export function assistantExhaustionNoticeId(sessionId: string, episodeStamp: string): string {
