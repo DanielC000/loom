@@ -141,9 +141,9 @@ export function RowName({ name, subtitle, width = 160, maxWidth = 200, indent = 
 }) {
   return (
     <span style={{ display: "flex", flexDirection: "column", minWidth: width, maxWidth, overflow: "hidden", paddingLeft: indent }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+      <span style={{ fontSize: fs.sm, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
       {subtitle && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
+        <span style={{ fontSize: fs.xs, color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
       )}
     </span>
   );
@@ -168,7 +168,7 @@ function SegToggle<T extends "tokens" | "cost">({ value, onChange, lead }: {
   const items = [{ key: "cost", label: "Cost" }, { key: "tokens", label: "Tokens" }] as const;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>{lead}</span>
+      <span style={{ fontSize: fs.sm, color: color.text3 }}>{lead}</span>
       <span style={{ display: "inline-flex", border: `1px solid ${color.line}`, borderRadius: radius.sm, overflow: "hidden" }}>
         {items.map((it) => {
           const active = value === it.key;
@@ -177,7 +177,7 @@ function SegToggle<T extends "tokens" | "cost">({ value, onChange, lead }: {
               style={{
                 background: active ? color.selected : "transparent",
                 color: active ? color.accentFg : color.text2,
-                border: "none", padding: "3px 10px", fontFamily: font.mono, fontSize: fs.mono,
+                border: "none", padding: "3px 10px", fontFamily: font.ui, fontSize: fs.sm,
                 cursor: "pointer",
               }}>
               {it.label}

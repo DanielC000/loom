@@ -71,7 +71,7 @@ export function cleanSshRules(rules: SshCommandRule[], label: string): { ok: tru
 const fieldLabel: CSSProperties = {
   fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.text2,
 };
-const hintStyle: CSSProperties = { color: color.text3, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 };
+const hintStyle: CSSProperties = { color: color.text3, fontSize: fs.sm, lineHeight: 1.5 };
 const Hint = ({ children }: { children: ReactNode }) => <span style={hintStyle}>{children}</span>;
 const Field = ({ label, children }: { label: string; children: ReactNode }) => (
   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -197,11 +197,11 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
             Pin cleared: it was fetched from {pinClearedFor}, and the host has changed. Fetch it again, or paste the fingerprint.
           </span>
         )}
-        {probe.error && <span role="alert" style={{ ...hintStyle, color: color.danger }}>Could not read the host key from {target}: {errorText(probe.error)}</span>}
+        {probe.error && <span role="alert" style={{ ...hintStyle, color: color.danger }}>Could not read the host key from <span style={{ fontFamily: font.mono }}>{target}</span>:{errorText(probe.error)}</span>}
         {fetched && (
           <div data-testid="ssh-fingerprint-confirm" style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4, padding: "10px 12px",
             border: `1px solid ${color.attn}`, borderRadius: radius.sm, background: color.surface }}>
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>{fetched.target} presented this host key:</span>
+            <span style={{ fontSize: fs.sm, color: color.text }}><span style={{ fontFamily: font.mono }}>{fetched.target}</span> presented this host key:</span>
             <code data-testid="ssh-fingerprint-fetched" style={{ fontFamily: font.mono, fontSize: fs.body, color: color.attnText, overflowWrap: "anywhere" }}>{fetched.fingerprint}</code>
             <span style={hintStyle}>
               Only pin it if it matches what the host itself reports. A fetch over the network cannot tell the real
@@ -219,7 +219,7 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
         <input type="checkbox" checked={draft.readOnly} onChange={(e) => patch({ readOnly: e.target.checked })}
           style={{ accentColor: color.accent, width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
         <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Read-only</span>
+          <span style={{ fontSize: fs.body, color: color.text }}>Read-only</span>
           <Hint>On by default. Untick only for a host where agents should deploy or restart things.</Hint>
         </span>
       </label>
@@ -235,7 +235,7 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={fieldLabel}>Hold these commands for my approval</span>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span data-testid="ssh-risky-summary" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>
+          <span data-testid="ssh-risky-summary" style={{ fontSize: fs.sm, color: color.text }}>
             {draft.riskyCommandPatterns.length} pattern{draft.riskyCommandPatterns.length === 1 ? "" : "s"}
             {riskyIsDefault ? " · Loom's default list" : " · edited"}
           </span>
@@ -359,7 +359,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", width: "100%" }}>
         <span data-testid={`ssh-target-${c.id}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{c.user}@{c.host}:{c.port}</span>
         {c.readOnly ? <Badge tone="muted">Read-only</Badge> : <Badge tone="attn">Read-write</Badge>}
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+        <span style={{ fontSize: fs.sm, color: color.text3 }}>
           {allowN === 0 ? "no allowlist" : `${allowN} allowed`} · {riskyN} held for approval
         </span>
         <span title={c.hostKeyFingerprint} data-testid={`ssh-fingerprint-${c.id}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
@@ -415,7 +415,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
             {probe.error && <span role="alert" style={{ ...hintStyle, color: color.danger }}>Could not read the host key: {errorText(probe.error)}</span>}
             {fetched && (
               <div data-testid="ssh-edit-fingerprint-confirm" style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4, padding: "10px 12px", border: `1px solid ${color.attn}`, borderRadius: radius.sm, background: color.surface }}>
-                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>{fetched.target} presented this host key:</span>
+                <span style={{ fontSize: fs.sm, color: color.text }}><span style={{ fontFamily: font.mono }}>{fetched.target}</span> presented this host key:</span>
                 <code style={{ fontFamily: font.mono, fontSize: fs.body, color: color.attnText, overflowWrap: "anywhere" }}>{fetched.fingerprint}</code>
                 <span style={hintStyle}>Only pin it if it matches what the host itself reports.</span>
                 <div style={{ display: "flex", gap: 6 }}>
@@ -427,7 +427,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
             <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} style={{ accentColor: color.accent, width: 15, height: 15 }} />
-            <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Read-only</span>
+            <span style={{ fontSize: fs.body, color: color.text }}>Read-only</span>
           </label>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Command allowlist</span>

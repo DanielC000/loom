@@ -89,7 +89,7 @@ function RailProjectControl({ onOpenChange }: { onOpenChange: (open: boolean) =>
         onMouseEnter={() => setHoveredId(p.id)} onMouseLeave={() => setHoveredId((h) => (h === p.id ? null : h))}
         style={{ display: "inline-flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
           background: hoveredId === p.id ? color.inset : "transparent", border: "none", cursor: "pointer",
-          color: selected ? color.accentFg : color.text, fontFamily: font.mono, fontSize: fs.body, padding: "6px 12px" }}>
+          color: selected ? color.accentFg : color.text, fontFamily: font.ui, fontSize: fs.body, padding: "6px 12px" }}>
         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
         {count > 0 && (
           <span title={`${count} live session${count === 1 ? "" : "s"}`}

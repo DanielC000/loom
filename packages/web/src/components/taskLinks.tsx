@@ -36,13 +36,13 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
   const complete = h.childCount > 0 && h.childDone >= h.childCount;
   return (
     <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", alignItems: "baseline", columnGap: 8, rowGap: 2,
-      fontFamily: font.mono, fontSize: fs.xs, lineHeight: 1.4 }}>
+      fontSize: fs.xs, lineHeight: 1.4 }}>
       {h.blockedByOpen > 0 && (
         <span style={{ ...metaItem, maxWidth: 150, color: color.attnText }}
           title={h.blockedByFirst
             ? `Blocked by "${h.blockedByFirst.title}"${h.blockedByOpen > 1 ? ` and ${h.blockedByOpen - 1} more` : ""} — open the card for the full list`
             : `Blocked by ${h.blockedByOpen} unresolved ${h.blockedByOpen === 1 ? "card" : "cards"}`}>
-          <span aria-hidden>⊘</span>
+          <span aria-hidden style={{ fontFamily: font.mono }}>⊘</span>
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
             {h.blockedByFirst
               ? `${h.blockedByFirst.title}${h.blockedByOpen > 1 ? ` +${h.blockedByOpen - 1}` : ""}`
@@ -53,8 +53,8 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
       {h.childCount > 0 && (
         <span style={{ ...metaItem, color: complete ? color.live : color.text2 }}
           title={`${h.childDone} of ${h.childCount} child ${h.childCount === 1 ? "card" : "cards"} done`}>
-          <span aria-hidden>⊞</span>
-          <span>{h.childDone}/{h.childCount}</span>
+          <span aria-hidden style={{ fontFamily: font.mono }}>⊞</span>
+          <span style={{ fontFamily: font.mono }}>{h.childDone}/{h.childCount}</span>
         </span>
       )}
       {h.parentId && (
@@ -62,7 +62,7 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
           title={parentTitle
             ? `Child of "${parentTitle}"`
             : `Child of card ${h.parentId.slice(0, 8)} — that card isn't on this board (archived, or in another project)`}>
-          <span aria-hidden>↳</span>
+          <span aria-hidden style={{ fontFamily: font.mono }}>↳</span>
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
             {parentTitle ?? h.parentId.slice(0, 8)}
           </span>
@@ -144,7 +144,7 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
           )}
           {/* Say so when the list is capped, rather than letting it read as the whole set. */}
           {links.children.total > links.children.items.length && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
+            <span style={{ fontSize: fs.sm, color: color.text3 }}>
               showing {links.children.items.length} of {links.children.total}
             </span>
           )}
@@ -200,7 +200,7 @@ export function TaskLinkRow({ ref_, columns, titleById, onOpenTask, glyph, tone,
   const textColor = muted ? color.text3 : (tone ?? (openable ? color.text2 : color.text3));
   const label = (
     <>
-      <span aria-hidden style={{ flexShrink: 0, color: color.text3 }}>{glyph}</span>
+      <span aria-hidden style={{ flexShrink: 0, color: color.text3, fontFamily: font.mono }}>{glyph}</span>
       <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ref_.title}</span>
       {suffix && <span style={{ flexShrink: 0, color: color.text3, fontSize: fs.xs }}>{suffix}</span>}
       {col && <Badge tone={columnTone(col) ?? "muted"} style={{ flexShrink: 0, fontSize: fs.xs, padding: "0 5px" }}>{col.label}</Badge>}
@@ -208,7 +208,7 @@ export function TaskLinkRow({ ref_, columns, titleById, onOpenTask, glyph, tone,
   );
   const shared: CSSProperties = {
     display: "flex", alignItems: "center", gap: 5, minWidth: 0, textAlign: "left",
-    fontFamily: font.mono, fontSize: fs.mono, color: textColor,
+    fontFamily: font.ui, fontSize: fs.sm, color: textColor,
   };
   if (!openable) {
     return (

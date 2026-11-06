@@ -104,22 +104,22 @@ function RoleCard({ d, selected, locked, onSelect }: {
       <span style={{ display: "flex", flexDirection: "column", gap: 9, flex: 1, padding: "11px 12px 12px",
         ...(elevated ? { background: "color-mix(in oklab, var(--tone) 5%, transparent)" } : null),
         ...(locked ? { opacity: 0.62 } : null) }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text2 }}>{d.description}</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.sm, lineHeight: 1.5, color: color.text2 }}>{d.description}</span>
         <span style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {d.powers.map((p, i) => (
-            <span key={i} style={{ display: "flex", gap: 7, alignItems: "flex-start", fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.45, color: color.text2 }}>
-              <span aria-hidden style={{ flex: "none", marginTop: 1, fontSize: fs.xs, color: p.has ? color.accentFg : color.text3 }}>▹</span>
+            <span key={i} style={{ display: "flex", gap: 7, alignItems: "flex-start", fontFamily: font.ui, fontSize: fs.sm, lineHeight: 1.45, color: color.text2 }}>
+              <span aria-hidden style={{ flex: "none", marginTop: 1, fontFamily: font.mono, fontSize: fs.xs, color: p.has ? color.accentFg : color.text3 }}>▹</span>
               {p.text}
             </span>
           ))}
         </span>
         <span style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: "var(--tone)", whiteSpace: "nowrap" }}>
+          <span style={{ fontFamily: font.ui, fontSize: fs.sm, color: "var(--tone)", whiteSpace: "nowrap" }}>
             Tier · {d.tierLabel}
           </span>
           {locked && (
             <span style={{ marginLeft: "auto", flex: "none", display: "inline-flex", alignItems: "center", gap: 4,
-              fontFamily: font.mono, fontSize: fs.xs, color: color.text3,
+              fontFamily: font.ui, fontSize: fs.xs, color: color.text3,
               border: `1px solid ${color.lineStrong}`, borderRadius: radius.pill, padding: "1px 7px" }}>
               ⚿ dev-layer
             </span>

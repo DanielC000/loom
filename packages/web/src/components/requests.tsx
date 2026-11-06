@@ -46,7 +46,7 @@ export function RequestTypeTag({ type }: { type: QuestionType }) {
 function RequestNeedsChip({ type }: { type: QuestionType }) {
   const c = tone[REQUEST_TYPE_TONE[type]];
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0, fontFamily: font.mono, fontSize: fs.mono,
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0, fontSize: fs.sm,
       color: c, border: `1px solid ${c}`, borderRadius: radius.sm, padding: "1px 8px" }}>
       <Dot tone={REQUEST_TYPE_TONE[type]} />
       {requestNeedsChip(type)}
@@ -73,20 +73,20 @@ function RequestNeedsChip({ type }: { type: QuestionType }) {
 // and the arrow is never the only carrier of meaning for assistive tech.
 export function RequestProvenance({ q, compact }: { q: Pick<QuestionInboxItem, "sessionId" | "filedBySessionId">; compact?: boolean }) {
   const full = requestProvenanceText(q);
-  const routed = <span style={{ color: color.text2 }}>{q.sessionId.slice(0, 8)}</span>;
+  const routed = <span style={{ fontFamily: font.mono, color: color.text2 }}>{q.sessionId.slice(0, 8)}</span>;
   return (
     <span title={full} aria-label={full} style={{ minWidth: 0 }}>
       {compact
         ? <>
             {q.filedBySessionId
-              ? <span style={{ color: color.text2 }}>{q.filedBySessionId.slice(0, 8)}</span>
+              ? <span style={{ fontFamily: font.mono, color: color.text2 }}>{q.filedBySessionId.slice(0, 8)}</span>
               : <>unknown</>}
             <span aria-hidden> → </span>
             {routed}
           </>
         : <>
             {q.filedBySessionId
-              ? <>filed by <span style={{ color: color.text2 }}>{q.filedBySessionId.slice(0, 8)}</span></>
+              ? <>filed by <span style={{ fontFamily: font.mono, color: color.text2 }}>{q.filedBySessionId.slice(0, 8)}</span></>
               : <>filer unknown</>}
             {" · now routed to "}
             {routed}
@@ -214,7 +214,7 @@ function SshClearConfirm({ q, action, onCancel }: { q: QuestionInboxItem; action
         </Button>
       </div>
       {clear.isError && (
-        <span role="alert" style={{ flexBasis: "100%", fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>
+        <span role="alert" style={{ flexBasis: "100%", fontSize: fs.sm, color: color.danger }}>
           Could not clear it: {errorText(clear.error)}
         </span>
       )}
@@ -328,9 +328,9 @@ function useAttachmentImageSrc(questionId: string, attachmentId: string, remote:
 function PreviewNote({ glyph, glyphTone, children }: { glyph: string; glyphTone?: string; children: ReactNode }) {
   return (
     <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center",
-      justifyContent: "center", gap: 6, textAlign: "center", padding: 12, fontFamily: font.mono, fontSize: fs.xs,
+      justifyContent: "center", gap: 6, textAlign: "center", padding: 12, fontSize: fs.sm,
       color: color.text3, lineHeight: 1.5 }}>
-      <span aria-hidden style={{ fontSize: fs.h1, lineHeight: 1, color: glyphTone ?? color.text3, opacity: 0.85 }}>{glyph}</span>
+      <span aria-hidden style={{ fontFamily: font.mono, fontSize: fs.h1, lineHeight: 1, color: glyphTone ?? color.text3, opacity: 0.85 }}>{glyph}</span>
       <span>{children}</span>
     </div>
   );
@@ -441,7 +441,7 @@ function AttachmentOpenAction({ questionId, a, remote }: { questionId: string; a
       href={api.questionAttachmentUrl(questionId, a.id)} target="_blank" rel="noopener noreferrer"
       title={`Open ${a.label} in a new tab`} onClick={() => stamp.mutate()}
       style={{ ...geometry, display: "inline-block", textAlign: "center", textDecoration: "none",
-        borderRadius: radius.base, fontFamily: font.mono }}>
+        borderRadius: radius.base, fontFamily: font.ui }}>
       Open ↗
     </a>
   );
@@ -477,7 +477,7 @@ function AttachmentRow({ questionId, a, selected, now, remote, onSelect }: {
           <span style={{ display: "block", fontFamily: font.mono, fontSize: fs.xs, color: color.text3, overflow: "hidden",
             textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{attachmentDetail(a)}</span>
         </span>
-        <span data-testid="attachment-state" style={{ width: MANIFEST_STATE_W, flexShrink: 0, fontFamily: font.mono,
+        <span data-testid="attachment-state" style={{ width: MANIFEST_STATE_W, flexShrink: 0,
           fontSize: fs.xs, color: tone[state.tone] }}>{state.label}</span>
       </button>
       <span style={{ width: MANIFEST_ACTION_W, flexShrink: 0, display: "flex", justifyContent: "flex-end", paddingRight: 6 }}>
@@ -531,7 +531,7 @@ function RequestAttachments({ question }: { question: QuestionInboxItem }) {
         <AttachmentPreviewPane questionId={question.id} a={selected} remote={remote} />
       </div>
       {chip.unavailable > 0 && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.6,
+        <span style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.6,
           borderLeft: `2px solid ${color.lineStrong}`, paddingLeft: 10 }}>
           A source was removed before you got here — most often a worker’s worktree reaped after it
           finished. The row stays so you can still see what the agent sent; the bytes themselves are gone.
@@ -570,8 +570,8 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
       style={{ display: "flex", flexDirection: "column", gap: 5, borderLeft: `3px solid ${edge}` }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ fontSize: fs.body, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
+          <span style={{ fontSize: fs.sm, color: color.text3, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             <Dot tone={metaDot} glow={watchdog} />
             <span style={{ color: color.text2 }}>{q.projectName}</span>
             <span>· <RequestProvenance q={q} /></span>
@@ -617,9 +617,9 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
       </div>
       {/* second line: the type-colored hint (pending) or the recorded outcome (answered/consumed). */}
       {q.state === "pending" ? (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone[typeTone] }}>{requestHint(q)}</span>
+        <span style={{ fontSize: fs.sm, color: tone[typeTone] }}>{requestHint(q)}</span>
       ) : (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: watchdog ? color.attnText : color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: fs.sm, color: watchdog ? color.attnText : color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {q.state === "notice" ? "" : watchdog ? "answered, not picked up — " : "answered: "}
           {requestOutcome(q)}
           {holdStatus && <span data-testid="ssh-hold-status"> · {holdStatus}</span>}
@@ -637,10 +637,10 @@ function FilterChip({ label, count, active, dotTone, onClick }:
     <button onClick={onClick}
       style={{ display: "inline-flex", alignItems: "center", gap: 6, background: active ? color.inset : "transparent",
         border: `1px solid ${active ? color.accentEdge : color.line}`, borderRadius: radius.sm, padding: "2px 8px", cursor: "pointer",
-        fontFamily: font.mono, fontSize: fs.mono, color: active ? color.accentFg : color.text2 }}>
+        fontFamily: font.ui, fontSize: fs.sm, color: active ? color.accentFg : color.text2 }}>
       {dotTone && <Dot tone={dotTone} />}
       {label}
-      <span style={{ color: active ? color.accentFg : color.text3 }}>{count}</span>
+      <span style={{ fontFamily: font.mono, color: active ? color.accentFg : color.text3 }}>{count}</span>
     </button>
   );
 }
@@ -731,8 +731,8 @@ export function RequestsInbox() {
         </div>
       )}
 
-      {items.length === 0 && <Panel><span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>Nothing is waiting on you. Managers surface requests here when they need your call.</span></Panel>}
-      {items.length > 0 && filtered.length === 0 && <Panel><span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No requests match this filter.</span></Panel>}
+      {items.length === 0 && <Panel><span style={{ color: color.text3, fontSize: fs.sm }}>Nothing is waiting on you. Managers surface requests here when they need your call.</span></Panel>}
+      {items.length > 0 && filtered.length === 0 && <Panel><span style={{ color: color.text3, fontSize: fs.sm }}>No requests match this filter.</span></Panel>}
 
       {pending.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -799,7 +799,7 @@ export function RequestModal({ id, onClose }: { id: string; onClose: () => void 
           <SectionLabel style={{ margin: 0, flex: 1 }}>Request · {id.slice(0, 8)}</SectionLabel>
           {refused && (
             <span data-testid="request-close-refused" role="status" aria-live="polite"
-              style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>{refused}</span>
+              style={{ fontSize: fs.sm, color: color.attnText }}>{refused}</span>
           )}
           <Button onClick={onClose} title="Close (Esc)">✕</Button>
         </div>
@@ -922,18 +922,18 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
           {/* Header */}
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <RequestTypeTag type={question.type} />
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+            <span style={{ fontSize: fs.sm, color: color.text2 }}>
               <RequestProvenance q={question} /> · <span style={{ color: color.text2 }}>{question.projectName}</span>
             </span>
             {question.taskId && <LinkedTaskChip taskId={question.taskId} title={linkedTitle} columnKey={linkedColumnKey} onClick={openLinkedTask} />}
             <span style={{ flex: 1 }} />
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+            <span style={{ fontSize: fs.sm, color: color.text3 }}>
               asked {relativeAge(question.createdAt, now)}
             </span>
             <DecisionStateChip q={question} now={now} />
             {question.sessionLive && (
               <button onClick={() => { onClose?.(); navigate(`/session/${question.sessionId}`); }}
-                style={{ background: "transparent", border: "none", cursor: "pointer", color: color.text2, fontFamily: font.mono, fontSize: fs.mono, padding: 0 }}>
+                style={{ background: "transparent", border: "none", cursor: "pointer", color: color.text2, fontFamily: font.ui, fontSize: fs.sm, padding: 0 }}>
                 open live session ↗
               </button>
             )}
@@ -942,7 +942,7 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
           {/* The asking session is confirmed gone for good — say so before the human answers into a no-op. */}
           {question.sessionOrphaned && (
             <Panel style={{ borderLeft: `3px solid ${color.attn}` }}>
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>
+              <span style={{ fontSize: fs.sm, color: color.attnText }}>
                 The asking session is gone for good and can never come back to pull an answer — submitting
                 below will record your answer, but nothing will ever act on it automatically.
               </span>
@@ -956,8 +956,8 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
               <span style={{ flex: 1 }} />
               <Badge tone={question.state === "pending" ? "attn" : "muted"}>{requestAnswerBadge(question)}</Badge>
             </div>
-            <div style={{ fontFamily: font.mono, fontSize: fs.lg, color: color.text, lineHeight: 1.45 }}>{question.title}</div>
-            {question.body && <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text2, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{question.body}</div>}
+            <div style={{ fontSize: fs.lg, color: color.text, lineHeight: 1.45 }}>{question.title}</div>
+            {question.body && <div style={{ fontSize: fs.body, color: color.text2, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{question.body}</div>}
           </Panel>
 
           {/* ATTACHED — its own panel between the ask and the answer controls, for EVERY state and type
@@ -989,10 +989,10 @@ function AnsweredReadout({ q }: { q: QuestionInboxItem }) {
     return (
       <Panel style={{ display: "flex", flexDirection: "column", gap: 6, borderLeft: `3px solid ${color.danger}` }}>
         <SectionLabel style={{ margin: 0, color: color.danger }}>Cancelled · never answered</SectionLabel>
-        <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text2 }}>
+        <div style={{ fontSize: fs.body, color: color.text2 }}>
           {q.cancelledReason ?? "no reason given"}
         </div>
-        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+        <div style={{ fontSize: fs.sm, color: color.text3 }}>
           by {q.cancelledBy === "agent" ? "the asking agent" : "a human"}
         </div>
       </Panel>
@@ -1015,13 +1015,13 @@ function AnsweredReadout({ q }: { q: QuestionInboxItem }) {
         ? (q.state === "consumed" ? "Answered · no longer in effect" : SSH_HOLD_ANSWERED_LABEL)
         : q.state === "consumed" ? "Answered · the manager pulled it" : "Answered · waiting on manager pickup"}</SectionLabel>
       {q.type === "credential" ? (
-        <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text2 }}>provided · encrypted, not shown</div>
+        <div style={{ fontSize: fs.body, color: color.text2 }}>provided · encrypted, not shown</div>
       ) : q.type === "permission" ? (
-        <div style={{ fontFamily: font.mono, fontSize: fs.body, color: q.chosenOption === "authorize" ? color.live : color.danger }}>{requestOutcome(q)}</div>
+        <div style={{ fontSize: fs.body, color: q.chosenOption === "authorize" ? color.live : color.danger }}>{requestOutcome(q)}</div>
       ) : (
         <>
-          {q.chosenOption && <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Chose: <span style={{ color: color.text2 }}>{q.chosenOption}</span></div>}
-          {q.note && <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text2, whiteSpace: "pre-wrap" }}>Note: {q.note}</div>}
+          {q.chosenOption && <div style={{ fontSize: fs.body, color: color.text }}>Chose: <span style={{ color: color.text2 }}>{q.chosenOption}</span></div>}
+          {q.note && <div style={{ fontSize: fs.body, color: color.text2, whiteSpace: "pre-wrap" }}>Note: {q.note}</div>}
           {!q.chosenOption && !q.note && <span style={{ color: color.text3, fontSize: fs.sm }}>—</span>}
         </>
       )}
@@ -1056,7 +1056,7 @@ function useAnswerMutation(id: string, mutationFn: () => Promise<unknown>) {
 
 const textareaStyle = {
   width: "100%", boxSizing: "border-box" as const, resize: "vertical" as const, background: color.inset, color: color.text,
-  border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "8px 10px", fontFamily: font.mono, fontSize: fs.body,
+  border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "8px 10px", fontFamily: font.ui, fontSize: fs.body,
 };
 
 // decision — options as selectable choices (recommendation flagged) + an always-optional note. Picking an
@@ -1086,7 +1086,7 @@ function DecisionControl({ q }: { q: QuestionInboxItem }) {
                 <span aria-hidden style={{ width: 14, height: 14, borderRadius: radius.pill, flexShrink: 0, marginTop: 2,
                   border: `2px solid ${selected ? color.accent : color.lineStrong}`, background: selected ? color.accent : "transparent",
                   boxShadow: selected ? `inset 0 0 0 2px ${color.selected}` : "none" }} />
-                <span style={{ flex: 1, fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{opt}</span>
+                <span style={{ flex: 1, fontSize: fs.body, color: color.text }}>{opt}</span>
                 {recommended && <Badge tone="muted">recommended</Badge>}
               </Panel>
             );
@@ -1155,9 +1155,9 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
     setRequestDraft(q.id, { ...EMPTY_REQUEST_DRAFT, note, scope, expiry }, dirty && !answered);
   }, [q.id, note, scope, expiry, defaultScope, answered]);
   const kv = (label: string, value: string) => (
-    <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: fs.body }}>
+    <div style={{ display: "flex", gap: 10, fontSize: fs.body }}>
       <span style={{ color: color.text3, minWidth: 90 }}>{label}</span>
-      <span style={{ color: color.text, whiteSpace: "pre-wrap" }}>{value}</span>
+      <span style={{ fontFamily: font.mono, color: color.text, whiteSpace: "pre-wrap" }}>{value}</span>
     </div>
   );
   return (
@@ -1176,8 +1176,8 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
             return (
               <Panel key={s} selected={selected} onClick={() => { setScope(s); if (s === "standing" && isSsh && !expiry) setExpiry("24h"); }}
                 style={{ flex: 1, cursor: "pointer", display: "flex", flexDirection: "column", gap: 3 }}>
-                <span style={{ fontFamily: font.mono, fontSize: fs.body, color: selected ? color.accentFg : color.text }}>{s}</span>
-                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+                <span style={{ fontSize: fs.body, color: selected ? color.accentFg : color.text }}>{s}</span>
+                <span style={{ fontSize: fs.sm, color: color.text3 }}>
                   {s === "once" ? "this action only" : "keep authorizing this class"}
                 </span>
               </Panel>
@@ -1185,7 +1185,7 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
           })}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: scope === "standing" ? color.text2 : color.text3 }}>Expiry</span>
+          <span style={{ fontSize: fs.sm, color: scope === "standing" ? color.text2 : color.text3 }}>Expiry</span>
           <Select value={expiry} disabled={scope !== "standing"} onChange={(e) => setExpiry(e.target.value)}
             title={scope === "standing" ? (isSsh ? "A standing ssh grant needs an expiry" : "Optional expiry for a standing grant") : "Enable by choosing the standing scope"}
             data-testid="permission-expiry">
@@ -1204,9 +1204,9 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <Button variant="primary" disabled={pending || sshNeedsExpiry} onClick={() => authorize.mutate()}>{authorize.isPending ? "Authorizing…" : "Authorize"}</Button>
           <Button variant="danger" disabled={pending} onClick={() => deny.mutate()}>{deny.isPending ? "Denying…" : "Deny"}</Button>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>Sends your decision to agent {q.sessionId.slice(0, 8)}.</span>
+          <span style={{ fontSize: fs.sm, color: color.text3 }}>Sends your decision to agent <span style={{ fontFamily: font.mono }}>{q.sessionId.slice(0, 8)}</span>.</span>
         </div>
-        {(authorize.isSuccess || deny.isSuccess) && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.live }}>✓ answered — the manager was nudged to pull it.</span>}
+        {(authorize.isSuccess || deny.isSuccess) && <span style={{ fontSize: fs.sm, color: color.live }}>✓ answered — the manager was nudged to pull it.</span>}
       </Panel>
     </div>
   );
@@ -1233,7 +1233,7 @@ function CredentialControl({ q }: { q: QuestionInboxItem }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <Panel style={{ borderLeft: `3px solid ${color.attn}`, display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.attnText }}>Write-only secret</span>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5 }}>
+        <span style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.5 }}>
           Stored envelope-encrypted (AES-256-GCM) and NEVER echoed back to the agent or shown here again.
           It is NOT auto-injected into any session — wire it into a Connection or the project's config
           yourself before an agent can use it. Store it once — you won’t see it after.
@@ -1242,14 +1242,14 @@ function CredentialControl({ q }: { q: QuestionInboxItem }) {
       <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <SectionLabel style={{ margin: 0 }}>Secret value</SectionLabel>
         {q.credentialEnvVar && (
-          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
-            target env var: <span style={{ color: color.attnText }}>{q.credentialEnvVar}</span>
+          <div style={{ fontSize: fs.sm, color: color.text2 }}>
+            target env var: <span style={{ fontFamily: font.mono, color: color.attnText }}>{q.credentialEnvVar}</span>
           </div>
         )}
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input type={reveal ? "text" : "password"} value={secret} onChange={(e) => setSecret(e.target.value)}
             autoComplete="off" spellCheck={false} placeholder="paste the secret value…"
-            style={{ flex: 1, ...textareaStyle, resize: undefined }} />
+            style={{ flex: 1, ...textareaStyle, fontFamily: font.mono, resize: undefined }} />
           <Button type="button" onClick={() => setReveal((r) => !r)} aria-pressed={reveal}
             title={reveal ? "Hide the secret" : "Show the secret"}>{reveal ? "Hide" : "Show"}</Button>
         </div>
@@ -1257,9 +1257,9 @@ function CredentialControl({ q }: { q: QuestionInboxItem }) {
           <Button variant="primary" disabled={secret.trim().length === 0 || answer.isPending} onClick={() => answer.mutate()}>
             {answer.isPending ? "Storing…" : "Store securely"}
           </Button>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>Encrypted at rest · never returned.</span>
+          <span style={{ fontSize: fs.sm, color: color.text3 }}>Encrypted at rest · never returned.</span>
         </div>
-        {answer.isSuccess && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.live }}>✓ stored — encrypted, and the manager was nudged to pull it.</span>}
+        {answer.isSuccess && <span style={{ fontSize: fs.sm, color: color.live }}>✓ stored — encrypted, and the manager was nudged to pull it.</span>}
       </Panel>
     </div>
   );
@@ -1272,9 +1272,9 @@ function SubmitRow({ label, disabled, pending, success, onSubmit }:
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <Button variant="primary" disabled={disabled || pending} onClick={onSubmit}>{pending ? "Submitting…" : label}</Button>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>Records your answer and nudges the manager to pull it.</span>
+        <span style={{ fontSize: fs.sm, color: color.text3 }}>Records your answer and nudges the manager to pull it.</span>
       </div>
-      {success && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.live }}>✓ answered — the manager was nudged to pull it.</span>}
+      {success && <span style={{ fontSize: fs.sm, color: color.live }}>✓ answered — the manager was nudged to pull it.</span>}
     </>
   );
 }
@@ -1374,8 +1374,8 @@ export function RequestHistory() {
         </Select>
       </div>
 
-      {terminal.length === 0 && <Panel><span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No history yet — answered requests land here once the manager pulls them, and dismissed/cancelled ones land here too.</span></Panel>}
-      {terminal.length > 0 && rows.length === 0 && <Panel><span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No history matches your search.</span></Panel>}
+      {terminal.length === 0 && <Panel><span style={{ color: color.text3, fontSize: fs.sm }}>No history yet — answered requests land here once the manager pulls them, and dismissed/cancelled ones land here too.</span></Panel>}
+      {terminal.length > 0 && rows.length === 0 && <Panel><span style={{ color: color.text3, fontSize: fs.sm }}>No history matches your search.</span></Panel>}
 
       {rows.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -1385,10 +1385,10 @@ export function RequestHistory() {
                 background: color.surface, border: `1px solid ${color.line}`, borderLeft: `3px solid ${color.lineStrong}`,
                 borderRadius: radius.sm, padding: "6px 10px" }}>
               <RequestTypeTag type={q.type} />
-              <span style={{ flex: "2 1 200px", minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
+              <span style={{ flex: "2 1 200px", minWidth: 0, fontSize: fs.sm, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
               <span title={`${q.projectName} · ${requestProvenanceText(q)}`}
-                style={{ flex: "1 1 170px", minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.projectName} · <RequestProvenance q={q} compact /></span>
-              <span style={{ flex: "2 1 200px", minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: q.state === "cancelled" ? color.danger : color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={requestOutcome(q)}>{requestOutcome(q)}</span>
+                style={{ flex: "1 1 170px", minWidth: 0, fontSize: fs.sm, color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.projectName} · <RequestProvenance q={q} compact /></span>
+              <span style={{ flex: "2 1 200px", minWidth: 0, fontSize: fs.sm, color: q.state === "cancelled" ? color.danger : color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={requestOutcome(q)}>{requestOutcome(q)}</span>
               {q.taskId && <LinkedTaskChip taskId={q.taskId} columnKey={q.linkedTaskColumnKey} />}
               <span style={{ flexShrink: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{relativeAge(resolvedAt(q), now)}</span>
             </button>

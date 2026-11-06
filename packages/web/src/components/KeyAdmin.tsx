@@ -187,7 +187,7 @@ function EndpointRow({ agent, onToggle, pending }: { agent: Agent; onToggle: () 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <StatusPill tone="muted" label={agent.endpoint ? "endpoint" : "off"} />
-      <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{agent.name}</span>
+      <span style={{ fontSize: fs.body, color: color.text }}>{agent.name}</span>
       <span style={{ flex: 1 }} />
       <Button variant={agent.endpoint ? "default" : "primary"} disabled={pending} onClick={onToggle}>
         {agent.endpoint ? "Disable" : "Enable"}
@@ -205,7 +205,7 @@ function KeyRow({ k, agentName, onEdit, onRotate, onKill, onDelete, onRevoke, on
     <Panel style={{ padding: "10px 12px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <StatusPill tone={statusTone[k.status]} label={k.status} glow={k.status === "active"} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{k.name || "(unnamed)"}</span>
+        <span style={{ fontSize: fs.body, color: color.text }}>{k.name || "(unnamed)"}</span>
         <span style={{ flex: 1 }} />
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{k.id.slice(0, 8)}</span>
       </div>
@@ -217,7 +217,7 @@ function KeyRow({ k, agentName, onEdit, onRotate, onKill, onDelete, onRevoke, on
       </div>
 
       <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        <span style={{ fontSize: fs.mono, color: color.text3, fontFamily: font.mono }}>endpoints:</span>
+        <span style={{ fontSize: fs.sm, color: color.text3 }}>endpoints:</span>
         {k.endpointAgentIds.length === 0 && <span style={{ fontSize: fs.sm, color: color.text3 }}>none</span>}
         {k.endpointAgentIds.map((id) => <Chip key={id} value={agentName(id)} tone="muted" />)}
       </div>
@@ -312,7 +312,7 @@ function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, 
           : (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {endpointAgents.map((a) => (
-                <label key={a.id} style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.body, color: color.text, cursor: "pointer" }}>
+                <label key={a.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: fs.body, color: color.text, cursor: "pointer" }}>
                   <input type="checkbox" checked={allow.has(a.id)} onChange={() => toggle(a.id)} />
                   {a.name}
                 </label>
@@ -348,7 +348,7 @@ function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, 
         </Labeled>
       )}
 
-      {(localErr || error) && <div style={{ fontSize: fs.mono, color: color.danger, fontFamily: font.mono }}>{localErr ?? error}</div>}
+      {(localErr || error) && <div style={{ fontSize: fs.sm, color: color.danger }}>{localErr ?? error}</div>}
 
       <div style={{ display: "flex", gap: 8 }}>
         {/* Saving is blocked while the eligible set is unknown: submitting then would either strip every
@@ -367,7 +367,7 @@ function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, 
 function CapInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontSize: fs.mono, color: color.text3, fontFamily: font.mono }}>{label}</span>
+      <span style={{ fontSize: fs.sm, color: color.text3 }}>{label}</span>
       <Input type="number" min={0} value={value} onChange={(e) => onChange(e.target.value)} placeholder="∞" style={{ width: 140 }} />
     </div>
   );

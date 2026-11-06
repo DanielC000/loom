@@ -124,7 +124,7 @@ export function ReviewSurface({ workerId, embedded = false }: {
         <Panel style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `2px solid ${analysis.highRisk ? color.danger : analysis.mediumRisk ? color.attn : color.live}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <SectionLabel style={{ margin: 0 }}>Summary</SectionLabel>
-            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>auto-derived</span>
+            <span style={{ fontSize: fs.sm, color: color.text3 }}>auto-derived</span>
             <span style={{ flex: 1 }} />
             {merged && <Badge tone="live">already merged</Badge>}
             {uncommitted && <Badge tone="attn">uncommitted</Badge>}
@@ -133,7 +133,7 @@ export function ReviewSurface({ workerId, embedded = false }: {
             </Badge>
           </div>
 
-          <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, lineHeight: 1.5 }}>{analysis.headline}</div>
+          <div style={{ fontSize: fs.body, color: color.text, lineHeight: 1.5 }}>{analysis.headline}</div>
 
           {/* Touched-area roll-up */}
           {analysis.areas.length > 0 && (
@@ -148,7 +148,7 @@ export function ReviewSurface({ workerId, embedded = false }: {
               {analysis.files.filter((f) => f.risk !== "low")
                 .sort((a, b) => riskOrder(b.risk) - riskOrder(a.risk))
                 .map((f) => (
-                  <div key={f.path} style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono }}>
+                  <div key={f.path} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: fs.sm }}>
                     <Dot tone={riskTone(f.risk)} glow={f.risk === "high"} />
                     <button onClick={() => jumpTo(f.path)} className="loom-btn"
                       style={{ background: "transparent", border: "none", color: color.text2, cursor: "pointer", padding: 0, fontFamily: font.mono, fontSize: fs.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 360, textAlign: "left" }}
@@ -176,14 +176,14 @@ export function ReviewSurface({ workerId, embedded = false }: {
             </Button>
             <span className="rv-changes" style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap", flex: "1 1 320px", minWidth: 0 }}>
               <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="changes to request (sent to the worker as a turn)…"
-                style={{ flex: "1 1 200px", minWidth: 0, maxWidth: 420, resize: "vertical", boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.mono, fontSize: fs.mono }} />
+                style={{ flex: "1 1 200px", minWidth: 0, maxWidth: 420, resize: "vertical", boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.ui, fontSize: fs.sm }} />
               <Button variant="danger" disabled={!note.trim() || requestChanges.isPending} onClick={() => requestChanges.mutate()}>Request changes</Button>
             </span>
           </div>
           <p style={{ color: color.text3, fontSize: fs.sm, marginTop: 8 }}>
             Approve runs the project's build/DoD gate in the worktree (fail-closed) before squash-merging; on green the worktree is removed and the task closed. Request changes sends your note to the worker as a turn.
           </p>
-          {result && <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.body, color: result.startsWith("✓") ? color.live : result.startsWith("error") || result.startsWith("rejected") ? color.danger : result.startsWith("still running") ? color.workText : color.attnText }}>{result}</div>}
+          {result && <div style={{ marginTop: 8, fontSize: fs.body, color: result.startsWith("✓") ? color.live : result.startsWith("error") || result.startsWith("rejected") ? color.danger : result.startsWith("still running") ? color.workText : color.attnText }}>{result}</div>}
         </Panel>
       )}
 

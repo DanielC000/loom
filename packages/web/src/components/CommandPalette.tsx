@@ -73,12 +73,12 @@ export function CommandPalette() {
         <input autoFocus value={q} onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && commands[0]) go(commands[0].run); }}
           placeholder="Jump to…  (Esc to close)"
-          style={{ width: "100%", boxSizing: "border-box", background: color.inset, color: color.text, border: "none", borderBottom: `1px solid ${color.line}`, padding: "10px 12px", fontFamily: font.mono, fontSize: fs.body, outline: "none" }} />
+          style={{ width: "100%", boxSizing: "border-box", background: color.inset, color: color.text, border: "none", borderBottom: `1px solid ${color.line}`, padding: "10px 12px", fontFamily: font.ui, fontSize: fs.body, outline: "none" }} />
         <div style={{ maxHeight: "50vh", overflow: "auto" }}>
-          {commands.length === 0 && <div style={{ padding: 12, color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No matches.</div>}
+          {commands.length === 0 && <div style={{ padding: 12, color: color.text3, fontSize: fs.sm }}>No matches.</div>}
           {commands.map((c, i) => (
             <button key={i} onClick={() => go(c.run)}
-              style={{ display: "flex", width: "100%", textAlign: "left", justifyContent: "space-between", gap: 8, background: "transparent", border: "none", borderBottom: `1px solid ${color.line}`, color: color.text, padding: "8px 12px", fontFamily: font.mono, fontSize: fs.body, cursor: "pointer" }}>
+              style={{ display: "flex", width: "100%", textAlign: "left", justifyContent: "space-between", gap: 8, background: "transparent", border: "none", borderBottom: `1px solid ${color.line}`, color: color.text, padding: "8px 12px", fontFamily: font.ui, fontSize: fs.body, cursor: "pointer" }}>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
               <span style={{ color: color.text3, fontSize: fs.sm }}>{c.hint}</span>
             </button>

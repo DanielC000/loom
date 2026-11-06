@@ -304,14 +304,14 @@ body {
 .loom-lane-menu-item {
   display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 6px 8px;
   background: transparent; border: 0; border-radius: var(--loom-radius-sm); text-align: left; text-decoration: none;
-  font-family: var(--loom-font-mono); font-size: 12px; color: var(--loom-text); cursor: pointer; white-space: nowrap;
+  font-family: var(--loom-font-ui); font-size: 12px; color: var(--loom-text); cursor: pointer; white-space: nowrap;
 }
 .loom-lane-menu-item.is-quiet { color: var(--loom-text-2); }
 .loom-lane-menu-item:hover { background: var(--loom-inset); }
 .loom-lane-menu-item:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
 .loom-lane-menu-item[aria-disabled="true"] { color: var(--loom-text-3); cursor: default; }
 .loom-lane-menu-item[aria-disabled="true"]:hover { background: transparent; }
-.loom-lane-menu-hint { margin-left: auto; color: var(--loom-text-3); font-size: 10px; }
+.loom-lane-menu-hint { margin-left: auto; color: var(--loom-text-3); font-family: var(--loom-font-mono); font-size: 10px; }
 .loom-lane-menu-sep { height: 1px; margin: 4px 2px; background: var(--loom-line); }
 /* A collapsed lane: the whole slim rail is the expand button, label running bottom-to-top. */
 .loom-lane-rail {
@@ -1402,8 +1402,8 @@ button.loom-cardtab:focus-visible {
   background: var(--loom-surface);
   border: 1px solid var(--loom-line-strong);
   color: var(--loom-text);
-  font-family: var(--loom-font-mono);
-  font-size: 11.5px;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
   box-shadow:
     var(--loom-pop-shadow),
     0 0 0 4px color-mix(in oklab, var(--loom-text) 6%, transparent);
@@ -3160,8 +3160,7 @@ button.loom-kpi.is-open {
 .loom-bandempty,
 .loom-slotnote {
   margin: 0;
-  font-family: var(--loom-font-mono);
-  font-size: 11.5px;
+  font-size: var(--loom-fs-sm);
   line-height: 1.65;
   color: var(--loom-text-3);
 }

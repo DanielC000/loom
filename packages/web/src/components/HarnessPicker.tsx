@@ -68,12 +68,12 @@ export function HarnessPicker({ value, onChange }: { value: Harness; onChange: (
               <span aria-hidden style={{ flex: "none", fontSize: fs.body, color: selected ? color.accentFg : "transparent" }}>✓</span>
             </span>
             <span style={{ display: "flex", flexDirection: "column", gap: 7, flex: 1, padding: "9px 11px 11px" }}>
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text2 }}>{o.summary}</span>
+              <span style={{ fontFamily: font.ui, fontSize: fs.sm, lineHeight: 1.5, color: color.text2 }}>{o.summary}</span>
               <span style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                 {o.implications.map((t, i) => (
-                  <span key={i} style={{ display: "flex", gap: 7, alignItems: "flex-start", fontFamily: font.mono,
-                    fontSize: fs.mono, lineHeight: 1.45, color: color.text3 }}>
-                    <span aria-hidden style={{ flex: "none", marginTop: 1, fontSize: fs.xs, color: "var(--tone)" }}>▹</span>
+                  <span key={i} style={{ display: "flex", gap: 7, alignItems: "flex-start", fontFamily: font.ui,
+                    fontSize: fs.sm, lineHeight: 1.45, color: color.text3 }}>
+                    <span aria-hidden style={{ flex: "none", marginTop: 1, fontFamily: font.mono, fontSize: fs.xs, color: "var(--tone)" }}>▹</span>
                     {t}
                   </span>
                 ))}
@@ -104,10 +104,10 @@ export function HarnessDropSummary({ harness }: { harness: Harness }) {
     <div data-testid="harness-drop-summary" role="status"
       style={{ border: `1px solid ${accent}`, borderRadius: radius.base, padding: "8px 10px",
         background: color.inset, display: "flex", flexDirection: "column", gap: 5 }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: accent, lineHeight: 1.5 }}>
+      <span style={{ fontSize: fs.sm, color: accent, lineHeight: 1.5 }}>
         {n} settings below are not read by the codex spawn path.
       </span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.5 }}>
+      <span style={{ fontSize: fs.sm, color: color.text3, lineHeight: 1.5 }}>
         {stored} of them ({storedLabels}) stay stored and become live again if you switch this rig back to
         Claude Code, so they are shown disabled rather than cleared. The rest Codex refuses to store at
         all — if this rig has any of them set, saving removes them, and the panel below says which.
@@ -137,11 +137,11 @@ export function HarnessRejectWarning({ harness, values }: { harness: Harness; va
     <div data-testid="harness-reject-warning" role="status"
       style={{ border: `1px solid ${color.attn}`, borderRadius: radius.base, padding: "8px 10px",
         background: color.inset, display: "flex", flexDirection: "column", gap: 5 }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, lineHeight: 1.5 }}>
+      <span style={{ fontSize: fs.sm, color: color.attnText, lineHeight: 1.5 }}>
         Saving removes {rejected.length === 1 ? "one setting" : `${rejected.length} settings`} Codex cannot
         honour: {rejected.map((f) => HARNESS_FIELD_LABELS[f]).join(", ")}.
       </span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.5 }}>
+      <span style={{ fontSize: fs.sm, color: color.text3, lineHeight: 1.5 }}>
         Codex has no per-tool disallow lever and mounts only HTTP MCP servers, so Loom refuses to store
         these against a codex rig rather than let them read as active. They are still set until you save —
         switch back to Claude Code now and nothing is lost. To keep them, keep this rig on Claude Code.
@@ -163,10 +163,10 @@ export function HarnessFieldDrop({ harness, field }: { harness: Harness; field: 
     <span data-testid={`harness-drop-${field}`} data-severity={drop.severity}
       style={{ display: "flex", flexDirection: "column", gap: 3, borderLeft: `2px solid ${accent}`,
         paddingLeft: 8, marginTop: 2 }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: accent }}>
+      <span style={{ fontSize: fs.sm, color: accent }}>
         {meta.tag} on codex
       </span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text3 }}>{drop.note}</span>
+      <span style={{ fontSize: fs.sm, lineHeight: 1.5, color: color.text3 }}>{drop.note}</span>
     </span>
   );
 }

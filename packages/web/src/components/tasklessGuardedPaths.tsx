@@ -62,7 +62,7 @@ export function TasklessGuardedPathsEditor({ project }: { project: Project }) {
         the work on a card. Workers on a card are not affected. Only you can set this list; agents cannot change it.
       </p>
       {seed.error && (
-        <div role="alert" data-testid="taskless-guarded-paths-corrupt" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.attnText, lineHeight: 1.5 }}>
+        <div role="alert" data-testid="taskless-guarded-paths-corrupt" style={{ fontSize: fs.sm, color: color.attnText, lineHeight: 1.5 }}>
           The stored list can’t be read ({seed.error}), so every merge from a worker without a card is refused. Saving
           below replaces it.
         </div>
@@ -94,21 +94,21 @@ export function TasklessGuardedPathsEditor({ project }: { project: Project }) {
         <li>An empty list guards nothing. A change applies to the next merge, without a restart.</li>
       </ul>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span data-testid="taskless-guarded-paths-count" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
+        <span data-testid="taskless-guarded-paths-count" style={{ fontSize: fs.sm, color: color.text3 }}>
           {count === null ? "" : count === 0 ? "no guarded paths" : `${count} guarded path${count === 1 ? "" : "s"}`}
         </span>
         <span style={{ flex: 1 }} />
         {dirty && !draft.ok && (
-          <span data-testid="taskless-guarded-paths-draft-error" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.attnText }}>{draft.error}</span>
+          <span data-testid="taskless-guarded-paths-draft-error" style={{ fontSize: fs.sm, color: color.attnText }}>{draft.error}</span>
         )}
         {dirty && <Button onClick={() => { adopt(storedOf(project)); save.reset(); }} disabled={save.isPending}>Discard changes</Button>}
-        {!dirty && justSaved && <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.liveText }}>saved</span>}
+        {!dirty && justSaved && <span style={{ fontSize: fs.sm, color: color.liveText }}>saved</span>}
         <Button variant="primary" data-testid="taskless-guarded-paths-save" disabled={!dirty || !draft.ok || save.isPending} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : "Save guarded paths"}
         </Button>
       </div>
       {save.error && (
-        <span role="alert" data-testid="taskless-guarded-paths-save-error" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.danger, lineHeight: 1.45 }}>
+        <span role="alert" data-testid="taskless-guarded-paths-save-error" style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.45 }}>
           {errorText(save.error)}
         </span>
       )}

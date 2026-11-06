@@ -46,10 +46,18 @@ async function crumbBoxes(page: Page) {
     lis.map((li) => {
       const spans = Array.from(li.querySelectorAll("span")).filter((s) => !s.hasAttribute("aria-hidden"));
       const el = spans[spans.length - 1] as HTMLElement;
+      // Four characters, measured in the label's OWN computed face and size, so the legibility floor
+      // follows the type (the crumb moved from the mono to the sans, card 312d5bc8) instead of being a
+      // pixel constant calibrated on one font.
+      const cs = getComputedStyle(el);
+      const ctx = document.createElement("canvas").getContext("2d");
+      if (ctx) ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
       return {
         text: (el.textContent ?? "").trim(),
         rendered: getComputedStyle(li).display !== "none",
         width: Math.round(el.getBoundingClientRect().width),
+        natural: el.scrollWidth,
+        fourChars: ctx ? Math.round(ctx.measureText("nnnn").width) : 0,
         clipped: el.scrollWidth > el.clientWidth,
       };
     }),
@@ -96,11 +104,14 @@ test.describe("Atlas crumb trail at 420px (card 9477a5ed)", () => {
         "the leading ancestors are collapsed, not merely narrowed").toBe(true);
 
       // ⭐ THE CLAIM THE DoD ASKS FOR, and the reason a bare "is it clipped" read is not enough: a
-      // collapsed segment reads as UNCLIPPED. ~3 characters of the 11.5px mono face is ~21px, and
-      // this asserts well above it — the point is that each rendered segment keeps REAL width, not
-      // that it technically painted something.
+      // collapsed segment reads as UNCLIPPED. So each rendered segment must keep REAL width: its whole
+      // label, or at least four characters of its own face when the label is longer than that — not
+      // merely that it technically painted something. (This was a fixed 25px while the crumbs were
+      // mono, ~3 characters of that face; the whole sans word "Diff" is narrower than that.)
       for (const c of shown) {
-        expect(c.width, `the rendered crumb "${c.text}" kept real width at 420px`).toBeGreaterThan(25);
+        expect(c.fourChars, "the four-character floor was measured").toBeGreaterThan(0);
+        expect(c.width, `the rendered crumb "${c.text}" kept real width at 420px`)
+          .toBeGreaterThanOrEqual(Math.min(c.natural, c.fourChars) - 1);
       }
       // The deepest is the tab, in full — the segment 1d3192dc protects, still protected.
       expect(shown.at(-1)?.text, "the deepest crumb is the tab this address is").toBe("Diff");

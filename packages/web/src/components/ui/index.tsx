@@ -338,10 +338,10 @@ export function StaleStartupPromptWarning({ warnings }: { warnings: StalePromptW
   if (!warnings || warnings.length === 0) return null;
   return (
     <div style={{ marginTop: 10, padding: 10, background: color.inset, border: `1px solid ${color.attn}`, borderRadius: radius.sm }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+      <span style={{ fontSize: fs.sm, color: color.text2 }}>
         these agent startup prompts still reference the OLD value — edit them manually if that's a problem:
       </span>
-      <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6 }}>
+      <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontSize: fs.sm, lineHeight: 1.6 }}>
         {warnings.map((w) => (
           <li key={w.agentId}>
             <span style={{ color: color.text }}>{w.agentName}</span>

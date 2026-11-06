@@ -44,7 +44,7 @@ function WakeChip({ w, sessionId, onCancelled }: { w: Wake; sessionId: string; o
   const inMs = new Date(w.wakeAt).getTime() - Date.now();
   return (
     <span title={`"${w.note}"\nfires ${new Date(w.wakeAt).toLocaleString()} (scheduled ${new Date(w.createdAt).toLocaleString()})`}
-      style={{ display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "1px 6px 1px 8px", fontFamily: font.mono, fontSize: fs.mono, color: color.text2, maxWidth: 320 }}>
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "1px 6px 1px 8px", fontSize: fs.sm, color: color.text2, maxWidth: 320 }}>
       <Dot tone="muted" />
       <span style={{ color: color.text2, whiteSpace: "nowrap" }}>wake {relTime(inMs)}</span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {w.note}</span>

@@ -631,7 +631,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             display: "flex", alignItems: "center", gap: space(2),
             padding: `${space(1)} ${space(2)}`,
             background: color.inset, borderBottom: `1px solid ${color.line}`,
-            fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text2,
+            fontSize: fs.sm, lineHeight: 1.5, color: color.text2,
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}
         >
@@ -656,7 +656,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             display: "flex", alignItems: "center", gap: space(2),
             padding: `${space(1)} ${space(2)}`,
             background: color.inset, borderTop: `1px solid ${color.line}`,
-            fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text2,
+            fontSize: fs.sm, lineHeight: 1.5, color: color.text2,
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}
         >

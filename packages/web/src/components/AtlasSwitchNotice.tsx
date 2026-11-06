@@ -22,7 +22,7 @@ export function AtlasSwitchNotice() {
         display: "flex", alignItems: "center", gap: 10,
         background: color.surface, border: `1px solid ${color.lineStrong}`, borderLeft: `3px solid ${color.attn}`,
         borderRadius: radius.base, padding: "9px 12px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
-        fontFamily: font.mono, fontSize: fs.mono,
+        fontSize: fs.sm,
       }}>
       <span style={{ color: color.text2 }}>The UI preference changed in another tab.</span>
       <Button data-testid="atlas-switch-notice-reload" onClick={() => window.location.reload()}

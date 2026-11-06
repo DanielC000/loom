@@ -79,7 +79,7 @@ function UsageGauge({ label, window: w }: { label: string; window: UsageWindow }
         <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[t] }}>{util}%</span>
       </span>
       <Meter value={util} max={100} tone={t} width={110} />
-      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>resets in {resetCountdown(w.resetsAt)}</span>
+      <span style={{ fontSize: fs.sm, color: color.text3 }}>resets in <span style={{ fontFamily: font.mono }}>{resetCountdown(w.resetsAt)}</span></span>
     </div>
   );
 }
@@ -94,7 +94,7 @@ export function PlanUsageStrip() {
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Plan usage</span>
-        <span title={reason} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>unavailable</span>
+        <span title={reason} style={{ fontSize: fs.sm, color: color.text3 }}>unavailable</span>
       </div>
     );
   }
@@ -194,7 +194,7 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   const kindLabel = (
     <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: tone[item.tone], whiteSpace: "nowrap" }}>{attentionKindLabel(item.kind)}</span>
   );
-  const textBase = { fontFamily: font.mono, fontSize: fs.mono, color: color.text2, overflow: "hidden", textOverflow: "ellipsis" } as const;
+  const textBase = { fontSize: fs.sm, color: color.text2, overflow: "hidden", textOverflow: "ellipsis" } as const;
   /* `title` (card ed0858dc): the row ellipsizes, and some kinds carry detail too long for one line
      (the isolation-gap `reason` strings run to a paragraph each) — so hover reveals `hoverText` when
      a kind supplies it, else the full untruncated `text`. `text` still has to stand alone: a reader
@@ -340,7 +340,7 @@ function SnoozeButton({ questionId }: { questionId: string }) {
         if (ms) snooze.mutate(ms);
         e.target.value = "";
       }}
-      style={{ fontFamily: font.mono, fontSize: fs.mono, background: color.surface, color: color.text,
+      style={{ fontFamily: font.ui, fontSize: fs.sm, background: color.surface, color: color.text,
         border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "2px 4px", cursor: "pointer" }}>
       <option value="" disabled>Snooze…</option>
       <option value="1d">1 day</option>
@@ -410,7 +410,7 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
           The status pill beside it already says "waiting on you", so this names only the count. */}
       {decision && (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: font.mono, fontSize: fs.mono, color: color.attnText,
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: fs.sm, color: color.attnText,
             border: `1px solid ${color.attn}`, borderRadius: radius.sm, padding: "1px 7px" }}>
             <Dot tone="attn" />{decision.count} decision{decision.count === 1 ? "" : "s"} pending
           </span>
@@ -445,14 +445,14 @@ export function WaveConsumption({ sessions }: { sessions: SessionListItem[] }) {
   const hot = wc.ratio > CONTEXT_WARN_RATIO;
   if (total.reporting === 0) return null;
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono }}
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: fs.sm }}
       title={`${total.tokens.toLocaleString()} input tokens in context across ${total.reporting} reporting session${total.reporting === 1 ? "" : "s"} (subscription usage, not an API $ bill)`}>
       <span style={{ color: color.text3 }}>consumption</span>
-      <span style={{ color: color.text }}>{(total.tokens / 1000).toFixed(0)}k ctx</span>
+      <span style={{ color: color.text, fontFamily: font.mono }}>{(total.tokens / 1000).toFixed(0)}k ctx</span>
       <span style={{ color: color.text3 }}>·</span>
       <span style={{ color: color.text3 }}>peak</span>
       <Meter value={wc.ctx} max={wc.window || 1} tone={hot ? "attn" : "accent"} width={70} />
-      <span style={{ color: hot ? color.attnText : color.text3 }}>{wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}</span>
+      <span style={{ color: hot ? color.attnText : color.text3, fontFamily: font.mono }}>{wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}</span>
     </span>
   );
 }
@@ -539,7 +539,7 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
       </div>
 
       {/* running / archived split — the "both-in-one" summary. Archived reads as clearly secondary. */}
-      <div style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, whiteSpace: "nowrap" }}>
+      <div style={{ fontSize: fs.sm, color: color.text3, whiteSpace: "nowrap" }}>
         running {running.length}
         {archived.length > 0 && <span style={{ color: color.text2 }}> · archived {archived.length}</span>}
       </div>
@@ -556,7 +556,7 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
 
       {/* worker-state composition bar + legend */}
       <CompBar buckets={buckets} />
-      <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: fs.xs }}>
+      <div style={{ display: "flex", gap: 10, fontSize: fs.xs }}>
         {buckets.waiting > 0 && <span style={{ color: color.attnText }}>waiting {buckets.waiting}</span>}
         <span style={{ color: color.workText }}>working {buckets.busy}</span>
         <span style={{ color: color.liveText }}>idle {buckets.idle}</span>
@@ -576,9 +576,9 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
 
       {/* busiest / most-recent manager hint — a held decision takes over the footer with an Answer → jump */}
       <div style={{ marginTop: "auto", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-        <div style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <div style={{ flex: 1, minWidth: 0, fontSize: fs.sm, color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {topMgr && topSt
-            ? <>★ mgr {topMgr.id.slice(0, 8)} · <span style={{ color: decision ? color.attnText : tone[topSt.tone] }}>{decision ? "waiting on you" : topSt.label}</span></>
+            ? <>★ mgr <span style={{ fontFamily: font.mono }}>{topMgr.id.slice(0, 8)}</span> · <span style={{ color: decision ? color.attnText : tone[topSt.tone] }}>{decision ? "waiting on you" : topSt.label}</span></>
             : <span style={{ color: color.text3 }}>no live manager</span>}
         </div>
         {decision && (
@@ -621,7 +621,7 @@ export function InactiveFleet({ projects, defaultOpen = false }: {
         data-testid="inactive-fleet"
         aria-expanded={open}
         title={open ? "Hide inactive projects" : "Show inactive projects"}
-        style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "2px 6px" }}>
+        style={{ fontSize: fs.sm, color: color.text3, padding: "2px 6px" }}>
         {open ? "▾" : "▸"} {projects.length} inactive project{projects.length === 1 ? "" : "s"}
       </Button>
       {open && (
@@ -632,7 +632,7 @@ export function InactiveFleet({ projects, defaultOpen = false }: {
               attention={0} onExpand={() => { /* no live sessions to expand into */ }} muted />
           ))}
           {overflow > 0 && (
-            <span style={{ alignSelf: "center", fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+            <span style={{ alignSelf: "center", fontSize: fs.sm, color: color.text3 }}>
               +{overflow} more inactive
             </span>
           )}

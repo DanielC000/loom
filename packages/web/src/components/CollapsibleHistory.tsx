@@ -20,7 +20,7 @@ export function CollapsibleHistory({ title, hint, children }: { title: string; h
         <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.text2 }}>
           {title}
         </span>
-        <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.text3, fontWeight: 400, fontSize: fs.sm }}>
           {hint}
         </span>
       </button>

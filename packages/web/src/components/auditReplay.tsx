@@ -126,10 +126,10 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
     retry: false,
   });
 
-  if (q.isLoading) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "8px 6px" }}>diffing…</div>;
+  if (q.isLoading) return <div style={{ fontSize: fs.sm, color: color.text3, padding: "8px 6px" }}>diffing…</div>;
   if (q.isError) {
     return (
-      <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, padding: "8px 6px", display: "flex", gap: 10, alignItems: "center" }}>
+      <div style={{ fontSize: fs.sm, color: color.attnText, padding: "8px 6px", display: "flex", gap: 10, alignItems: "center" }}>
         <span>{(q.error as Error).message}</span>
         <Button variant="ghost" onClick={onClose}>Dismiss</Button>
       </div>
@@ -152,7 +152,7 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
         <Button variant="ghost" onClick={onClose}>Close</Button>
       </div>
 
-      {!d.summary.changed && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.live }}>Identical event sequences.</span>}
+      {!d.summary.changed && <span style={{ fontSize: fs.sm, color: color.live }}>Identical event sequences.</span>}
 
       {changedKinds.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -293,7 +293,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
     return (
       <div data-testid="audit-replay">
         {!hideLabel && <SectionLabel>Wave replay</SectionLabel>}
-        <Panel><span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No manager waves to replay yet.</span></Panel>
+        <Panel><span style={{ color: color.text3, fontSize: fs.sm }}>No manager waves to replay yet.</span></Panel>
       </div>
     );
   }
@@ -316,7 +316,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
                 style={{
                   background: scope === sc ? color.inset : "transparent", border: "none",
                   color: scope === sc ? color.accentFg : color.text3,
-                  fontFamily: font.mono, fontSize: fs.mono, padding: "4px 12px", cursor: "pointer",
+                  fontFamily: font.ui, fontSize: fs.sm, padding: "4px 12px", cursor: "pointer",
                 }}>{sc}</button>
             ))}
           </div>
@@ -362,8 +362,8 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
 
         {/* Event stream up to the scrub head; future events dimmed */}
         <div style={{ maxHeight: "40vh", overflow: "auto", display: "flex", flexDirection: "column", gap: 1 }}>
-          {q.isLoading && <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>loading timeline…</span>}
-          {timeline && events.length === 0 && <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No events recorded for this {scope}.</span>}
+          {q.isLoading && <span style={{ color: color.text3, fontSize: fs.sm }}>loading timeline…</span>}
+          {timeline && events.length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No events recorded for this {scope}.</span>}
           {events.map((e) => (
             <ReplayEvent key={e.id} t={timeline!} e={e} state={e.seq < cur ? "past" : e.seq === cur ? "current" : "future"} />
           ))}

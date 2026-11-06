@@ -101,7 +101,7 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
           <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "baseline", gap: 10 }}>
             <h2 id={titleId} style={{ margin: 0, fontFamily: font.mono, fontSize: fs.body, fontWeight: 600, color: color.text,
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.label}>{a.label}</h2>
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, whiteSpace: "nowrap" }}>
+            <span style={{ fontSize: fs.sm, color: color.text3, whiteSpace: "nowrap" }}>
               {kindWord} · {attachmentDetail(a)}
             </span>
           </div>
@@ -138,7 +138,7 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
 
 function ViewerNote({ children, tone }: { children: ReactNode; tone?: string }) {
   return (
-    <div role="status" style={{ padding: "48px 24px", textAlign: "center", fontFamily: font.mono, fontSize: fs.mono,
+    <div role="status" style={{ padding: "48px 24px", textAlign: "center", fontSize: fs.sm,
       lineHeight: 1.6, color: tone ?? color.text3 }}>{children}</div>
   );
 }
@@ -153,7 +153,7 @@ function DownloadAction({ questionId, a, remote }: { questionId: string; a: Ques
     return (
       <a data-testid="attachment-viewer-download" className="loom-btn loom-btn-default"
         href={api.questionAttachmentUrl(questionId, a.id)} download={a.label} rel="noopener noreferrer"
-        style={{ ...style, display: "inline-block", textDecoration: "none", borderRadius: radius.base, fontFamily: font.mono }}>
+        style={{ ...style, display: "inline-block", textDecoration: "none", borderRadius: radius.base, fontFamily: font.ui }}>
         Download
       </a>
     );

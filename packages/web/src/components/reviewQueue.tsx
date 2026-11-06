@@ -104,13 +104,13 @@ const MERGE_TITLE =
  */
 export function MergeOutcome({ merge }: { merge: WorkerMerge }) {
   if (merge.data?.pending) {
-    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.workText }}>still running — {merge.data.reason}</span>;
+    return <span style={{ fontSize: fs.sm, color: color.workText }}>still running — {merge.data.reason}</span>;
   }
   if (merge.data && !merge.data.pending && merge.data.merged === false) {
-    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>rejected — {merge.data.reason}</span>;
+    return <span style={{ fontSize: fs.sm, color: color.danger }}>rejected — {merge.data.reason}</span>;
   }
   if (merge.data && !merge.data.pending && merge.data.merged === true) {
-    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.live }}>
+    return <span style={{ fontSize: fs.sm, color: color.live }}>
       {merge.data.commitSubject ? `merged — ${merge.data.commitSubject}` : "merged"}
     </span>;
   }
@@ -172,11 +172,11 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
       {worker?.branch && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{worker.branch} → main</span>}
 
       {/* auto-summary + stats */}
-      {loading && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>loading diff…</span>}
-      {error && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>diff unavailable (no branch / merged)</span>}
+      {loading && <span style={{ fontSize: fs.sm, color: color.text3 }}>loading diff…</span>}
+      {error && <span style={{ fontSize: fs.sm, color: color.danger }}>diff unavailable (no branch / merged)</span>}
       {analysis && (
         <>
-          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.45 }}>{analysis.headline}</div>
+          <div style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.45 }}>{analysis.headline}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono }}>
             <span style={{ color: color.text }}>{analysis.files.length} file{analysis.files.length === 1 ? "" : "s"}</span>
             {analysis.totalInsertions > 0 && <span style={{ color: color.live }}>+{analysis.totalInsertions}</span>}

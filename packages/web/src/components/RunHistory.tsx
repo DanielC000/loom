@@ -87,7 +87,7 @@ export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, show
       {runs.length > DEFAULT_VISIBLE && (
         <button onClick={() => setShowAll((v) => !v)}
           style={{ alignSelf: "flex-start", background: "transparent", border: `1px solid ${color.line}`, borderRadius: radius.sm,
-            padding: "4px 10px", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+            padding: "4px 10px", cursor: "pointer", fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>
           {showAll ? "Show fewer" : `Show all (${runs.length})`}
         </button>
       )}
@@ -174,7 +174,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
       </div>
 
       {resumeM.isError && (
-        <div style={{ padding: "0 10px 8px 30px", color: color.danger, fontFamily: font.mono, fontSize: fs.mono, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+        <div style={{ padding: "0 10px 8px 30px", color: color.danger, fontSize: fs.sm, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
           resume failed: {errorText(resumeM.error)}
         </div>
       )}
@@ -187,14 +187,14 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle, previewOn
 
       {showFindings && findings.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", padding: "0 10px 8px 30px" }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>Findings</span>
+          <span style={{ fontSize: fs.sm, color: color.text3 }}>Findings</span>
           {findings.map((f) => {
             const task = tasks.find((t) => t.id === f.taskId);
             const title = task?.title ?? (f.detail?.title as string | undefined) ?? "finding";
             const severity = f.detail?.severity as string | undefined;
             return (
               <span key={f.id} title={task ? title : `${title} (no longer on the board)`}
-                style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: font.mono, fontSize: fs.mono,
+                style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: fs.sm,
                   border: `1px solid ${task ? color.lineStrong : color.line}`, borderRadius: radius.sm, padding: "1px 6px",
                   color: task ? color.text2 : color.text3, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {severity && <span style={{ color: color.attnText }}>{severity}</span>}

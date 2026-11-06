@@ -51,7 +51,7 @@ export function SpawnControls({ profileRole, onSpawn, pending }:
             <button key={o.label} disabled={pending} onClick={() => { setOpen(false); onSpawn(o.role); }}
               className="loom-btn loom-btn-ghost"
               style={{ textAlign: "left", background: "transparent", border: "none", whiteSpace: "nowrap",
-                fontFamily: font.mono, fontSize: fs.mono, padding: "6px 10px", cursor: "pointer" }}>
+                fontFamily: font.ui, fontSize: fs.sm, padding: "6px 10px", cursor: "pointer" }}>
               {o.label}
             </button>
           ))}

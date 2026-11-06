@@ -67,7 +67,7 @@ export function CardPolicyBlock({ taskId, projectId }: { taskId: string; project
   };
   if (q.isError && !q.data) {
     return (
-      <div data-testid="card-policy-unavailable" style={{ display: "flex", alignItems: "center", gap: 6, color: color.text3, fontFamily: font.mono, fontSize: fs.xs }}>
+      <div data-testid="card-policy-unavailable" style={{ display: "flex", alignItems: "center", gap: 6, color: color.text3, fontSize: fs.sm }}>
         <Dot tone="attn" />
         <span>card policy unavailable: couldn’t read this card’s requirements (retrying…)</span>
       </div>
@@ -129,7 +129,7 @@ function RequirementRow({ taskId, v, onChanged }: { taskId: string; v: CardPolic
           {requirementLabel(v.requirement)}
         </span>
         {/* A deferred row's pill already says when it is checked. */}
-        {phase && v.status !== "deferred" && <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>at {phase}</span>}
+        {phase && v.status !== "deferred" && <span style={{ fontSize: fs.sm, color: color.text3 }}>at {phase}</span>}
         <span style={{ flex: 1 }} />
         {canWaive(v) && !waiving && (
           <Button variant="ghost" onClick={() => setWaiving(true)}>Waive…</Button>
@@ -141,7 +141,7 @@ function RequirementRow({ taskId, v, onChanged }: { taskId: string; v: CardPolic
         )}
       </div>
       {v.detail && v.status !== "waived" && v.status !== "deferred" && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, lineHeight: 1.45 }}>{v.detail}</span>
+        <span style={{ fontSize: fs.sm, color: color.text3, lineHeight: 1.45 }}>{v.detail}</span>
       )}
       {waiving && (
         <form onSubmit={(e) => { e.preventDefault(); if (reason.trim()) waive.mutate(); }}
@@ -156,7 +156,7 @@ function RequirementRow({ taskId, v, onChanged }: { taskId: string; v: CardPolic
           <Button type="button" onClick={() => { setWaiving(false); setReason(""); waive.reset(); }}>Cancel</Button>
         </form>
       )}
-      {err && <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.danger }}>{errorText(err)}</span>}
+      {err && <span role="alert" style={{ fontSize: fs.sm, color: color.danger }}>{errorText(err)}</span>}
     </div>
   );
 }
@@ -221,7 +221,7 @@ export function CardPoliciesEditor({ project }: { project: Project }) {
         or waive one on a card; agents can read them.
       </p>
       {!seed.ok && (
-        <div role="alert" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.attnText, lineHeight: 1.5 }}>
+        <div role="alert" style={{ fontSize: fs.sm, color: color.attnText, lineHeight: 1.5 }}>
           The stored policy list can’t be read ({seed.error}), so every spawn and merge on a card of this project is
           refused. Saving below replaces it.
         </div>
@@ -240,16 +240,16 @@ export function CardPoliciesEditor({ project }: { project: Project }) {
         </Button>
         <span style={{ flex: 1 }} />
         {dirty && !built.ok && (
-          <span data-testid="card-policy-draft-error" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.attnText }}>{built.error}</span>
+          <span data-testid="card-policy-draft-error" style={{ fontSize: fs.sm, color: color.attnText }}>{built.error}</span>
         )}
         {dirty && <Button onClick={reset} disabled={save.isPending}>Discard changes</Button>}
-        {!dirty && justSaved && <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.liveText }}>saved</span>}
+        {!dirty && justSaved && <span style={{ fontSize: fs.sm, color: color.liveText }}>saved</span>}
         <Button variant="primary" data-testid="card-policy-save" disabled={!dirty || !built.ok || save.isPending} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : "Save policies"}
         </Button>
       </div>
       {save.error && (
-        <span role="alert" data-testid="card-policy-save-error" style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.danger, lineHeight: 1.45 }}>
+        <span role="alert" data-testid="card-policy-save-error" style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.45 }}>
           {errorText(save.error)}
         </span>
       )}
@@ -293,7 +293,7 @@ function PolicyRuleEditor({ draft, index, id, onChange, onRemove }: {
             return (
               <button key={t} type="button" aria-pressed={on} onClick={() => toggleType(t)}
                 data-testid={`card-policy-type-${t}`} className={`loom-toggle${on ? " is-active" : ""}`}
-                style={{ fontFamily: font.mono, fontSize: fs.sm, fontWeight: on ? 600 : 500, padding: "3px 10px", borderRadius: radius.pill,
+                style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: on ? 600 : 500, padding: "3px 10px", borderRadius: radius.pill,
                   lineHeight: "16px", color: on ? toneText.accent : color.text2, background: on ? toneSoft.accent : "transparent",
                   border: `1px solid ${on ? tone.accent : color.line}` }}>
                 {t}
@@ -325,7 +325,7 @@ function PolicyRuleEditor({ draft, index, id, onChange, onRemove }: {
             <input type="checkbox" checked={draft.require.includes(k)} onChange={() => toggleReq(k)} data-testid={`card-policy-require-${k}`}
               style={{ accentColor: color.accent, width: 15, height: 15, margin: 0 }} />
             <span>{REQUIREMENT_COPY[k].label}</span>
-            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>at {REQUIREMENT_COPY[k].phase}</span>
+            <span style={{ fontSize: fs.sm, color: color.text3 }}>at {REQUIREMENT_COPY[k].phase}</span>
           </label>
         ))}
       </div>

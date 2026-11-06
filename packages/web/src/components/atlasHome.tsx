@@ -14,7 +14,7 @@ import { useAtlasNodeHeadSlot } from "../lib/atlasNodeHead";
 import { useDismissable } from "../lib/useDismissable";
 import { sentenceCase } from "../lib/textCase";
 import type { BoardLane } from "../lib/atlasHome";
-import { color, columnTone, font, radius, tone, toneFill, type Tone } from "../theme";
+import { color, columnTone, radius, tone, toneFill, type Tone } from "../theme";
 
 // ── Node tabs ──────────────────────────────────────────────────────────────────────────────────
 // Real addresses, not local state: a tab is a `?tab=` on the node's own path, so it is linkable,
@@ -733,7 +733,7 @@ export function DayBars({ series, label }: { series: { day: string; branches: nu
 
 /** The mono caption used under a panel body — a footer fact, not a second heading. */
 export function BandFoot({ children }: { children: ReactNode }) {
-  return <div className="loom-bandfoot" style={{ fontFamily: font.mono }}>{children}</div>;
+  return <div className="loom-bandfoot">{children}</div>;
 }
 
 // ── Plan usage ─────────────────────────────────────────────────────────────────────────────────

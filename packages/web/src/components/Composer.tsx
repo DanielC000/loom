@@ -142,7 +142,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
             // `minWidth: 0` overrides the UA's intrinsic textarea width (~232px at this font), which is
             // otherwise a hard floor this flex item cannot shrink past — the column's own basis above
             // is what picks the wrap point, not this floor.
-            style={{ flex: 1, minWidth: 0, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "6px 52px 6px 8px", fontFamily: font.mono, fontSize: fs.body }}
+            style={{ flex: 1, minWidth: 0, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "6px 52px 6px 8px", fontFamily: font.ui, fontSize: fs.body }}
           />
           {/* Two-icon cluster in the bottom-right corner: the presets (Spark) trigger + the expand
               button, both ghost, absolutely positioned so they add ZERO height to the composer.
@@ -314,7 +314,7 @@ function LargeEditor({
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Compose a longer message…  (Ctrl/Cmd+Enter to send)"
-            style={{ flex: 1, minHeight: 320, resize: "vertical", boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "10px 12px", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5 }}
+            style={{ flex: 1, minHeight: 320, resize: "vertical", boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "10px 12px", fontFamily: font.ui, fontSize: fs.body, lineHeight: 1.5 }}
           />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 8 }}>
             <div>{voiceCluster}</div>
@@ -413,7 +413,7 @@ function ComposerStatusLine({ speech, sendStatus }: { speech: SpeechRecognitionA
   // Nothing to say → render nothing, so the composer sits flush against the card's bottom edge.
   if (!node) return null;
   return (
-    <div data-testid="composer-status" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontFamily: font.mono, fontSize: fs.xs, minHeight: 16 }}>
+    <div data-testid="composer-status" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, fontSize: fs.sm, minHeight: 16 }}>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{node}</span>
     </div>
   );

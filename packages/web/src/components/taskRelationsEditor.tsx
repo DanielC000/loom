@@ -105,7 +105,7 @@ export function TaskRelationsEditor({
           rather than to one row. Verbatim — the validator's own wording already says what to drop. */}
       {errorTarget?.scope === "graph" && saveErrorMessage && (
         <span role="alert" data-testid="relations-error-graph"
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.4 }}>
+          style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.4 }}>
           {saveErrorMessage}
         </span>
       )}
@@ -129,7 +129,7 @@ export function TaskRelationsEditor({
                 ))}
                 {errorTarget?.scope === "kind" && errorTarget.kind === kind && saveErrorMessage && (
                   <span role="alert" data-testid={`relations-error-${kind}`}
-                    style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.4 }}>
+                    style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.4 }}>
                     {saveErrorMessage}
                   </span>
                 )}
@@ -236,7 +236,7 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
             <option key={k} value={k}>{EDIT_RELATION_LABEL[k]}</option>
           ))}
         </Select>
-        <span style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: fs.xs, color: color.text3,
+        <span style={{ flex: 1, minWidth: 0, fontSize: fs.sm, color: color.text3,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {EDIT_RELATION_HINT[kind]}
         </span>
@@ -270,7 +270,7 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
       <div id={listId} role="listbox" aria-label={`Cards to link as ${EDIT_RELATION_LABEL[kind]}`}
         style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: 176, overflowY: "auto", minWidth: 0 }}>
         {matches.length === 0 ? (
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+          <span style={{ fontSize: fs.sm, color: color.text3 }}>
             {total === 0 && query.trim() === ""
               ? "no other cards on this board yet"
               : "no card on this board matches that title or id"}
@@ -284,11 +284,11 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
               onClick={() => { onPick(c.id); setQuery(""); }}
               title={`Link card ${c.id.slice(0, 8)} — ${c.title}`}
               style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, textAlign: "left", cursor: "pointer",
-                fontFamily: font.mono, fontSize: fs.mono, padding: "3px 5px", borderRadius: radius.sm,
+                fontFamily: font.ui, fontSize: fs.sm, padding: "3px 5px", borderRadius: radius.sm,
                 color: active ? color.text : color.text2,
                 background: active ? color.surface : "transparent",
                 border: `1px solid ${active ? color.lineStrong : "transparent"}` }}>
-              <span style={{ flexShrink: 0, color: color.text3, fontSize: fs.xs }}>{c.id.slice(0, 8)}</span>
+              <span style={{ flexShrink: 0, color: color.text3, fontFamily: font.mono, fontSize: fs.xs }}>{c.id.slice(0, 8)}</span>
               <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</span>
               {col && <Badge tone={columnTone(col) ?? "muted"} style={{ flexShrink: 0, fontSize: fs.xs, padding: "0 5px" }}>{col.label}</Badge>}
             </button>
@@ -297,7 +297,7 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
       </div>
       {/* Say so when the list is capped rather than letting 8 rows read as the whole board. */}
       {total > matches.length && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
+        <span style={{ fontSize: fs.sm, color: color.text3 }}>
           showing {matches.length} of {total} — keep typing to narrow
         </span>
       )}

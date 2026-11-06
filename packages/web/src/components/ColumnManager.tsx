@@ -217,8 +217,8 @@ export function ColumnManager({ project }: { project: Project }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <p style={{ color: color.text3, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
-        Drag <span style={{ color: color.text2 }}>⠿</span> to reorder · rename inline · assign a lifecycle
+      <p style={{ color: color.text3, fontSize: fs.sm, margin: 0, lineHeight: 1.5 }}>
+        Drag <span style={{ color: color.text2, fontFamily: font.mono }}>⠿</span> to reorder · rename inline · assign a lifecycle
         role · set an accent or WIP limit · delete or add a lane. Saving re-keys cards atomically — nothing
         is ever orphaned.
       </p>
@@ -246,7 +246,7 @@ export function ColumnManager({ project }: { project: Project }) {
           nothing was written. Staged edits are kept; the human reviews and presses Save again (card d5946e05). */}
       {drift ? (
         <div role="status" data-testid="column-drift-notice"
-          style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5, border: `1px solid ${color.attn}`, borderRadius: radius.base, padding: "6px 9px" }}>
+          style={{ color: color.attnText, fontSize: fs.sm, lineHeight: 1.5, border: `1px solid ${color.attn}`, borderRadius: radius.base, padding: "6px 9px" }}>
           The board changed while you were editing — nothing was saved, and your edits are kept.
           {drift.added.length ? ` Added elsewhere: ${drift.added.map(labelOf).join(", ")} (now listed below).` : ""}
           {drift.removed.length ? ` Removed elsewhere: ${drift.removed.map(labelOf).join(", ")} (flagged below).` : ""}
@@ -259,7 +259,7 @@ export function ColumnManager({ project }: { project: Project }) {
       {warnings.length ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {warnings.map((w, i) => (
-            <span key={i} style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>⚠ {w}</span>
+            <span key={i} style={{ color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>⚠ {w}</span>
           ))}
         </div>
       ) : null}
@@ -270,13 +270,13 @@ export function ColumnManager({ project }: { project: Project }) {
           {save.isPending ? "Saving…" : "Save layout"}
         </Button>
         {error
-          ? <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{error}</span>
+          ? <span style={{ color: color.danger, fontSize: fs.sm }}>{error}</span>
           : dirty
-            ? <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
-            : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
+            ? <span style={{ color: color.attnText, fontSize: fs.sm }}>unsaved changes</span>
+            : <span style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
         <span style={{ flex: 1 }} />
         {save.isError && !(save.error instanceof ColumnsDriftedError) && (
-          <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono, textAlign: "right" }}>
+          <span style={{ color: color.danger, fontSize: fs.sm, textAlign: "right" }}>
             {errorText(save.error)}
           </span>
         )}
@@ -307,10 +307,10 @@ export function ColumnManager({ project }: { project: Project }) {
             <Button onClick={() => setResetConfirming(true)} disabled={applyPreset.isPending}>Reset board</Button>
           )}
           {applyPreset.isError && !(applyPreset.error instanceof ColumnsDriftedError) && (
-            <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(applyPreset.error)}</span>
+            <span style={{ color: color.danger, fontSize: fs.sm }}>{errorText(applyPreset.error)}</span>
           )}
         </div>
-        <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <span style={{ color: color.text3, fontSize: fs.sm, lineHeight: 1.5, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
           <PresetAccentDots accents={presetById(resetPresetId).columns.map((c) => c.accentColor)}
             title={presetById(resetPresetId).columns.map((c) => c.label).join(" → ")} />
           <span>
@@ -361,7 +361,7 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
         {/* Role badge (read) + assignment (write). The badge is the at-a-glance state; the select edits it. */}
         {meta
           ? <Badge tone={meta.t}>{meta.short}{meta.required ? "" : ""}</Badge>
-          : <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "2px 8px", border: `1px dashed ${color.line}`, borderRadius: radius.sm }}>NO ROLE</span>}
+          : <span style={{ fontSize: fs.sm, color: color.text3, padding: "2px 8px", border: `1px dashed ${color.line}`, borderRadius: radius.sm }}>NO ROLE</span>}
         <Select value={row.role ?? ""} onChange={(e) => onRole((e.target.value || undefined) as ColumnRole | undefined)}
           aria-label="Lifecycle role" style={{ width: 150 }}>
           <option value="">— no role —</option>
@@ -419,14 +419,14 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
           again as an empty lane — the human's call, so it is stated on the row itself; ✕ drops it instead. */}
       {row.removedElsewhere && (
         <div data-testid="column-removed-elsewhere"
-          style={{ padding: "0 9px 8px 28px", fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, lineHeight: 1.5 }}>
+          style={{ padding: "0 9px 8px 28px", fontSize: fs.sm, color: color.attnText, lineHeight: 1.5 }}>
           Removed elsewhere — Save will re-create this lane (empty; its cards were already moved). Press ✕ to leave it deleted.
         </div>
       )}
 
       {/* Delete-with-cards confirm: what happens to the lane's cards on save. */}
       {confirming && cards > 0 && (
-        <div style={{ padding: "0 9px 8px 28px", fontFamily: font.mono, fontSize: fs.mono, color: color.attnText, lineHeight: 1.5 }}>
+        <div style={{ padding: "0 9px 8px 28px", fontSize: fs.sm, color: color.attnText, lineHeight: 1.5 }}>
           {cards} card{cards === 1 ? "" : "s"} will move to <span style={{ color: color.text }}>{landingLabel}</span> when you save.
         </div>
       )}
@@ -451,7 +451,7 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
           <button type="button" aria-label="No accent" aria-pressed={!row.accentColor} title="No accent"
             onClick={() => { onAccent(undefined); setAccentOpen(false); }}
             style={{
-              fontFamily: font.mono, fontSize: fs.mono, cursor: "pointer", padding: "2px 8px", borderRadius: radius.sm,
+              fontFamily: font.ui, fontSize: fs.sm, cursor: "pointer", padding: "2px 8px", borderRadius: radius.sm,
               background: "transparent", borderWidth: 1, borderStyle: "dashed",
               borderColor: !row.accentColor ? color.text : color.line,
               color: !row.accentColor ? color.text : color.text3,
@@ -466,12 +466,12 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
           <Input value={row.key} onChange={(e) => onKey(e.target.value)} aria-label="Column key" spellCheck={false}
             placeholder="stable_key" style={{ width: 200 }} />
           {renamed && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>
-              rename {row.originalKey} → {row.key.trim() || "?"}{cards > 0 ? ` · moves ${cards} card${cards === 1 ? "" : "s"}` : ""}
+            <span style={{ fontSize: fs.sm, color: color.attnText }}>
+              rename <span style={{ fontFamily: font.mono }}>{row.originalKey}</span> → <span style={{ fontFamily: font.mono }}>{row.key.trim() || "?"}</span>{cards > 0 ? ` · moves ${cards} card${cards === 1 ? "" : "s"}` : ""}
             </span>
           )}
           {!row.originalKey && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>new column — pick a stable key (it's how cards reference this lane)</span>
+            <span style={{ fontSize: fs.sm, color: color.text3 }}>new column — pick a stable key (it's how cards reference this lane)</span>
           )}
         </div>
       )}

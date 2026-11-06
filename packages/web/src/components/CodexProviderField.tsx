@@ -21,7 +21,7 @@ export function CodexProviderField({ value, onChange, connections }: {
   const mode = modeOf(value);
   const usable = connections.filter((c) => c.authScheme === undefined || c.authScheme === "api-key" || c.authScheme === "bearer");
   const label = { fontFamily: font.ui as string, fontSize: fs.sm, fontWeight: 700, color: color.text2 };
-  const select = { background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.mono, fontSize: fs.mono };
+  const select = { background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.ui, fontSize: fs.sm };
   const setMode = (m: Mode) => {
     if (m === "default") return onChange(null);
     if (m === "custom") return onChange({ id: value && modeOf(value) === "custom" ? value.id : "", baseUrl: "", connectionId: "" });
@@ -53,7 +53,7 @@ export function CodexProviderField({ value, onChange, connections }: {
               {usable.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.host}</option>)}
             </select>
           </label>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.attnText }}>
+          <span style={{ fontSize: fs.sm, lineHeight: 1.5, color: color.attnText }}>
             Spend surface: sessions under this rig send their work to that endpoint and bill the connection's key.
             https only (http is allowed to a loopback host); the URL host must equal the connection's host.
           </span>

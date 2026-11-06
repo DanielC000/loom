@@ -113,7 +113,7 @@ export function AgentForm({ onCreate, pending, onCancel }: { onCreate: (b: { nam
     <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 0 }} data-testid="agent-create-form">
       <Input placeholder="agent name" value={name} onChange={(e) => setName(e.target.value)} aria-label="Agent name" />
       <textarea
-        style={{ ...PROMPT_FIELD_SIZE, background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: 8, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5 }}
+        style={{ ...PROMPT_FIELD_SIZE, background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: 8, fontFamily: font.ui, fontSize: fs.body, lineHeight: 1.5 }}
         placeholder="startup prompt (injected as the first turn of each new session)"
         value={startupPrompt} onChange={(e) => setPrompt(e.target.value)} />
       <div style={{ display: "flex", gap: 8 }}>
@@ -236,7 +236,7 @@ export function AgentEditor(
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <span style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>{agent.name}</span>
         <span style={{ flex: 1 }} />
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: fs.sm, color: color.text3 }}>
           profile
           {/* Assign / clear the Profile — it supplies the spawn role/rig; the prompt comes from the agent. */}
           <Select value={agent.profileId ?? ""} onChange={(e) => onAssignProfile(e.target.value || null)} style={{ maxWidth: 220 }}
@@ -263,14 +263,14 @@ export function AgentEditor(
         </Button>
       </div>
       {boundBindsPlain && (
-        <div data-testid="agent-profile-plain-bind" style={{ display: "flex", alignItems: "baseline", gap: 6, color: color.attnText, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
-          <span aria-hidden>△</span>
+        <div data-testid="agent-profile-plain-bind" style={{ display: "flex", alignItems: "baseline", gap: 6, color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
+          <span aria-hidden style={{ fontFamily: font.mono }}>△</span>
           <span>This profile's role isn't one a profile can confer, so sessions from this agent spawn plain.</span>
         </div>
       )}
       <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
         <span style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>Startup prompt</span>
-        <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>injected as the first turn of each new session</span>
+        <span style={{ color: color.text3, fontSize: fs.sm }}>injected as the first turn of each new session</span>
       </div>
       {/* ⌘/Ctrl+Enter saves, from the one shared handler AgentPromptEditor uses (lib/modEnter.ts) — the
           same gate as the Save button beside it, so the keyboard can never write what the button won't. */}
@@ -279,7 +279,7 @@ export function AgentEditor(
         data-testid={`agent-prompt-${agent.id}`}
         style={{
           ...PROMPT_FIELD_SIZE,
-          fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
+          fontFamily: font.ui, fontSize: fs.body, lineHeight: 1.5,
           background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 8,
         }} />
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -288,9 +288,9 @@ export function AgentEditor(
           onClick={() => onSavePrompt(prompt)}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
           ? <Button onClick={() => setPrompt(seed)}>Reset</Button>
-          : <span data-testid={`agent-prompt-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
+          : <span data-testid={`agent-prompt-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
         {conflict && (
-          <span data-testid="agent-prompt-conflict" style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <span data-testid="agent-prompt-conflict" style={{ color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
             This prompt changed elsewhere since you opened it — Save replaces it with your version, Reset takes theirs.
           </span>
         )}
@@ -302,10 +302,10 @@ export function AgentEditor(
           even the Setup Assistant / Platform Lead's own agent_update tool may touch this field). */}
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: 4 }}>
         <span style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>Credential grants</span>
-        <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>reach ONLY this agent — a sibling on the same profile never sees them</span>
+        <span style={{ color: color.text3, fontSize: fs.sm }}>reach ONLY this agent — a sibling on the same profile never sees them</span>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+        <span style={{ fontSize: fs.sm, color: color.text2 }}>
           Connections <span style={{ fontWeight: 400, color: color.text3 }}>· {connections.length === 0 ? "none selected → NO authenticated_request access (default)" : `${connections.length} selected → authenticated_request may use only these`}</span>
         </span>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -314,20 +314,20 @@ export function AgentEditor(
             return (
               <button key={c.id} type="button" onClick={() => toggleConnection(c.id)}
                 data-testid={`agent-connection-${agent.id}-${c.id}`}
-                style={{ cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, padding: "3px 9px", borderRadius: radius.lg,
+                style={{ cursor: "pointer", fontFamily: font.ui, fontSize: fs.sm, padding: "3px 9px", borderRadius: radius.lg,
                   border: `1px solid ${on ? color.accentEdge : color.line}`, background: on ? color.inset : "transparent",
                   color: on ? color.accentFg : color.text3 }}>
                 {/* Metadata only — name, target, scheme. ConnectionMetadata carries no key field to render. */}
-                {on ? "✓ " : ""}{c.name} <span style={{ opacity: 0.7 }}>({c.authScheme === "ssh" ? `${c.user}@${c.host}` : c.host})</span>
+                {on ? "✓ " : ""}{c.name} <span style={{ opacity: 0.7, fontFamily: font.mono }}>({c.authScheme === "ssh" ? `${c.user}@${c.host}` : c.host})</span>
                 {c.authScheme === "ssh" && <span style={{ marginLeft: 6, fontSize: fs.xs, opacity: 0.8 }}>ssh</span>}
               </button>
             );
           })}
-          {availableConnections.length === 0 && <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>No connections in the credential store yet — add one in Settings.</span>}
+          {availableConnections.length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No connections in the credential store yet — add one in Settings.</span>}
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>Capabilities</span>
+        <span style={{ fontSize: fs.sm, color: color.text2 }}>Capabilities</span>
         {availableCapabilities.map((c) => {
           const checked = capabilities.some((g) => g.slug === c.slug);
           return (
@@ -336,7 +336,7 @@ export function AgentEditor(
                 data-testid={`agent-capability-${agent.id}-${c.slug}`} />
               <span style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
                 <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                  <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{c.name}</span>
+                  <span style={{ fontSize: fs.body, color: color.text }}>{c.name}</span>
                   {c.requiresConnection && <Badge tone="muted">needs connection</Badge>}
                 </span>
                 {checked && c.requiresConnection && (
@@ -351,7 +351,7 @@ export function AgentEditor(
                       ))}
                     </Select>
                     {availableConnections.some((conn) => conn.authScheme !== "api-key" && conn.authScheme !== "bearer") && (
-                      <span style={{ fontSize: fs.mono, color: color.text3, fontFamily: font.mono }}>
+                      <span style={{ fontSize: fs.sm, color: color.text3 }}>
                         oauth2/ssh connections aren't listed — they can't be statically injected here.
                       </span>
                     )}
@@ -365,11 +365,11 @@ export function AgentEditor(
             genuinely still loading, the query errored (never resolves on its own), or the catalog
             loaded fine but is empty once the two reserved legacy slugs are filtered out above. */}
         {capabilityList.isLoading ? (
-          <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>Loading capability catalog…</span>
+          <span style={{ color: color.text3, fontSize: fs.sm }}>Loading capability catalog…</span>
         ) : capabilityList.isError ? (
-          <span role="alert" style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>Could not load the capability catalog: {errorText(capabilityList.error as Error)}</span>
+          <span role="alert" style={{ color: color.danger, fontSize: fs.sm }}>Could not load the capability catalog: {errorText(capabilityList.error as Error)}</span>
         ) : availableCapabilities.length === 0 ? (
-          <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>No capabilities in the registry yet — add one in Settings.</span>
+          <span style={{ color: color.text3, fontSize: fs.sm }}>No capabilities in the registry yet — add one in Settings.</span>
         ) : null}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -377,9 +377,9 @@ export function AgentEditor(
           onClick={() => onSaveGrants({ connections, capabilities })}>{savingGrants ? "Saving…" : "Save grants"}</Button>
         {grantsDirty
           ? <Button onClick={() => { setConnections(grantSync.seed.connections); setCapabilities(grantSync.seed.capabilities); }}>Reset</Button>
-          : <span data-testid={`agent-grants-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
+          : <span data-testid={`agent-grants-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
         {grantsConflict && (
-          <span data-testid={`agent-grants-conflict-${agent.id}`} style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <span data-testid={`agent-grants-conflict-${agent.id}`} style={{ color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
             Grants changed elsewhere since you opened this — Save replaces them with your version, Reset takes theirs.
           </span>
         )}
@@ -388,7 +388,7 @@ export function AgentEditor(
           oauth2/ssh binding, a reserved legacy slug) — shown verbatim, same placement as the Profile
           editor's own save-error line (pages/Profiles.tsx). */}
       {scopedGrantsError && (
-        <span data-testid={`agent-grants-error-${agent.id}`} role="alert" style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
+        <span data-testid={`agent-grants-error-${agent.id}`} role="alert" style={{ color: color.danger, fontSize: fs.sm, lineHeight: 1.5 }}>
           {errorText(scopedGrantsError)}
         </span>
       )}

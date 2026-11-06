@@ -33,7 +33,7 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
         </strong>
       </div>
 
-      <p style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
+      <p style={{ margin: 0, fontSize: fs.sm, lineHeight: 1.6, color: color.text }}>
         You are granting <strong style={{ color: color.attnText }}>{grantKeyList(plan.addedKeys)}</strong> on this profile.
         {" "}
         {unknown ? GRANT_REACH_UNKNOWN : (
@@ -50,7 +50,7 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
       {/* Role carries a from/to VALUE a bare key name can't express (card be447b3f) — shown as its own
           line rather than folded into grantKeyList's prose clause. */}
       {plan.roleChange && (
-        <p data-testid="grant-reach-role-change" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
+        <p data-testid="grant-reach-role-change" style={{ margin: 0, fontSize: fs.sm, lineHeight: 1.6, color: color.text }}>
           Role changes from <strong style={{ color: color.attnText }}>{plan.roleChange.from ?? "none"}</strong>
           {" "}to <strong style={{ color: color.attnText }}>{plan.roleChange.to ?? "none"}</strong>.
         </p>
@@ -62,7 +62,7 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
           <ul data-testid="grant-reach-agents"
             style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 2 }}>
             {shown.map((a) => (
-              <li key={a.id} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>
+              <li key={a.id} style={{ fontSize: fs.sm, color: color.text }}>
                 <span style={{ color: color.text2 }}>{a.projectName}</span>
                 <span style={{ color: color.text3 }}> / </span>
                 {a.name}
@@ -70,7 +70,7 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
             ))}
           </ul>
           {hidden > 0 && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>+{hidden} more</span>
+            <span style={{ fontSize: fs.sm, color: color.text3 }}>+{hidden} more</span>
           )}
         </div>
       )}

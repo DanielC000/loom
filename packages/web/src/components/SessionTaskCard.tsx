@@ -23,11 +23,11 @@ export function SessionTaskCard({ task }: { task: Task }) {
           display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
           border: `1px solid ${hover ? color.lineStrong : color.line}`, borderRadius: radius.sm,
           padding: "2px 6px", marginBottom: 4, background: color.inset,
-          fontFamily: font.mono, fontSize: fs.mono, color: color.text,
+          fontSize: fs.sm, color: color.text,
         }}>
         <PriorityChip priority={prio(task)} />
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{task.title}</span>
-        {hasBody && <span title="has a description" style={{ color: color.text3, flexShrink: 0 }}>≣</span>}
+        {hasBody && <span title="has a description" style={{ color: color.text3, flexShrink: 0, fontFamily: font.mono, fontSize: fs.mono }}>≣</span>}
       </div>
       {open && <ReadOnlyTaskDrawer task={task} onClose={() => setOpen(false)} />}
     </>
@@ -56,16 +56,16 @@ function ReadOnlyTaskDrawer({ task, onClose }: { task: Task; onClose: () => void
           <Button onClick={onClose} title="Close (Esc)">✕</Button>
         </div>
         <span style={labelStyle}>Title</span>
-        <div style={{ fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5, color: color.text }}>{task.title}</div>
+        <div style={{ fontSize: fs.body, lineHeight: 1.5, color: color.text }}>{task.title}</div>
         <span style={labelStyle}>Priority</span>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <PriorityChip priority={prio(task)} />
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>{PRIORITY_META[prio(task)].label}</span>
+          <span style={{ fontSize: fs.sm, color: color.text2 }}>{PRIORITY_META[prio(task)].label}</span>
         </div>
         <span style={labelStyle}>Description</span>
         <div style={{
           flex: 1, minHeight: 200, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",
-          fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
+          fontSize: fs.body, lineHeight: 1.5,
           background: color.inset, color: body ? color.text : color.text3,
           border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 8, boxSizing: "border-box",
         }}>{body || "No description."}</div>

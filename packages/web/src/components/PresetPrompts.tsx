@@ -143,16 +143,16 @@ export function SuggestionRow({ suggestion }: { suggestion: PresetPromptSuggesti
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5, border: `1px solid ${color.line}`,
       borderRadius: radius.sm, padding: 8, background: color.inset }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 600, color: color.text }}>
+      <span style={{ fontSize: fs.sm, fontWeight: 600, color: color.text }}>
         {suggestion.label}
       </span>
       <span title={suggestion.prompt}
-        style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.4,
+        style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.4,
           display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
         {suggestion.prompt}
       </span>
       {suggestion.rationale && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.4 }}>
+        <span style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.4 }}>
           {suggestion.rationale}
         </span>
       )}
@@ -184,8 +184,8 @@ function PresetRow({ preset, onInsert, onEdit }: {
           own border-color hover rule outright. @decision 6cefdf25 — a call site's chrome lives in a class. */}
       <button type="button" onClick={onInsert} disabled={del.isPending} title={preset.prompt}
         className="loom-btn loom-btn-default"
-        style={{ flex: 1, minWidth: 0, textAlign: "left", fontFamily: font.mono,
-          fontSize: fs.mono, padding: "5px 8px", borderRadius: radius.base,
+        style={{ flex: 1, minWidth: 0, textAlign: "left", fontFamily: font.ui,
+          fontSize: fs.sm, padding: "5px 8px", borderRadius: radius.base,
           overflow: "hidden", display: "flex", flexDirection: "column", gap: 2 }}>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preset.label}</span>
         <span style={{ color: color.text3, fontSize: fs.sm, lineHeight: 1.35, overflow: "hidden",
@@ -248,7 +248,7 @@ function PresetForm({ preset, onDone }: { preset?: PresetPrompt; onDone: () => v
 const fieldStyle = {
   width: "100%", boxSizing: "border-box" as const, background: color.inset, color: color.text,
   border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "4px 8px",
-  fontFamily: font.mono, fontSize: fs.mono,
+  fontFamily: font.ui, fontSize: fs.sm,
 };
 
 function FieldLabel({ text, children }: { text: string; children: ReactNode }) {
@@ -261,7 +261,7 @@ function FieldLabel({ text, children }: { text: string; children: ReactNode }) {
 }
 
 function Muted({ children, tone }: { children: ReactNode; tone?: "danger" }) {
-  return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone === "danger" ? color.danger : color.text3, padding: "2px 0" }}>{children}</span>;
+  return <span style={{ fontSize: fs.sm, color: tone === "danger" ? color.danger : color.text3, padding: "2px 0" }}>{children}</span>;
 }
 
 // @decision 6cefdf25 — do not restate the variant's own `color` inline here, even to the identical

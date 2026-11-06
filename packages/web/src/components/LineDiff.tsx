@@ -11,7 +11,7 @@ import { color, font, radius, fs } from "../theme";
 export function LineDiff({ base, shipped }: { base: string; shipped: string }) {
   const rows = useMemo(() => collapse(diffLines(base, shipped)), [base, shipped]);
   if (rows.every((r) => r.t === " " || r.t === "fold")) {
-    return <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No textual change.</span>;
+    return <span style={{ color: color.text3, fontSize: fs.sm }}>No textual change.</span>;
   }
   return (
     <pre style={{ margin: 0, maxHeight: 260, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",

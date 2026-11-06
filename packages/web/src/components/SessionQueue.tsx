@@ -153,7 +153,7 @@ export function SessionQueue({
         ) : (
           <>
             <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3, flexShrink: 0 }}>Next</span>
-            <span title={pending[0]!.text} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+            <span title={pending[0]!.text} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: fs.sm, color: color.text2 }}>
               {peek}
             </span>
           </>
@@ -226,7 +226,7 @@ function QueueRow({
     return (
       <div style={rowStyle} title={`${m.text}\n\n(worker / agent message — read-only)`}>
         <Dot tone="muted" />
-        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: fs.sm, color: color.text2 }}>
           {preview}
         </span>
         <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>worker</span>
@@ -254,7 +254,7 @@ function QueueRow({
       <span
         onClick={editable ? onEditStart : undefined}
         title={editable ? m.text : `${m.text}\n\n(Loom nudge — remove or reorder, not editable)`}
-        style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text2, cursor: editable ? "text" : "default" }}
+        style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: fs.sm, color: color.text2, cursor: editable ? "text" : "default" }}
       >
         {preview}
       </span>
@@ -291,7 +291,7 @@ function QueueEditor({ sessionId, entryId, initial, busy, onSave, onCancel }: {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }
           else if (e.key === "Escape") { e.preventDefault(); onCancel(); }
         }}
-        style={{ flex: 1, minWidth: 0, resize: "vertical", boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "4px 6px", fontFamily: font.mono, fontSize: fs.mono }}
+        style={{ flex: 1, minWidth: 0, resize: "vertical", boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "4px 6px", fontFamily: font.ui, fontSize: fs.sm }}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <Button variant="primary" disabled={!draft.trim() || busy} onClick={submit} style={{ padding: "2px 8px", fontSize: fs.sm }}>Save</Button>

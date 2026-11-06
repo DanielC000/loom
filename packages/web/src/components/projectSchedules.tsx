@@ -30,11 +30,11 @@ export function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string
   const mine = (schedules.data ?? []).filter((s) => agentIds.has(s.agentId));
   if (mine.length === 0) {
     return (
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontSize: fs.sm, color: color.text3 }}>
         <span style={{ color: color.text2 }}>Schedules</span>
         <span>· none —</span>
         <button onClick={() => navigate("/automation")} title="Create a schedule on the Automation page"
-          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.accentFg, fontFamily: font.mono, fontSize: fs.mono }}>
+          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.accentFg, fontFamily: font.ui, fontSize: fs.sm }}>
           add one on the Automation page →
         </button>
       </div>

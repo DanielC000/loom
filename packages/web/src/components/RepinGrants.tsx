@@ -139,12 +139,12 @@ export function RepinGrantsControl({ session }: { session: Partial<Pick<Session,
             boxShadow: `inset 0 0 0 1px ${color.attn}`, display: "flex", flexDirection: "column", gap: 10,
           }}>
           <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>Re-pin grants for this session?</strong>
-          <p data-testid="repin-confirm-counts" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
+          <p data-testid="repin-confirm-counts" style={{ margin: 0, fontSize: fs.sm, lineHeight: 1.6, color: color.text }}>
             This session is pinned to {plural(d.connections.pinned, "connection")} and {plural(d.capabilities.pinned, "capability grant")}.
             Its agent currently grants {plural(d.connections.current, "connection")} and {plural(d.capabilities.current, "capability grant")}.
             Re-pinning updates the session's stored grants to match its agent. It does not restart the session.
           </p>
-          <ul data-testid="repin-confirm-changes" style={{ margin: 0, paddingLeft: 18, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
+          <ul data-testid="repin-confirm-changes" style={{ margin: 0, paddingLeft: 18, fontSize: fs.sm, lineHeight: 1.6, color: color.text }}>
             {changes.map((c) => (
               <li key={c.key} data-testid={`repin-confirm-change-${c.key}`} data-loosening={c.loosening ? "true" : undefined}
                 style={c.loosening ? { color: color.dangerText, fontWeight: 700 } : undefined}>
@@ -153,19 +153,19 @@ export function RepinGrantsControl({ session }: { session: Partial<Pick<Session,
             ))}
           </ul>
           {showResumeNote && (
-            <p data-testid="repin-confirm-resume-note" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.attnText }}>
+            <p data-testid="repin-confirm-resume-note" style={{ margin: 0, fontSize: fs.sm, lineHeight: 1.6, color: color.attnText }}>
               {SPAWN_TIME_NOTE} Connection and vault-write changes apply to the session's next tool call.
             </p>
           )}
           {d.firstTimeGrant && (
-            <p data-testid="repin-confirm-first-time" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.attnText }}>
+            <p data-testid="repin-confirm-first-time" style={{ margin: 0, fontSize: fs.sm, lineHeight: 1.6, color: color.attnText }}>
               {d.connections.pinned === 0 && d.connections.current > 0
                 ? `Pinned 0 of ${plural(d.connections.current, "connection grant")}. Re-pin, then resume this session: `
                 : "Re-pin, then resume this session: "}
               a first-time grant's tool (e.g. ssh_exec / authenticated_request / vault_write) only appears after a resume.
             </p>
           )}
-          {repin.isError && <span role="alert" style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>{errorText(repin.error)}</span>}
+          {repin.isError && <span role="alert" style={{ color: color.danger, fontSize: fs.sm }}>{errorText(repin.error)}</span>}
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
             <Button variant="ghost" disabled={repin.isPending} onClick={() => setConfirming(false)}>Cancel</Button>
             <Button variant="primary" disabled={repin.isPending || drift.isFetching} data-testid={`repin-confirm-apply-${session.id}`}

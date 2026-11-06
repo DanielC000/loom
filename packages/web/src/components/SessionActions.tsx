@@ -1,6 +1,6 @@
 import type { Session } from "@loom/shared";
 import { Button } from "./ui";
-import { color, font, fs } from "../theme";
+import { color, fs } from "../theme";
 import { canResumeSession } from "../lib/sessions";
 import { RepinGrantsControl } from "./RepinGrants";
 
@@ -53,7 +53,7 @@ export function SessionActions({
       {live && <Button disabled={stopping} title="Stop this session — graceful Ctrl-C, clean and resumable"
         onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>}
       {canResume && <Button disabled={resuming} title="Resume this session and attach its terminal" onClick={onResume}>Resume</Button>}
-      {s.resumability === "dead" && <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>dead</span>}
+      {s.resumability === "dead" && <span style={{ color: color.danger, fontSize: fs.sm }}>dead</span>}
     </>
   );
 }

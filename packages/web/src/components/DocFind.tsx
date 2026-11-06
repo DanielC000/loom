@@ -199,7 +199,7 @@ export default function DocFind({ containerRef, registry, docKey }: {
           placeholder="Find in document…" aria-label="Find in document"
           style={{
             background: color.inset, color: color.text, border: `1px solid ${color.line}`,
-            borderRadius: radius.sm, padding: "3px 8px", width: 200, fontFamily: font.mono, fontSize: fs.mono, outline: "none",
+            borderRadius: radius.sm, padding: "3px 8px", width: 200, fontFamily: font.ui, fontSize: fs.sm, outline: "none",
           }}
         />
         <span

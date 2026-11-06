@@ -566,7 +566,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           data-session-id={sessionId}
           role="alert"
         >
-          <span aria-hidden style={{ color: color.danger }}>●</span>
+          <span aria-hidden style={{ fontFamily: font.mono, color: color.danger }}>●</span>
           <span>
             <strong style={{ color: color.text }}>{name} has stopped replying.</strong>{" "}
             {stuck.turnsSinceLastReply} turns have completed with no answer — Loom flagged it at turn{" "}
@@ -588,7 +588,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           data-session-id={sessionId}
           role="alert"
         >
-          <span aria-hidden style={{ color: color.attn }}>▲</span>
+          <span aria-hidden style={{ fontFamily: font.mono, color: color.attn }}>▲</span>
           <span>
             <strong style={{ color: color.text }}>{name}'s home route is refused.</strong>{" "}
             Proactive delivery (heartbeat/reminder/attention-push) can't reach it — fix the home under{" "}
@@ -599,7 +599,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
 
       {armed === false && (
         <div style={notice("attn")} role="status">
-          <span aria-hidden style={{ color: color.attn }}>▲</span>
+          <span aria-hidden style={{ fontFamily: font.mono, color: color.attn }}>▲</span>
           <span>
             This companion has no in-app route yet, so a message won't reach it — bind one under{" "}
             <strong style={{ color: color.text }}>Manage</strong> first.
@@ -645,7 +645,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           spellCheck
           aria-label="Message"
           style={{
-            flex: 1, resize: "none", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
+            flex: 1, resize: "none", fontFamily: font.ui, fontSize: fs.body, lineHeight: 1.5,
             background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`,
             borderRadius: radius.base, padding: "8px 12px",
           }}
@@ -759,7 +759,7 @@ function MessageRow({ msg, title, grouped, groupEnd, time, delivery }: {
               {you ? "You" : title}
             </span>
             {badge && (
-              <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text2, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "0 5px", background: color.surface2 }}>
+              <span style={{ fontSize: fs.xs, color: color.text2, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "0 5px", background: color.surface2 }}>
                 {badge}
               </span>
             )}
@@ -768,8 +768,8 @@ function MessageRow({ msg, title, grouped, groupEnd, time, delivery }: {
         )}
         <Bubble msg={msg} you={you} groupEnd={groupEnd} />
         {you && groupEnd && delivery && (
-          <div style={{ display: "flex", flexDirection: "row-reverse", alignItems: "center", gap: 6, margin: "4px 5px 0", fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
-            <span style={{ color: color.live, letterSpacing: "-1px" }} aria-hidden>{delivery === "delivered" ? "✓✓" : "✓"}</span>
+          <div style={{ display: "flex", flexDirection: "row-reverse", alignItems: "center", gap: 6, margin: "4px 5px 0", fontSize: fs.sm, color: color.text3 }}>
+            <span style={{ fontFamily: font.mono, color: color.live, letterSpacing: "-1px" }} aria-hidden>{delivery === "delivered" ? "✓✓" : "✓"}</span>
             <span>{(badge ? `via ${badge}` : "in-app")} · {delivery}</span>
           </div>
         )}
@@ -784,7 +784,7 @@ function Bubble({ msg, you, groupEnd }: { msg: ChatMessage; you: boolean; groupE
     <div
       className="loom-chat-in"
       style={{
-        maxWidth: "100%", padding: "9px 13px", borderRadius: radius.lg, fontFamily: font.mono, fontSize: fs.body,
+        maxWidth: "100%", padding: "9px 13px", borderRadius: radius.lg, fontSize: fs.body,
         lineHeight: 1.6, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: color.text,
         background: you ? color.selected : color.inset,
         border: `1px solid ${color.line}`,
@@ -838,14 +838,14 @@ function EventLine({ msg, time, title }: { msg: ChatMessage; time: string; title
         style={{
           display: "inline-flex", alignItems: "center", gap: 9, maxWidth: "82%", padding: "6px 12px",
           borderRadius: radius.pill, border: `1px solid ${wash(color.attn, 28)}`, background: wash(color.attn, 9),
-          fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.45,
+          fontSize: fs.sm, color: color.text2, lineHeight: 1.45,
         }}
       >
         <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.attnText, whiteSpace: "nowrap" }}>
           ⟡ {title}
         </span>
         <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>{msg.text}</span>
-        {time && <span style={{ color: color.text3, fontSize: fs.xs, whiteSpace: "nowrap" }}>{time}</span>}
+        {time && <span style={{ fontFamily: font.mono, color: color.text3, fontSize: fs.xs, whiteSpace: "nowrap" }}>{time}</span>}
       </span>
     </div>
   );
@@ -983,7 +983,7 @@ function notice(t: "attn" | "muted" | "danger"): CSSProperties {
     display: "flex", gap: 8, alignItems: "center", padding: "8px 12px",
     border: `1px solid ${accent}`, borderRadius: radius.base,
     background: t === "attn" ? wash(color.attn, 6) : t === "danger" ? wash(color.danger, 7) : color.inset,
-    fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: t === "muted" ? color.text3 : color.text2,
+    fontSize: fs.sm, lineHeight: 1.5, color: t === "muted" ? color.text3 : color.text2,
   };
 }
 
@@ -1100,7 +1100,7 @@ function HistoryRow({ active, primary, secondary, count, live, onClick }: {
         textAlign: "left", display: "flex", flexDirection: "column", gap: 3, cursor: "pointer",
         background: active ? color.selected : "transparent",
         border: `1px solid ${active ? color.accentEdge : color.line}`,
-        borderRadius: radius.base, padding: "7px 9px", fontFamily: font.mono,
+        borderRadius: radius.base, padding: "7px 9px", fontFamily: font.ui,
       }}
     >
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -1111,7 +1111,7 @@ function HistoryRow({ active, primary, secondary, count, live, onClick }: {
         {count !== undefined && (
           <>
             <span style={{ flex: 1 }} />
-            <span style={{ fontSize: fs.xs, color: color.text3 }}>{count} msg{count === 1 ? "" : "s"}</span>
+            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>{count} msg{count === 1 ? "" : "s"}</span>
           </>
         )}
       </span>
@@ -1148,11 +1148,11 @@ function PastConversationView({ sessionId, seq, title, onBack }: {
 
       <div style={{ flex: 1, minHeight: 0, maxHeight: SCROLL_MAX_HEIGHT, overflowY: "auto", display: "flex", flexDirection: "column", padding: "6px 14px 10px" }}>
         {q.isLoading ? (
-          <div style={{ margin: "auto", color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>Loading…</div>
+          <div style={{ margin: "auto", color: color.text3, fontSize: fs.sm }}>Loading…</div>
         ) : q.isError ? (
-          <div style={{ margin: "auto", color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>{(q.error as Error).message}</div>
+          <div style={{ margin: "auto", color: color.danger, fontSize: fs.sm }}>{(q.error as Error).message}</div>
         ) : timeline.length === 0 ? (
-          <div style={{ margin: "auto", color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>This conversation has no messages.</div>
+          <div style={{ margin: "auto", color: color.text3, fontSize: fs.sm }}>This conversation has no messages.</div>
         ) : (
           <Timeline items={timeline} title={title} />
         )}

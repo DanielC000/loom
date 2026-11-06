@@ -111,7 +111,7 @@ function Counter({ used, interval, tone }: { used: number; interval: number | nu
 export function VerdictStrip({ recent }: { recent: MergeGateVerdict[] }) {
   const shown = recent.slice(-RECENT_VERDICT_CAP);
   if (shown.length === 0) {
-    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>no periodic gates yet</span>;
+    return <span style={{ fontSize: fs.sm, color: color.text3 }}>no periodic gates yet</span>;
   }
   const label = `Last ${shown.length} periodic ${shown.length === 1 ? "gate" : "gates"}: ${shown.map((v) => v.result).join(", ")}`;
   // `result` is already the word for each kind ("pass" / "fail" / "cleared"), so the label stays truthful
@@ -189,7 +189,7 @@ export function CadenceControls({ draft, onChange, idPrefix, layout }: {
           {!disabled && <Hint>merges</Hint>}
         </div>
         {err && <span id={`${fieldId}-error`} role="alert" data-testid="merge-gate-interval-error"
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>{err}</span>}
+          style={{ fontSize: fs.sm, color: color.danger }}>{err}</span>}
         {disabled && (
           <Hint>
             {draft.cadence === "every"
@@ -230,7 +230,7 @@ export function CadenceWeakening({ cadence, interval }: { cadence: MergeGateCade
   return (
     <div data-testid={note.tone === "danger" ? "merge-gate-warn-never" : "merge-gate-warn-interval"}
       style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: color.inset }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: note.tone === "danger" ? color.danger : color.attnText, lineHeight: 1.6 }}>{note.text}</span>
+      <span style={{ fontSize: fs.sm, color: note.tone === "danger" ? color.danger : color.attnText, lineHeight: 1.6 }}>{note.text}</span>
     </div>
   );
 }
@@ -295,7 +295,7 @@ export function CommitMessageWeakening({ k, value }: { k: CommitMessageKey; valu
   return (
     <div data-testid={k === "trailers" ? "commit-trailers-warn" : "commit-log-body-warn"}
       style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${note.tone === "attn" ? color.attn : color.line}`, borderRadius: radius.base, background: color.inset }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: c, lineHeight: 1.6 }}>{note.text}</span>
+      <span style={{ fontSize: fs.sm, color: c, lineHeight: 1.6 }}>{note.text}</span>
     </div>
   );
 }
@@ -400,7 +400,7 @@ export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: 
         {showTrack && <TickTrack used={s.ungatedSinceLastPass} interval={s.interval} tone={read.tone} nextGated={s.nextLandingGated} />}
         {showTrack && <Counter used={s.ungatedSinceLastPass} interval={s.interval} tone={read.tone} />}
         <span className="loom-gate-msg" data-testid="merge-gate-sentence" title={read.sentence}
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+          style={{ fontSize: fs.sm, color: color.text2 }}>
           {read.sentence}
         </span>
         <span className="loom-gate-spacer" aria-hidden />
@@ -449,7 +449,7 @@ export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: 
               <Hint>last pass {ago(s.lastPassAt)}</Hint>
             </div>
             <div style={{ marginLeft: "auto", alignSelf: "center", display: "flex", gap: 8, alignItems: "center" }}>
-              {save.isError && <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>{errorText(save.error)}</span>}
+              {save.isError && <span role="alert" style={{ fontSize: fs.sm, color: color.danger }}>{errorText(save.error)}</span>}
               <Button variant="primary" data-testid="merge-gate-save"
                 disabled={!cadenceDraftValid(draft) || !dirty || save.isPending}
                 title={!dirty ? "No cadence change to save" : undefined}
@@ -543,10 +543,10 @@ function LiveCounterRow({ status: s }: { status: MergeGateStatus }) {
     <div data-testid="merge-gate-live" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
       <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Now</span>
       {showTrack && <TickTrack used={s.ungatedSinceLastPass} interval={s.interval} tone={read.tone} nextGated={s.nextLandingGated} />}
-      <span style={{ fontFamily: font.mono, fontSize: fs.body, color: toneMap[read.tone] }}>
+      <span style={{ fontSize: fs.body, color: toneMap[read.tone] }}>
         {showTrack
-          ? <>{s.ungatedSinceLastPass} <span style={{ fontSize: fs.sm, color: color.text3 }}>/ {s.interval} ungated since the last passing gate</span></>
-          : <>{s.ungatedSinceLastPass} <span style={{ fontSize: fs.sm, color: color.text3 }}>{s.ungatedSinceLastPass === 1 ? "merge" : "merges"} landed unverified since the last passing gate</span></>}
+          ? <><span style={{ fontFamily: font.mono }}>{s.ungatedSinceLastPass}</span> <span style={{ fontSize: fs.sm, color: color.text3 }}>/ {s.interval} ungated since the last passing gate</span></>
+          : <><span style={{ fontFamily: font.mono }}>{s.ungatedSinceLastPass}</span> <span style={{ fontSize: fs.sm, color: color.text3 }}>{s.ungatedSinceLastPass === 1 ? "merge" : "merges"} landed unverified since the last passing gate</span></>}
       </span>
       <span style={{ flex: 1 }} />
       <VerdictStrip recent={s.recent} />
@@ -570,7 +570,7 @@ function FieldLabel({ children, htmlFor }: { children: React.ReactNode; htmlFor?
 }
 
 function Hint({ children }: { children: React.ReactNode }) {
-  return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{children}</span>;
+  return <span style={{ fontSize: fs.sm, color: color.text3 }}>{children}</span>;
 }
 
 // Re-exported for the surfaces that only need the classification, not the whole strip.

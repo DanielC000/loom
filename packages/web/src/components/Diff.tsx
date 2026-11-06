@@ -31,8 +31,8 @@ export function DiffView({ patch }: { patch: string }) {
 // The hunks of ONE file, rendered with per-line coloring + a faint hunk-header band. Pulled out so
 // the collapsible FileDiffBlock can show/hide it without re-laying the lines.
 function FileHunks({ file }: { file: FileDiff }) {
-  if (file.binary) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "8px 10px" }}>Binary file — no text diff.</div>;
-  if (file.hunks.length === 0) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "8px 10px" }}>No textual changes.</div>;
+  if (file.binary) return <div style={{ fontSize: fs.sm, color: color.text3, padding: "8px 10px" }}>Binary file — no text diff.</div>;
+  if (file.hunks.length === 0) return <div style={{ fontSize: fs.sm, color: color.text3, padding: "8px 10px" }}>No textual changes.</div>;
   return (
     <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, padding: "4px 10px 8px" }}>
       {file.hunks.map((h, hi) => (

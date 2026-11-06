@@ -157,7 +157,7 @@ export function TileTitle({ s, showProject }: { s: TerminalCardSession; showProj
   // precedence as fleet's sessionStatus: waiting on you > working > idle.
   const waiting = usePendingDecisionsBySession().has(s.id);
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0, fontSize: fs.sm, color: color.text2 }}>
       {waiting
         ? <StatusPill {...WAITING_ON_YOU} style={{ flexShrink: 0 }} />
         : <StatusPill tone={s.busy ? "work" : "live"} glow={s.busy} label={s.busy ? "working" : "idle"} style={{ flexShrink: 0 }} />}
@@ -172,7 +172,7 @@ export function TileTitle({ s, showProject }: { s: TerminalCardSession; showProj
       <span data-testid="tile-identity" title={`${prefix} · ${shortId}`}
         style={{ display: "inline-flex", alignItems: "center", minWidth: 0 }}>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{prefix}</span>
-        <span style={{ flexShrink: 0, whiteSpace: "pre" }}>{` · ${shortId}`}</span>
+        <span style={{ flexShrink: 0, whiteSpace: "pre", fontFamily: font.mono }}>{` · ${shortId}`}</span>
       </span>
     </span>
   );

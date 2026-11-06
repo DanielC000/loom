@@ -88,13 +88,13 @@ function ReleasedSkillsBody({ project }: { project: Project }) {
 
         {list.isLoading && <Prose>reading this project's doctrine directory…</Prose>}
         {list.isError && (
-          <span data-testid="released-skills-list-error" style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>
+          <span data-testid="released-skills-list-error" style={{ color: color.danger, fontSize: fs.sm }}>
             {errorText(list.error)}
           </span>
         )}
 
         {!list.isLoading && !list.isError && released.length === 0 && (
-          <span data-testid="released-skills-empty" style={{ color: color.text3, fontSize: fs.body, fontFamily: font.mono }}>
+          <span data-testid="released-skills-empty" style={{ color: color.text3, fontSize: fs.body }}>
             Nothing frozen — Loom is still managing every skill it injected here.
           </span>
         )}
@@ -143,14 +143,14 @@ function ReleasedRow({ projectId, entry, open, onToggle, onReadopted }: {
         <Badge tone={reasonTone}>{entry.reason}</Badge>
         {trackedLabel && <Badge tone="danger">{trackedLabel}</Badge>}
         <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, flexShrink: 0 }}>
+        <span style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text2, flexShrink: 0 }}>
           {releasedAgeLabel(entry.firstSeenAt)}
         </span>
       </button>
       <div style={{ padding: "0 10px 8px", display: "flex", flexDirection: "column", gap: 6 }}>
         <Prose>{releaseReasonGloss(entry.reason)}</Prose>
         {blocked && (
-          <span role="status" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.5 }}>
+          <span role="status" style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.5 }}>
             Re-adopting is refused: {blocked}.
           </span>
         )}
@@ -212,7 +212,7 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
   if (diff.isError || !reviewed) {
     return (
       <Body>
-        <span data-testid="released-skill-diff-error" style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span data-testid="released-skill-diff-error" style={{ color: color.danger, fontSize: fs.sm }}>
           {errorText(diff.error) || "Couldn't read this copy."}
         </span>
       </Body>
@@ -228,10 +228,10 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
   return (
     <Body>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
-          on disk now: <span style={{ color: color.text2 }}>{shortFingerprint(reviewed.currentFingerprint)}</span>
+        <span style={{ fontSize: fs.sm, color: color.text3 }}>
+          on disk now: <span style={{ color: color.text2, fontFamily: font.mono }}>{shortFingerprint(reviewed.currentFingerprint)}</span>
         </span>
-        <span data-testid="released-skill-diff-summary" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+        <span data-testid="released-skill-diff-summary" style={{ fontSize: fs.sm, color: color.text3 }}>
           {reviewed.files.length === 1
             ? `${changed.length} of 1 file differs from the store`
             : `${changed.length} of ${reviewed.files.length} files differ from the store`}
@@ -273,7 +273,7 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
       {readopt.error && (
         <div data-testid="readopt-error" role="status"
           style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-            color: color.danger, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5,
+            color: color.danger, fontSize: fs.sm, lineHeight: 1.5,
             border: `1px solid ${color.danger}`, borderRadius: radius.sm, padding: "6px 8px" }}>
           <span style={{ flex: 1, minWidth: 0 }}>{errorText(readopt.error)}</span>
           <Button variant="ghost" disabled={diff.isFetching} onClick={reReadCopy}>
@@ -295,8 +295,8 @@ function ReleasedDiff({ projectId, entry, onReadopted }: {
         // this really is unrecoverable from here. The amber "attention" tone would understate it.
         <div role="status" style={{ display: "flex", flexDirection: "column", gap: 8, padding: 8,
           border: `1px solid ${color.danger}`, borderRadius: radius.sm, background: color.surface }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.5 }}>
-            Replace this project's copy of <strong>{entry.name}</strong> with the current store copy?
+          <span style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.5 }}>
+            Replace this project's copy of <strong style={{ fontFamily: font.mono }}>{entry.name}</strong> with the current store copy?
             {changed.length === 1 && " The file above is overwritten, and that cannot be undone from here."}
             {changed.length > 1 && ` The ${changed.length} files above are overwritten, and that cannot be undone from here.`}
           </span>
@@ -349,10 +349,10 @@ function FileRow({ projectId, name, path, open, onToggle }: {
           {!d ? (
             file.isLoading
               ? <Prose>loading this file…</Prose>
-              : <span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>{errorText(file.error) || "Couldn't load this file."}</span>
+              : <span style={{ color: color.danger, fontSize: fs.sm }}>{errorText(file.error) || "Couldn't load this file."}</span>
           ) : (
             <>
-              <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
+              <span style={{ fontSize: fs.sm, color: color.text3 }}>
                 Store copy → copy on disk
               </span>
               <LineDiff base={d.store ?? ""} shipped={d.onDisk ?? ""} />
@@ -371,7 +371,7 @@ const Body = ({ children }: { children: ReactNode }) => (
 );
 
 const Prose = ({ children, style }: { children: ReactNode; style?: CSSProperties }) => (
-  <p style={{ color: color.text3, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.55, ...style }}>
+  <p style={{ color: color.text3, fontSize: fs.sm, margin: 0, lineHeight: 1.55, ...style }}>
     {children}
   </p>
 );

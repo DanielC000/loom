@@ -392,7 +392,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                 className={`loom-atlas-crumblist${collapsibleTrail ? " is-collapsible" : ""}`
                   + `${trailOpen ? " is-open" : ""}`}
                 style={{ display: "flex", alignItems: "center", listStyle: "none", margin: 0, padding: 0,
-                  overflow: "hidden", fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+                  overflow: "hidden", fontSize: fs.sm, color: color.text3 }}>
                 {crumbs.map((crumb, i) => {
                   const last = i === crumbs.length - 1;
                   return (
@@ -547,7 +547,7 @@ function AtlasEmptyNode() {
       <SectionLabel style={{ margin: "0 0 10px" }}>Nothing here yet</SectionLabel>
       {/* Copy stays position-neutral on purpose: the tree rail moves above the content below the
           narrow breakpoint (styles/global.css), so "the tree on the left" would be false on a phone. */}
-      <p style={{ margin: 0, color: color.text2, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.7 }}>
+      <p style={{ margin: 0, color: color.text2, fontSize: fs.body, lineHeight: 1.7 }}>
         This address has no node in the Atlas preview yet. Pick a destination from the entity tree, or
         switch back to the classic UI for anything the preview has not reached.
       </p>
