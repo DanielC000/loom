@@ -1959,6 +1959,17 @@ async function main(): Promise<void> {
   } catch (err) {
     console.warn(`[boot] dist-importer-check worktree sweep failed (continuing boot): ${(err as Error).message}`);
   }
+  // Card c9a21e8f: AFTER the sweep above (so a re-fired check never races it for a leftover worktree) —
+  // re-fire the ONE coalesced advisory check per (project, repo) the restart pre-empted, at the current HEAD.
+  // Fire-and-forget: a check runs minutes and must never delay or fail boot.
+  try {
+    if (restartIntent?.distImporterRefire?.length) {
+      const { started } = await sessions.refireDistImporterChecks(restartIntent.distImporterRefire);
+      console.log(`[boot] dist-importer-check re-fire: started ${started} of ${restartIntent.distImporterRefire.length} pre-empted advisory check(s)`);
+    }
+  } catch (err) {
+    console.warn(`[boot] dist-importer-check re-fire failed (continuing boot): ${(err as Error).message}`);
+  }
 
   // Setup Assistant E1-6: FIRST-RUN auto-launch. On a brand-new/empty install (no ordinary projects + the
   // one-time app_meta marker unset) greet the user by auto-spawning the Setup Assistant ONCE; the marker

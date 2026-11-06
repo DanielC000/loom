@@ -1072,7 +1072,14 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "quiet', use a whole-box CPU reading plus a worktree-scoped process attribution check, whichever your " +
         "install provides (the latter is partial by construction). " +
         "Returns {cap, activeCount, queuedCount, running, queued, repoGuardOnly, squashing, declarations, " +
-        "waitingOnSelfCheck}. " +
+        "waitingOnSelfCheck, restartSafe}. " +
+        "`restartSafe` (bool, DAEMON-GLOBAL, not own-project) is `true` iff nothing in `running`/`queued`/" +
+        "`repoGuardOnly`/`squashing`/`waitingOnSelfCheck` is anything OTHER than an automatic dist-importer " +
+        "advisory check (`distImporterCheckOnly`), AND no merge or gate operation is live in the daemon (this " +
+        "includes a merge confirm still in its pre-queue preparation). A daemon restart itself cancels advisory " +
+        "checks and re-fires ONE after boot, so a `true` here (including with advisory entries still listed) " +
+        "means no merge/gate work the daemon is tracking would be interrupted. It does NOT cover untracked work. " +
+        "It reads the semaphore's belief only — blind to hand-run tests, like every field here. " +
         "`queued` is ordered by ARRIVAL within priority tier (high-priority merge/deploy before low-priority worker " +
         "self-checks, FIFO within each), so index + 1 IS `queuePosition` — a BELIEF about arrival order, NOT a " +
         "promise of grant order: the semaphore skips a head-of-line waiter that isn't admissible and grants the " +
@@ -5484,6 +5491,10 @@ export class OrchestrationMcpRouter {
           "but whose process tree's death could not be VERIFIED within a bounded window — reported NOT " +
           "cancelled on purpose (the run continues under its own timeout) rather than freeing a slot over work " +
           "that may still run. " +
+          "{outcome:\"cancel_signalled\", reason, opId, gateType} is the SAME situation for the automatic " +
+          "dist-importer advisory check only (a `distImporterCheckOnly` entry): the abort WAS delivered, but " +
+          "that run only observes a cancel between its worktree-cut / build / test phases, so it may take " +
+          "minutes to leave the queue — re-check `gate_queue` rather than re-cancelling. " +
           "ALSO REACHES a repo-guard-only wait (an inert-diff-skip merge waiting on a same-repo sibling's guard, " +
           "in gate_queue's `repoGuardOnly` array): tried automatically when the opId matches nothing in the " +
           "ordinary registry, same ambiguity handling. A QUEUED one cancels like a queued merge; a " +

@@ -48,6 +48,11 @@ export interface RequestDaemonRestartResult {
   supervisorCheckFailed?: boolean;
   supervisorWarning?: string;
   mergeDangerWait?: { waitedMs: number; windowsActive: number };
+  /** Card c9a21e8f — advisory dist-importer checks this restart pre-empted; absent when there were none. */
+  advisoryPreempt?: { cancelled: number; refireQueued: number; refireDroppedPaths: number };
+  /** Card c9a21e8f — set when a pre-empted RUNNING advisory's kill was still unverified after the bounded
+   *  wait; the restart proceeded anyway (its own worktree's strays were reaped by path). */
+  advisoryCancelUnverified?: string[];
 }
 
 /** Exit code that asks the supervisor to rebuild + relaunch. MUST match scripts/daemon-supervisor.mjs. */
@@ -193,8 +198,37 @@ export interface RestartIntent {
    * cost (one extra turn), never a resurrected false-positive.
    */
   deploySha?: string;
+  /**
+   * Card c9a21e8f — one entry per (project, repo) whose advisory dist-importer check this restart
+   * pre-empted (running, queued, or holding a coalesced follow-up). Boot re-fires exactly ONE check per
+   * entry at the then-current mainline HEAD (`SessionService.refireDistImporterChecks`). The check's own
+   * state is in-memory only, so this is the sole carrier of the touched-module set across the exit; it is
+   * additive (an older intent simply has none — nothing re-fires, never a crash). Absent when nothing was
+   * pre-empted. Size is capped per entry — see {@link DistImporterRefireEntry.droppedPathCount}.
+   */
+  distImporterRefire?: DistImporterRefireEntry[];
   requestedAt: string;
 }
+
+/**
+ * Card c9a21e8f — see {@link RestartIntent.distImporterRefire}. `repoKey` is the same value
+ * `kickDistImporterCheck` was given (`"primary"` for the project's own repo).
+ */
+export interface DistImporterRefireEntry {
+  projectId: string;
+  repoKey: string;
+  /** The manager that confirmed the landing — the nudge recipient, exactly as for an ordinary check. */
+  managerSessionId: string;
+  /** Union of the touched `packages/daemon/dist/**` modules of the pre-empted run + its folded follow-up,
+   *  capped at {@link DIST_IMPORTER_REFIRE_MAX_PATHS}. */
+  touchedDistPaths: string[];
+  /** How many touched modules did NOT fit under the cap (absent when none). Never silently dropped: boot
+   *  tells the manager this re-check covered only the carried subset. */
+  droppedPathCount?: number;
+}
+
+/** Cap on {@link DistImporterRefireEntry.touchedDistPaths} per entry — bounds the intent file, not the check. */
+export const DIST_IMPORTER_REFIRE_MAX_PATHS = 500;
 
 /**
  * The fleet to resume, tolerant of BOTH the current shape (`resume`) and the OLD on-disk shape

@@ -1468,8 +1468,12 @@ function makeRepo(repo) {
 
   if (liveEntry) {
     const cancelResult = await sessions.cancelGateOp(mgrId, liveEntry.opId, { scope: { kind: "project" } });
-    check("(i) cancelGateOp reports NOT cancelled (the kill is genuinely unverified — the pre-fix vacuous wait could never produce this)", cancelResult.outcome === "not_cancelled");
-    check("(i) the reason names the verification bound, not a generic failure", /not verified dead/i.test(cancelResult.reason ?? ""));
+    // Card c9a21e8f: the verification is still HONEST (never `cancelled`, slot held — below), but for an
+    // advisory dist-importer check the outcome is now the DISTINCT `cancel_signalled`: the abort was
+    // delivered and only takes effect at the run's next phase boundary, so "not_cancelled"/"kill failed"
+    // wording misdescribed it. The vacuous-wait regression this scenario guards would still yield `cancelled`.
+    check("(i) cancelGateOp reports NOT cancelled (the kill is genuinely unverified — the pre-fix vacuous wait could never produce this): the distinct cancel_signalled outcome", cancelResult.outcome === "cancel_signalled" && cancelResult.outcome !== "cancelled");
+    check("(i) the reason names the verification bound and the phase boundary, not a generic failure", /150ms/.test(cancelResult.reason ?? "") && /next phase boundary/i.test(cancelResult.reason ?? ""));
     await abortObservedPromise; // no timeout — the abort really was delivered to this op's own fn
     check("(i) the abort was requested and (eventually) observed by the fake fn", true);
     const snapAfter = sessions.gateQueueForManager(projId);

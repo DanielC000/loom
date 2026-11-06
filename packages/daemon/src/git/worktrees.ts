@@ -6124,6 +6124,9 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/pty-codex-agnostic-methods.mjs",
   "packages/daemon/test/redelivery-parked-notice-suppression.mjs",
   "packages/daemon/test/redirect-discoverability.mjs",
+  // Card c9a21e8f: (11) reads real src/index.ts SOURCE (comment-stripped, anchored on the two call tokens) to
+  // prove the boot re-fire wiring exists — a presence/order text check, so a src edit near it can flip it.
+  "packages/daemon/test/dist-importer-restart-preempt.mjs",
   // Card f349f5cb: reads real packages/daemon/src/index.ts SOURCE directly (never dist/**, so shape-(4)'s
   // tsc-emit-reprint reasoning does not apply here) and asserts, by comment-stripped substring search,
   // that the onExit hook wires reconcileNeverStartedRecycleSuccessor(exited.id, info.intended) after

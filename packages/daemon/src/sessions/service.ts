@@ -72,7 +72,7 @@ import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, runBuildStep, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult, type RequestDaemonRestartResult } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, runBuildStep, DIST_IMPORTER_REFIRE_MAX_PATHS, type DistImporterRefireEntry, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult, type RequestDaemonRestartResult } from "../orchestration/restart.js";
 import { armHardShutdownWatchdog, GRACEFUL_TEARDOWN_HARD_EXIT_MS } from "../graceful-teardown.js";
 import { currentDeployStaleness } from "../served-status.js";
 import { advisoryBuildStamp, type DeployStalenessResult } from "../deploy-staleness.js";
@@ -455,6 +455,10 @@ export interface GateQueueSnapshot {
   squashing: SquashQueueEntry[];
   declarations: GateIntentEntry[];
   waitingOnSelfCheck: WaitingOnSelfCheckQueueEntry[];
+  /** Card c9a21e8f: DAEMON-GLOBAL (never caller-scoped) — true iff every live thing in the five arrays above is
+   *  an automatic dist-importer advisory check, i.e. a `daemon_restart` would interrupt no merge/deploy/
+   *  worker-self-check work (it cancels advisories itself and re-fires one after boot). */
+  restartSafe: boolean;
 }
 
 /** The near-free identity {@link SessionService.reconcileOrchestrationOnBoot}'s Pass B already has in
@@ -3097,6 +3101,9 @@ export class SessionService {
    *  hermetic test drive a deterministic scan FAILURE without corrupting a real fixture repo.
    *  `undefined` in production ⇒ the real {@link computeDirectDistImporterRunSet}, byte-identical. */
   private readonly distImporterCheckComputeRunSet: typeof computeDirectDistImporterRunSet | undefined;
+  /** Card c9a21e8f — TEST SEAM for the post-landing kick's changed-paths git op, so a test can hold it pending.
+   *  `undefined` in production ⇒ the real {@link changedDaemonSrcTsPathsForCommit}, byte-identical. */
+  private readonly distImporterCheckChangedPaths: typeof changedDaemonSrcTsPathsForCommit | undefined;
   /** Card cee17efe (round-4 ruling 1a) — TEST SEAM for the check's own worktree removal, shared by its
    *  in-run cleanup (both the ordinary and the deterministic-path branch) AND
    *  {@link sweepOrphanedDistImporterCheckWorktrees}'s boot sweep, so a hermetic test can drive a
@@ -3123,6 +3130,27 @@ export class SessionService {
    * exactly the number of repos with a check CURRENTLY in flight — never a permanent per-project entry.
    */
   private readonly distImporterCheckQueues = new Map<string, DistImporterCheckQueueState>();
+  /** Card c9a21e8f — true from a restart's advisory pre-empt until the restart is refused (re-fire) or the process exits:
+   *  no advisory check starts, and the follow-up drain is skipped, while set. */
+  private distImporterPaused = false;
+  /** Card c9a21e8f — landings that ARRIVED while {@link distImporterPaused} was set, per `${projectId}:${repoKey}`:
+   *  folded into the restart's refire set (never dropped). Reset at the start of each pre-empt. */
+  private readonly distImporterPausedArrivals = new Map<string, { projectId: string; repoKey: string; managerSessionId: string; paths: Set<string> }>();
+  /** Card c9a21e8f — post-landing kicks still computing their changed paths (registered SYNCHRONOUSLY at kick entry,
+   *  removed the moment the git op resolves and the kick is about to enqueue/fold). The restart seal waits on these
+   *  (bounded) and nudges the manager for any still unresolved — a kick dying with the process must never be silent. */
+  private readonly distImporterKicksInFlight = new Map<number, { projectId: string; repoKey: string; managerSessionId: string; landedSha: string; settled: Promise<void>; resolve: () => void; uncoveredNudged: boolean }>();
+  private distImporterKickSeq = 0;
+  /** Card c9a21e8f — set once the restart intent's refire list is final (just before the exit is scheduled); an arrival
+   *  after that point can no longer be carried, so it is surfaced to its manager by nudge instead. */
+  private distImporterRefireSealed = false;
+  /**
+   * Card c9a21e8f — every dist-importer check run currently inside {@link runOneDistImporterCheck}, keyed by
+   * its opId: the identity a restart needs to (1) re-fire it and (2) derive its OWN isolated worktree path
+   * (`resolveWorktreePath(projectId, "dist-importer-check-<opId>", repoKey)`) to reap strays scoped to that
+   * path alone. In-memory like the queue state above; entries live exactly as long as the run.
+   */
+  private readonly activeDistImporterRuns = new Map<string, { projectId: string; repoKey: string; managerSessionId: string; touchedDistPaths: string[]; worktreePath?: string }>();
   /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
    * must not mean "dangles forever"). A wedge is usually eventually-resolvable (a held OS-indexer/
@@ -3553,6 +3581,8 @@ export class SessionService {
       distImporterCheckOnPhase?: BoundedGitDeps["onPhase"];
       /** TEST SEAM (card cee17efe, round-3 ruling 3): the dist-importer check's own direct-importer scan — see {@link distImporterCheckComputeRunSet}'s own doc. */
       distImporterCheckComputeRunSet?: typeof computeDirectDistImporterRunSet;
+      /** TEST SEAM (card c9a21e8f): the post-landing kick's changed-paths git op — see {@link distImporterCheckChangedPaths}'s own doc. */
+      distImporterCheckChangedPaths?: typeof changedDaemonSrcTsPathsForCommit;
       /** TEST SEAM (card cee17efe, round-4 ruling 1a): the dist-importer check's own worktree removal — see {@link distImporterCheckRemoveWorktree}'s own doc. */
       distImporterCheckRemoveWorktree?: typeof removeWorktree;
       /** TEST SEAM (card 02c5311d): the in-run cleanup's own listCheckedOutBranches read — see {@link distImporterCheckListCheckedOutBranches}'s own doc. */
@@ -3600,6 +3630,7 @@ export class SessionService {
     this.distImporterCheckCreateWorktree = opts?.distImporterCheckCreateWorktree;
     this.distImporterCheckOnPhase = opts?.distImporterCheckOnPhase;
     this.distImporterCheckComputeRunSet = opts?.distImporterCheckComputeRunSet;
+    this.distImporterCheckChangedPaths = opts?.distImporterCheckChangedPaths;
     this.distImporterCheckRemoveWorktree = opts?.distImporterCheckRemoveWorktree;
     this.distImporterCheckListCheckedOutBranches = opts?.distImporterCheckListCheckedOutBranches;
     this.distImporterCheckProvisionTimeoutMs = opts?.distImporterCheckProvisionTimeoutMs;
@@ -5561,6 +5592,10 @@ export class SessionService {
       buildDeps?: BuildDeps; exit?: (code: number) => void; mergeDangerGraceMs?: number; isSupervisorAlive?: () => Promise<SupervisorLivenessResult>;
       /** TEST SEAM (card 347b3584): swap the real worker_threads-backed watchdog for a fake/short one. */
       armHardShutdownWatchdog?: typeof armHardShutdownWatchdog; watchdogHardExitMs?: number;
+      /** TEST SEAM (card c9a21e8f): the bound on how long the advisory dist-importer pre-empt waits for a cancelled RUNNING check to settle. */
+      advisoryPreemptVerifyMs?: number;
+      /** TEST SEAM (card c9a21e8f): the bound on how long the seal waits for an in-flight post-landing kick's changed-paths git op. */
+      distImporterKickSettleMs?: number;
     } = {},
   ): Promise<RequestDaemonRestartResult> {
     const caller = this.db.getSession(callerSessionId);
@@ -5587,6 +5622,20 @@ export class SessionService {
       return this.inFlightRestart.promise;
     }
     const restartNotes: { sessionId: string; reason: string }[] = [{ sessionId: callerSessionId, reason }];
+    // Card c9a21e8f: non-null once the advisory pre-empt has run — every non-restarting exit after it must re-fire in-process.
+    let advisoryRefire: DistImporterRefireEntry[] | null = null;
+    // The pre-empt's own refire set, NEVER overwritten: every merge of the paused arrivals starts from this, because
+    // feeding a merged result back in as `base` re-counts the arrivals' path overflow in `droppedPathCount` each time.
+    let advisoryBase: DistImporterRefireEntry[] | null = null;
+    let intentWritten = false;
+    // Folds landings that arrived during the pause into the set, then re-fires in-process (nothing will exit).
+    const refireAfterRefusal = (): void => {
+      if (!advisoryBase) return;
+      const r = this.mergePausedDistImporterArrivals(advisoryBase);
+      advisoryBase = null;
+      advisoryRefire = null;
+      void this.refireDistImporterChecks(r);
+    };
     const attempt = (async (): Promise<RequestDaemonRestartResult> => {
     // Code Review (card 8e84e4a6), CRITICAL: this whole body MUST NEVER REJECT. `inFlightRestart.promise`
     // is this exact promise, shared with every attached caller — an unhandled rejection anywhere in this
@@ -5649,6 +5698,13 @@ export class SessionService {
     // failure can NEVER block the restart. `this.db` is live here (unlike index.ts's pre-migration boot
     // snapshot), so pass the persisted platform override (sweep G4) — a configured keep/enabled actually
     // applies to this trigger, not just the hardcoded default.
+    // Card c9a21e8f: AFTER the green build (a failed build leaves the daemon up with its advisories intact),
+    // BEFORE the intent is written: cancel every advisory dist-importer check — they must not hold a gate
+    // slot/host CPU through the deploy, nor leave child trees alive across the exit — and carry ONE refire
+    // per (project, repo) in the intent. A merge/deploy/worker-self-check op is deliberately NOT touched.
+    const preempt = await this.preemptAdvisoryDistImporterChecks(deps.advisoryPreemptVerifyMs ?? SessionService.ADVISORY_PREEMPT_VERIFY_MS);
+    advisoryBase = preempt.refire;
+    advisoryRefire = preempt.refire;
     const backupCfg = resolveBackupConfig(this.db.getPlatformConfig());
     if (backupCfg.enabled) await takeBackup({ reason: "pre-restart", keep: backupCfg.keep });
     // Capture the WHOLE live fleet — the daemon is ONE process for ALL projects, so this restart tears
@@ -5715,7 +5771,13 @@ export class SessionService {
     const combinedReason = restartNotes.length > 1
       ? `${restartNotes[0]!.reason}\n\n(this restart also serves ${restartNotes.length - 1} other overlapping daemon_restart call(s) received while the build was in flight:\n${restartNotes.slice(1).map((n) => `- session ${n.sessionId}: ${n.reason}`).join("\n")})`
       : restartNotes[0]!.reason;
-    writeRestartIntent({
+    // @decision c9a21e8f — landings that arrive during the pause are folded into the refire set (never dropped);
+    // the intent is rewritten below if more arrive after this first write, and the list is sealed at the last moment.
+    const withArrivals = (seal: boolean): DistImporterRefireEntry[] => {
+      advisoryRefire = this.mergePausedDistImporterArrivals(advisoryBase ?? [], seal);
+      return advisoryRefire;
+    };
+    const intent: Parameters<typeof writeRestartIntent>[0] = {
       reason: combinedReason,
       managerSessionId: callerSessionId,
       resume,
@@ -5730,7 +5792,11 @@ export class SessionService {
       ...(supervisorCheck.status === "could-not-check" ? { supervisorCheckFailed: true } : {}),
       // Card 3af8674e DoD-4 — see RestartIntent.deploySha's own doc.
       ...(build.deploySha ? { deploySha: build.deploySha } : {}),
-    });
+    };
+    const firstRefire = withArrivals(false);
+    if (firstRefire.length > 0) intent.distImporterRefire = firstRefire;
+    intentWritten = true; // set before the write: a partial write must also be cleared by the catch-all
+    writeRestartIntent(intent);
     // Card f05e5a06 — await the merge-danger-window guard BEFORE scheduling the exit-flush timer below,
     // not concurrently with it: the restart-intent (the fleet's resumable state) is already durably
     // written by this point, so a still-draining squash only extends how long THIS call takes to return —
@@ -5761,9 +5827,25 @@ export class SessionService {
     // the restart intent above (harmless while the daemon keeps running — index.ts only ever reads it at
     // boot) — clear it explicitly so it can never be mistaken for a live, still-pending restart by a
     // later, unrelated crash/reboot.
+    // @decision c9a21e8f — a post-landing kick whose changed-paths git op is still pending must not die silently with the
+    // process: give it a short bounded window to resolve (it then folds into the paused arrivals, which the seal below
+    // carries), and nudge the manager by name for any that is still unresolved.
+    await this.settleInFlightDistImporterKicks(deps.distImporterKickSettleMs ?? SessionService.DIST_IMPORTER_KICK_SETTLE_MS);
     const recheck = await checkSupervisorAlive();
+    if (recheck.alive) {
+      // Final fold + seal: an arrival from here on is nudged to its manager instead of being carried. Rewrites the
+      // already-written intent only if the set grew since the first write (synchronous with the seal — no gap).
+      const before = JSON.stringify(advisoryRefire ?? []);
+      const finalRefire = withArrivals(true);
+      if (JSON.stringify(finalRefire) !== before) {
+        if (finalRefire.length > 0) intent.distImporterRefire = finalRefire;
+        writeRestartIntent(intent);
+      }
+    }
     if (!recheck.alive) {
       clearRestartIntent();
+      // Card c9a21e8f: nothing will exit, so the advisories this restart cancelled are re-fired right here.
+      refireAfterRefusal();
       return supervisorRefusal(
         recheck,
         "the restart supervisor could no longer be confirmed alive immediately before exiting (the restart-intent written moments ago has been cleared; nothing was scheduled to exit)",
@@ -5819,8 +5901,16 @@ export class SessionService {
       // Card 0ec6fb57 — a non-fatal win-job-launcher.exe rebuild failure during the deploy build above;
       // surfaced here so the requesting manager sees it on this SAME call, not just in daemon stdout.
       ...(build.nativeLauncherWarning ? { nativeLauncherWarning: build.nativeLauncherWarning } : {}),
+      ...(preempt.cancelled > 0 || preempt.refire.length > 0
+        ? { advisoryPreempt: { cancelled: preempt.cancelled, refireQueued: preempt.refire.length, refireDroppedPaths: preempt.refire.reduce((n, r) => n + (r.droppedPathCount ?? 0), 0) } }
+        : {}),
+      ...(preempt.unverified.length > 0 ? { advisoryCancelUnverified: preempt.unverified } : {}),
     };
     } catch (err) {
+      // Card c9a21e8f: an intent written moments ago must not outlive a restart that is NOT happening — a later
+      // crash-boot would re-fire from it while the in-process re-fire below already did.
+      if (intentWritten) { try { clearRestartIntent(); } catch { /* best-effort */ } }
+      refireAfterRefusal();
       // Code Review (card 8e84e4a6), CRITICAL: the catch-all for the try{} opened above — see its own
       // comment for why this body must never let an exception escape as a rejection of `attempt`.
       const message = err instanceof Error ? err.message : String(err);
@@ -6761,7 +6851,18 @@ export class SessionService {
       }
       waitingOnSelfCheck.push(entry);
     }
-    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly, squashing, declarations, waitingOnSelfCheck };
+    // @decision c9a21e8f — read off the RAW snapshot/unredacted counts, never the redacted per-caller
+    // arrays' own fields: an advisory is identified by `distImporterCheckOnly`, which rides every entry.
+    // A merge confirm does real work (inert-diff / emit-compare / reunion prep) BEFORE it reaches the semaphore, so
+    // it is also read off the live pending ops: any RUNNING merge or gate op is non-advisory work (an advisory
+    // check registers a `pending_gate_ops` row, never a `pendingOps` entry).
+    const livePendingRealWork = this.pendingOps.listAllOfKind("merge").length > 0 || this.pendingOps.listAllOfKind("gate").length > 0;
+    // Belt-and-braces: the `waitingOnSelfCheck.length === 0` conjunct below is subsumed by `livePendingRealWork`
+    // (a merge waiting on its worker's self-check holds a pending "merge" op) — kept so restartSafe stays correct
+    // even if that pending-op bookkeeping ever changes.
+    const restartSafe = snap.entries.every((e) => e.distImporterCheckOnly)
+      && repoGuardOnly.length === 0 && squashing.length === 0 && waitingOnSelfCheck.length === 0 && !livePendingRealWork;
+    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly, squashing, declarations, waitingOnSelfCheck, restartSafe };
   }
 
   /**
@@ -7693,6 +7794,13 @@ export class SessionService {
    *  purely how long `cancelGateOp` waits to SEE whether that one attempt was verified. See
    *  `gateCancelVerifyMs`'s own doc for the test-only override. */
   private static readonly DEFAULT_GATE_CANCEL_VERIFY_MS = 5_000;
+  /** Card c9a21e8f: how long `daemon_restart` waits for a pre-empted RUNNING advisory dist-importer check to
+   *  settle before proceeding with an `advisoryCancelUnverified` warning (longer than the manual-cancel
+   *  window above: the restart has already paid for a build, and a check mid worktree-cut/build only
+   *  observes the abort at its next phase boundary). */
+  private static readonly ADVISORY_PREEMPT_VERIFY_MS = 30_000;
+  /** Card c9a21e8f — how long the restart seal waits for an in-flight post-landing kick's changed-paths git op. */
+  private static readonly DIST_IMPORTER_KICK_SETTLE_MS = 5_000;
 
   /**
    * `gate_cancel` — the manual cancel/supersede escalation for a case auto-supersede-on-merge does NOT
@@ -7716,6 +7824,10 @@ export class SessionService {
     // byte-identical); set only by the waiting-on-self-check branch to say what was actually cancelled.
     | { outcome: "cancelled"; phase: "queued" | "running"; opId: string; gateType: GateType; note?: string }
     | { outcome: "refused" | "not_found" | "ambiguous" | "not_cancelled"; reason: string; opId: string }
+    // Card c9a21e8f — additive, advisory dist-importer checks only: the abort WAS delivered but the run has
+    // not yet left the registry (it only observes a cancel at its next phase boundary). Distinct from
+    // `not_cancelled`, whose wording says the kill itself failed — wrong for this case.
+    | { outcome: "cancel_signalled"; reason: string; opId: string; gateType: GateType }
   > {
     const caller = this.db.getSession(callerSessionId);
     const restrictToOwnerSessionId = params.scope.kind === "own" ? params.scope.sessionId : undefined;
@@ -7849,6 +7961,13 @@ export class SessionService {
     const settled = isWorkerSelfCheckGate(entry)
       ? await this.pendingOps.waitBriefly(`gate:${entry.sessionId}`, this.gateCancelVerifyMs)
       : await this.gateSemaphore.waitForSettleBriefly(entry.id, this.gateCancelVerifyMs);
+    if (!settled && entry.distImporterCheckOnly) {
+      return {
+        outcome: "cancel_signalled", opId: entry.opId ?? opId, gateType: entry.gateType,
+        reason: `cancel signalled; the run exits at its next phase boundary — it was not confirmed gone within ${this.gateCancelVerifyMs}ms ` +
+          "(its worktree cut and build only check for a cancel between phases, so this can take minutes). The slot frees when it exits; re-check gate_queue rather than re-cancelling.",
+      };
+    }
     if (!settled) {
       return {
         outcome: "not_cancelled", opId: entry.opId ?? opId,
@@ -25905,24 +26024,230 @@ export class SessionService {
     // await "this kick has fully settled" instead of guessing a timeout; the production call site at
     // confirmWorkerMergeTracked's squash deliberately does not await it (never delays or can fail a
     // merge response), but nothing stops it from also existing to await.
+    // @decision c9a21e8f — registered SYNCHRONOUSLY, before the first await: a restart's seal must be able to see a kick
+    // whose changed-paths git op is still pending (else the kick dies with the process, silently, with no carry/nudge).
+    const kickId = ++this.distImporterKickSeq;
+    let resolveSettled!: () => void;
+    const rec = { projectId, repoKey, managerSessionId, landedSha, settled: new Promise<void>((r) => { resolveSettled = r; }), resolve: () => resolveSettled(), uncoveredNudged: false };
+    this.distImporterKicksInFlight.set(kickId, rec);
+    const unregister = (): void => { this.distImporterKicksInFlight.delete(kickId); rec.resolve(); };
     return (async () => {
       let changedTs: string[] | null;
       try {
-        changedTs = await changedDaemonSrcTsPathsForCommit(repoPath, landedSha, { timeoutMs: this.gitOpMs });
+        changedTs = await (this.distImporterCheckChangedPaths ?? changedDaemonSrcTsPathsForCommit)(repoPath, landedSha, { timeoutMs: this.gitOpMs });
       } catch (err) {
+        unregister();
         console.warn(`[dist-importer-check] could not compute changed paths for ${landedSha} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
+      unregister(); // synchronous with the enqueue/fold below: the seal sees either "in flight" or "already folded", never neither
+      if (rec.uncoveredNudged) return; // the seal already told the manager this landing is uncovered — don't double-report
       if (!changedTs || changedTs.length === 0) return; // git failure, or nothing in packages/daemon/src — nothing to check
       const touchedDistPaths = touchedDistPathsFor(changedTs);
       if (touchedDistPaths.length === 0) return;
-      const key = `${projectId}:${repoKey}`;
-      let q = this.distImporterCheckQueues.get(key);
-      if (!q) { q = newDistImporterCheckQueueState(); this.distImporterCheckQueues.set(key, q); }
-      const { shouldRunNow } = enqueueLanding(q, landedSha, touchedDistPaths);
-      if (!shouldRunNow) return; // folded into the in-flight run's own follow-up batch — that loop will pick this up
-      await this.runDistImporterCheckLoop(key, q, projectId, repoKey, repoPath, managerSessionId, landedSha, touchedDistPaths);
+      await this.enqueueDistImporterCheck(projectId, repoKey, repoPath, managerSessionId, landedSha, touchedDistPaths);
     })().catch((err) => console.warn(`[dist-importer-check] kick failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`));
+  }
+
+  /**
+   * The coalescing enqueue shared by an ordinary post-landing kick and card c9a21e8f's post-restart
+   * re-fire: at most one run per (project, repo); an arrival during a run folds into ONE follow-up at the
+   * newest sha with the union of touched modules (see `enqueueLanding`/`drainFollowUp`).
+   */
+  private async enqueueDistImporterCheck(
+    projectId: string, repoKey: string, repoPath: string, managerSessionId: string, landedSha: string, touchedDistPaths: string[],
+  ): Promise<void> {
+    if (this.distImporterPaused) {
+      // @decision c9a21e8f — never drop a landing that arrives during the pause: fold it into the pending refire set.
+      this.foldPausedDistImporterArrival(projectId, repoKey, managerSessionId, landedSha, touchedDistPaths);
+      return;
+    }
+    const key = `${projectId}:${repoKey}`;
+    let q = this.distImporterCheckQueues.get(key);
+    if (!q) { q = newDistImporterCheckQueueState(); this.distImporterCheckQueues.set(key, q); }
+    const { shouldRunNow } = enqueueLanding(q, landedSha, touchedDistPaths);
+    if (!shouldRunNow) return; // folded into the in-flight run's own follow-up batch — that loop will pick this up
+    await this.runDistImporterCheckLoop(key, q, projectId, repoKey, repoPath, managerSessionId, landedSha, touchedDistPaths);
+  }
+
+  /**
+   * Card c9a21e8f — the restart's pre-empt of every ADVISORY dist-importer check (never any other gate
+   * kind: a merge/deploy/worker-self-check op is untouched here). Order matters: (1) pause new starts and
+   * stop the follow-up drain, (2) capture the refire set (running run + folded follow-up per (project,repo)),
+   * (3) cancel queued entries (zero process risk) and running ones (signal), (4) wait up to `verifyMs`
+   * for each to leave the registry, (5) for an entry STILL unsettled — typically stuck in its worktree cut /
+   * build, which only observe the abort at phase boundaries — reap strays rooted in THAT run's own derived
+   * worktree path (`reapWorktreeUnlessClaimed`, path-scoped exactly like `worker_reap`, never by image name
+   * or port) since a daemon exit does not kill a Windows child tree and the boot sweep only removes the
+   * directory/branch. Never throws. The caller MUST call {@link refireDistImporterChecks} (with the set from
+   * {@link mergePausedDistImporterArrivals}) if the restart is then refused/aborted, or no advisory check would
+   * ever start again on this process; `resumeDistImporterChecks` is only a bare-unpause test seam.
+   * @decision c9a21e8f
+   */
+  async preemptAdvisoryDistImporterChecks(verifyMs: number): Promise<{ cancelled: number; refire: DistImporterRefireEntry[]; unverified: string[] }> {
+    this.distImporterPaused = true;
+    this.distImporterRefireSealed = false;
+    this.distImporterPausedArrivals.clear();
+    try {
+      const entries = this.gateSemaphore.snapshot().entries.filter((e) => e.distImporterCheckOnly && e.opId != null);
+      const byKey = new Map<string, { projectId: string; repoKey: string; managerSessionId: string; paths: Set<string> }>();
+      const slot = (projectId: string, repoKey: string, managerSessionId: string) => {
+        const k = `${projectId}:${repoKey}`;
+        let s = byKey.get(k);
+        if (!s) { s = { projectId, repoKey, managerSessionId, paths: new Set() }; byKey.set(k, s); }
+        return s;
+      };
+      for (const run of this.activeDistImporterRuns.values()) {
+        const s = slot(run.projectId, run.repoKey, run.managerSessionId);
+        for (const p of run.touchedDistPaths) s.paths.add(p);
+      }
+      for (const [k, q] of this.distImporterCheckQueues) {
+        if (q.pendingTouchedDistPaths.size === 0) continue;
+        const existing = byKey.get(k);
+        // A follow-up's manager is the running run's; a queue with no active run has no recipient to re-fire for.
+        if (!existing) { console.warn(`[dist-importer-check] restart pre-empt: queue ${k} holds a pending follow-up but no active run — cannot re-fire it`); continue; }
+        for (const p of q.pendingTouchedDistPaths) existing.paths.add(p);
+      }
+      const detail = "cancelled by a daemon restart (the deploy supersedes this advisory) — ONE check re-fires at the then-current HEAD after boot";
+      const waits: Array<{ entry: (typeof entries)[number]; settled: Promise<boolean> }> = [];
+      let cancelled = 0;
+      for (const e of entries) {
+        const ok = e.phase === "queued" ? this.gateSemaphore.cancelQueued(e.id, "manual", detail) : this.gateSemaphore.cancelRunning(e.id, detail);
+        if (!ok) continue; // admitted/settled between the snapshot and now — its own settle handles it
+        cancelled++;
+        waits.push({ entry: e, settled: this.gateSemaphore.waitForSettleBriefly(e.id, verifyMs) });
+      }
+      const results = await Promise.all(waits.map(async (w) => ({ w, settled: await w.settled })));
+      const unverified: string[] = [];
+      for (const { w, settled } of results) {
+        if (settled || w.entry.phase !== "running") continue;
+        const opId = w.entry.opId!;
+        unverified.push(opId.slice(0, 8));
+        const run = this.activeDistImporterRuns.get(opId);
+        if (!run) continue;
+        // The cut's own recorded path when it has landed, else the deterministic derived one (still mid-cut).
+        const worktreePath = run.worktreePath ?? resolveWorktreePath(run.projectId, `dist-importer-check-${opId}`, run.repoKey);
+        await this.reapWorktreeUnlessClaimed(worktreePath, { logPrefix: "restart-preempt", verb: "reaped" }).catch(() => { /* best-effort */ });
+      }
+      const refire: DistImporterRefireEntry[] = [];
+      for (const s of byKey.values()) {
+        const all = [...s.paths].sort();
+        const kept = all.slice(0, DIST_IMPORTER_REFIRE_MAX_PATHS);
+        const dropped = all.length - kept.length;
+        if (dropped > 0) console.warn(`[dist-importer-check] restart pre-empt: ${dropped} touched module(s) for ${s.projectId}:${s.repoKey} exceed the persisted cap (${DIST_IMPORTER_REFIRE_MAX_PATHS}) — the re-fired check will cover the first ${kept.length} and say so`);
+        refire.push({ projectId: s.projectId, repoKey: s.repoKey, managerSessionId: s.managerSessionId, touchedDistPaths: kept, ...(dropped > 0 ? { droppedPathCount: dropped } : {}) });
+      }
+      return { cancelled, refire, unverified };
+    } catch (err) {
+      console.warn(`[dist-importer-check] restart pre-empt failed (non-fatal, the restart proceeds): ${err instanceof Error ? err.message : String(err)}`);
+      return { cancelled: 0, refire: [], unverified: [] };
+    }
+  }
+
+  /**
+   * Card c9a21e8f — before the restart seals its refire list: wait (bounded) for every post-landing kick still
+   * computing its changed paths, so a resolved one folds into the paused arrivals and rides the intent. A kick still
+   * unresolved after the bound can no longer be carried, so its manager is nudged by name (and the kick, if it ever
+   * resolves, stays quiet). Never throws.
+   * @decision c9a21e8f
+   */
+  async settleInFlightDistImporterKicks(settleMs: number): Promise<void> {
+    try {
+      if (this.distImporterKicksInFlight.size === 0) return;
+      const pending = [...this.distImporterKicksInFlight.values()];
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all(pending.map((p) => p.settled)),
+        new Promise<void>((r) => { timer = setTimeout(r, settleMs); }),
+      ]);
+      if (timer) clearTimeout(timer);
+      for (const p of this.distImporterKicksInFlight.values()) {
+        p.uncoveredNudged = true;
+        try {
+          this.enqueueDurableMessage(p.managerSessionId, `[loom:dist-importer-check] landing ${p.landedSha.slice(0, 8)} was still being analysed when the daemon restart finalised its re-fire list and is NOT covered by any advisory dist-importer check — run the affected tests by hand if it matters.`, { sender: "system", taskId: null, kind: "warning" });
+        } catch (err) { console.warn(`[dist-importer-check] could not push uncovered-landing nudge (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+      }
+    } catch (err) {
+      console.warn(`[dist-importer-check] settling in-flight kicks failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** Card c9a21e8f — undo {@link preemptAdvisoryDistImporterChecks}'s pause when the restart did not proceed. */
+  resumeDistImporterChecks(): void { this.distImporterPaused = false; this.distImporterRefireSealed = false; this.distImporterPausedArrivals.clear(); }
+
+  /**
+   * Card c9a21e8f — a landing arrived while the restart pause was on. Folds it into the pending-refire set
+   * (union touched paths, newest sha) so {@link mergePausedDistImporterArrivals} carries it into the intent / the
+   * refusal refire. Once the intent's refire list is sealed it can no longer be carried, so the manager is told
+   * by name rather than the landing being dropped silently.
+   * @decision c9a21e8f
+   */
+  private foldPausedDistImporterArrival(projectId: string, repoKey: string, managerSessionId: string, landedSha: string, touchedDistPaths: string[]): void {
+    if (this.distImporterRefireSealed) {
+      try {
+        this.enqueueDurableMessage(managerSessionId, `[loom:dist-importer-check] landing ${landedSha.slice(0, 8)} arrived after the daemon restart's re-fire list was finalised and is NOT covered by any advisory dist-importer check — run the affected tests by hand if it matters.`, { sender: "system", taskId: null, kind: "warning" });
+      } catch (err) { console.warn(`[dist-importer-check] could not push uncovered-landing nudge (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+      return;
+    }
+    const k = `${projectId}:${repoKey}`;
+    let a = this.distImporterPausedArrivals.get(k);
+    if (!a) { a = { projectId, repoKey, managerSessionId, paths: new Set() }; this.distImporterPausedArrivals.set(k, a); }
+    for (const p of touchedDistPaths) a.paths.add(p);
+    a.managerSessionId = managerSessionId;
+    console.warn(`[dist-importer-check] a daemon restart is pre-empting advisory checks — landing ${landedSha.slice(0, 8)} folded into the pending re-fire (advisory only; never a gate)`);
+  }
+
+  /** Card c9a21e8f — `base` plus every paused arrival (union per project/repo, re-capped); `seal` freezes further folding. */
+  mergePausedDistImporterArrivals(base: readonly DistImporterRefireEntry[], seal = false): DistImporterRefireEntry[] {
+    const out = new Map<string, DistImporterRefireEntry>(base.map((b) => [`${b.projectId}:${b.repoKey}`, { ...b, touchedDistPaths: [...b.touchedDistPaths] }]));
+    for (const [k, a] of this.distImporterPausedArrivals) {
+      const cur = out.get(k);
+      const all = [...new Set([...(cur?.touchedDistPaths ?? []), ...a.paths])].sort();
+      const kept = all.slice(0, DIST_IMPORTER_REFIRE_MAX_PATHS);
+      const dropped = (cur?.droppedPathCount ?? 0) + (all.length - kept.length);
+      out.set(k, { projectId: a.projectId, repoKey: a.repoKey, managerSessionId: cur?.managerSessionId ?? a.managerSessionId, touchedDistPaths: kept, ...(dropped > 0 ? { droppedPathCount: dropped } : {}) });
+    }
+    if (seal) this.distImporterRefireSealed = true;
+    return [...out.values()];
+  }
+
+  /**
+   * Card c9a21e8f — start ONE coalesced advisory check per carried (project, repo) at the CURRENT mainline
+   * HEAD (not the sha that was running when the restart cut it off). Runs after boot (index.ts) or, when a
+   * restart is aborted after the pre-empt, in-process. Returns how many were started plus a promise a test can
+   * await; production ignores it (a check runs minutes, and must never delay boot).
+   * @decision c9a21e8f
+   */
+  async refireDistImporterChecks(entries: readonly DistImporterRefireEntry[]): Promise<{ started: number; done: Promise<void> }> {
+    this.distImporterPaused = false;
+    this.distImporterRefireSealed = false;
+    this.distImporterPausedArrivals.clear(); // callers merge them into `entries` first (mergePausedDistImporterArrivals)
+    const runs: Promise<void>[] = [];
+    for (const entry of entries) {
+      const pushNudge = (text: string) => {
+        try { this.enqueueDurableMessage(entry.managerSessionId, text, { sender: "system", taskId: null, kind: "warning" }); }
+        catch (err) { console.warn(`[dist-importer-check] could not push re-fire nudge (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+      };
+      try {
+        const project = this.db.getProject(entry.projectId);
+        if (!project) continue;
+        const repoPath = resolveRepoByKey(project, entry.repoKey).path;
+        const head = await readMainlineHead(repoPath, this.mainlineGitMs());
+        if (!head) {
+          pushNudge(formatDistImporterMechanismFailureNudge({ landedSha: "(unknown)", reason: "the post-restart re-fire could not read the mainline HEAD (detached/unborn/unreadable)" }));
+          continue;
+        }
+        if (entry.touchedDistPaths.length === 0) continue;
+        if (entry.droppedPathCount && entry.droppedPathCount > 0) {
+          pushNudge(`[loom:dist-importer-check] the re-check re-fired after the daemon restart covers ${entry.touchedDistPaths.length} touched module(s); ${entry.droppedPathCount} more exceeded the persisted-list cap and are NOT covered — treat a green result as partial.`);
+        }
+        runs.push(this.enqueueDistImporterCheck(entry.projectId, entry.repoKey, repoPath, entry.managerSessionId, head.tip, [...entry.touchedDistPaths])
+          .catch((err) => console.warn(`[dist-importer-check] re-fire failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`)));
+      } catch (err) {
+        console.warn(`[dist-importer-check] could not re-fire for ${entry.projectId}:${entry.repoKey} (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return { started: runs.length, done: Promise.all(runs).then(() => undefined) };
   }
 
   /**
@@ -25942,6 +26267,9 @@ export class SessionService {
       } catch (err) {
         console.warn(`[dist-importer-check] a run threw unexpectedly for ${sha} (non-fatal, queue continues): ${err instanceof Error ? err.message : String(err)}`);
       }
+      // @decision c9a21e8f — a restart pre-empt has already captured this queue's pending follow-up into the
+      // restart intent; draining it here would start the very run the pre-empt just cancelled.
+      if (this.distImporterPaused) { this.distImporterCheckQueues.delete(key); return; }
       const next = drainFollowUp(q);
       if (!next) { this.distImporterCheckQueues.delete(key); return; }
       sha = next.sha;
@@ -25990,6 +26318,7 @@ export class SessionService {
       opId, kind: "gate", key: `dist-importer-check:${opId}`, ownerSessionId: managerSessionId,
       projectId, taskId: null, branch: null, startedAt: new Date().toISOString(), state: "pending", surfacedPending: false,
     });
+    this.activeDistImporterRuns.set(opId, { projectId, repoKey, managerSessionId, touchedDistPaths });
 
     type Outcome =
       | { kind: "mechanism-failure"; reason: string }
@@ -26036,6 +26365,8 @@ export class SessionService {
           }
           worktreePath = info.worktreePath;
           branch = info.branch;
+          const activeRun = this.activeDistImporterRuns.get(opId);
+          if (activeRun) activeRun.worktreePath = info.worktreePath; // a restart pre-empt reaps THIS path (card c9a21e8f)
           // @decision cee17efe — checked after each phase so a cancel frees this check's slot promptly, not just inside runGateSeq's own per-step check.
           if (cancelSignal.aborted) return { kind: "cancelled", reason: cancelReason("cancelled while cutting the isolated worktree") };
           const build = this.distImporterCheckBuild ?? defaultDistImporterCheckBuild;
@@ -26091,6 +26422,7 @@ export class SessionService {
       pushNudge(formatDistImporterMechanismFailureNudge({ landedSha, reason: `the isolated check errored (${err instanceof Error ? err.message : String(err)})` }));
       return;
     } finally {
+      this.activeDistImporterRuns.delete(opId);
       const removeWt = this.distImporterCheckRemoveWorktree ?? removeWorktree;
       if (worktreePath) {
         const removal = await removeWt(repoPath, worktreePath, { timeoutMs: this.gitOpMs }).catch(() => ({ removed: false, wedged: false, aborted: false }));
