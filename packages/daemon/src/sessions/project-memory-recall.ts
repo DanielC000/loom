@@ -2,17 +2,15 @@ import type { ProjectMemoryEntry } from "@loom/shared";
 import { resolveConfig, isProjectMemoryExpired } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateNote } from "./project-memory-annotations.js";
-import { buildMentionsIndex } from "./project-memory-references.js";
-import { buildBacklinksIndex } from "./project-memory-backlinks.js";
-import { buildOutboundLinksIndex } from "./project-memory-outbound-links.js";
 import { extractPathTokens } from "./project-memory-path-tokens.js";
 
 /**
  * Loom PROJECT MEMORY — project-scoped SHARED knowledge (card 2fd9abf9), the fleet-wide sibling of the
  * companion's own per-session memory (companion/memory-recall.ts). Any worker/manager on a project can
  * write a note (`memory_write`, mcp/memory.ts); every kickoff on that SAME project retrieves and injects
- * a budget-capped digest — PINNED notes ride in full always, "related" notes ride in full only when their
- * title/text FTS5-MATCH the kickoff/task text — so a fleet-shared decision or gotcha survives across
+ * a budget-capped digest — PINNED notes are offered on every kickoff (a never-drop note as title + one rule
+ * line + a memory_read pointer, a long pinned note as its lead), "related" notes only when their
+ * title/text FTS5-MATCH the kickoff/task text (lead-truncated unless the kickoff cites their key) — so a fleet-shared decision or gotcha survives across
  * sessions instead of living only in hand-curated docs.
  *
  * Framed EXPLICITLY as DATA/CONTEXT, never instructions (mirrors companion/memory-recall.ts's posture,
@@ -175,9 +173,52 @@ function versionStamp(m: ProjectMemoryEntry): string {
  *  (a note that links nothing, or no `annotate` callback supplied) ⇒ byte-identical to before this card. */
 function noteBlock(m: ProjectMemoryEntry, annotations: string[] = [], full = false): string {
   const title = sanitizeTitle(m.title) || m.key;
-  const body = full || isNeverDrop(m) ? m.text.trim() : leadOrWhole(m.text.trim(), m.key);
+  const body = full ? m.text.trim() : isNeverDrop(m) ? floorRuleLine(m) : leadOrWhole(m.text.trim(), m.key);
   const lines = [`### ${title} (${m.key}) [${versionStamp(m)}]`, body, ...annotations];
   return lines.join("\n");
+}
+
+/** A never-drop (floor) note rides every kickoff as its header + ONE rule line + a `memory_read` pointer,
+ *  not its body; a note the kickoff cites by key still renders in full (`full`), and a SHORT note (body at
+ *  most {@link FLOOR_SHORT_NOTE_MAX_CHARS}) renders whole, since a pointer would save nothing and a one-liner
+ *  loses its DON'Ts. The rule line is the FIRST eligible line in document order: a `>` quote line or a plain
+ *  content line, but never a heading, a provenance stamp (bold `**v<n>`/`**Est.`/`**Established`, or a line
+ *  that is only a date), a code-fence opener, or anything inside a fenced block. Capped at
+ *  {@link FLOOR_RULE_MAX_CHARS} with an open code fence closed. A note with no eligible line gets the pointer
+ *  alone (its title still carries the topic). */
+export const FLOOR_RULE_MAX_CHARS = 240;
+export const FLOOR_SHORT_NOTE_MAX_CHARS = 400;
+// @decision 7c74acd8 — a never-drop note guarantees REACHABILITY (title + rule + key), not full-body delivery.
+const PROVENANCE_LINE_RE = /^\*\*\s*(?:v\d+\b|Est\.|Established\b|\d{4}-\d{2}-\d{2})|^\d{4}-\d{2}-\d{2}\s*$/i;
+const FENCE_OPENER_RE = /^(?:```|~~~)/;
+/** Closes a code fence left open by a cut (odd count of ``` markers): shared by {@link leadOrWhole} and
+ *  {@link floorRuleLine} so a truncated excerpt can never swallow the rest of the kickoff. */
+function closeOpenFence(excerpt: string): string {
+  return (excerpt.match(/```/g) ?? []).length % 2 === 1 ? `${excerpt}\n\`\`\`` : excerpt;
+}
+export function floorRuleLine(m: ProjectMemoryEntry): string {
+  const text = m.text.trim();
+  if (text.length <= FLOOR_SHORT_NOTE_MAX_CHARS) return text;
+  let rule = "";
+  let inFence = false;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (FENCE_OPENER_RE.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    const content = line.startsWith(">") ? line.replace(/^[>\s]+/, "") : line;
+    if (!content || /^#{1,6}\s/.test(content) || PROVENANCE_LINE_RE.test(content) || FENCE_OPENER_RE.test(content)) continue;
+    rule = content;
+    break;
+  }
+  if (rule.length > FLOOR_RULE_MAX_CHARS) {
+    let end = FLOOR_RULE_MAX_CHARS;
+    const last = rule.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1; // never split a surrogate pair at the cut
+    rule = closeOpenFence(`${rule.slice(0, end).trimEnd()}…`);
+  }
+  const pointer = `[… \`memory_read\` ${m.key} for the full note]`;
+  return rule ? `${rule}\n${pointer}` : pointer;
 }
 
 /** Card 7c74acd8 (B) — a non-floor note whose text is longer than this renders as its LEAD plus a
@@ -212,7 +253,7 @@ export function leadOrWhole(text: string, key: string): string {
     lead = (nl > DIGEST_NOTE_LEAD_MAX_CHARS / 2 ? cut.slice(0, nl) : cut).trimEnd();
   }
   if (lead.length >= text.length) return text;
-  if ((lead.match(/```/g) ?? []).length % 2 === 1) lead += "\n```"; // never leave a code fence open
+  lead = closeOpenFence(lead); // never leave a code fence open
   return `${lead}\n[… ${text.length - lead.length} more chars omitted — \`memory_read\` ${key} for the full note]`;
 }
 
@@ -473,8 +514,8 @@ export function composeProjectMemoryDigest(
   /** Card e6d270b3 — resolves a note's linked Request ids to live annotation lines. Defaults to "no
    *  annotations" so every pre-existing call site (incl. every hermetic test fixed against fixture
    *  entries with no DB) stays byte-identical. The real caller ({@link retrieveProjectMemoryForKickoff})
-   *  passes a callback backed by {@link annotateNote} (linked-Request state + inbound wikilink
-   *  backlinks — card e4e180ad). */
+   *  passes a callback backed by {@link annotateNote} (linked-Request live state only; backlink,
+   *  mention and unresolved-link lines are not injected — decision 7c74acd8). */
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
   /** Card 71192d47 — the SAME text driving the RELATED-tier FTS query one level up (see
    *  {@link retrieveProjectMemoryForKickoff}). Originally threaded down here ONLY to detect "a key this
@@ -716,9 +757,8 @@ export function buildFramedProjectMemory(
  * mid-session plumbing in every MCP router) or "card label" (Task has no such field) — a touched-path glob
  * over kickoffText is the only predicate needing zero new plumbing at this call site.
  *
- * `extractPathTokens` itself moved to project-memory-path-tokens.ts (card a140598a round 2) so this file
- * can import from project-memory-references.ts (to build its mentions index, below) without the two
- * modules importing each other in a cycle.
+ * `extractPathTokens` lives in project-memory-path-tokens.ts (card a140598a round 2), not here, so the
+ * path-token parser and project-memory-references.ts never import each other in a cycle.
  */
 
 /** Compiles a glob (`*`/`**`/`?`, anchored full-token match) into a RegExp — the identical semantics to
@@ -902,21 +942,9 @@ export function retrieveProjectMemoryForKickoff(
   const pinnedIds = new Set(pinned.map((m) => m.id));
   const related = relatedRaw.filter((m) => !pinnedIds.has(m.id));
   if (allPinned.length === 0 && related.length === 0) return null;
-  // Card a140598a round 2 — built EXACTLY ONCE per composition (never per note): a single corpus +
-  // task-list fetch feeds every note's mentions lookup below via an O(1) Map.get, instead of
-  // annotateNote re-scanning the whole project memory + task list on every one of the (up to dozens of)
-  // notes this digest considers. See that card's own decision record for the measured before/after.
-  const mentionsIndex = buildMentionsIndex(db, projectId);
-  // Card 527ed4f0 — same build-once fix applied to the OTHER per-note scan annotateNote used to run:
-  // backlinks. See docs/decisions/527ed4f0-backlinks-index-build-once.md for the measured before/after.
-  const backlinksIndex = buildBacklinksIndex(db, projectId);
-  // Card 1c9dcb24 — same build-once shape again, for outbound [[wikilink]] targets that don't resolve.
-  const outboundLinksIndex = buildOutboundLinksIndex(db, projectId);
-  // Card e4e180ad: combined annotate (linked-Request state + inbound [[wikilink]] backlinks + outbound
-  // [[wikilink]] resolution + the prebuilt mentions index above) — the SAME function mcp/memory.ts's
-  // computeNeverDropStatus uses to size the floor tier, so the two can never silently diverge on what
-  // counts toward a note's rendered/estimated size.
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex, outboundLinksIndex);
+  // Only linked-Request live state is annotated into the digest (annotateNote); backlinks, mentions and
+  // unresolved-link lines are not injected, so no per-composition indexes are built.
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
   const { framed, includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys } =
     buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate, kickoffText);
   // Card 926e4ac8 — these three daemon-log lines render from the RETURNED key-only arrays (titles aren't

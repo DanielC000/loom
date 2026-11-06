@@ -318,10 +318,9 @@ function linesForMentionsResult({ matches, totalFound }: { matches: NoteMention[
 /**
  * Every "connected mention" annotation line for `targetKey` — an O(1) lookup into `precomputed` (built
  * ONCE per composition, see {@link buildMentionsIndex}), never a fresh corpus/task scan per note. Same
- * bracketed-line style `[backlink: ...]` already renders in. Called from
- * project-memory-annotations.ts's `annotateNote`, the one place every digest-rendered note (and the
- * never-drop floor-tier byte estimate, mcp/memory.ts's `computeNeverDropStatus`/`computeRestTierSignal`)
- * gets its annotations from. `precomputed` is optional only so a caller with no map at all (e.g. a
+ * bracketed-line style `[backlink: ...]` used to render in. No production path calls it any more (the
+ * kickoff digest stopped injecting mentions; there is no on-demand surface), so it is exercised by tests
+ * only. `precomputed` is optional only so a caller with no map at all (e.g. a
  * hermetic test exercising request-links/backlinks alone) can omit it rather than pass an empty Map;
  * every real caller builds one via {@link buildMentionsIndex} first.
  */

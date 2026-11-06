@@ -335,8 +335,10 @@ try {
     // The kickoff digest actually renders the mentions annotation — THE auto-detected reference
     // surfacing a connection a hand wikilink never made (the card's own measurement framing).
     const framed = retrieveProjectMemoryForKickoff(db, proj, "");
-    check("(digest) the kickoff digest renders the mentions annotation on the pinned canonical note",
-      typeof framed === "string" && framed.includes("[mentions: card c0ffee00]"));
+    check("(digest) positive control: the pinned canonical note is delivered",
+      typeof framed === "string" && framed.includes("(digest-canonical)"));
+    check("(digest) the kickoff digest renders NO mentions annotation (no longer injected)",
+      typeof framed === "string" && !framed.includes("[mentions"));
     check("(digest) the digest never renders a mentions line for the lonely note (no false positive noise)",
       !framed.includes("digest-lonely"));
   }

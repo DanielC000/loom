@@ -42,11 +42,10 @@ export function extractWikilinkKeys(text: string): string[] {
 export const MAX_BACKLINKS = 20;
 
 /**
- * A MUCH tighter cap for the ONE path where this cost is NOT a one-off: ANY note's backlinks, as rendered
- * into the KICKOFF DIGEST (project-memory-annotations.ts's `annotateNote`, which mcp/memory.ts's
- * `computeNeverDropStatus` mirrors for its byte estimate) — every note the digest packs is SIZED against
- * the shared budget on EVERY kickoff, whether or not it ends up surviving the pack — this is not a
- * `never-drop`-specific concern, it's a "does the digest render this note at all" one. `memory_read`/
+ * A tighter cap sized for the KICKOFF DIGEST. NOTE: the digest no longer injects backlinks at all
+ * (project-memory-annotations.ts's `annotateNote` returns linked-Request state only), so this cap is now
+ * exercised only by {@link buildBacklinksIndex}'s callers in tests; it records the cap the digest used when
+ * every packed note was sized against the shared budget on EVERY kickoff. `memory_read`/
  * `memory_list` keep the full {@link MAX_BACKLINKS}, since an on-demand pull isn't paying this cost on
  * every OTHER session's kickoff too.
  *
@@ -170,8 +169,7 @@ function linesForBacklinkResult({ matches, totalFound }: { matches: InboundBackl
  * zero: this function always returns an array, so "no backlinks" and "backlinks not resolved at all" are
  * never the same shape at the call site (see mcp/memory.ts's `ProjectMemoryEntryWithLinks.backlinks`,
  * which is likewise always present, never omitted). `cap` defaults to {@link MAX_BACKLINKS} (the
- * on-demand-read cap); project-memory-annotations.ts's `annotateNote` passes the tighter {@link
- * MAX_BACKLINKS_DIGEST} unconditionally, for EVERY note the kickoff digest renders.
+ * on-demand-read cap, which memory_read uses); the kickoff digest no longer renders backlinks.
  */
 export function annotateBacklinks(db: Db, projectId: string, targetKey: string, cap: number = MAX_BACKLINKS): string[] {
   return linesForBacklinkResult(findInboundBacklinks(db, projectId, targetKey, cap));
@@ -215,9 +213,8 @@ export function buildBacklinksIndex(db: Db, projectId: string, cap: number = MAX
  * {@link annotateBacklinks}. Mirrors `annotateMentionsPrecomputed`'s exact omit-safe shape
  * (project-memory-references.ts) — `precomputed` is optional only so a caller with no map at all (e.g. a
  * hermetic test exercising request-links/mentions alone) can omit it rather than pass an empty Map; every
- * real DIGEST caller builds one via {@link buildBacklinksIndex} first. Called from
- * project-memory-annotations.ts's `annotateNote`, the one place every digest-rendered note (and the
- * never-drop floor-tier byte estimate) gets its annotations from.
+ * real caller builds one via {@link buildBacklinksIndex} first. No production path calls it any more
+ * (the kickoff digest stopped injecting backlinks); it is exercised by tests only.
  *
  * @decision 527ed4f0 — never let this diverge from {@link annotateBacklinks}'s own rendered output for
  * the same note; both must route through {@link matchesFor}/{@link linesForBacklinkResult}.

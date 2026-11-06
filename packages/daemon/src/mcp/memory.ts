@@ -2,13 +2,12 @@ import type { ProjectMemoryEntry, ProjectMemoryHistoryEntry } from "@loom/shared
 import { resolveConfig, isProjectMemoryExpired } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
-import { annotateBacklinks, annotateBacklinksBulk, buildBacklinksIndex } from "../sessions/project-memory-backlinks.js";
+import { annotateBacklinks, annotateBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import { annotateNote } from "../sessions/project-memory-annotations.js";
 import { computeFloorTierStatus, computeRestTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
-import { buildMentionsIndex } from "../sessions/project-memory-references.js";
 import { computeNearDuplicateSignal, type NearDuplicateSignal } from "../sessions/project-memory-dedup.js";
 import {
-  buildOutboundLinksIndex, findUnresolvedOutboundLinks, findUnresolvedOutboundLinksBulk,
+  findUnresolvedOutboundLinks, findUnresolvedOutboundLinksBulk,
   unresolvedOutboundLinksMessage,
 } from "../sessions/project-memory-outbound-links.js";
 
@@ -502,17 +501,8 @@ function computeNeverDropStatus(
     };
   }
   const pinnedNow = db.listPinnedProjectMemory(projectId);
-  // Card a140598a round 2 — built ONCE for this status computation, never once per floor-tier note.
-  const mentionsIndex = buildMentionsIndex(db, projectId);
-  // Card 527ed4f0 — same build-once fix for the OTHER per-note scan annotateNote used to run: backlinks.
-  const backlinksIndex = buildBacklinksIndex(db, projectId);
-  // Card 1c9dcb24 — same build-once shape again, for outbound [[wikilink]] targets that don't resolve.
-  const outboundLinksIndex = buildOutboundLinksIndex(db, projectId);
-  // Card e4e180ad: uses the SAME combined annotate as the real kickoff digest (project-memory-recall.ts's
-  // retrieveProjectMemoryForKickoff) — backlinks ride in the floor tier's rendered size exactly like
-  // linked-request annotations already did, so this status can never under-report against what the
-  // packer's own in-digest ALARM line actually computes (see composeProjectMemoryDigest's DoD-6 cross-check).
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex, outboundLinksIndex);
+  // Same annotate as the real kickoff digest (project-memory-recall.ts) so this status sizes what is injected.
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
   const status = computeFloorTierStatus(pinnedNow, budgetTokens, annotate);
   return {
     floorCount: status.floorCount,
@@ -521,10 +511,12 @@ function computeNeverDropStatus(
     overBudget: status.overBudget,
     roughFitCount: status.roughFitCount,
     message: status.overBudget
-      ? `floor tier (pinned + "${NEVER_DROP_TAG}") is now ≈${status.floorTokens} tok against a ` +
+      ? `floor tier (pinned + "${NEVER_DROP_TAG}"; each note rides a kickoff as title + first rule line + ` +
+        `key, body via memory_read) is now ≈${status.floorTokens} tok against a ` +
         `${status.budgetTokens} tok budget — "${NEVER_DROP_TAG}" can no longer GUARANTEE delivery for ` +
         `every note in this tier; roughly ${status.roughFitCount} of ${status.floorCount} such notes fit.`
-      : `floor tier (pinned + "${NEVER_DROP_TAG}") is ≈${status.floorTokens} tok of a ` +
+      : `floor tier (pinned + "${NEVER_DROP_TAG}"; each note rides a kickoff as title + first rule line + ` +
+        `key, body via memory_read) is ≈${status.floorTokens} tok of a ` +
         `${status.budgetTokens} tok budget (${status.floorCount} note(s)) — fits.`,
   };
 }
@@ -544,13 +536,8 @@ function computeRestTierSignal(
 ): RestTierSignal | undefined {
   if (!entry.pinned || entry.tags.includes(NEVER_DROP_TAG)) return undefined;
   const pinnedNow = db.listPinnedProjectMemory(projectId);
-  // Card a140598a round 2 — built ONCE for this status computation, never once per REST-tier note.
-  const mentionsIndex = buildMentionsIndex(db, projectId);
-  // Card 527ed4f0 — same build-once fix for the OTHER per-note scan annotateNote used to run: backlinks.
-  const backlinksIndex = buildBacklinksIndex(db, projectId);
-  // Card 1c9dcb24 — same build-once shape again, for outbound [[wikilink]] targets that don't resolve.
-  const outboundLinksIndex = buildOutboundLinksIndex(db, projectId);
-  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m, mentionsIndex, backlinksIndex, outboundLinksIndex);
+  // Same annotate as the real kickoff digest (project-memory-recall.ts) so this status sizes what is injected.
+  const annotate = (m: ProjectMemoryEntry) => annotateNote(db, projectId, m);
   const status = computeRestTierStatus(pinnedNow, budgetTokens, annotate);
   const cycle = status.roughCycleKickoffs;
   return {

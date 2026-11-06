@@ -524,7 +524,10 @@ export class TaskMcpRouter {
           "digits/-/_ only) that identifies this note: writing the SAME key again UPDATES it in place " +
           "(no duplicate accumulation) — prefer refining an existing key over minting a near-duplicate. " +
           "`text` is the note body. `pinned:true` marks it especially important — pinned notes are " +
-          "injected IN FULL on EVERY kickoff and never auto-evicted; leave it false/omitted for a note " +
+          "offered to EVERY kickoff and never auto-evicted — a long pinned note is injected as its lead plus a " +
+          "`memory_read` pointer, and a \"never-drop\" note as its title, first rule line and key only (read " +
+          "the body with `memory_read`; a note under ~400 chars goes whole), so put the rule FIRST: the first " +
+          "line that isn't a date/version stamp or heading is the rule; leave it false/omitted for a note " +
           "that should surface only when RELEVANT (full-text matched against the kickoff/task text). When the " +
           "digest budget can't fit every pinned note, they are delivered newest-updated first, so an old " +
           "critical pinned note can be dropped — tag it `\"never-drop\"` (via `tags`) to pack it ahead of every " +
@@ -544,7 +547,7 @@ export class TaskMcpRouter {
           "never blocks. If the note must survive, put its content somewhere durable outside project memory " +
           "(the task card or your report); do NOT pin just to dodge the cap, since pinning spends the " +
           "separately-budgeted pinned tier and gives up the note's FTS-relevance recall path (a pinned note " +
-          "rides in full or not at all). Optional `title` " +
+          "rides every kickoff, or is dropped from it). Optional `title` " +
           "(short label, max 200 chars) and `tags` (string[]). `title` (or, if omitted, `key`) is rendered " +
           "into every delivered note's digest header as `### {title} ({key})`; both consume " +
           "`memory.budgetTokens` on every kickoff like `text` does, so keep the title short. Write " +

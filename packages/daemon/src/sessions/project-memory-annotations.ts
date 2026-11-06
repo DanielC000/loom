@@ -1,55 +1,25 @@
 import type { ProjectMemoryEntry } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateRequestLinks } from "./project-memory-request-links.js";
-import { annotateBacklinksPrecomputed } from "./project-memory-backlinks.js";
-import { annotateMentionsPrecomputed, type NoteMention } from "./project-memory-references.js";
-import { unresolvedOutboundLinksDigestLine } from "./project-memory-outbound-links.js";
 
 /**
- * Every read-time annotation line for a note that a DIGEST/`composeProjectMemoryDigest` `annotate`
- * callback appends after the note's own body: linked-Request state (card e6d270b3), inbound
- * `[[wikilink]]` backlinks (card e4e180ad), outbound `[[wikilink]]` targets that don't resolve (card
- * 1c9dcb24), then auto-detected card/decision/path cross-note mentions (card a140598a). Combined into ONE
- * function so every caller that sizes or renders a note's annotations — the kickoff digest
- * (project-memory-recall.ts's `retrieveProjectMemoryForKickoff`) AND the never-drop floor-tier byte
- * estimate (mcp/memory.ts's `computeNeverDropStatus`) — computes the identical set from the identical
- * function, rather than two independently-written closures that could silently diverge on which
- * annotations count toward a note's rendered/estimated size (the exact class of bug
- * `floorSectionTokens`/`computeFloorTierStatus` were already written to avoid for the floor-tier total
- * itself — see project-memory-recall.ts).
+ * The read-time annotation lines a DIGEST/`composeProjectMemoryDigest` `annotate` callback appends after a
+ * note body: ONLY linked-Request live state (decision e6d270b3). One function so the kickoff digest
+ * (project-memory-recall.ts) and the never-drop floor-tier size estimate (mcp/memory.ts
+ * `computeNeverDropStatus`) compute the identical set.
  *
- * @decision e4e180ad — every note here is DIGEST-rendered, so its backlinks always use the tighter
- * `MAX_BACKLINKS_DIGEST` (applied when the caller builds `backlinksIndex`), never `MAX_BACKLINKS`.
- *
- * `mentionsIndex` (card a140598a round 2 — performance), `backlinksIndex` (card 527ed4f0 — same
- * performance fix, applied to the OTHER per-note scan this function used to run), and
- * `outboundLinksIndex` (card 1c9dcb24 — same shape again, for the THIRD per-note scan) are each built
- * ONCE per digest composition / per write-time status computation by the CALLER (`buildMentionsIndex`/
- * `buildBacklinksIndex`/`buildOutboundLinksIndex`), never fetched or recomputed by this function itself —
- * every note annotated in the SAME composition shares the identical prebuilt maps, an O(1) lookup each,
- * instead of each call re-scanning the whole memory corpus (+ task list, for mentions). All three optional
- * only so a caller with genuinely nothing to look up can omit any of them.
- *
- * NOT used by mcp/memory.ts's `withLinks` (the memory_read/memory_list read path) — there, request
- * annotations, backlinks, and unresolved-outbound-links are deliberately kept as SEPARATE fields
- * (`requestAnnotations`, `backlinks`, `unresolvedOutboundLinks`) on `ProjectMemoryEntryWithLinks`, since
- * that's a structured API response, not prose being appended into one digest block, and that on-demand
- * read keeps the full `MAX_BACKLINKS` (via the per-note `annotateBacklinks`, unaffected by this card).
- * Auto-detected mentions (card a140598a) have no on-demand surface of their own yet — see that card's own
- * scope note — so they are digest-only, same as everything else this function renders.
+ * Inbound `[[wikilink]]` backlinks, unresolved outbound links and auto-detected card/path mentions are
+ * deliberately NOT injected into kickoffs (decision 7c74acd8): they were ~16% of the memory section and are
+ * navigation aids, and `memory_read`/`memory_list` still return `backlinks` and `unresolvedOutboundLinks`
+ * as structured fields. Auto-detected mentions had no on-demand surface, so they are no longer surfaced
+ * anywhere. The index builders (`buildBacklinksIndex`/`buildMentionsIndex`/`buildOutboundLinksIndex`) are no
+ * longer called by any production path (memory_read/memory_list use the per-note/bulk finders); they remain
+ * only for their own tests until a separate decision removes them.
  */
 export function annotateNote(
   db: Db,
   projectId: string,
   entry: ProjectMemoryEntry,
-  mentionsIndex?: Map<string, { matches: NoteMention[]; totalFound: number }>,
-  backlinksIndex?: Map<string, string[]>,
-  outboundLinksIndex?: Map<string, string[]>,
 ): string[] {
-  return [
-    ...annotateRequestLinks(db, projectId, entry.requestIds),
-    ...annotateBacklinksPrecomputed(backlinksIndex, entry.key),
-    ...unresolvedOutboundLinksDigestLine(outboundLinksIndex?.get(entry.key) ?? []),
-    ...annotateMentionsPrecomputed(mentionsIndex, entry.key),
-  ];
+  return annotateRequestLinks(db, projectId, entry.requestIds);
 }

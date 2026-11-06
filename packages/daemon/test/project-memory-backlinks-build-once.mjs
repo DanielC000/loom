@@ -87,7 +87,7 @@ db.upsertProjectMemory(PROJECT_ID, { key: "lonely", text: db.getProjectMemoryByK
     retrieveProjectMemoryForKickoff(db, PROJECT_ID, "call-count check, small corpus");
     const countSmall = callCount;
     check("(call-count, kickoff) db.listProjectMemory called a small bounded number of times (<=3) on the small corpus",
-      countSmall > 0 && countSmall <= 3);
+      countSmall <= 3); // 0 since the digest stopped building the backlinks index
 
     // Scale the corpus up substantially and re-run — the call count must NOT grow with note count.
     for (let i = 0; i < 100; i++) {
@@ -131,7 +131,7 @@ db.upsertProjectMemory(PROJECT_ID, { key: "lonely", text: db.getProjectMemoryByK
     check("(call-count, write) restTierStatus was actually computed (the path under test ran)",
       res1 && res1.restTierStatus !== undefined);
     check("(call-count, write) db.listProjectMemory called a small bounded number of times (<=3) on the small pinned set",
-      countSmall > 0 && countSmall <= 3);
+      countSmall <= 3);
 
     // Pin many MORE ordinary notes and re-run on the SAME target — call count must not grow.
     for (let i = 5; i < 30; i++) {
@@ -186,30 +186,27 @@ for (const cap of [MAX_BACKLINKS_DIGEST, MAX_BACKLINKS]) {
     JSON.stringify(oldHub) !== JSON.stringify(newHubWrong));
 }
 
-// ===== 3. INTEGRATION: annotateNote renders the SAME backlink lines via the new backlinksIndex param,
-// in the same position relative to request-link/mention lines (both omitted here via undefined). =====
+// ===== 3. INTEGRATION: annotateNote no longer injects backlinks into the digest annotations (only linked
+// Request state remains); the index builder itself still produces the digest-capped lines memory_read-style
+// callers use. =====
 {
   const hubEntry = db.getProjectMemoryByKey(PROJECT_ID, "hub");
   const backlinksIndex = buildBacklinksIndex(db, PROJECT_ID, MAX_BACKLINKS_DIGEST);
-  const combined = annotateNote(db, PROJECT_ID, hubEntry, undefined, backlinksIndex);
   const oldHub = annotateBacklinks(db, PROJECT_ID, "hub", MAX_BACKLINKS_DIGEST);
-  check("(integration) annotateNote's output equals the old per-note backlinks output when request-links/mentions are empty",
-    JSON.stringify(combined) === JSON.stringify(oldHub));
-  // Omitting backlinksIndex entirely must NOT fall back to a live per-note scan (mirrors
-  // annotateMentionsPrecomputed's own omit-safe shape) — it renders [] for that segment.
-  const noIndex = annotateNote(db, PROJECT_ID, hubEntry, undefined, undefined);
-  check("(integration) omitting backlinksIndex renders no backlink lines (lookup-only, no live fallback)",
-    JSON.stringify(noIndex) === JSON.stringify([]));
+  check("(integration) the precomputed index still equals the per-note backlinks output",
+    JSON.stringify(annotateBacklinksPrecomputed(backlinksIndex, "hub")) === JSON.stringify(oldHub) && oldHub.length > 0);
+  check("(integration) annotateNote injects NO backlink lines (only request-link state remains; hub links no request)",
+    JSON.stringify(annotateNote(db, PROJECT_ID, hubEntry)) === JSON.stringify([]));
 }
 
-// ===== 4. END-TO-END: the real rendered kickoff digest actually contains the expected backlink lines. =====
+// ===== 4. END-TO-END: the real rendered kickoff digest carries NO backlink annotation. =====
 {
   db.upsertProjectMemory(PROJECT_ID, { key: "hub", text: db.getProjectMemoryByKey(PROJECT_ID, "hub").text, pinned: true }, 1000);
   const digest = retrieveProjectMemoryForKickoff(db, PROJECT_ID, "end-to-end kickoff check");
-  check("(e2e) the real kickoff digest contains hub's backlink annotation",
-    typeof digest === "string" && digest.includes("[backlink: [[expired-linker]] links here]"));
-  check("(e2e) the real kickoff digest contains the truncation notice",
-    typeof digest === "string" && digest.includes("showing 5 of 7 inbound links"));
+  check("(e2e) the digest renders hub (positive control: the note is delivered)",
+    typeof digest === "string" && digest.includes("(hub)"));
+  check("(e2e) the real kickoff digest contains NO backlink annotation",
+    typeof digest === "string" && !digest.includes("[backlink") && !digest.includes("inbound links"));
 }
 
 db.close();

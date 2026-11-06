@@ -249,8 +249,10 @@ try {
       !("error" in floorCompanion));
 
     const framed = retrieveProjectMemoryForKickoff(db, proj, "");
-    check("(digest) the kickoff digest actually renders the backlink annotation on the floor note",
-      typeof framed === "string" && framed.includes("[backlink: [[floor-companion]] links here]"));
+    check("(digest) positive control: the floor note is delivered in the kickoff digest",
+      typeof framed === "string" && framed.includes("(floor-canonical)"));
+    check("(digest) the kickoff digest renders NO backlink annotation on the floor note (backlinks are memory_read-only)",
+      typeof framed === "string" && !framed.includes("[backlink"));
     check("(digest) the floor note's OWN write never had to shrink to make room for the backlink (still ~1990 bytes stored)",
       floorNote.text.length === 1990);
 
@@ -296,12 +298,11 @@ try {
       const framed = retrieveProjectMemoryForKickoff(db, proj, "");
       const linkerPattern = new RegExp(`\\[backlink: \\[\\[${hubKey}-linker-\\d+\\]\\] links here\\]`, "g");
       const shownInDigest = (framed.match(linkerPattern) ?? []).length;
-      check(`(digest-cap) ${hubKey}: the KICKOFF DIGEST shows only ${MAX_BACKLINKS_DIGEST} backlinks (the tighter cap)`,
-        shownInDigest === MAX_BACKLINKS_DIGEST);
-      check(`(digest-cap) ${hubKey}: the digest's truncation notice reports "showing ${MAX_BACKLINKS_DIGEST} of ${linkerCount}"`,
-        framed.includes(`showing ${MAX_BACKLINKS_DIGEST} of ${linkerCount}`));
-      check(`(digest-cap) ${hubKey}: DISCRIMINATING — the digest shows STRICTLY FEWER backlinks than memory_read did for the identical note`,
-        shownInDigest < readHub.backlinks.filter((l) => l.startsWith("[backlink:")).length);
+      check(`(digest-cap) ${hubKey}: positive control: the hub itself is delivered in the digest`, framed.includes(`(${hubKey})`));
+      check(`(digest-cap) ${hubKey}: the KICKOFF DIGEST shows NO backlinks (they are memory_read-only)`,
+        shownInDigest === 0);
+      check(`(digest-cap) ${hubKey}: the digest carries no "showing N of M" truncation notice`,
+        !framed.includes(`showing ${MAX_BACKLINKS_DIGEST} of ${linkerCount}`) && !framed.includes("inbound links"));
     };
 
     // Floor-tier hub note: gets the tight digest cap.

@@ -61,7 +61,8 @@ try {
     const cited = entry("cited-note", longText);
     const { digest } = composeProjectMemoryDigest([floor, rest], [related, cited], 100000, () => [], "see memory key cited-note for details");
     const sect = (k) => { const s = digest.indexOf(`(${k})`); const e = digest.indexOf("\n### ", s + 1); return digest.slice(s, e < 0 ? undefined : e); };
-    check("(B) the never-drop FLOOR note renders in full (tail sentinel present, no pointer)", sect("floor-note").includes(LATE) && !sect("floor-note").includes("memory_read"));
+    check("(B) the never-drop FLOOR note renders compact (no tail, a memory_read pointer)", !sect("floor-note").includes(LATE) && sect("floor-note").includes("memory_read` floor-note"));
+    check("(B) the compact floor note is far shorter than its body", sect("floor-note").length < longText.length / 3);
     check("(B) an ordinary pinned (REST) note is lead-truncated with a pointer", !sect("rest-note").includes(LATE) && sect("rest-note").includes("memory_read` rest-note"));
     check("(B) a RELATED note is lead-truncated with a pointer", !sect("related-note").includes(LATE) && sect("related-note").includes("memory_read` related-note"));
     check("(B) a RELATED note the kickoff cites by key renders in full", sect("cited-note").includes(LATE));

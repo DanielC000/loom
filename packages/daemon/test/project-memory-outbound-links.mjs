@@ -11,11 +11,10 @@ import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 //      resolution once the missing target is written.
 //   4. memory_read (readProjectMemory) — the unresolvedOutboundLinks field, same live-resolution proof.
 //   5. memory_list (listProjectMemoryEntries) — bulk-vs-per-note equivalence.
-//   6. The kickoff digest (retrieveProjectMemoryForKickoff) — the compact marker line renders, and a
-//      bounded call-count (cost doesn't scale per note).
-//   7. MEASURE (not estimate): wall time + added characters for a realistic corpus (~750 notes, ~120
-//      dangling citations) with the feature ON vs OFF (annotateNote's outboundLinksIndex arg present vs
-//      omitted — both code paths are real, shipped code, so this is a genuine on/off comparison).
+//   6. The kickoff digest (retrieveProjectMemoryForKickoff) — the marker line is NOT injected (it is
+//      memory_read-only), and a bounded call-count (cost doesn't scale per note).
+//   7. MEASURE: wall time of one full kickoff digest over a realistic corpus (~750 notes, ~120 dangling
+//      citations) — a regression ceiling only.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/project-memory-outbound-links.mjs
 
@@ -26,7 +25,6 @@ const {
   findUnresolvedOutboundLinks, findUnresolvedOutboundLinksBulk, existingKeysFromCorpus,
   buildOutboundLinksIndex, unresolvedOutboundLinksDigestLine, unresolvedOutboundLinksMessage,
 } = await import("../dist/sessions/project-memory-outbound-links.js");
-const { annotateNote } = await import("../dist/sessions/project-memory-annotations.js");
 const { retrieveProjectMemoryForKickoff } = await import("../dist/sessions/project-memory-recall.js");
 const { writeProjectMemory, listProjectMemoryEntries, readProjectMemory } = await import("../dist/mcp/memory.js");
 
@@ -145,14 +143,14 @@ db.insertProject({ id: PROJECT_ID, name: "Outbound Links Project", repoPath: loo
     JSON.stringify(rowY.unresolvedOutboundLinks) === JSON.stringify(perNoteY.unresolvedOutboundLinks));
 }
 
-// ===== 6. Kickoff digest: compact marker renders + bounded call-count =====
+// ===== 6. Kickoff digest: marker NOT injected + bounded call-count =====
 {
   db.upsertProjectMemory(PROJECT_ID, { key: "digest-pinned", text: "pinned note citing [[digest-ghost]].", pinned: true }, 1000);
   const digest = retrieveProjectMemoryForKickoff(db, PROJECT_ID, "");
-  check("(digest) the rendered kickoff digest contains the compact unresolved-links marker",
-    digest != null && digest.includes("[unresolved links: digest-ghost]"));
-  check("(digest) the compact marker is ONE line, never a sentence per link",
-    digest.split("[unresolved links:").length === 2);
+  check("(digest) positive control: the pinned note citing the ghost is delivered",
+    digest != null && digest.includes("(digest-pinned)"));
+  check("(digest) the rendered kickoff digest carries NO unresolved-links marker (memory_read-only)",
+    !digest.includes("[unresolved links"));
 
   // Call-count: db.listProjectMemory must not scale with corpus size — same bounded-count discipline as
   // project-memory-backlinks-build-once.mjs's own §5.
@@ -175,7 +173,7 @@ db.insertProject({ id: PROJECT_ID, name: "Outbound Links Project", repoPath: loo
   }
 }
 
-// ===== 7. MEASURE: wall time + added chars, feature ON vs OFF, ~750 notes / ~120 dangling citations =====
+// ===== 7. MEASURE: one full kickoff digest pass over a ~750 note / ~120 dangling-citation corpus =====
 {
   const MEASURE_PROJECT_ID = "proj-outbound-links-measure";
   db.insertProject({ id: MEASURE_PROJECT_ID, name: "Measure Project", repoPath: loomHome, vaultPath: loomHome, config: {}, createdAt: now, archivedAt: null });
@@ -190,49 +188,12 @@ db.insertProject({ id: PROJECT_ID, name: "Outbound Links Project", repoPath: loo
       100000,
     );
   }
-  const corpus = db.listProjectMemory(MEASURE_PROJECT_ID);
-  const mentionsIndex = new Map(); // isolate the measurement to outbound-links cost specifically
-  const backlinksIndex = new Map();
-
-  const outboundLinksIndex = buildOutboundLinksIndex(db, MEASURE_PROJECT_ID);
-  const totalDangling = [...outboundLinksIndex.values()].reduce((sum, v) => sum + v.length, 0);
-  check(`(measure) fixture actually produced ${DANGLING_NOTES} dangling citations (got ${totalDangling})`,
-    totalDangling === DANGLING_NOTES);
-
-  const RUNS = 20;
-  const timeRuns = (withOutbound) => {
-    const start = process.hrtime.bigint();
-    let renderedChars = 0;
-    for (let r = 0; r < RUNS; r++) {
-      for (const m of corpus) {
-        const lines = withOutbound
-          ? annotateNote(db, MEASURE_PROJECT_ID, m, mentionsIndex, backlinksIndex, outboundLinksIndex)
-          : annotateNote(db, MEASURE_PROJECT_ID, m, mentionsIndex, backlinksIndex);
-        renderedChars += lines.join("\n").length;
-      }
-    }
-    const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
-    return { elapsedMs, renderedChars: renderedChars / RUNS };
-  };
-  const off = timeRuns(false);
-  const on = timeRuns(true);
-  const addedChars = on.renderedChars - off.renderedChars;
-  console.log(
-    `MEASURED  ${TOTAL_NOTES} notes / ${DANGLING_NOTES} dangling citations, ${RUNS} runs over annotateNote: ` +
-    `feature OFF ${(off.elapsedMs / RUNS).toFixed(3)}ms/pass, feature ON ${(on.elapsedMs / RUNS).toFixed(3)}ms/pass, ` +
-    `delta ${((on.elapsedMs - off.elapsedMs) / RUNS).toFixed(3)}ms/pass, added chars/pass ${addedChars.toFixed(0)}`,
-  );
-  check("(measure) feature ON still produces a finite, non-negative per-pass time delta", (on.elapsedMs - off.elapsedMs) >= -50);
-  check("(measure) feature ON adds rendered characters only on notes that actually have a dangling citation",
-    addedChars > 0 && addedChars < DANGLING_NOTES * 80);
-
-  // Same measurement for the real digest-composition entry point (buildOutboundLinksIndex's own cost,
-  // not just the O(1) lookup loop above) — the one number that actually answers "does a real kickoff
-  // get slower".
+  // The one number that answers "does a real kickoff get slower" over this corpus (the digest no longer
+  // builds the outbound-links index, so this is a regression ceiling, not an ON/OFF comparison).
   const digestStart = process.hrtime.bigint();
   retrieveProjectMemoryForKickoff(db, MEASURE_PROJECT_ID, "");
   const digestElapsedMs = Number(process.hrtime.bigint() - digestStart) / 1e6;
-  console.log(`MEASURED  one full retrieveProjectMemoryForKickoff pass over the same ${TOTAL_NOTES}-note/${DANGLING_NOTES}-dangling corpus: ${digestElapsedMs.toFixed(2)}ms (includes mentions+backlinks+outbound, not isolated)`);
+  console.log(`MEASURED  one full retrieveProjectMemoryForKickoff pass over the same ${TOTAL_NOTES}-note/${DANGLING_NOTES}-dangling corpus: ${digestElapsedMs.toFixed(2)}ms `);
   check("(measure) a full real kickoff digest composition over this corpus completes well under 1s", digestElapsedMs < 1000);
 }
 
