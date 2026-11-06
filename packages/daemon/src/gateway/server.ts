@@ -19,6 +19,7 @@ import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
 import { batchedDbPolicyEvidence, evaluateProjectCardPolicyStatus, policyIdIsConfigured, projectStoresCardPolicies, resolveWrittenCardPolicyIds } from "../orchestration/card-policy.js";
+import { flushMcpCalls, mcpCallStats } from "../mcp/call-record.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archivedSnapshotIds, engineTranscriptExists, deleteProjectArchives, pageTranscript, type TranscriptTurn } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import { sweepDeadSessions } from "../sessions/liveness.js";
@@ -5104,6 +5105,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     if (offset === undefined && limit === undefined) return turns;
     return pageTranscript(turns, { offset: offset ?? 0, limit });
+  });
+  // Per-call MCP latency + outcome class (card 8ef582d0). HUMAN-ONLY loopback read: Tier 0 by omission from
+  // TIER_1_ROUTES (loopback only, STRICTER than the Tier-1 transcript route above, which a remote bind can
+  // reach); there is deliberately NO agent MCP read tool. Identity/shape only: tool name, router, start, duration, outcome class, bounded errClass.
+  // `?limit=N` (1..500, default 200), newest first. `dropped`/`writeFailures` are the recorder's counters.
+  app.get("/api/sessions/:id/mcp-calls", async (req, reply) => {
+    const q = req.query as { limit?: string };
+    if (q.limit !== undefined && !/^\d{1,4}$/.test(q.limit)) return reply.code(400).send({ error: "limit must be a positive integer" });
+    const limit = Math.min(500, Math.max(1, q.limit === undefined ? 200 : Number(q.limit)));
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    flushMcpCalls(); // best-effort: make just-finished calls readable
+    const { dropped, writeFailures } = mcpCallStats();
+    return { calls: deps.db.listMcpCalls(id, limit), dropped, writeFailures };
   });
   // A worker's branch diff for the orchestration view (read-only — does NOT call reviewWorkerMerge,
   // so it appends no merge_request event; the manager's two-step gate is the only thing that does).

@@ -37,6 +37,7 @@ import { runBootClaudeSettingsRoutingScan } from "./pty/claude-settings-routing-
 import { UsageSampler } from "./sessions/usage-sampler.js";
 import { MidTurnContextSampler } from "./sessions/mid-turn-context-sampler.js";
 import { TaskMcpRouter } from "./mcp/server.js";
+import { startMcpCallRecorder, stopMcpCallRecorder, MCP_CALL_PER_SESSION_CAP, MCP_CALL_MAX_AGE_MS } from "./mcp/call-record.js"; // card 8ef582d0
 import { OrchestrationMcpRouter } from "./mcp/orchestration.js";
 import { PlatformMcpRouter } from "./mcp/platform.js";
 import { AuditMcpRouter } from "./mcp/audit.js";
@@ -149,6 +150,11 @@ async function main(): Promise<void> {
   declareDaemonProcess();
   const db = new Db();
   dbForShutdown = db; // lets the boot-safe shutdown stub registered above best-effort close it
+  // Card 8ef582d0: per-call MCP latency/outcome recorder — batched off the call path, pruned at boot + hourly.
+  startMcpCallRecorder(
+    (rows) => db.insertMcpCalls(rows, MCP_CALL_PER_SESSION_CAP),
+    () => { db.pruneMcpCalls(Date.now() - MCP_CALL_MAX_AGE_MS); },
+  );
   // @decision 3a5c5d4a (round 5) — register BEFORE the backfill right below and before anything else
   // that could issue a canonical git call (boot-reconcile included); an unregistered resolver fails
   // closed for a subdir-bound repo, so ordering here only ever widens protection, never narrows it.
@@ -1765,6 +1771,10 @@ async function main(): Promise<void> {
     // actually delays exit if something here awaits it; both callers of this closure already propagate
     // the resulting promise (see runGracefulTeardown / requestDaemonRestart's own finally-guarded await).
     try { await codescapeSupervisor.stop(); } catch { /* never block the exit */ }
+    // Card 8ef582d0: final flush of the buffered per-call MCP records. Lives in THIS shared cleanup so BOTH
+    // exit paths run it: gracefulShutdown and daemon_restart's exit-75 (which would otherwise drop up to the
+    // last flush interval of rows, usually including the daemon_restart call's own). Idempotent, never throws.
+    try { stopMcpCallRecorder(); } catch { /* never block the exit */ }
   };
   // Card 7f9444f3 audit: this function's only two writes (the `console.log` above and the
   // `codescapeSupervisor.stop()` call) are ALREADY each individually try/catch-guarded, so a throw here

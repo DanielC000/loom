@@ -14,6 +14,7 @@ import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 // field name silently ignored, `id` never auto-added).
 import { pickFields } from "./tasks.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
+import { instrumentServer } from "./call-record.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
 import { MAX_GATE_HISTORY_PAGE, DEFAULT_GATE_HISTORY_PAGE, MAX_EVENTS_SEARCH_PAGE } from "../db.js";
@@ -2145,6 +2146,7 @@ export class OrchestrationMcpRouter {
     const sessions = this.sessions;
     const pty = this.pty;
     const server = new McpServer({ name: "loom-orchestration", version: "0.1.0" });
+    instrumentServer(server, { router: "orchestration", sessionId }); // card 8ef582d0
     // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
     // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 

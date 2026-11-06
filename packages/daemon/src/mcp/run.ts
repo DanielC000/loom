@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { strictShape } from "./arg-alias.js";
+import { instrumentServer } from "./call-record.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -36,6 +37,7 @@ export class RunMcpRouter {
   buildServer(runSessionId: string): McpServer {
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-run", version: "0.1.0" });
+    instrumentServer(server, { router: "run", sessionId: runSessionId }); // card 8ef582d0
     // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
     // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 

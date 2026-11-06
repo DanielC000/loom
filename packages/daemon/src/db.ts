@@ -691,6 +691,23 @@ CREATE TABLE IF NOT EXISTS orchestration_events (
 CREATE TABLE IF NOT EXISTS orchestration_event_seq (
   n INTEGER PRIMARY KEY AUTOINCREMENT
 );
+-- Per-call MCP latency + outcome class (mcp/call-record.ts). IDENTITY/SHAPE ONLY: session, router, tool
+-- name, start, duration, outcome class and a bounded err_class label — NEVER arguments or results or any
+-- error text. NO FK to sessions(id) on purpose (a buffered row can flush after its session is deleted;
+-- cascadeSessionForeignKeyChildren sweeps it explicitly and the age prune backstops stragglers). Bounded:
+-- per-session row cap + age prune (Db.insertMcpCalls / Db.pruneMcpCalls). Human-only read.
+CREATE TABLE IF NOT EXISTS mcp_call_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  router TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  outcome TEXT NOT NULL,
+  err_class TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_call_log_session ON mcp_call_log(session_id, id);
+CREATE INDEX IF NOT EXISTS idx_mcp_call_log_started ON mcp_call_log(started_at);
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
@@ -7842,6 +7859,38 @@ export class Db {
     this.db.prepare("UPDATE event_triggers SET target_session_id = NULL WHERE target_session_id = ?").run(sessionId);
     this.db.prepare("UPDATE webhook_endpoints SET target_session_id = NULL WHERE target_session_id = ?").run(sessionId);
     this.purgeBoardReadSnapshots(sessionId); // card 15bdb031
+    this.db.prepare("DELETE FROM mcp_call_log WHERE session_id = ?").run(sessionId); // no FK on that table; swept here so a deleted session leaves no call rows
+  }
+
+  /**
+   * Batch-insert per-call MCP records (mcp/call-record.ts) in ONE transaction, then trim each touched
+   * session to `perSessionCap` newest rows. Identity/shape only — the row has no column that could hold
+   * arguments, results or error text.
+   */
+  insertMcpCalls(rows: ReadonlyArray<{ sessionId: string; router: string; tool: string; startedAt: number; durationMs: number; outcome: string; errClass: string | null }>, perSessionCap: number): void {
+    if (rows.length === 0) return;
+    const ins = this.db.prepare("INSERT INTO mcp_call_log (session_id, router, tool, started_at, duration_ms, outcome, err_class) VALUES (?,?,?,?,?,?,?)");
+    const trim = this.db.prepare("DELETE FROM mcp_call_log WHERE session_id = ? AND id <= COALESCE((SELECT id FROM mcp_call_log WHERE session_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?), 0)");
+    this.db.transaction(() => {
+      const touched = new Set<string>();
+      for (const r of rows) {
+        ins.run(r.sessionId, r.router, r.tool, Math.trunc(r.startedAt), Math.max(0, Math.round(r.durationMs)), r.outcome, r.errClass);
+        touched.add(r.sessionId);
+      }
+      for (const sid of touched) trim.run(sid, sid, perSessionCap);
+    })();
+  }
+  /** Newest-first page of one session's recorded MCP calls (human REST read only). */
+  listMcpCalls(sessionId: string, limit: number): Array<{ id: number; router: string; tool: string; startedAt: number; durationMs: number; outcome: string; errClass: string | null }> {
+    return (this.db.prepare("SELECT id, router, tool, started_at, duration_ms, outcome, err_class FROM mcp_call_log WHERE session_id = ? ORDER BY id DESC LIMIT ?")
+      .all(sessionId, limit) as Row[]).map((r) => ({
+        id: r.id as number, router: r.router as string, tool: r.tool as string, startedAt: r.started_at as number,
+        durationMs: r.duration_ms as number, outcome: r.outcome as string, errClass: (r.err_class as string | null) ?? null,
+      }));
+  }
+  /** Age prune: drop call rows that started before `olderThanMs` (epoch ms). Returns rows removed. */
+  pruneMcpCalls(olderThanMs: number): number {
+    return this.db.prepare("DELETE FROM mcp_call_log WHERE started_at < ?").run(olderThanMs).changes;
   }
   /**
    * Permanently delete a session row (the Archive tab's Delete), atomically with its full FK-child

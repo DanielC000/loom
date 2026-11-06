@@ -16,6 +16,7 @@ import type { PtyHost } from "../pty/host.js";
 import { isClaudeConfigDirEnvKey } from "../pty/claude-config.js";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, finalizeQuestionAsk, appendQuestionAskedEvent, pullQuestionsForAgent, cancelQuestionForAgent, amendQuestionForAgent, resolveQuestionForAgent, resolveOwnerTextForQuestionResolve, applySupersede, noticeOwnerActionAdvisory } from "./questionTool.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
+import { instrumentServer } from "./call-record.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir, resolveProjectInitTarget } from "../setup/bootstrap.js";
 import { expandTilde, PORT, isLoomDev, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
@@ -1396,6 +1397,7 @@ export class PlatformMcpRouter {
     const gitWriteTimeouts = this.gitWriteTimeouts;
     const pty = this.pty;
     const server = new McpServer({ name: "loom-platform", version: "0.1.0" });
+    instrumentServer(server, { router: "platform", sessionId: callerSessionId }); // card 8ef582d0
     // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
     // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 

@@ -20,6 +20,7 @@ import { performSshExec } from "../connections/sshExec.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { isConfirmedSubagent, type ToolAttributionResult } from "../pty/tool-attribution.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
+import { instrumentServer } from "./call-record.js";
 import { withWakeTimeEcho, nowEcho, localTimeString } from "../orchestration/time-echo.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 import { recordBoardRead } from "../orchestration/board-read.js";
@@ -162,6 +163,7 @@ export class TaskMcpRouter {
     const wakes = this.wakes;
     const fetchOverride = this.fetchOverride;
     const server = new McpServer({ name: "loom-tasks", version: "0.1.0" });
+    instrumentServer(server, { router: "task", sessionId }); // card 8ef582d0
     // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
     // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 

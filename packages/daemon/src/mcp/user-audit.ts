@@ -9,6 +9,7 @@ import { registerScopedRepoReadTools, type ScopedRootResolution } from "./repo-r
 import { skillListData } from "./skillTools.js";
 import { readSkill, isValidSkillName } from "../skills/store.js";
 import { strictShape } from "./arg-alias.js";
+import { instrumentServer } from "./call-record.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
@@ -81,6 +82,7 @@ export class WorkspaceAuditMcpRouter {
     const db = this.db;
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-user-audit", version: "0.1.0" });
+    instrumentServer(server, { router: "user-audit", sessionId: auditorSessionId }); // card 8ef582d0
     // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
     // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 

@@ -9,6 +9,7 @@ import { registerTranscriptReadTools } from "./transcript-read.js";
 import { registerRepoReadTools } from "./repo-read.js";
 import { auditRequestItem, pageRequests } from "./questionTool.js";
 import { strictShape } from "./arg-alias.js";
+import { instrumentServer } from "./call-record.js";
 // Card 40f4cae9: the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8) — reuse
 // the SAME generic `pickFields` rather than a second projector.
 import { pickFields } from "./tasks.js";
@@ -70,6 +71,7 @@ export class AuditMcpRouter {
     const db = this.db;
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-audit", version: "0.1.0" });
+    instrumentServer(server, { router: "audit", sessionId: auditorSessionId }); // card 8ef582d0
     // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
     // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 

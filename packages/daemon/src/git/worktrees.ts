@@ -6069,6 +6069,9 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/agent-runs-keys.mjs",
   "packages/daemon/test/event-trigger-mcp-absence.mjs",
   "packages/daemon/test/gateway-token.mjs",
+  // Card 8ef582d0: raw-reads real src/mcp/*.ts + src/index.ts SOURCE (comment-stripped) for the
+  // instrumentServer( census and the shared-shutdown stopMcpCallRecorder() wiring.
+  "packages/daemon/test/mcp-call-record-wiring.mjs",
   // Card f5ea0cdb: (D) raw-scans compiled dist/gateway/loopback-secret.js for /timingSafeEqual\(/ — the
   // SAME presence-only shape as gateway-token.mjs immediately above; was wrongly excluded on the
   // now-corrected "single-token regex is immune" argument (see shape-(4) above).

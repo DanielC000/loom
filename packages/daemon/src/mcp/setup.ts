@@ -30,6 +30,7 @@ import { getByIdPrefix } from "../id-prefix.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate, templateAssignableProfileError } from "../setup/templates.js";
 import { spawnableRoleError } from "./spawnable-role.js";
 import { strictShape } from "./arg-alias.js";
+import { instrumentServer } from "./call-record.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -193,6 +194,7 @@ export class SetupMcpRouter {
     const db = this.db;
     const sessions = this.sessions;
     const server = new McpServer({ name: "loom-setup", version: "0.1.0" });
+    instrumentServer(server, { router: "setup", sessionId: callerSessionId }); // card 8ef582d0
     // @decision 90dc3c8c — every tool registered on this server is auto-approved under codex
     // (CODEX_AUTO_APPROVE_MCP_SERVER_IDS, pty/host.ts) the instant it merges — no separate review.
 
