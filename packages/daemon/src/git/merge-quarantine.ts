@@ -10701,6 +10701,15 @@ function reenterMergeQuarantinesAtBootImpl(
         // the filename cascade.
         if (isReadableLatchRecord(parsed) && typeof parsed.repoPath === "string" && parsed.repoPath.length > 0 && path.isAbsolute(parsed.repoPath)) {
           contentIdentity = parsed.repoPath;
+          // @decision ad66e57e — dispose only when >=1 REAL string token exists and ALL are tombstoned for the
+          // named identity; tokenless / non-string / partial / other-identity falls through unchanged.
+          const contentTokens = readSurvivingOnDiskTokens(parsed, contentIdentity);
+          if (contentTokens.raw.length > 0 && contentTokens.surviving.length === 0) {
+            // eslint-disable-next-line no-console
+            console.warn(`[merge-quarantine] boot-time tmp latch ${f} is UNARMABLE but every token it names for ${contentIdentity} is already covered by the durable cleared-tokens tombstone — deleting it rather than fail-closing ${contentIdentity} on an already-resolved record.`);
+            try { fs.unlinkSync(tmpPath); } catch { /* best-effort — a fully-tombstoned leftover is harmless and filters to empty again next boot */ }
+            continue;
+          }
         }
         throw new Error("tmp latch JSON is missing repoPath/branch/reason");
       }

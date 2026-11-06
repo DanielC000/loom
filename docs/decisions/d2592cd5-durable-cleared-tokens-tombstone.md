@@ -61,8 +61,9 @@ copy that can drift from the source.
 C. **Read-side (boot).** `loadClearedTokensTombstoneFileAtBoot` seeds `clearedTokens` from the sidecar
 FIRST, before any latch file is read (this is what makes `8bc779f0`'s own "Do not" — filtering by
 `clearedTokens` at boot is a structural no-op — no longer true; that record's prohibition is superseded
-by this card for exactly this reason). Every one of boot's three raw-token-read sites (PASS 1's primary
-`.json` parse, PASS 1b's `.tmp-` recovery, the safety-tmp recovery) routes its freshly-parsed token array
+by this card for exactly this reason). Every one of boot's four raw-token-read sites (PASS 1's primary
+`.json` parse, PASS 1b's `.tmp-` recovery, the safety-tmp recovery, and PASS 1b's unarmable-content read —
+a field-missing record naming an absolute `repoPath`, card `ad66e57e`) routes its freshly-parsed token array
 through `filterBootTombstonedTokens` before constructing a live entry. A record fully covered by the
 tombstone (every token subtracted) is deleted rather than armed with zero tokens — this module's own
 invariant is that no live record ever has an empty token set.
@@ -429,8 +430,9 @@ against that pre-fix tip, GREEN restored, working tree confirmed byte-identical.
 - Do not gate the durable tombstone write on the generic in-memory `tombstoneIfNotSurviving` call's own
   firing — that call also fires when the underlying write FAILED, by design. Gate on the SPECIFIC call
   site's own already-tracked write-success signal instead (mutant 2 above proves why).
-- Do not widen `filterBootTombstonedTokens`'s call sites beyond the three raw-token-read sites named in
-  §C — it must run BEFORE a live entry is constructed from parsed JSON, never after.
+- Do not widen `filterBootTombstonedTokens`'s call sites beyond the four raw-token-read sites named in
+  §C (the three plus PASS 1b's unarmable-content read, card `ad66e57e`) — it must run BEFORE a live entry
+  is constructed from parsed JSON, never after.
 - Do not arm a boot-time record with zero surviving tokens after filtering — delete the file and skip it;
   this module's own invariant is that no live record ever has an empty token set.
 - Do not reintroduce an in-process prune of the durable tombstone sidecar — see §D above; it is unsafe by

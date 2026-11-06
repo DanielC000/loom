@@ -92,6 +92,12 @@ on the armable path, so it does not reach this throw.
 field-missing record, apply this card's rule at both sites with the same controls (absolute `repoPath` only,
 filename-claimant fallback otherwise, unlink only after the content owner is durably armed).
 
+## Follow-up: ad66e57e
+
+A fully tombstoned unarmable record is now disposed of instead of placeholdered; see
+`ad66e57e-tombstone-filter-unarmable-content-tokens.md`. That disposal deliberately unlinks with NO
+superseding write: the durable tombstone is the supersession proof, mirroring the armable branch.
+
 ## Not done
 
 No token salvage: X's placeholder carries a fresh token, not the original (the file had no usable `branch`).
