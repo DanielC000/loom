@@ -11850,6 +11850,12 @@ export class Db {
   markQuestionSurfaced(id: string, signature: string, at: string): void {
     this.db.prepare("UPDATE questions SET last_surfaced_state = ?, last_surfaced_at = ? WHERE id = ?").run(signature, at, id);
   }
+  /** When this question was last read via the Companion's decisions_list/decision_get (the
+   *  `last_surfaced_at` stamp `markQuestionSurfaced` writes), or null if never read / unknown id. Pure read. */
+  getQuestionLastSurfacedAt(id: string): string | null {
+    const r = this.db.prepare("SELECT last_surfaced_at FROM questions WHERE id = ?").get(id) as { last_surfaced_at: string | null } | undefined;
+    return r?.last_surfaced_at ?? null;
+  }
   /** One question enriched with the same display fields (the answer page), any state; undefined if unknown.
    *  Same `agent_name`-via-`filed_by_session_id` join as `listOpenQuestions` (card 24a8b8c3) — see that
    *  method's doc for why. */

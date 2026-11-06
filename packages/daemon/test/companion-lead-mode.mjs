@@ -201,7 +201,7 @@ try {
     const orch = new OrchestrationMcpRouter(db, {});
     const tools = await listOf(orch.buildServer(sess, "assistant"));
     const expectedActTools = [
-      "sessions_status", "decisions_list", "decision_resolve",
+      "sessions_status", "decisions_list", "decision_get", "decision_resolve",
       "board_list", "board_get", "board_create", "board_update", "authored_content_grant", "board_relocate",
       "vault_lookup", "send_media",
       "session_message", "session_steer", "session_stop", "session_resume",

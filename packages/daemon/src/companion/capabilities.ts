@@ -678,6 +678,10 @@ function decisionSurfaceSignature(q: Pick<Question, "state" | "chosenOption" | "
   return `${q.state}|${q.chosenOption ?? ""}|${q.answeredAt ?? ""}|${q.consumedAt ?? ""}|${q.title}|${q.body}|${(q.options ?? []).join(",")}`;
 }
 
+/** The single refusal for an id-keyed decision lookup that must not reveal whether the id exists
+ *  (decision_get, decision_resolve). */
+const NO_SUCH_DECISION = "no such decision";
+
 const DECISIONS_RELAY: CompanionCapability = {
   slug: "decisions-relay",
   supportsMode: ["read", "act"],
@@ -770,6 +774,46 @@ const DECISIONS_RELAY: CompanionCapability = {
       },
     );
 
+    // Single-decision read: same grant + scope gate as decisions_list, one row by id (no sibling listing).
+    server.registerTool(
+      "decision_get",
+      {
+        description:
+          "Read-only: fetch ONE decision-inbox question by `questionId` (the id an alert names, as " +
+          "`question:<id>`) in full — title, body, options, recommendation, state — instead of listing every " +
+          "pending decision. Readable states match decisions_list: pending or already answered (consumed and " +
+          "cancelled are not readable). Returns {decision, asOf} with " +
+          "the same `alreadySurfaced` flag decisions_list reports, or {error:\"no such decision\"} when the id " +
+          "does not exist, is not in your granted project(s), is a notice, or is no longer readable — those " +
+          "cases are deliberately indistinguishable.",
+        inputSchema: { questionId: z.string() },
+      },
+      async ({ questionId }) => {
+        const q = db.getQuestionInboxItem(questionId);
+        // @decision c64c1e7d — one identical refusal (NO_SUCH_DECISION) for nonexistent / out-of-scope /
+        // notice / consumed / cancelled ids, decided BEFORE any stamp: no existence oracle, no side effect.
+        // Readable states match decisions_list exactly (pending + answered).
+        if (!q || !ctx.scope.projectIds.has(q.projectId) || q.type === "notice" || (q.state !== "pending" && q.state !== "answered")) {
+          return ok({ error: NO_SUCH_DECISION });
+        }
+        let surfaced = new Map<string, string>();
+        try { surfaced = db.getQuestionSurfacedSignatures([q.id]); } catch { /* degrade to not-surfaced */ }
+        const now = new Date().toISOString();
+        const signature = decisionSurfaceSignature(q);
+        const alreadySurfaced = surfaced.get(q.id) === signature;
+        try { db.markQuestionSurfaced(q.id, signature, now); } catch { /* best-effort bookkeeping only */ }
+        return ok({
+          decision: {
+            questionId: q.id, projectId: q.projectId, projectName: q.projectName,
+            sessionId: q.sessionId, title: q.title, body: q.body, options: q.options,
+            recommendation: q.recommendation, state: q.state, createdAt: q.createdAt,
+            alreadySurfaced,
+          },
+          asOf: now,
+        });
+      },
+    );
+
     // ACT half — read-only grants (every project in scope is mode:'read') never see this tool at all,
     // keeping their surface byte-identical to before this card.
     const hasActGrant = [...ctx.scope.projectIds].some((pid) => ctx.scope.mayAct(pid));
@@ -799,10 +843,10 @@ const DECISIONS_RELAY: CompanionCapability = {
       },
       async ({ questionId, chosenOption, note }) => {
         const question = db.getQuestion(questionId);
-        if (!question) return ok({ error: `no question "${questionId}"` });
-        // Belt-and-suspenders (Framework §2, mandatory per-project — never a collapsed scope check).
-        if (!ctx.scope.projectIds.has(question.projectId)) {
-          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "decisions-relay", question.projectId, "this question's project") });
+        // @decision c64c1e7d — id-keyed lookups collapse missing / out-of-scope / notice into ONE
+        // NO_SUCH_DECISION error; routing the scope denial through scopeDenialMessage here would confirm the id exists.
+        if (!question || !ctx.scope.projectIds.has(question.projectId) || question.type === "notice") {
+          return ok({ error: NO_SUCH_DECISION });
         }
         if (!ctx.scope.mayAct(question.projectId)) {
           return ok({ error: "you only have a read-mode grant on this question's project — decision_resolve needs act-mode" });

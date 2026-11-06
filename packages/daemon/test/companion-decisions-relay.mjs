@@ -468,6 +468,104 @@ try {
     await client.close();
     db.close();
   }
+
+  // ============ (i) decision_get: one decision by id, same scope gate, no existence oracle ============
+  {
+    const db = tmpDb();
+    seedProject(db, "proj-g1", "G1");
+    seedProject(db, "proj-g2", "G2");
+    const sess = "companion-get";
+    seedSession(db, sess, "proj-g1", "assistant");
+    seedSession(db, "mgr-g1", "proj-g1", "manager");
+    seedSession(db, "mgr-g2", "proj-g2", "manager");
+    seedQuestion(db, "qg-in", "mgr-g1", "proj-g1", { title: "In scope", options: ["x", "y"] });
+    seedQuestion(db, "qg-sib", "mgr-g1", "proj-g1", { title: "Sibling" });
+    seedQuestion(db, "qg-ans", "mgr-g1", "proj-g1", { title: "Answered", state: "answered", answeredAt: now });
+    seedQuestion(db, "qg-out", "mgr-g2", "proj-g2", { title: "Out of scope" });
+    seedQuestion(db, "qg-notice", "mgr-g1", "proj-g1", { type: "notice", title: "FYI only" });
+    db.upsertCompanionCapabilityGrant({ sessionId: sess, capability: "decisions-relay", projectId: "proj-g1", mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const names = await listOf(orch.buildServer(sess, "assistant"));
+    check("(i) granted companion HAS decision_get", names.includes("decision_get"));
+    const client = await connect(orch.buildServer(sess, "assistant"));
+
+    const got = await call(client, "decision_get", { questionId: "qg-in" });
+    check("(i) returns exactly that one row, in full", got.decision?.questionId === "qg-in" && got.decision.title === "In scope"
+      && Array.isArray(got.decision.options) && got.decision.alreadySurfaced === false && typeof got.asOf === "string");
+    check("(i) no sibling listing", got.decisions === undefined);
+    check("(i) success stamps last_surfaced_at", db.getQuestionLastSurfacedAt("qg-in") === got.asOf);
+    const again = await call(client, "decision_get", { questionId: "qg-in" });
+    check("(i) repeat read reports alreadySurfaced:true", again.decision?.alreadySurfaced === true);
+    check("(i) an unrelated sibling was NOT stamped by the fetch", db.getQuestionLastSurfacedAt("qg-sib") === null);
+    const ans = await call(client, "decision_get", { questionId: "qg-ans" });
+    check("(i) no pending-only filter: an answered decision is fetchable", ans.decision?.state === "answered");
+
+    const missing = await client.callTool({ name: "decision_get", arguments: { questionId: "nope" } });
+    const outOfScope = await client.callTool({ name: "decision_get", arguments: { questionId: "qg-out" } });
+    const notice = await client.callTool({ name: "decision_get", arguments: { questionId: "qg-notice" } });
+    const mt = missing.content[0].text;
+    check("(i) nonexistent id -> {error:\"no such decision\"}", JSON.parse(mt).error === "no such decision");
+    check("(i) out-of-scope id payload is BYTE-IDENTICAL to a nonexistent id's (no existence oracle)", outOfScope.content[0].text === mt);
+    check("(i) notice id payload is BYTE-IDENTICAL too", notice.content[0].text === mt);
+    check("(i) denied ids leave no surfaced stamp (out-of-scope / notice)",
+      db.getQuestionLastSurfacedAt("qg-out") === null && db.getQuestionLastSurfacedAt("qg-notice") === null);
+
+    await client.close();
+
+    // no grant -> not registered; non-assistant role with a stray grant -> not registered
+    seedSession(db, "companion-nogrant", "proj-g1", "assistant");
+    check("(i) no grant => decision_get NOT registered", !(await listOf(orch.buildServer("companion-nogrant", "assistant"))).includes("decision_get"));
+    db.upsertCompanionCapabilityGrant({ sessionId: "mgr-g1", capability: "decisions-relay", projectId: "proj-g1", mode: "read" });
+    check("(i) manager with a stray grant => decision_get NOT registered", !(await listOf(orch.buildServer("mgr-g1", "manager"))).includes("decision_get"));
+
+    // reminder wording: alertLine carries "last read at <ts>" only when provided, and only for request_escalated
+    const { alertLine } = await import("../dist/companion/attention-push.js");
+    const ev = { seq: 1, managerSessionId: "mgr-g1xxxxxx", kind: "request_escalated", detail: { questionId: "qg-in", title: "T", ageMinutes: 1500 } };
+    const o = { canFetchDecision: true, lastReadAt: "2026-11-05T10:00:00.000Z" };
+    const withTs = alertLine(ev, "decision-pending", "G1", true, o);
+    check("(i) reminder alert carries \"listed before at <ts>\" and the full question id", withTs.includes("listed before at 2026-11-05T10:00:00.000Z") && withTs.includes("question:qg-in"));
+    check("(i) reminder with no prior listing has no note", !alertLine(ev, "decision-pending", "G1", true, { canFetchDecision: true, lastReadAt: null }).includes("listed before"));
+    const asked = alertLine({ ...ev, kind: "question_asked" }, "decision-pending", "G1", true, o);
+    check("(i) question_asked ignores lastReadAt and names the id", !asked.includes("listed before") && asked.includes("question:qg-in"));
+    db.close();
+  }
+
+  // ============ (j) decision_get refuses consumed/cancelled; decision_resolve collapses its id denials ============
+  {
+    const db = tmpDb();
+    seedProject(db, "proj-j1", "J1");
+    seedProject(db, "proj-j2", "J2");
+    const sess = "companion-j";
+    seedSession(db, sess, "proj-j1", "assistant");
+    seedSession(db, "mgr-j1", "proj-j1", "manager");
+    seedSession(db, "mgr-j2", "proj-j2", "manager");
+    seedQuestion(db, "qj-cons", "mgr-j1", "proj-j1", { title: "consumed", state: "consumed" });
+    seedQuestion(db, "qj-canc", "mgr-j1", "proj-j1", { title: "cancelled", state: "cancelled" });
+    seedQuestion(db, "qj-out", "mgr-j2", "proj-j2", { title: "out", options: ["a", "b"] });
+    seedQuestion(db, "qj-notice", "mgr-j1", "proj-j1", { type: "notice", title: "fyi", options: ["a"] });
+    seedQuestion(db, "qj-ok", "mgr-j1", "proj-j1", { title: "in scope", options: ["a", "b"] });
+    db.upsertCompanionCapabilityGrant({ sessionId: sess, capability: "decisions-relay", projectId: "proj-j1", mode: "act", config: { decisionClasses: ["general"] } });
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(sess, "assistant"));
+    const raw = async (name, args) => (await client.callTool({ name, arguments: args })).content[0].text;
+
+    const getMissing = await raw("decision_get", { questionId: "nope" });
+    check("(j) decision_get: consumed id -> same collapsed payload", await raw("decision_get", { questionId: "qj-cons" }) === getMissing);
+    check("(j) decision_get: cancelled id -> same collapsed payload", await raw("decision_get", { questionId: "qj-canc" }) === getMissing);
+    check("(j) decisions_list does not list consumed/cancelled either (readable states match)",
+      !(await call(client, "decisions_list", {})).decisions.some((d) => d.questionId === "qj-cons" || d.questionId === "qj-canc"));
+
+    const resMissing = await raw("decision_resolve", { questionId: "nope", chosenOption: "a" });
+    check("(j) decision_resolve: nonexistent id -> {error:\"no such decision\"}", JSON.parse(resMissing).error === "no such decision");
+    check("(j) decision_resolve: out-of-scope id payload BYTE-IDENTICAL to a nonexistent id's", await raw("decision_resolve", { questionId: "qj-out", chosenOption: "a" }) === resMissing);
+    check("(j) decision_resolve: notice id payload BYTE-IDENTICAL too", await raw("decision_resolve", { questionId: "qj-notice", chosenOption: "a" }) === resMissing);
+    check("(j) decision_resolve: the out-of-scope question was left untouched", db.getQuestion("qj-out").state === "pending");
+    const inScope = JSON.parse(await raw("decision_resolve", { questionId: "qj-ok", chosenOption: "a" }));
+    check("(j) decision_resolve: an in-scope id still reaches its own (non-collapsed) checks", inScope.error !== "no such decision");
+    await client.close();
+    db.close();
+  }
 } finally {
   cleanupPathSync(tmpHome);
 }

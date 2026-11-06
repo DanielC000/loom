@@ -1581,6 +1581,68 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   check("alertLine: manager_context_exhausted is not the bare default", /ran out of context/.test(mgr) && !/^Proj Z: context-overflow —/.test(mgr));
 }
 
+// --- card c64c1e7d: reminder alert wording ("listed before at"), title-cut marker, decision_get hint gating ---
+{
+  const ts = "2026-11-05T10:00:00.000Z";
+  const qid = "11111111-2222-3333-4444-555555555555";
+  const ev = (title, kind = "request_escalated") => ({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind, detail: { questionId: qid, title, ageMinutes: 3000 } });
+  const opts = { canFetchDecision: true, lastReadAt: ts };
+  let neverSilent = true;
+  for (let n = 1; n <= 100; n++) {
+    const t = "T".repeat(n);
+    const line = alertLine(ev(t), "decision-pending", "Proj A", true, opts);
+    // either the FULL title survives, or the TRUNCATED marker is present — never a silent cut
+    if (!(line.includes(`"${t}"`) || line.includes("[title TRUNCATED"))) neverSilent = false;
+    if (line.length > 200) neverSilent = false;
+  }
+  check("reminder+note: every title length 1..100 -> full title or TRUNCATED marker, line <= 200", neverSilent);
+  // A long project name pushes even the bare line past the cap: the title must shrink WITH the marker.
+  let longProjSilent = false;
+  for (let n = 30; n <= 100; n += 5) {
+    const t = "T".repeat(n);
+    const line = alertLine(ev(t), "decision-pending", "P".repeat(60), true, opts);
+    if (!(line.includes(`"${t}"`) || line.includes("[title TRUNCATED")) || line.length > 200) longProjSilent = true;
+  }
+  check("reminder+note: long project name -> still full title or TRUNCATED marker, line <= 200", !longProjSilent);
+  const mid = alertLine(ev("T".repeat(60)), "decision-pending", "Proj A", true, opts);
+  check("reminder+note: a 60-char title survives whole OR is flagged (never silent)", mid.includes(`"${"T".repeat(60)}"`) || mid.includes("[title TRUNCATED"));
+  check("reminder: note reads 'listed before at', is AFTER the title, and never claims a read",
+    mid.includes(`[listed before at ${ts}]`) && mid.indexOf(`[listed before at`) > mid.indexOf(`TT"`) &&!mid.includes("last read"));
+  const noGrant = alertLine(ev("T".repeat(150)), "decision-pending", "Proj A", true, { lastReadAt: ts });
+  check("no decisions-relay grant: no decision_get named, no listed-before note", !noGrant.includes("decision_get") && !noGrant.includes("listed before") && noGrant.includes("[title TRUNCATED]"));
+  const granted = alertLine(ev("T".repeat(150)), "decision-pending", "Proj A", true, { canFetchDecision: true });
+  check("granted + cut title: marker names decision_get", granted.includes("with decision_get"));
+  const notice = alertLine(ev("N".repeat(150), "question_asked"), "notice", "Proj A", true, { canFetchDecision: true });
+  check("notice alert: marker present but decision_get NOT named (it refuses notices)", notice.includes("[title TRUNCATED]") && !notice.includes("decision_get"));
+}
+
+// --- card c64c1e7d: watcher wiring of the per-event alert options on all delivery paths + degrade ---
+{
+  const ts = "2026-11-05T09:00:00.000Z";
+  const qId = `q-${randomUUID()}`;
+  const mk = (opts = {}) => {
+    const e = makeEnv({ configA: { alertClasses: ["decision-pending"], ...(opts.digestMinutes ? { digestMinutes: opts.digestMinutes } : {}) } });
+    if (opts.relay !== false) e.db.upsertCompanionCapabilityGrant({ sessionId: e.sessId, capability: "decisions-relay", projectId: e.projA, mode: "read" });
+    e.db.insertQuestion({ id: qId, sessionId: e.mgrA, projectId: e.projA, type: "decision", title: "Pick", body: "b", options: null, recommendation: null, state: "pending", chosenOption: null, note: null, createdAt: ts, answeredAt: null, consumedAt: null });
+    e.db.markQuestionSurfaced(qId, "sig", ts);
+    e.watcher.start(); e.watcher.stop();
+    return e;
+  };
+  const fireEsc = (e, n = 1) => { for (let i = 0; i < n; i++) e.db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: e.mgrA, kind: "request_escalated", detail: { questionId: qId, title: "Pick", ageMinutes: 3000 } }); };
+  const note = `[listed before at ${ts}]`;
+
+  { const e = mk(); fireEsc(e); e.watcher.tick(new Date());
+    check("watcher immediate path: reminder carries the listed-before note", e.enqueued.length === 1 && e.enqueued[0].text.includes(note)); cleanupEnv(e); }
+  { const e = mk(); fireEsc(e, 11); e.watcher.tick(new Date());
+    check("watcher burst-digest path: reminder lines carry the note", e.enqueued.length === 1 && e.enqueued[0].text.includes(note)); cleanupEnv(e); }
+  { const e = mk({ digestMinutes: 10 }); fireEsc(e); e.watcher.tick(new Date());
+    check("watcher digest-flush path: reminder carries the note", e.enqueued.length === 1 && e.enqueued[0].text.includes(note)); cleanupEnv(e); }
+  { const e = mk({ relay: false }); fireEsc(e); e.watcher.tick(new Date());
+    check("watcher: no decisions-relay grant -> no note, no decision_get", e.enqueued.length === 1 && !e.enqueued[0].text.includes("listed before") && !e.enqueued[0].text.includes("decision_get")); cleanupEnv(e); }
+  { const e = mk(); e.db.getQuestionLastSurfacedAt = () => { throw new Error("boom"); }; fireEsc(e); e.watcher.tick(new Date());
+    check("watcher: a throwing getQuestionLastSurfacedAt degrades to no note and STILL delivers", e.enqueued.length === 1 && !e.enqueued[0].text.includes("listed before") && e.enqueued[0].text.includes(`question:${qId}`)); cleanupEnv(e); }
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, renders a platform_escalate alert with a readable title instead of an opaque line, gives a fleet-resume failure a real human owner (fleet_resume_failed → worker-crashed) even with no live platform Lead, a late-resolved manager/Lead recycle (recycle_fleet_resolved) reaches the same human surface as its unresolved sibling instead of being silently dropped, and claude_boot_dialog_stuck reaches the owner via the non-FLEET_OPS 'escalation' class exactly when nobody else was addressed (parentNudged:false), never otherwise."
   : `\n❌ ${failures} FAILURE(S).`);

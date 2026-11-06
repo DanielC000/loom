@@ -321,7 +321,17 @@ export function classify(kind: string, detail: Record<string, unknown> | undefin
 /** Render ONE terse chat line for a classified event: `{project}: <what> — <who>` (8-char id slices),
  *  bounded to ALERT_LINE_MAX_CHARS (CR fold-in [5] — an unbounded source field, e.g. question_ask's title,
  *  must never produce a pathologically long line). */
-export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass, projectName: string, taskIdResolvable = true): string {
+export interface AlertLineOpts {
+  /** `last_surfaced_at` of a reminder's question (global across recipients — see the reminder case). */
+  lastReadAt?: string | null;
+  /** The recipient holds a decisions-relay grant covering the event's project, so naming `decision_get`
+   *  is actionable. Default false: the hint is omitted (a tool the recipient lacks is noise). */
+  canFetchDecision?: boolean;
+}
+
+export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass, projectName: string, taskIdResolvable = true, opts: AlertLineOpts = {}): string {
+  const canFetch = opts.canFetchDecision === true && alertClass !== "notice"; // decision_get refuses notices
+  const truncHint = canFetch ? " [title TRUNCATED — fetch it with decision_get before answering]" : " [title TRUNCATED]";
   const detail = e.detail ?? {};
   const w8 = e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)}` : null;
   const m8 = `m:${e.managerSessionId.slice(0, 8)}`;
@@ -414,7 +424,7 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // exactly like a genuinely short question, and the measured incident (a Companion answering from
       // half a sentence, then retracting) is exactly this ambiguity turning into a wrong decision.
       const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
-      const cutFlag = titleTruncated ? " [title TRUNCATED — fetch full text before answering]" : "";
+      const cutFlag = titleTruncated ? truncHint : "";
       // Card 68f27faf: a notice needs no answer — "decision needed" would be actively wrong wording for it.
       line = alertClass === "notice"
         ? `${projectName}: FYI${qRef}${cutFlag} — "${title}" (${m8})`
@@ -430,7 +440,7 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
       const title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
       const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
-      const cutFlag = titleTruncated ? " [title TRUNCATED — fetch full text before answering]" : "";
+      const cutFlag = titleTruncated ? truncHint : "";
       line = `${projectName}: pending decision amended${qRef}${cutFlag} — "${title}" (${m8})`;
       break;
     }
@@ -443,14 +453,32 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // defeat: live, but nothing a human could act on from the push alone.
       const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
       const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
-      const title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
+      let title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
       const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
       const ageDays = typeof detail.ageMinutes === "number" ? Math.floor(detail.ageMinutes / 1440) : null;
       const ageStr = ageDays !== null
         ? ageDays >= 1 ? `${ageDays}d` : `${Math.round((detail.ageMinutes as number))}m`
         : "?";
-      const cutFlag = titleTruncated ? " [title TRUNCATED — fetch full text before answering]" : "";
-      line = `${projectName}: Request pending ${ageStr}, unanswered${qRef}${cutFlag} — "${title}" — please answer or dismiss it`;
+      // `last_surfaced_at` is GLOBAL (not per-recipient) and stamped on every decisions_list row, so this
+      // only says the decision was LISTED before — never that this recipient read or acted on it. Shown
+      // only to a recipient that can list/fetch decisions, and placed LAST (after the title) so the final
+      // trim can only ever eat the note, never the title.
+      let listedNote = canFetch && opts.lastReadAt ? ` [listed before at ${opts.lastReadAt}]` : "";
+      let tail = " — please answer or dismiss it";
+      const build = (t: string, flag: string, n: string): string =>
+        `${projectName}: Request pending ${ageStr}, unanswered${qRef}${flag} — "${t}"${tail}${n}`;
+      let cutFlag = titleTruncated ? truncHint : "";
+      // Priority when the line is over budget: title > note > the boilerplate tail. Drop the tail first
+      // (the note carries the nudge), then the note itself; only if the line is STILL too long shrink the
+      // title (with the marker) — the final trim must never be what silently chops the title.
+      if (build(title, cutFlag, listedNote).length > ALERT_LINE_MAX_CHARS && listedNote) tail = "";
+      if (build(title, cutFlag, listedNote).length > ALERT_LINE_MAX_CHARS) { listedNote = ""; tail = " — please answer or dismiss it"; }
+      if (build(title, cutFlag, listedNote).length > ALERT_LINE_MAX_CHARS) {
+        const room = ALERT_LINE_MAX_CHARS - build("", truncHint, "").length;
+        const fitted = truncateText(rawTitle, Math.max(room, 12));
+        if (fitted !== rawTitle) { title = fitted; cutFlag = truncHint; }
+      }
+      line = build(title, cutFlag, listedNote);
       break;
     }
     case "idle_escalated":
@@ -944,7 +972,7 @@ export class AttentionPushWatcher {
       // inAppHomeRoute's doc) so this proactive push still lands somewhere instead of chat_reply resolving
       // `no-target`.
       const home = this.deps.db.getCompanionHome(this.deps.sessionId) ?? inAppHomeRoute(this.deps.sessionId);
-      const lines = qualifying.map(({ e, cls, projectName, taskIdResolvable }) => alertLine(e, cls, projectName, taskIdResolvable));
+      const lines = qualifying.map(({ e, cls, projectName, taskIdResolvable }) => alertLine(e, cls, projectName, taskIdResolvable, this.alertOptsFor(e)));
       // proactive:true (proactive event-line producer) — a daemon-driven alert push, tagged for the web
       // chat's amber event line.
       this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home, "agent", undefined, undefined, true);
@@ -958,7 +986,7 @@ export class AttentionPushWatcher {
       for (const { e, cls, projectName, taskIdResolvable } of qualifying) {
         // kind:"agent" — a daemon-driven push turn, must land as its own turn (never mashed with a sibling).
         // proactive:true — see the digest branch above.
-        this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName, taskIdResolvable)), "system", undefined, home, "agent", undefined, undefined, true);
+        this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName, taskIdResolvable, this.alertOptsFor(e))), "system", undefined, home, "agent", undefined, undefined, true);
         this.deferredSinceLastPush = false;
         this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e), ...this.stampConsolidatedLineage(e) });
       }
@@ -993,7 +1021,7 @@ export class AttentionPushWatcher {
     // No home configured ⇒ fall back to the session's implicit in-app route — see tickImmediate's digest
     // branch above.
     const home = this.deps.db.getCompanionHome(this.deps.sessionId) ?? inAppHomeRoute(this.deps.sessionId);
-    const lines = qualifying.map(({ e, cls, projectName, taskIdResolvable }) => alertLine(e, cls, projectName, taskIdResolvable));
+    const lines = qualifying.map(({ e, cls, projectName, taskIdResolvable }) => alertLine(e, cls, projectName, taskIdResolvable, this.alertOptsFor(e)));
     // proactive:true — see tickImmediate's digest branch above.
     this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home, "agent", undefined, undefined, true);
     this.lastDigestFlushAt = now.getTime();
@@ -1002,6 +1030,27 @@ export class AttentionPushWatcher {
       this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e), ...this.stampConsolidatedLineage(e) });
     }
     this.watermark = scanned[scanned.length - 1]!.seq;
+  }
+
+  /** Per-event `alertLine` options: whether this recipient holds a decisions-relay grant covering the
+   *  event's project (read through the same `resolveCompanionGrant` chokepoint as the tick's own grant), and
+   *  — for a `request_escalated` reminder only — the question's `last_surfaced_at`. Best-effort: any lookup
+   *  failure degrades to "no hint, no note", never blocks the push. */
+  private alertOptsFor(e: OrchestrationEvent): AlertLineOpts {
+    let canFetchDecision = false;
+    try {
+      const projectId = this.deps.db.getSession(e.managerSessionId)?.projectId;
+      const g = resolveCompanionGrant(this.deps.db, this.deps.sessionId, "decisions-relay");
+      canFetchDecision = !!(projectId && g && g.projectIds.has(projectId));
+    } catch { /* degrade: no decision_get hint */ }
+    let lastReadAt: string | null = null;
+    if (canFetchDecision && e.kind === "request_escalated") {
+      const qid = (e.detail ?? {}).questionId;
+      if (typeof qid === "string") {
+        try { lastReadAt = this.deps.db.getQuestionLastSurfacedAt(qid); } catch { lastReadAt = null; }
+      }
+    }
+    return { canFetchDecision, lastReadAt };
   }
 
   /** Stamps `escalationSurfaced` at the moment a `platform_escalate` event is ACTUALLY pushed (never at
