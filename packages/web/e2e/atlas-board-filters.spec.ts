@@ -24,10 +24,12 @@
 //     `aria-pressed="true"`. A single-select chip leaves exactly ONE card and drops the first chip, so
 //     it fails at two independent lines. Asserting only the COUNT would not discriminate here either:
 //     the card TITLES are asserted, so "2 shown" can't be satisfied by the wrong two cards.
-//   · MULTI-SELECT LANE — the two selected lanes are deliberately the ones holding the cards the
-//     priority leg EXCLUDES, so its expected result set is the exact COMPLEMENT of the priority leg's.
-//     A lane chip secretly wired to the priority filter (or vice versa) returns the other set and fails.
-//   · THEY AND, THEY DO NOT OR — priority {P0,P1} with lanes {To Do, Inbox} leaves exactly the one card
+//   · MULTI-SELECT TYPE — the second dimension is the title's commit type (card cea577af replaced the
+//     lane chips: the lanes already show the lane). The two selected types are deliberately the ones on
+//     the cards the priority leg EXCLUDES, so its expected result set is the exact COMPLEMENT of the
+//     priority leg's. A type chip secretly wired to the priority filter (or vice versa) returns the
+//     other set and fails. The lane chips' ABSENCE is asserted after the bar's presence.
+//   · THEY AND, THEY DO NOT OR — priority {P0,P1} with types {fix, docs} leaves exactly the one card
 //     in both. An OR would show three; a dimension that overwrote the other would show two.
 //   · "N OF M SHOWN" — cross-checked at EVERY step against the number of card open-targets actually
 //     rendered on that surface, so a count that drifts from the board it labels fails here instead of
@@ -55,19 +57,19 @@ const DEFAULT_LANES = 7;
 const VIEWPORT = { width: 1600, height: 1000 };
 
 /**
- * The four seeded cards. Each is distinct in BOTH priority and lane, which is what lets one fixture
- * serve both multi-select dimensions — and the two dimensions' expected result sets are deliberately
- * DISJOINT (priority {P0,P1} ⇒ the first two; lanes {Inbox, Waiting} ⇒ the last two), so neither leg
- * can be satisfied by the other dimension's filter having been the one that actually fired.
+ * The four seeded cards. Each is distinct in priority, commit type AND lane, which is what lets one
+ * fixture serve both multi-select dimensions — and the two dimensions' expected result sets are
+ * deliberately DISJOINT (priority {P0,P1} ⇒ the first two; types {docs, test} ⇒ the last two), so
+ * neither leg can be satisfied by the other dimension's filter having been the one that actually fired.
  *
- * `label` is the chip's own accessible name on that dimension: `PRIORITY_META[p].label`
- * (components/priority.tsx) for priority, the column label (config.ts PLATFORM_DEFAULTS) for the lane.
+ * `priLabel` is the priority chip's accessible name (`PRIORITY_META[p].label`, components/priority.tsx);
+ * `type` is the title's Conventional-Commits type, which is the Type chip's name (lib/boardFilters.ts).
  */
 const SEED = [
-  { slot: "p0todo", priority: "p0", priLabel: "Critical", columnKey: "todo", lane: "To Do" },
-  { slot: "p1review", priority: "p1", priLabel: "High", columnKey: "review", lane: "Review" },
-  { slot: "p2inbox", priority: "p2", priLabel: "Normal", columnKey: "inbox", lane: "Inbox" },
-  { slot: "p3waiting", priority: "p3", priLabel: "Low", columnKey: "waiting", lane: "Waiting" },
+  { slot: "p0todo", priority: "p0", priLabel: "Critical", columnKey: "todo", type: "fix" },
+  { slot: "p1review", priority: "p1", priLabel: "High", columnKey: "review", type: "feat" },
+  { slot: "p2inbox", priority: "p2", priLabel: "Normal", columnKey: "inbox", type: "docs" },
+  { slot: "p3waiting", priority: "p3", priLabel: "Low", columnKey: "waiting", type: "test" },
 ] as const;
 
 type Slot = (typeof SEED)[number]["slot"];
@@ -95,7 +97,7 @@ const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.rand
 async function seedCards(loomDaemon: LoomDaemon, projectId: string): Promise<SeededCards> {
   const out = {} as SeededCards;
   for (const s of SEED) {
-    const title = uniq(`filtercard-${s.slot}-SENTINEL`);
+    const title = uniq(`${s.type}(web): filtercard-${s.slot}-SENTINEL`);
     const task = await loomDaemon.createTask(projectId, { title, columnKey: s.columnKey, priority: s.priority });
     out[s.slot] = { id: task.id, title };
   }
@@ -115,7 +117,9 @@ const cardIn = (scope: Locator, title: string) => openTargetsIn(scope).filter({ 
 
 const searchIn = (scope: Locator) => scope.getByLabel("Search tasks by id, title, or description");
 const priChip = (scope: Locator, label: string) => scope.getByRole("button", { name: `Filter by ${label} priority` });
-const colChip = (scope: Locator, label: string) => scope.getByRole("button", { name: `Filter by ${label} column` });
+const typeChip = (scope: Locator, type: string) => scope.getByRole("button", { name: `Filter by ${type} cards` });
+// The retired lane chips, by the accessible-name shape they had — asserted ABSENT.
+const anyColChip = (scope: Locator) => scope.getByRole("button", { name: /^Filter by .+ column$/ });
 const clearIn = (scope: Locator) => scope.getByRole("button", { name: "Clear filters" });
 // The live count span. Matched by shape, not by a literal, so this locator cannot go stale against the
 // numbers it is about to be asserted on.
@@ -174,9 +178,11 @@ async function assertMultiSelectFilters(
   await expect(searchIn(scope), `${label}: the search field`).toBeVisible();
   for (const s of SEED) {
     await expect(priChip(scope, s.priLabel), `${label}: the ${s.priLabel} priority chip`).toBeVisible();
-    await expect(colChip(scope, s.lane), `${label}: the ${s.lane} lane chip`).toBeVisible();
+    await expect(typeChip(scope, s.type), `${label}: the ${s.type} type chip`).toBeVisible();
   }
   await expect(countIn(scope), `${label}: the "N of M shown" readout`).toBeVisible();
+  // The bar is proven present above, so this absence is real: no lane filter chip survives (card cea577af).
+  await expect(anyColChip(scope), `${label}: no lane filter chip`).toHaveCount(0);
 
   const total = (await readCount(scope)).total;
   if (exactTotal !== null) {
@@ -222,42 +228,42 @@ async function assertMultiSelectFilters(
   await expect(priChip(scope, "Critical")).toHaveAttribute("aria-pressed", "false");
   await expect(priChip(scope, "High")).toHaveAttribute("aria-pressed", "false");
 
-  // ── LEG 2. MULTI-SELECT LANE: Inbox, then Inbox+Waiting — the COMPLEMENT of leg 1's result set. ──
-  await colChip(scope, "Inbox").click();
-  await expect(colChip(scope, "Inbox")).toHaveAttribute("aria-pressed", "true");
-  await expect(cardIn(scope, cards.p2inbox.title), `${label}: Inbox alone keeps the Inbox card`).toBeVisible();
-  await expect(cardIn(scope, cards.p3waiting.title), `${label}: Inbox alone drops the Waiting card`).toHaveCount(0);
-  const oneCol = (await readCount(scope)).shown;
-  await assertCountAgreesWithBoard(scope, total, `${label}: Inbox only`);
+  // ── LEG 2. MULTI-SELECT TYPE: docs, then docs+test — the COMPLEMENT of leg 1's result set. ──────
+  await typeChip(scope, "docs").click();
+  await expect(typeChip(scope, "docs")).toHaveAttribute("aria-pressed", "true");
+  await expect(cardIn(scope, cards.p2inbox.title), `${label}: docs alone keeps the docs card`).toBeVisible();
+  await expect(cardIn(scope, cards.p3waiting.title), `${label}: docs alone drops the test card`).toHaveCount(0);
+  const oneType = (await readCount(scope)).shown;
+  await assertCountAgreesWithBoard(scope, total, `${label}: docs only`);
 
-  await colChip(scope, "Waiting").click();
-  await expect(colChip(scope, "Inbox"),
-    `${label}: the first lane chip STAYS on — the mockup had no lane filter at all, let alone a multi-select one`).toHaveAttribute("aria-pressed", "true");
-  await expect(colChip(scope, "Waiting")).toHaveAttribute("aria-pressed", "true");
-  await expect(cardIn(scope, cards.p2inbox.title), `${label}: Inbox+Waiting keeps the Inbox card`).toBeVisible();
-  await expect(cardIn(scope, cards.p3waiting.title), `${label}: Inbox+Waiting keeps the Waiting card`).toBeVisible();
-  // The complement: the two cards leg 1 kept are exactly the two this leg must drop. A lane chip wired
+  await typeChip(scope, "test").click();
+  await expect(typeChip(scope, "docs"),
+    `${label}: the first type chip STAYS on — a single-select would have dropped it`).toHaveAttribute("aria-pressed", "true");
+  await expect(typeChip(scope, "test")).toHaveAttribute("aria-pressed", "true");
+  await expect(cardIn(scope, cards.p2inbox.title), `${label}: docs+test keeps the docs card`).toBeVisible();
+  await expect(cardIn(scope, cards.p3waiting.title), `${label}: docs+test keeps the test card`).toBeVisible();
+  // The complement: the two cards leg 1 kept are exactly the two this leg must drop. A type chip wired
   // to the priority filter would have returned leg 1's set here and fails on these two lines.
-  await expect(cardIn(scope, cards.p0todo.title), `${label}: Inbox+Waiting drops the To Do card`).toHaveCount(0);
-  await expect(cardIn(scope, cards.p1review.title), `${label}: Inbox+Waiting drops the Review card`).toHaveCount(0);
+  await expect(cardIn(scope, cards.p0todo.title), `${label}: docs+test drops the fix card`).toHaveCount(0);
+  await expect(cardIn(scope, cards.p1review.title), `${label}: docs+test drops the feat card`).toHaveCount(0);
   expect((await readCount(scope)).shown,
-    `${label}: adding a second lane WIDENS the result set (${oneCol} → more)`).toBeGreaterThan(oneCol);
-  await assertCountAgreesWithBoard(scope, total, `${label}: Inbox+Waiting`);
+    `${label}: adding a second type WIDENS the result set (${oneType} → more)`).toBeGreaterThan(oneType);
+  await assertCountAgreesWithBoard(scope, total, `${label}: docs+test`);
   if (exactTotal !== null) await expect(countIn(scope)).toHaveText(`2 of ${exactTotal} shown`);
 
   // ── LEG 3. THE TWO DIMENSIONS AND, THEY DO NOT OR. ──────────────────────────────────────────────
-  // priority {P0,P1} ∧ lanes {To Do, Inbox} ⇒ only the P0/To Do card is in both.
-  // An OR would show three (P0/To Do, P1/Review, P2/Inbox); one dimension overwriting the other, two.
+  // priority {P0,P1} ∧ types {fix, docs} ⇒ only the P0/fix card is in both.
+  // An OR would show three (P0/fix, P1/feat, P2/docs); one dimension overwriting the other, two.
   await priChip(scope, "Critical").click();
   await priChip(scope, "High").click();
-  await colChip(scope, "Waiting").click(); // off — lanes become {Inbox}
-  await colChip(scope, "To Do").click();   // on  — lanes become {Inbox, To Do}
+  await typeChip(scope, "test").click(); // off — types become {docs}
+  await typeChip(scope, "fix").click();  // on  — types become {docs, fix}
   await expect(cardIn(scope, cards.p0todo.title), `${label}: the one card in both sets survives`).toBeVisible();
   for (const s of ["p1review", "p2inbox", "p3waiting"] as const) {
     await expect(cardIn(scope, cards[s].title),
       `${label}: ${s} matches only ONE dimension, so an AND must drop it`).toHaveCount(0);
   }
-  await assertCountAgreesWithBoard(scope, total, `${label}: P0+P1 AND To Do+Inbox`);
+  await assertCountAgreesWithBoard(scope, total, `${label}: P0+P1 AND fix+docs`);
   if (exactTotal !== null) await expect(countIn(scope)).toHaveText(`1 of ${exactTotal} shown`);
 
   // ── LEG 4. ONE CLEAR RESETS BOTH DIMENSIONS. ────────────────────────────────────────────────────
@@ -265,7 +271,7 @@ async function assertMultiSelectFilters(
   await expect(countIn(scope), `${label}: one clear restores the whole board`).toHaveText(`${total} of ${total} shown`);
   for (const s of SEED) {
     await expect(priChip(scope, s.priLabel), `${label}: the ${s.priLabel} chip is off after clear`).toHaveAttribute("aria-pressed", "false");
-    await expect(colChip(scope, s.lane), `${label}: the ${s.lane} chip is off after clear`).toHaveAttribute("aria-pressed", "false");
+    await expect(typeChip(scope, s.type), `${label}: the ${s.type} chip is off after clear`).toHaveAttribute("aria-pressed", "false");
     await expect(cardIn(scope, cards[s.slot].title), `${label}: ${s.slot} is back after clear`).toBeVisible();
   }
   await assertCountAgreesWithBoard(scope, total, `${label}: after clear`);

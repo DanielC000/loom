@@ -30,6 +30,10 @@ import { useVoiceLang } from "../lib/useVoiceLang";
 import { isDoneColumn } from "../lib/columnSort";
 import { useResolvedTheme, type ResolvedTheme } from "../lib/themePref";
 import { taskMatchesSearch } from "../lib/taskFilter";
+import {
+  CARD_STATES, OTHER_TYPE, commitType, descendantCounts, hasState, isUnderEpic, pendingRequestTaskIds, sortTypes,
+  type CardState, type StateContext,
+} from "../lib/boardFilters";
 // Priority chip + metadata live in one place so the board and the /terminals task card never drift.
 import { PRIORITY_META, PriorityChip, prio, byPriorityThenPosition } from "../components/priority";
 import { errorText } from "../lib/loopbackCredential";
@@ -89,21 +93,37 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
 
   // ── Client-side view filter (no server round-trip) ───────────────────────────
   // Search matches id+title+body (case-insensitive substring — a full card id or any prefix finds the
-  // card by its primary handle); priority + column are multi-select (empty set = no constraint). All
-  // three AND together. Non-matching cards vanish from every column; the column header count and the
-  // "N of M shown" affordance reflect the filtered view.
+  // card by its primary handle). The rest filter on CARD DETAILS: priority, commit type and State are
+  // multi-select (empty = no constraint, OR within a group); Epic and Repo are single-selects (null =
+  // any). Groups AND together; non-matching cards vanish from every lane.
+  //
+  // @decision cea577af — never persist these filters per viewer, and never re-add a column filter.
   //
   // Declared ABOVE the board query because `filterActive` decides whether that query may ask the server
   // for a done WINDOW at all (card a483cbec) — the filter runs over whatever the response contains, so a
-  // windowed response while filtering could only ever search the newest page.
+  // windowed response while filtering could only ever search the newest page. Every filter below MUST
+  // count toward `filterActive`, or turning it on would filter a windowed response.
   const [search, setSearch] = useState("");
   const [priFilter, setPriFilter] = useState<Set<TaskPriority>>(() => new Set());
-  const [colFilter, setColFilter] = useState<Set<string>>(() => new Set());
-  const togglePri = (p: TaskPriority) => setPriFilter((s) => { const n = new Set(s); n.delete(p) || n.add(p); return n; });
-  const toggleCol = (k: string) => setColFilter((s) => { const n = new Set(s); n.delete(k) || n.add(k); return n; });
-  const clearFilters = () => { setSearch(""); setPriFilter(new Set()); setColFilter(new Set()); };
+  const [typeFilter, setTypeFilter] = useState<Set<string>>(() => new Set());
+  const [stateFilter, setStateFilter] = useState<Set<CardState>>(() => new Set());
+  const [epicFilter, setEpicFilter] = useState<string | null>(null);
+  // "" is the PRIMARY repo (a card whose repoKey is null); null is "any repo".
+  const [repoFilter, setRepoFilter] = useState<string | null>(null);
+  const toggleIn = <T,>(set: (f: (s: Set<T>) => Set<T>) => void) => (v: T) =>
+    set((s) => { const n = new Set(s); n.delete(v) || n.add(v); return n; });
+  const togglePri = toggleIn(setPriFilter);
+  const toggleType = toggleIn(setTypeFilter);
+  const toggleState = toggleIn(setStateFilter);
+  const clearFilters = () => {
+    setSearch(""); setPriFilter(new Set()); setTypeFilter(new Set()); setStateFilter(new Set());
+    setEpicFilter(null); setRepoFilter(null);
+  };
+  // A project switch drops the single-selects: an epic or repo key from project A means nothing on B.
+  useEffect(() => { setEpicFilter(null); setRepoFilter(null); }, [propProjectId, active.projectId]);
   const q = search.trim().toLowerCase();
-  const filterActive = q !== "" || priFilter.size > 0 || colFilter.size > 0;
+  const filterActive = q !== "" || priFilter.size > 0 || typeFilter.size > 0 || stateFilter.size > 0
+    || epicFilter !== null || repoFilter !== null;
 
   // ── The done-lane window (card a483cbec) ─────────────────────────────────────
   // How many done cards this board currently asks the server for. The "Show N more" reveal bumps it by
@@ -366,10 +386,50 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     () => allTasks.map((t) => ({ id: t.id, title: t.title, columnKey: t.columnKey })),
     [allTasks],
   );
+  // ── Card-detail filter inputs (card cea577af) ──────────────────────────────────
+  // Pending Requests come from the SAME app-wide key the sidebar badge already polls, so this is a cache
+  // read, not a new request per board.
+  const openQuestions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 3000 });
+  const facets = useMemo(() => {
+    const ids = allTasks.map((t) => t.id);
+    const parentOf = new Map(allTasks.map((t) => [t.id, t.parentId]));
+    const typeOf = new Map(allTasks.map((t) => [t.id, commitType(t.title)]));
+    const ctx: StateContext = {
+      policyBlocking: (id) => policyByTask[id]?.blocking ?? 0,
+      pendingRequest: pendingRequestTaskIds(openQuestions.data ?? [], projectId, ids),
+    };
+    const under = descendantCounts(allTasks);
+    const epics = allTasks.filter((t) => (under.get(t.id) ?? 0) > 0)
+      .map((t) => ({ id: t.id, title: t.title, count: under.get(t.id) ?? 0 }))
+      .sort((a, b) => a.title.localeCompare(b.title));
+    return { parentOf, typeOf, ctx, epics };
+  }, [allTasks, policyByTask, openQuestions.data, projectId]);
+  const matchesDetails = (t: BoardTask) =>
+    (typeFilter.size === 0 || typeFilter.has(facets.typeOf.get(t.id) ?? OTHER_TYPE)) &&
+    (stateFilter.size === 0 || [...stateFilter].some((s) => hasState(t, s, facets.ctx))) &&
+    (epicFilter === null || isUnderEpic(t, epicFilter, facets.parentOf)) &&
+    (repoFilter === null || (t.repoKey ?? "") === repoFilter);
   const shownTasks = allTasks.filter((t) =>
     taskMatchesSearch(t, q) &&
     (priFilter.size === 0 || priFilter.has(prio(t))) &&
-    (colFilter.size === 0 || colFilter.has(t.columnKey)));
+    matchesDetails(t));
+  // Chip counts, over the whole fetched board (not the filtered view), so a chip's number never moves
+  // as other chips toggle.
+  const counts = useMemo(() => {
+    const pri = new Map<string, number>(); const type = new Map<string, number>(); const state = new Map<string, number>();
+    const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
+    for (const t of allTasks) {
+      bump(pri, prio(t));
+      bump(type, facets.typeOf.get(t.id) ?? OTHER_TYPE);
+      for (const s of CARD_STATES) if (hasState(t, s.key, facets.ctx)) bump(state, s.key);
+    }
+    return { pri, type, state };
+  }, [allTasks, facets]);
+  // An epic picked before it lost its children (or was deleted) must stay visible in the picker, or the
+  // board would be filtered by a value no control shows.
+  const epicOptions = epicFilter && !facets.epics.some((e) => e.id === epicFilter)
+    ? [...facets.epics, { id: epicFilter, title: titleById.get(epicFilter) ?? epicFilter.slice(0, 8), count: 0 }]
+    : facets.epics;
 
   // ── Reading a windowed response (card a483cbec) ──────────────────────────────
   // WHICH lane the server windowed is resolved by the DAEMON'S OWN resolver, never by this board's
@@ -410,8 +470,12 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
               typed title is safe (card a1ec70a6). It still surfaces the failure inline via create.error. */}
           <NewTask repos={repos} onCreate={(title, repoKey) => create.mutateAsync({ title, repoKey })}
             error={create.error ? errorText(create.error) : null} />
-          <FilterBar search={search} onSearch={setSearch} columns={board.data.columns}
-            priFilter={priFilter} onTogglePri={togglePri} colFilter={colFilter} onToggleCol={toggleCol}
+          <FilterBar search={search} onSearch={setSearch} counts={counts}
+            priFilter={priFilter} onTogglePri={togglePri}
+            types={sortTypes(counts.type.keys())} typeFilter={typeFilter} onToggleType={toggleType}
+            stateFilter={stateFilter} onToggleState={toggleState}
+            epics={epicOptions} epicFilter={epicFilter} onEpic={setEpicFilter}
+            repos={multiRepo ? repos : null} repoFilter={repoFilter} onRepo={setRepoFilter}
             shown={shownTasks.length + unfetchedDone} total={allTasks.length + unfetchedDone}
             active={filterActive} onClear={clearFilters} />
           {/* A failed policy-status read must not look like "nothing is blocking": say so, quietly (404 stays null = no badges). */}
@@ -770,8 +834,10 @@ const groupLabel = { fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, colo
 // PriorityChip "pop" look). `muted` fills with the lighter text-dim grey instead of the near-invisible
 // muted grey so the dark on-fill label keeps AA contrast. Native <button> → Enter/Space + focus ring
 // (.loom-toggle in global.css) come for free; aria-pressed exposes the on/off state.
-function ToggleChip({ label, ariaLabel, t, active, onToggle }:
-  { label: string; ariaLabel: string; t: Tone; active: boolean; onToggle: () => void }) {
+// `count` (optional) renders as a quiet mono number after the label — how many cards on the board carry
+// this value. A zero-count chip dims but stays clickable: it is still a true filter, just an empty one.
+function ToggleChip({ label, ariaLabel, t, active, onToggle, count }:
+  { label: string; ariaLabel: string; t: Tone; active: boolean; onToggle: () => void; count?: number }) {
   // Graphite capsule: outlined at rest; on, it takes the tone's soft fill, text and edge. A muted tone has
   // no edge of its own, so its "on" state borrows the strong line to stay distinguishable from rest.
   const edge = t === "muted" ? color.lineStrong : tone[t];
@@ -783,16 +849,55 @@ function ToggleChip({ label, ariaLabel, t, active, onToggle }:
         padding: "3px 10px", borderRadius: radius.pill, lineHeight: "16px",
         color: active ? toneText[t] : color.text2, background: active ? toneSoft[t] : "transparent",
         border: `1px solid ${active ? edge : color.line}`,
+        opacity: count === 0 && !active ? 0.55 : 1,
       }}>
       {label}
+      {count !== undefined && (
+        <span data-testid="filter-chip-count" style={{ marginLeft: 5, fontFamily: font.mono, fontSize: fs.xs, fontWeight: 400,
+          color: active ? "inherit" : color.text3 }}>{count}</span>
+      )}
     </button>
   );
 }
 
-function FilterBar({ search, onSearch, columns, priFilter, onTogglePri, colFilter, onToggleCol, shown, total, active, onClear }:
-  { search: string; onSearch: (v: string) => void; columns: KanbanColumn[];
+// A hairline between two filter groups that share a row. Decorative.
+function GroupSep() {
+  return <span aria-hidden style={{ width: 1, height: 18, background: color.line, flexShrink: 0 }} />;
+}
+
+// One filter group: its label and its controls, wrapping as a unit. `role="group"` + aria-label names the
+// group for a screen reader (the visual label stays aria-hidden, as before — each control names itself).
+function FilterGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div role="group" aria-label={`${label} filter`} data-filter-group={label.toLowerCase()}
+      style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+      <span aria-hidden style={groupLabel}>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+// The Epic / Repo single-selects: compact, and tinted with the accent edge once a value is picked so an
+// active select reads as "on" the same way a pressed chip does.
+const filterSelect = (on: boolean): React.CSSProperties => ({
+  fontSize: fs.sm, padding: "3px 8px", maxWidth: 260, borderRadius: radius.base,
+  ...(on ? { borderColor: color.accentEdge, color: color.accentFg } : {}),
+});
+
+// The Repo select's "any" value. "" is taken (it means the PRIMARY repo, a card with no repoKey), and a
+// space can never be inside a registry key, so this can never collide with one.
+const ANY_REPO = " any";
+
+type FilterCounts = { pri: Map<string, number>; type: Map<string, number>; state: Map<string, number> };
+
+function FilterBar({ search, onSearch, counts, priFilter, onTogglePri, types, typeFilter, onToggleType,
+  stateFilter, onToggleState, epics, epicFilter, onEpic, repos, repoFilter, onRepo, shown, total, active, onClear }:
+  { search: string; onSearch: (v: string) => void; counts: FilterCounts;
     priFilter: Set<TaskPriority>; onTogglePri: (p: TaskPriority) => void;
-    colFilter: Set<string>; onToggleCol: (k: string) => void;
+    types: string[]; typeFilter: Set<string>; onToggleType: (t: string) => void;
+    stateFilter: Set<CardState>; onToggleState: (s: CardState) => void;
+    epics: { id: string; title: string; count: number }[]; epicFilter: string | null; onEpic: (id: string | null) => void;
+    repos: RepoRegistryEntry[] | null; repoFilter: string | null; onRepo: (key: string | null) => void;
     shown: number; total: number; active: boolean; onClear: () => void }) {
   return (
     <div style={{ marginTop: 10, background: color.surface, borderRadius: radius.lg, boxShadow: shadow.panel,
@@ -817,28 +922,64 @@ function FilterBar({ search, onSearch, columns, priFilter, onTogglePri, colFilte
         </span>
         {active && <Button variant="ghost" onClick={onClear} style={{ marginLeft: "auto" }}>Clear filters</Button>}
       </div>
-      {/* Row 2: priority + column toggles */}
-      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span aria-hidden style={groupLabel}>Priority</span>
+      {/* Row 2: what the card IS — priority + the title's commit type. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <FilterGroup label="Priority">
           {PRIORITIES.map((p) => (
-            <ToggleChip key={p} label={PRIORITY_META[p].short} ariaLabel={`Filter by ${PRIORITY_META[p].label} priority`}
+            <ToggleChip key={p} label={PRIORITY_META[p].short} count={counts.pri.get(p) ?? 0}
+              ariaLabel={`Filter by ${PRIORITY_META[p].label} priority`}
               t={PRIORITY_META[p].tone} active={priFilter.has(p)} onToggle={() => onTogglePri(p)} />
           ))}
-        </div>
-        {columns.length > 0 && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            <span aria-hidden style={groupLabel}>Column</span>
-            {columns.map((c) => (
-              <ToggleChip key={c.key} label={c.label} ariaLabel={`Filter by ${c.label} column`}
-                t={columnTone(c) ?? "muted"} active={colFilter.has(c.key)} onToggle={() => onToggleCol(c.key)} />
+        </FilterGroup>
+        {types.length > 0 && <GroupSep />}
+        {types.length > 0 && (
+          <FilterGroup label="Type">
+            {types.map((t) => (
+              <ToggleChip key={t} label={t} count={counts.type.get(t) ?? 0}
+                ariaLabel={t === OTHER_TYPE ? "Filter by cards whose title has no commit type" : `Filter by ${t} cards`}
+                t="muted" active={typeFilter.has(t)} onToggle={() => onToggleType(t)} />
             ))}
-          </div>
+          </FilterGroup>
+        )}
+      </div>
+      {/* Row 3: where the card STANDS — state facts, then the epic it belongs to and the repo it targets. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <FilterGroup label="State">
+          {CARD_STATES.map((s) => (
+            <ToggleChip key={s.key} label={s.label} count={counts.state.get(s.key) ?? 0}
+              ariaLabel={`Filter by ${s.aria}`} t={STATE_TONE[s.key]}
+              active={stateFilter.has(s.key)} onToggle={() => onToggleState(s.key)} />
+          ))}
+        </FilterGroup>
+        <GroupSep />
+        <FilterGroup label="Epic">
+          <Select aria-label="Filter by epic (shows every card under it)" value={epicFilter ?? ""}
+            onChange={(e) => onEpic(e.target.value || null)} style={filterSelect(epicFilter !== null)}
+            disabled={epics.length === 0 && epicFilter === null}>
+            <option value="">{epics.length === 0 ? "no epics" : "any epic"}</option>
+            {epics.map((e) => <option key={e.id} value={e.id}>{e.title} ({e.count})</option>)}
+          </Select>
+        </FilterGroup>
+        {/* Only on a project with a repo registry — the same gate as the card's repo badge. */}
+        {repos && (
+          <FilterGroup label="Repo">
+            <Select aria-label="Filter by target repo" value={repoFilter ?? ANY_REPO}
+              onChange={(e) => onRepo(e.target.value === ANY_REPO ? null : e.target.value)}
+              style={filterSelect(repoFilter !== null)}>
+              <option value={ANY_REPO}>any repo</option>
+              <option value="">primary</option>
+              {repos.map((r) => <option key={r.key} value={r.key}>{r.key}</option>)}
+            </Select>
+          </FilterGroup>
         )}
       </div>
     </div>
   );
 }
+
+// A State chip's "on" tone matches the badge the card itself wears for that state, so the chip and the
+// cards it keeps read as the same thing.
+const STATE_TONE: Record<CardState, Tone> = { held: "busy", deferred: "info", policy: "danger", request: "accent", blocked: "muted" };
 
 // A worker bound to this task → show its live status + branch (links the board to the spine).
 function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: boolean } {

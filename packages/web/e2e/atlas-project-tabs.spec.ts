@@ -451,7 +451,10 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       // claim at this same address; what this card can break is the controls not being here at all.
       await expect(scope.getByLabel("Search tasks by id, title, or description")).toBeVisible();
       await expect(scope.getByRole("button", { name: /^Filter by .+ priority$/ }).first()).toBeVisible();
-      await expect(scope.getByRole("button", { name: /^Filter by .+ column$/ }).first()).toBeVisible();
+      // The card-detail groups (card cea577af — lane chips retired): State chips + the Epic select are
+      // rendered on every board, whatever its cards carry.
+      await expect(scope.getByRole("group", { name: "State filter" })).toBeVisible();
+      await expect(scope.getByLabel("Filter by epic (shows every card under it)")).toBeVisible();
 
       // THE CENTRED DIALOG, never a drawer. Presence of the card first, then the absence of a dialog,
       // so a still-loading page cannot satisfy the pair (card 625d791c).

@@ -27,7 +27,7 @@ async function pinActiveProject(page: Page, projectId: string) {
 // ONLY by board columns on this route (Board.tsx Column; the shared Panel `grid` prop is the only other user and
 // the board route never mounts one), and the header label <span> is an exact-text match — so this resolves to
 // exactly one element per lane. Scoping a card assertion through it proves the card sits in the RIGHT lane
-// (the column filter chips share the label text but live outside `.loom-grid`, so they never interfere).
+// (nothing in the filter bar carries a lane label since card cea577af, and it lives outside `.loom-grid` anyway).
 function lane(page: Page, label: string) {
   return page.locator(".loom-grid").filter({ has: page.getByText(label, { exact: true }) });
 }
@@ -99,29 +99,141 @@ test("search-by-id filters to a single card and updates the live count", async (
   await expect(page.getByText("2 of 2 shown")).toBeVisible();
 });
 
-test("a column filter chip narrows the board to that lane", async ({ page, loomDaemon }) => {
-  const project = await loomDaemon.createProject(`board-colfilter-${Date.now()}`);
-  await pinActiveProject(page, project.id);
+// ── Card-detail filters (card cea577af) ─────────────────────────────────────────────────────────────
+// The board filters on what a card IS, not which lane it's in (the lanes already say that), so there must be
+// no column chip at all. Each test below proves its group with a before/after visible card set AND the count.
 
-  const todoTitle = uniq("in-todo");
-  const reviewTitle = uniq("in-review");
-  await loomDaemon.createTask(project.id, { title: todoTitle, columnKey: "todo" });
-  await loomDaemon.createTask(project.id, { title: reviewTitle, columnKey: "review" });
+async function patchTask(baseURL: string, id: string, patch: Record<string, unknown>) {
+  const res = await fetch(`${baseURL}/api/tasks/${id}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(patch),
+  });
+  expect(res.ok, `POST /api/tasks/${id} ${JSON.stringify(patch)} → ${res.status} ${await res.text()}`).toBeTruthy();
+}
+const cardTitle = (page: Page, title: string) => page.getByTestId("card-title").filter({ hasText: title });
+
+test("the filter bar carries no column chips", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-nocol-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await loomDaemon.createTask(project.id, { title: uniq("feat(web): any card"), columnKey: "todo" });
+  await page.goto(`${loomDaemon.baseURL}/board`);
+  // Contrast case first: the filter bar IS rendered (a priority chip resolves), so the absence below is real.
+  await expect(page.getByRole("button", { name: "Filter by Critical priority" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Filter by .+ column$/ })).toHaveCount(0);
+  await expect(page.getByRole("group", { name: "Column filter" })).toHaveCount(0);
+});
+
+test("a Type chip narrows the board to cards whose title declares that commit type", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-type-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  const fixTitle = uniq("fix(web): a bug");
+  const featTitle = uniq("feat(daemon): a feature");
+  const proseTitle = uniq("Just some prose");
+  await loomDaemon.createTask(project.id, { title: fixTitle, columnKey: "todo" });
+  await loomDaemon.createTask(project.id, { title: featTitle, columnKey: "review" });
+  await loomDaemon.createTask(project.id, { title: proseTitle, columnKey: "inbox" });
 
   await page.goto(`${loomDaemon.baseURL}/board`);
-  await expect(cardInLane(page, "To Do", todoTitle)).toBeVisible();
-  await expect(cardInLane(page, "Review", reviewTitle)).toBeVisible();
+  await expect(page.getByText("3 of 3 shown")).toBeVisible();
+  // Only types that occur get a chip: fix, feat and the "other" bucket — no docs chip on this board.
+  const fix = page.getByRole("button", { name: "Filter by fix cards" });
+  await expect(fix).toBeVisible();
+  await expect(page.getByRole("button", { name: "Filter by docs cards" })).toHaveCount(0);
 
-  // Toggle the "To Do" column filter on (aria-pressed is the toggle's own observable).
-  const todoChip = page.getByRole("button", { name: "Filter by To Do column" });
-  await expect(todoChip).toHaveAttribute("aria-pressed", "false");
-  await todoChip.click();
-  await expect(todoChip).toHaveAttribute("aria-pressed", "true");
+  await fix.click();
+  await expect(fix).toHaveAttribute("aria-pressed", "true");
+  await expect(cardTitle(page, fixTitle)).toBeVisible();
+  await expect(cardTitle(page, featTitle)).toHaveCount(0);
+  await expect(cardTitle(page, proseTitle)).toHaveCount(0);
+  await expect(page.getByText("1 of 3 shown")).toBeVisible();
 
-  // AFTER: only the To Do card survives the filter; the Review card is hidden; the count reflects it.
-  await expect(cardInLane(page, "To Do", todoTitle)).toBeVisible();
-  await expect(cardInLane(page, "Review", reviewTitle)).toHaveCount(0);
-  await expect(page.getByText("1 of 2 shown")).toBeVisible();
+  // OR within the group: adding "other" brings the prose card back, the feat card stays out.
+  await page.getByRole("button", { name: "Filter by cards whose title has no commit type" }).click();
+  await expect(cardTitle(page, proseTitle)).toBeVisible();
+  await expect(cardTitle(page, featTitle)).toHaveCount(0);
+  await expect(page.getByText("2 of 3 shown")).toBeVisible();
+
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(page.getByText("3 of 3 shown")).toBeVisible();
+});
+
+test("State chips filter by held, deferred, blocked-by-card and pending request", async ({ page, loomDaemon }) => {
+  // A live manager owns the project so a pending Request can be filed against one of its cards.
+  const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "FilterMgr" });
+  await pinActiveProject(page, mgr.projectId);
+  const plainT = uniq("plain"), heldT = uniq("held"), deferredT = uniq("deferred"), blockedT = uniq("blocked"), askT = uniq("asking");
+  const plain = await loomDaemon.createTask(mgr.projectId, { title: plainT, columnKey: "todo" });
+  const held = await loomDaemon.createTask(mgr.projectId, { title: heldT, columnKey: "todo" });
+  const deferred = await loomDaemon.createTask(mgr.projectId, { title: deferredT, columnKey: "todo" });
+  const blocked = await loomDaemon.createTask(mgr.projectId, { title: blockedT, columnKey: "todo" });
+  const asking = await loomDaemon.createTask(mgr.projectId, { title: askT, columnKey: "todo" });
+  await patchTask(loomDaemon.baseURL, held.id, { held: true });
+  await patchTask(loomDaemon.baseURL, deferred.id, { deferred: true, deferredReason: "e2e: sequenced behind another card" });
+  // `plain` is an open card, so it is an OPEN blocker of `blocked`.
+  await patchTask(loomDaemon.baseURL, blocked.id, { blockedBy: [plain.id] });
+  await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, taskId: asking.id,
+    title: uniq("which-way"), type: "decision", options: ["A", "B"], state: "pending" });
+
+  await page.goto(`${loomDaemon.baseURL}/board`);
+  const all = [plainT, heldT, deferredT, blockedT, askT];
+  const expectOnly = async (visible: string[]) => {
+    for (const t of all) {
+      if (visible.includes(t)) await expect(cardTitle(page, t)).toBeVisible();
+      else await expect(cardTitle(page, t)).toHaveCount(0);
+    }
+    await expect(page.getByText(`${visible.length} of 5 shown`)).toBeVisible();
+  };
+  await expectOnly(all);
+
+  const chip = (name: string) => page.getByRole("button", { name });
+  await chip("Filter by held cards (the owner's brake)").click();
+  await expectOnly([heldT]);
+  await chip("Filter by held cards (the owner's brake)").click();
+
+  await chip("Filter by deferred cards (a manager's sequencing marker)").click();
+  // `blocked` is NOT deferred — a blocks edge alone doesn't set the flag — so only the deferred card stays.
+  await expectOnly([deferredT]);
+  await chip("Filter by deferred cards (a manager's sequencing marker)").click();
+
+  await chip("Filter by cards with an open blocker card").click();
+  await expectOnly([blockedT]);
+  await chip("Filter by cards with an open blocker card").click();
+
+  const req = chip("Filter by cards with a pending Request");
+  await req.click();
+  await expect(req).toHaveAttribute("aria-pressed", "true");
+  await expectOnly([askT]);
+  await req.click();
+  await expectOnly(all);
+});
+
+test("the Epic select shows the epic's whole subtree (children and grandchildren), not the epic itself", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`board-epic-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  const epicT = uniq("epic-root"), childT = uniq("epic-child"), grandT = uniq("epic-grandchild"), otherT = uniq("unrelated");
+  const epic = await loomDaemon.createTask(project.id, { title: epicT, columnKey: "todo" });
+  const child = await loomDaemon.createTask(project.id, { title: childT, columnKey: "in_progress" });
+  const grand = await loomDaemon.createTask(project.id, { title: grandT, columnKey: "review" });
+  await loomDaemon.createTask(project.id, { title: otherT, columnKey: "todo" });
+  await patchTask(loomDaemon.baseURL, child.id, { parentId: epic.id });
+  await patchTask(loomDaemon.baseURL, grand.id, { parentId: child.id });
+
+  await page.goto(`${loomDaemon.baseURL}/board`);
+  await expect(page.getByText("4 of 4 shown")).toBeVisible();
+  const select = page.getByLabel("Filter by epic (shows every card under it)");
+  // The epic counts BOTH levels under it; the child is itself an epic of one.
+  await expect(select.locator("option", { hasText: `${epicT} (2)` })).toHaveCount(1);
+  await select.selectOption(epic.id);
+
+  await expect(cardTitle(page, childT)).toBeVisible();
+  await expect(cardTitle(page, grandT)).toBeVisible();
+  await expect(cardTitle(page, epicT)).toHaveCount(0);
+  await expect(cardTitle(page, otherT)).toHaveCount(0);
+  await expect(page.getByText("2 of 4 shown")).toBeVisible();
+
+  // Clear filters resets the select too.
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(select).toHaveValue("");
+  await expect(page.getByText("4 of 4 shown")).toBeVisible();
 });
 
 test("opening a card shows its body in the detail drawer", async ({ page, loomDaemon }) => {
