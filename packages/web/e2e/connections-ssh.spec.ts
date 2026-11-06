@@ -24,6 +24,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, test, type Locator, type Page } from "./fixtures/daemon";
+import { generateParseableEd25519 } from "./fixtures/ssh-keys";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -52,7 +53,7 @@ interface ConnRow { id: string; name: string; authScheme: string; readOnly?: boo
 
 /** A throwaway loopback ssh server and the fingerprint computed from its host key directly. */
 async function startHostKeyServer(): Promise<{ port: number; fingerprint: string; close: () => Promise<void> }> {
-  const hostKey = ssh2.utils.generateKeyPairSync("ed25519");
+  const hostKey = generateParseableEd25519(ssh2.utils);
   const raw: Buffer = ssh2.utils.parseKey(hostKey.public).getPublicSSH();
   const fingerprint = `SHA256:${createHash("sha256").update(raw).digest("base64").replace(/=+$/, "")}`;
   const server = new ssh2.Server({ hostKeys: [hostKey.private] }, (conn: { on: (e: string, f: () => void) => void }) => { conn.on("error", () => {}); });
@@ -131,7 +132,7 @@ test("create an ssh connection with a confirmed pin, then grant it to one agent 
   const agentsOf = (projectId: string) => apiJson<AgentRow[]>(`${base}/api/projects/${projectId}/agents`);
 
   const passphrase = uniq("pass-phrase");
-  const key: { private: string } = ssh2.utils.generateKeyPairSync("ed25519", { passphrase, cipher: "aes256-ctr" });
+  const key: { private: string } = generateParseableEd25519(ssh2.utils, { passphrase, cipher: "aes256-ctr" });
   const marker = keyMarker(key.private);
   const server = await startHostKeyServer();
   const connName = uniq("Homelab NAS");
@@ -307,7 +308,7 @@ test("an unconfirmed fetched fingerprint is discarded when the host changes, and
     await expect(page.getByLabel("Host key fingerprint")).toHaveValue(typed);
 
     await field(page, "User").fill("loom");
-    await field(page, "Private key").fill(ssh2.utils.generateKeyPairSync("ed25519").private);
+    await field(page, "Private key").fill(generateParseableEd25519(ssh2.utils).private);
     await page.getByLabel("Host key fingerprint").fill("SHA256:not-a-real-fingerprint");
     await page.getByRole("button", { name: "Create connection" }).click();
     await expect(page.getByText("Pin the host key fingerprint: paste it, or fetch it from the host and confirm.")).toBeVisible();

@@ -15,6 +15,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Locator, type LoomDaemon, type Page } from "./fixtures/daemon";
+import { generateParseableEd25519 } from "./fixtures/ssh-keys";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const daemonRequire = createRequire(path.resolve(__dirname, "..", "..", "daemon", "package.json"));
@@ -40,7 +41,7 @@ async function gotoInbox(page: Page, base: string) {
 
 /** A loopback ssh server that never authenticates anyone, plus the fingerprint of its host key. */
 async function startRefusingSshServer(): Promise<{ port: number; fingerprint: string; close: () => Promise<void> }> {
-  const hostKey = ssh2.utils.generateKeyPairSync("ed25519");
+  const hostKey = generateParseableEd25519(ssh2.utils);
   const raw: Buffer = ssh2.utils.parseKey(hostKey.public).getPublicSSH();
   const fingerprint = `SHA256:${createHash("sha256").update(raw).digest("base64").replace(/=+$/, "")}`;
   const server = new ssh2.Server({ hostKeys: [hostKey.private] }, (conn: { on: (e: string, f: (...a: never[]) => void) => void }) => {
@@ -62,7 +63,7 @@ interface SshResult { ok: boolean; status?: string; reason?: string; kind?: stri
 /** A project, a read-write ssh connection scoped to it, and a seeded worker session granted that connection. */
 async function seedSshWorker(loomDaemon: LoomDaemon, server: { port: number; fingerprint: string }) {
   const project = await loomDaemon.createProject(uniq("ssh-clear"));
-  const key = ssh2.utils.generateKeyPairSync("ed25519");
+  const key = generateParseableEd25519(ssh2.utils);
   const conn = await api<{ id: string }>(`${loomDaemon.baseURL}/api/connections/ssh`, {
     method: "POST",
     body: JSON.stringify({

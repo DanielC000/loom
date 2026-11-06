@@ -10,6 +10,8 @@
 // libcrypto"). Measured 48 of 10,000 keys, every one with exactly that 31/63-byte signature. The product
 // (`stripSshKeyPassphrase`) fails closed on such a key, so this is a fixture-generation flake only.
 //
+// Twin: packages/web/e2e/fixtures/ssh-keys.ts (card f4d013b6) — keep the validity rule and retry bound in step.
+//
 // FIX: retry generation until `parseKey` accepts the result — bounded, never an infinite loop.
 
 export const MAX_ED25519_GENERATION_ATTEMPTS = 20;
