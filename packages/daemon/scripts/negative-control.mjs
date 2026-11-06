@@ -88,6 +88,7 @@ Usage:
     --file <repo/relative/path> [--file <repo/relative/path> ...] \\
     --test <repo/relative/test.mjs> [--test <repo/relative/test.mjs> ...] \\
     [--ref <git-ref>] [--build "<command>"] [--allow-structural]
+  or, instead of --file/--ref:  --mutant <patch.diff> --test <test.mjs> ...
 
   --file    Repo-relative path to a source file your uncommitted (or --ref-relative) fix touches.
             Repeatable. Its CURRENT on-disk bytes are snapshotted, temporarily replaced with the
@@ -97,6 +98,15 @@ Usage:
             Default: HEAD (the usual case — your fix is an uncommitted working-tree edit on top of
             HEAD). If your fix is already committed, pass e.g. --ref HEAD~1 or --ref HEAD^.
   --build   Build command to run before each test phase. Default: "${DEFAULT_BUILD_COMMAND}".
+  --mutant  Path to a unified diff (git format) that KEEPS the API and disables only the logic. Instead of
+            reverting --file(s) to --ref, the patch is applied to the working tree (\`git apply\`, never
+            --index: the git index stays untouched) to make the broken bytes, so a card that ADDS an API
+            can still produce a BEHAVIOURAL RED. The files the patch touches are snapshotted automatically
+            and restored byte-for-byte afterwards, same as --file. MUTUALLY EXCLUSIVE with --file/--ref
+            (exit 2). Refused with exit 2, tree untouched, when: the patch does not apply cleanly
+            (\`git apply --check\`), touches a path outside the repo root, ADDS, DELETES or RENAMES a file
+            (not restorable byte-exactly here), is a binary patch, changes file modes, or names no file.
+            Generate one with \`git diff\` against your fixed tree after hand-disabling the logic.
   --allow-structural  Accept a RED that is not BEHAVIOURAL (see below). Default: refuse, exit 3.
   RED CLASSES (the RED phase is only proof of a bug when it is BEHAVIOURAL):
     BUILD-ONLY    the build failed (tests ran against stale output) — proves nothing about logic.
@@ -111,7 +121,8 @@ Usage:
     A phase is BEHAVIOURAL if ANY failing test is. Signatures are matched on stderr only, and assertion
     lines win over signatures. Known gap: a test that try/catches a missing API and prints its own
     FAIL line reads as BEHAVIOURAL — keep the API and disable the logic instead (a mutant).
-  Exit codes: 0 proven; 1 RED/GREEN/restore failure; 2 usage; 3 RED class refused.
+  Exit codes: 0 proven; 1 RED/GREEN/restore failure; 2 usage / --mutant patch refused (nothing was
+  mutated); 3 RED class refused.
   The last stdout line is always: [negative-control] RESULT: red=<class> failingAssertions=<n>
     green=<pass|FAIL> restore=<verified|MISMATCH> => OK | REFUSED(<reason>)
   --repo-root  Override the repo root everything above is relative to. Default: this script's own
@@ -127,7 +138,8 @@ function parseArgs(argv) {
     if (a === "--help" || a === "-h") { args.help = true; continue; }
     if (a === "--file") { args.file.push(argv[++i]); continue; }
     if (a === "--test") { args.test.push(argv[++i]); continue; }
-    if (a === "--ref") { args.ref = argv[++i]; continue; }
+    if (a === "--ref") { args.ref = argv[++i]; args.refGiven = true; continue; }
+    if (a === "--mutant") { args.mutant = argv[++i]; continue; }
     if (a === "--build") { args.build = argv[++i]; continue; }
     if (a === "--allow-structural") { args.allowStructural = true; continue; }
     if (a === "--repo-root") { args.repoRoot = argv[++i]; continue; }
@@ -142,6 +154,36 @@ function toAbsPath(repoRoot, repoRelPath) {
   // repo-relative POSIX form git expects, and join natively for fs access.
   const posixRel = repoRelPath.replaceAll("\\", "/");
   return { posixRel, absPath: path.join(repoRoot, ...posixRel.split("/")) };
+}
+
+/**
+ * Parse the repo-relative paths a unified diff touches. Returns { paths } or { refusal }.
+ * Refuses (rather than guesses) anything we could not restore byte-exactly from a per-file snapshot:
+ * add/delete/rename, binary patches, mode changes, quoted (escaped) paths, and out-of-root paths.
+ */
+function parsePatchPaths(patchBuf) {
+  const text = patchBuf.toString("latin1");
+  const paths = new Set();
+  for (const line of text.split(/\r?\n/)) {
+    if (/^(new file mode|deleted file mode|rename (from|to)|copy (from|to)|similarity index) /.test(line)) {
+      return { refusal: `patch adds, deletes, renames or copies a file ("${line}") — not restorable byte-exactly; only in-place edits of existing files are supported` };
+    }
+    if (/^(old mode|new mode) /.test(line)) return { refusal: `patch changes a file mode ("${line}") — not restored by this tool` };
+    if (/^GIT binary patch|^Binary files /.test(line)) return { refusal: "binary patch — not supported" };
+    const m = /^(?:---|\+\+\+) (.*?)(?:\t.*)?$/.exec(line);
+    if (!m) continue;
+    const raw = m[1];
+    if (raw === "/dev/null") return { refusal: "patch adds or deletes a file (/dev/null side) — not restorable byte-exactly" };
+    if (raw.startsWith('"')) return { refusal: `quoted path ${raw} — not supported` };
+    const rel = raw.replace(/^[ab]\//, "");
+    const norm = path.posix.normalize(rel.replaceAll("\\", "/"));
+    if (path.isAbsolute(rel) || /^[A-Za-z]:/.test(rel) || norm === ".." || norm.startsWith("../") || norm.startsWith("/")) {
+      return { refusal: `patch path "${rel}" is outside the repo root` };
+    }
+    paths.add(norm);
+  }
+  if (paths.size === 0) return { refusal: "patch names no file (not a unified diff?)" };
+  return { paths: [...paths] };
 }
 
 function readRefContent(repoRoot, ref, posixRel) {
@@ -222,17 +264,41 @@ async function main() {
     console.log(HELP);
     process.exit(0);
   }
-  if (args.file.length === 0 || args.test.length === 0) {
-    console.error("[negative-control] at least one --file and one --test are required.\n");
+  const mutantMode = args.mutant !== undefined;
+  if (mutantMode && (args.file.length > 0 || args.refGiven)) {
+    console.error("[negative-control] --mutant is mutually exclusive with --file/--ref (two different ways to get the broken bytes).");
+    process.exit(2);
+  }
+  if ((!mutantMode && args.file.length === 0) || args.test.length === 0) {
+    console.error("[negative-control] at least one --test and either --file (one or more) or --mutant are required.\n");
     console.error(HELP);
     process.exit(2);
   }
 
   const repoRoot = args.repoRoot;
-  const files = args.file.map((f) => toAbsPath(repoRoot, f));
+  let patchAbs = null;
+  let files;
+  if (mutantMode) {
+    patchAbs = path.resolve(process.cwd(), args.mutant);
+    let patchBuf;
+    try {
+      patchBuf = fs.readFileSync(patchAbs);
+    } catch (err) {
+      console.error(`[negative-control] --mutant ${args.mutant} could not be read (${err.message}).`);
+      process.exit(2);
+    }
+    const parsed = parsePatchPaths(patchBuf);
+    if (parsed.refusal) {
+      console.error(`[negative-control] ⛔ --mutant patch refused: ${parsed.refusal}. Nothing was changed.`);
+      process.exit(2);
+    }
+    files = parsed.paths.map((f) => toAbsPath(repoRoot, f));
+  } else {
+    files = args.file.map((f) => toAbsPath(repoRoot, f));
+  }
 
-  // Fail fast, before mutating anything: every --file must exist on disk now, and every --file must
-  // resolve at --ref. Collecting both snapshots up front means a bad argument never leaves a file
+  // Fail fast, before mutating anything: every file must exist on disk now, and (--file mode) every
+  // file must resolve at --ref. Collecting snapshots up front means a bad argument never leaves a file
   // half-reverted.
   const snapshots = [];
   for (const { posixRel, absPath } of files) {
@@ -240,21 +306,37 @@ async function main() {
     try {
       original = fs.readFileSync(absPath);
     } catch (err) {
-      console.error(`[negative-control] --file ${posixRel} could not be read (${err.message}) — it must exist in your worktree now.`);
+      console.error(`[negative-control] ${mutantMode ? "patched file" : "--file"} ${posixRel} could not be read (${err.message}) — it must exist in your worktree now.`);
       process.exit(2);
     }
-    const refContent = readRefContent(repoRoot, args.ref, posixRel);
+    const refContent = mutantMode ? null : readRefContent(repoRoot, args.ref, posixRel);
     snapshots.push({ posixRel, absPath, original, refContent });
   }
 
-  console.log(`[negative-control] reverting ${snapshots.length} file(s) to ${args.ref}, proving RED, restoring, proving GREEN:`);
+  const brokenLabel = mutantMode ? `mutant ${path.basename(patchAbs)}` : args.ref;
+  if (mutantMode) {
+    // `git apply` WITHOUT --index: the index is never touched. --check first so a non-applying patch is
+    // a clean refusal; git apply is all-or-nothing without --reject, and we re-verify the bytes anyway.
+    const chk = spawnSync("git", ["apply", "--check", patchAbs], { cwd: repoRoot, encoding: "utf8" });
+    if (chk.status !== 0) {
+      console.error(`[negative-control] ⛔ --mutant patch does not apply to the current tree (git apply --check exited ${chk.status}): ${(chk.stderr ?? "").trim()}\nNothing was changed.`);
+      process.exit(2);
+    }
+  }
+
+  console.log(`[negative-control] ${mutantMode ? `applying ${brokenLabel} to` : `reverting`} ${snapshots.length} file(s)${mutantMode ? "" : ` to ${args.ref}`}, proving RED, restoring, proving GREEN:`);
   for (const s of snapshots) console.log(`  - ${s.posixRel}`);
 
   let phase1;
   let restoreErrors = [];
   try {
-    for (const s of snapshots) fs.writeFileSync(s.absPath, s.refContent);
-    phase1 = runPhase(repoRoot, `RED phase (reverted to ${args.ref})`, { buildCommand: args.build, testPaths: args.test });
+    if (mutantMode) {
+      const ap = spawnSync("git", ["apply", patchAbs], { cwd: repoRoot, encoding: "utf8" });
+      if (ap.status !== 0) throw new Error(`git apply failed after --check passed: ${(ap.stderr ?? "").trim()}`);
+    } else {
+      for (const s of snapshots) fs.writeFileSync(s.absPath, s.refContent);
+    }
+    phase1 = runPhase(repoRoot, `RED phase (${mutantMode ? "mutant applied" : `reverted to ${args.ref}`})`, { buildCommand: args.build, testPaths: args.test });
   } finally {
     for (const s of snapshots) {
       try {
@@ -293,13 +375,13 @@ async function main() {
   const classOk = redClass.cls === "BEHAVIOURAL" || args.allowStructural;
 
   console.log("\n[negative-control] ── SUMMARY ──");
-  console.log(`  RED   (reverted to ${args.ref}): ${phase1.pass ? "PASSED — ⚠️ expected this to FAIL" : "failed, as expected"} ⇒ ${redOk ? "OK" : "❌ FAIL"}`);
+  console.log(`  RED   (${mutantMode ? "mutant applied" : `reverted to ${args.ref}`}): ${phase1.pass ? "PASSED — ⚠️ expected this to FAIL" : "failed, as expected"} ⇒ ${redOk ? "OK" : "❌ FAIL"}`);
   console.log(`  CLASS (RED failure kind):        ${redClass.cls}, ${redClass.assertions} recognised assertion line(s)${redClass.cls === "BEHAVIOURAL" ? "" : args.allowStructural ? " — allowed by --allow-structural" : " — not behavioural ⇒ ❌ REFUSED"}`);
   console.log(`  GREEN (restored):                ${phase2.pass ? "passed, as expected" : "FAILED — ⚠️ expected this to PASS"} ⇒ ${greenOk ? "OK" : "❌ FAIL"}`);
   console.log(`  CLEAN (byte-identical restore):  ${cleanOk ? "confirmed for all file(s)" : `MISMATCH: ${integrityFailures.join(", ")}`} ⇒ ${cleanOk ? "OK" : "❌ FAIL"}`);
 
   if (!redOk) {
-    console.error(`\n[negative-control] ❌ the RED phase did not fail — reverting to ${args.ref} did not make ${args.test.join(", ")} fail. Either the test doesn't actually cover this change, or --ref doesn't name the pre-fix state.`);
+    console.error(`\n[negative-control] ❌ the RED phase did not fail — ${mutantMode ? "applying the mutant" : `reverting to ${args.ref}`} did not make ${args.test.join(", ")} fail. Either the test doesn't actually cover this change, or ${mutantMode ? "the mutant doesn't disable the logic under test" : "--ref doesn't name the pre-fix state"}.`);
   }
   if (!greenOk) {
     console.error(`\n[negative-control] ❌ the GREEN phase did not pass — the restored (current) state still fails ${args.test.join(", ")}. Your fix is not actually green.`);
