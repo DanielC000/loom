@@ -133,6 +133,24 @@ believe COULD happen" rather than a verified-reachable one. Either way: **do not
 assertion in either direction** without first finding (or definitively ruling out) the actual production
 call site.
 
+## Re-examined by card 5669cb78 (2026-11-06): won't-fix, the residual stays logged
+
+The follow-up card reproduced boot 3 of `cross-key-strip-degraded-and-pending-bystanders` with a scratch probe (temp `LOOM_HOME`, fresh module import per boot) and decided NOT to build the tombstone.
+
+What is wrong: after boot 2's PHASE 3 deleted O, X (degraded/pending at boot 2, resolvable at boot 3) re-enters memory AND is re-persisted on its new final listing O. `clearMergeQuarantineLatchFile(O's freed id)` then returns `{ok:true, latchKept:true, referencingRepoPaths:[X]}` for a file that does not exist. Direction: a misattributed clear-by-id / over-protection, never fail-open; it self-heals when X itself is cleared.
+
+Basename reuse is real: after `git init` in L (a former plain subdir), `hash(canonicalKey(L))` equals O's retired legacy basename. It does not block L's own clear: with X still holding the ghost ref, L raised at that basename and `clearMergeQuarantine(L)` lifted it and deleted the file. So the harm is a wrong report plus a repeating warning, nothing else.
+
+Why won't-fix: a real fix threads a new durable sidecar through FOUR strip sites (PHASE 1a's own strip, the da716192 cross-key strip which skips ordinary migrate targets such as boot 3's X, the pending loop, the warn helper) plus the `bootWriteLatch` drop-sets and the `allBootWriteTargets` registration, and needs the full `merge-quarantine*.mjs` corpus to validate. That is a large cost for a cosmetic gain.
+
+Tombstone design, for a future seat: record a retirement AFTER the unlink, at the PHASE 3 call site, only when `deleteSourceLatchIfSuperseded(...) === true && !fs.existsSync(file)`; persist once per PHASE 3, best-effort, never blocking the unlink. Use a NEW sidecar beside `merge-quarantine-cleared-tokens.dat` (outside `MERGE_QUARANTINE_DIR`, same write-tmp-then-rename and fail-closed additive loader), not the cleared-tokens file (different schema, cap and test reset). Cap ~2000 names oldest-first; the only safe prune is dropping a tombstone whose name is observed present on disk at boot. Strip a ref only when the name is tombstoned AND absent AND not migrating this boot. Either write order is safe against a wrong strip; unlink-then-tombstone keeps provenance strict and a crash between them just reverts to today's logged residual.
+
+Why NOT record inside `deleteSourceLatchIfSuperseded`: it returns true in four branches that never unlink (the written file itself, a kept-unreadable file, a pending-owned file, a file owned elsewhere), so it would tombstone files that were never retired.
+
+Option B, the cheaper alternative (unverified): make `clearMergeQuarantineLatchFile` make no kept/referenced claim when the target id's file is absent right now. No durable state, but it changes the clear-by-id contract to fix a report, and it still needs the corpus run.
+
+Revisit when a real user hits the misleading clear-by-id report.
+
 ## Do not
 
 - Do not drop an `orphanLatchFiles` reference on file absence alone, at boot or anywhere else in this
@@ -150,3 +168,4 @@ call site.
 - Do not run only the one scenario a card's own repro lives in before trusting a fix in this file — the
   full `merge-quarantine*.mjs` corpus is where this card's own regression actually surfaced; the single
   targeted scenario stayed green throughout.
+- Do not record a retirement inside `deleteSourceLatchIfSuperseded`: it returns true in four branches that never unlink, so it would tombstone files that were never retired. Record at the PHASE 3 call site, after a confirmed-absent post-check.
