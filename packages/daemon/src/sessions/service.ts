@@ -11,7 +11,7 @@ import {
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type MergeGateAgentView, type MergeGateStatus, type CompanionRoute, type ProjectMemoryEntry,
-  type ProfileGrantReach,
+  type ProfileGrantReach, type SessionGrantDrift,
 } from "@loom/shared";
 // Card 66b1b40d: its own statement (not folded into the import above). orchestration-mcp-role-guard.mjs now matches the
 // `usesOrchestrationMcp` import as a whole statement, so the split is no longer load-bearing for that guard.
@@ -62,6 +62,7 @@ import { composeWorkerStartupPrompt, buildWorkerRepoContext, type WorkerRepoCont
 import { composeReviveKickoff, type ReviveSpawnSpec } from "./worker-revive.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { guardedFetch } from "../connections/boundedFetch.js";
+import { resolveUsableSshConnections } from "../connections/store.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
 import { listSkills as listSkillStore } from "../skills/store.js";
 import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
@@ -3681,7 +3682,8 @@ export class SessionService {
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
     // @decision acd3c688 — spawnHumanAuthorized/skipGrantCarryoverCheck gate the explicit-role-grant-carryover
     // check below; see the decision record for which callers pass which, and why.
-    opts?: { spawnHumanAuthorized?: boolean; skipGrantCarryoverCheck?: boolean },
+    // `quiet` (the read-only grant-drift dry-run, polled every 15s per mount) suppresses the diagnostic console line only.
+    opts?: { spawnHumanAuthorized?: boolean; skipGrantCarryoverCheck?: boolean; quiet?: boolean },
   ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; profileRole: SessionRole | null; connections: string[]; vaultWrite: boolean; harness: "claude" | "codex" | undefined; harnessDefaultSkipped: CodexIncompatibility[] | undefined; harnessRoleForced: { role: SessionRole; agentId: string; profileId: string | null; reason: string } | undefined; codexProviderDropped: { agentId: string; profileId: string | null; providerId: string; connectionId: string | null; reason: string } | undefined; skillsDropped: { sessionRole: SessionRole; agentId: string; profileId: string | null; profileRole: SessionRole | null } | undefined } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
@@ -3771,7 +3773,7 @@ export class SessionService {
           reason: `the profile's codex model-provider "${resolved.codexProvider.id}" was NOT applied: this session's final harness is ${finalHarness ?? "claude"}, not codex`,
         }
       : undefined;
-    if (codexProviderDropped) {
+    if (codexProviderDropped && !opts?.quiet) {
       // eslint-disable-next-line no-console
       console.warn(`[codex-provider-dropped] agent ${agent.id} profile ${codexProviderDropped.profileId ?? "(none)"}: provider "${codexProviderDropped.providerId}" (connection ${codexProviderDropped.connectionId ?? "(none)"}) dropped — final harness is not codex`);
     }
@@ -5337,15 +5339,29 @@ export class SessionService {
     };
     skillsDropped: { sessionRole: SessionRole; agentId: string; profileId: string | null; profileRole: SessionRole | null } | undefined;
   } {
+    const resolved = this.resolveRepinSurface(session, agent, config);
+    this.db.setSessionCapabilitySurface(session.id, resolved.patch);
+    return resolved;
+  }
+
+  // The READ half of `repinCapabilitySurface`: the SAME resolveAgentSpawn call + the SAME codex refusal,
+  // but NO write. `repinCapabilitySurface` (the write) and `sessionGrantDrift` (the dry-run read behind the
+  // drift badge) both go through here, so what the badge reports and what the re-pin applies cannot differ.
+  private resolveRepinSurface(session: Session, agent: Agent, config: ResolvedConfig, dryRun = false): {
+    patch: {
+      browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean;
+      noCommit: boolean; skills: string[] | null; connections: string[]; vaultWrite: boolean;
+    };
+    skillsDropped: { sessionRole: SessionRole; agentId: string; profileId: string | null; profileRole: SessionRole | null } | undefined;
+  } {
     // @decision 6745e4bc round 2 — resolved from THIS session's OWN row, never a caller-supplied
     // parameter: the caller can only ever re-pin the role this session already has, not a different one.
     const { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite, skillsDropped } =
-      this.resolveAgentSpawn(agent, config, session.role ?? undefined, false, undefined, { skipGrantCarryoverCheck: true });
+      this.resolveAgentSpawn(agent, config, session.role ?? undefined, false, undefined, { skipGrantCarryoverCheck: true, quiet: dryRun });
     // Card b94fcb72: the row's harness stays pinned, and codex ignores restrictedTools — re-pinning `true` onto a
     // codex row would resume UNrestricted while reading as restricted. Refuse BEFORE any write.
     if (restrictedTools === true && session.harness === "codex") throw new RepinGrantsRefusalError(CODEX_RESTRICTED_TOOLS_REASON);
     const patch = { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite };
-    this.db.setSessionCapabilitySurface(session.id, patch);
     return { patch, skillsDropped };
   }
 
@@ -5451,6 +5467,63 @@ export class SessionService {
   // platform-lead session's frozen grants. Row-write only — a forced respawn here could interrupt a
   // mid-build/mid-git-op turn with nothing to recapture it, unlike a companion's short chat turn.
   repinSessionGrants(sessionId: string): { session: Session; diff: Record<string, { old: unknown; new: unknown }> } {
+    const { session, agent, config } = this.loadRepinTarget(sessionId);
+    const { patch, skillsDropped } = this.repinCapabilitySurface(session, agent, config);
+    // @decision 6745e4bc round 2 — the SAME managerSessionId attribution as the grants_repinned event
+    // right below (parentSessionId ?? sessionId), so a worker's own locked_role_skills_dropped and
+    // grants_repinned rows for one repin call always attribute to its parent manager, not its own id.
+    const managerSessionId = session.parentSessionId ?? sessionId;
+    this.recordSkillsDropped(session, managerSessionId, skillsDropped);
+    const diff = diffCapabilitySurfaceFields(session, patch);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, workerSessionId: sessionId, taskId: session.taskId ?? null,
+      kind: "grants_repinned", detail: { diff },
+    });
+    return { session: this.db.getSession(sessionId)!, diff };
+  }
+
+  // Card 158cb01a — the READ-ONLY twin of repinSessionGrants behind the web drift badge: the SAME refusals
+  // (loadRepinTarget) and the SAME resolution (resolveRepinSurface), but nothing is written and no event is
+  // filed. COUNTS ONLY: never an id, name or host — the response is safe to render and cannot widen the
+  // credential-reach surface. `drifted` is computed from the full diff (so an equal-count swap still
+  // reports), then the counts are all that leave the daemon.
+  sessionGrantDrift(sessionId: string): SessionGrantDrift {
+    const { session, agent, config } = this.loadRepinTarget(sessionId);
+    const { patch } = this.resolveRepinSurface(session, agent, config, true);
+    const diff = diffCapabilitySurfaceFields(session, patch);
+    const pinnedConns = session.connections?.length ?? 0;
+    const pinnedCaps = session.capabilities?.length ?? 0;
+    const pinnedVault = session.vaultWrite ?? false;
+    // A first-time grant: a conditionally-registered tool (authenticated_request/ssh_exec, vault_write) goes
+    // from absent to present, which an already-connected engine never re-lists (record 1a048349).
+    // ssh_exec registers only when the list holds >=1 USABLE ssh connection (mcp/server.ts), so a session that
+    // already pins other connections still gains it for the first time — the same resolver, both lists.
+    const sshAbsent = resolveUsableSshConnections(this.db, session.connections ?? [], session.projectId).length === 0;
+    const sshPresentNow = resolveUsableSshConnections(this.db, patch.connections, session.projectId).length > 0;
+    const firstTimeGrant = (pinnedConns === 0 && patch.connections.length > 0) || (!pinnedVault && patch.vaultWrite) || (sshAbsent && sshPresentNow);
+    // Spawn-time fields mount only at spawn (createPty/buildMcpServers); a change to any of them reaches the
+    // session only after its next resume, adds and revocations alike.
+    const SPAWN_TIME_FIELDS = ["capabilities", "browserTesting", "documentConversion", "restrictedTools", "skills"];
+    const spawnTimeChanged = SPAWN_TIME_FIELDS.some((k) => k in diff);
+    const skillsCount = (v: string[] | null | undefined): number | null => (v == null ? null : v.length);
+    return {
+      sessionId, drifted: Object.keys(diff).length > 0,
+      connections: { pinned: pinnedConns, current: patch.connections.length },
+      capabilities: { pinned: pinnedCaps, current: patch.capabilities.length },
+      vaultWrite: { pinned: pinnedVault, current: patch.vaultWrite },
+      restrictedTools: { pinned: session.restrictedTools ?? false, current: patch.restrictedTools },
+      noCommit: { pinned: session.noCommit ?? false, current: patch.noCommit },
+      browserTesting: { pinned: session.browserTesting ?? false, current: patch.browserTesting },
+      documentConversion: { pinned: session.documentConversion ?? false, current: patch.documentConversion },
+      skills: { pinned: skillsCount(session.skills), current: skillsCount(patch.skills) },
+      otherChanged: Object.keys(diff).filter((k) => k !== "connections" && k !== "capabilities" && k !== "vaultWrite"),
+      firstTimeGrant,
+      spawnTimeChanged,
+    };
+  }
+
+  private loadRepinTarget(sessionId: string): { session: Session; agent: Agent; config: ResolvedConfig } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     // @decision 6745e4bc round 2 — a STALE id refuses before any role check: an archived row has no live
@@ -5471,20 +5544,7 @@ export class SessionService {
     if (!project) throw new Error("project not found");
     const agent = this.db.getAgent(session.agentId);
     if (!agent) throw new Error("agent not found");
-    const config = resolveConfig(project.config);
-    const { patch, skillsDropped } = this.repinCapabilitySurface(session, agent, config);
-    // @decision 6745e4bc round 2 — the SAME managerSessionId attribution as the grants_repinned event
-    // right below (parentSessionId ?? sessionId), so a worker's own locked_role_skills_dropped and
-    // grants_repinned rows for one repin call always attribute to its parent manager, not its own id.
-    const managerSessionId = session.parentSessionId ?? sessionId;
-    this.recordSkillsDropped(session, managerSessionId, skillsDropped);
-    const diff = diffCapabilitySurfaceFields(session, patch);
-    this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId, workerSessionId: sessionId, taskId: session.taskId ?? null,
-      kind: "grants_repinned", detail: { diff },
-    });
-    return { session: this.db.getSession(sessionId)!, diff };
+    return { session, agent, config: resolveConfig(project.config) };
   }
 
   // @decision 39fcaad3 — daemon_restart's safety gates (supervisor-check, rebuild-first) are ROLE-

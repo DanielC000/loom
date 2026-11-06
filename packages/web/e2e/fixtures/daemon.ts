@@ -391,6 +391,8 @@ export interface LoomDaemon {
     /** (card a56270da) The session-row connection grant — the only way a spec can give a seeded session a
      *  row-keyed tool such as `ssh_exec`. Omitted ⇒ none, byte-identical to every existing call. */
     connections?: string[];
+    /** (card 158cb01a) Pin `restrictedTools: true` on the seeded row (agent resolves false => a loosening re-pin). */
+    restrictedTools?: boolean;
   }) => Promise<SeededLiveSession>;
   /**
    * Enqueue a message straight onto a LIVE session's pty FIFO with a chosen source+kind via POST
@@ -849,7 +851,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
           parentSessionId: opts.parentSessionId, taskId, branch: opts.branch, title: opts.title,
           ptyGeometry: opts.ptyGeometry, ptyBytes: opts.ptyBytes,
           model: opts.model, ctxInputTokens: opts.ctxInputTokens, harness: opts.harness,
-          processState: opts.processState, lastError: opts.lastError, connections: opts.connections,
+          processState: opts.processState, lastError: opts.lastError, connections: opts.connections, restrictedTools: opts.restrictedTools,
         }],
         wakes: opts.wake ? [{ sessionId, note: wakeNote }] : [],
       });

@@ -16,6 +16,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { AgentEditor, AgentForm, useAgentWrites } from "./agentEditor";
 import { SpawnControls } from "./SpawnControls";
+import { RepinGrantsControl } from "./RepinGrants";
 import { Button, Panel, SectionLabel, Select, StatusPill } from "./ui";
 import { RoleBadge, roleColor, roleDisplay } from "../lib/roleDisplay";
 import { errorText } from "../lib/loopbackCredential";
@@ -84,6 +85,8 @@ export function AgentActions({ entry }: { entry: RosterAgent }) {
             onClick={() => stop.mutate(entry.session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
       </div>
+      {/* Re-pin grants (card 158cb01a): the agent's live manager only — never a roster row without a session. */}
+      {entry.managerLive && entry.session && <RepinGrantsControl session={entry.session} />}
       {spawn.isError && <span className="loom-agentrow-err">{errorText(spawn.error)}</span>}
       {stop.isError && <span className="loom-agentrow-err">{errorText(stop.error)}</span>}
     </div>

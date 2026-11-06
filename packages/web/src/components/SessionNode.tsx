@@ -8,6 +8,7 @@ import { harnessOf } from "../lib/harnessFields";
 import { sessionNodeTabHref, sessionNodeTabsFor, type SessionNodeTab } from "../lib/sessionNodeTabs";
 import { useStopSession, useForkSession, useEndSession } from "../lib/useSessionActions";
 import { EndSessionButton, canEndSession } from "./SessionActions";
+import { RepinGrantsControl } from "./RepinGrants";
 import { HeadPill } from "./atlasHome";
 import { TerminalCard, type TerminalTabs } from "./TerminalCard";
 import { ReviewSurface } from "./ReviewSurface";
@@ -199,7 +200,7 @@ export function SessionNode({ session, tab = "terminal" }: {
       lifecycle={liveish ? "stop" : "none"}
       onStop={() => stop.mutate(session.id)}
       stopPending={stop.isPending}
-      actionsExtra={endAction}
+      actionsExtra={<>{endAction}<RepinGrantsControl session={session} /></>}
       readOnly={!liveish}
       maximizable
       showProject={false}

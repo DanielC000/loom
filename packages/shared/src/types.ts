@@ -760,6 +760,33 @@ export interface PendingMerge {
 }
 
 /**
+ * `GET /api/sessions/:id/grant-drift` — a read-only dry-run of `POST /api/sessions/:id/repin-grants`
+ * (human-only REST, Tier 0, never an MCP tool). COUNTS ONLY: it never carries a connection or capability
+ * id, name or host. `drifted` is computed from the full diff, so an equal-count swap still reports.
+ * `firstTimeGrant`: a conditionally-registered tool (ssh_exec / authenticated_request / vault_write) would
+ * go from absent to present, which a live engine only picks up after the session's next resume.
+ */
+export interface SessionGrantDrift {
+  sessionId: string;
+  drifted: boolean;
+  connections: { pinned: number; current: number };
+  capabilities: { pinned: number; current: number };
+  vaultWrite: { pinned: boolean; current: boolean };
+  /** The remaining patch fields, still counts/booleans only (skills: the subset size, `null` = unrestricted). */
+  restrictedTools: { pinned: boolean; current: boolean };
+  noCommit: { pinned: boolean; current: boolean };
+  browserTesting: { pinned: boolean; current: boolean };
+  documentConversion: { pinned: boolean; current: boolean };
+  skills: { pinned: number | null; current: number | null };
+  /** FIELD NAMES that differ besides connections/capabilities/vaultWrite (never values, ids or hosts). */
+  otherChanged: string[];
+  firstTimeGrant: boolean;
+  /** True when any spawn-time-only field (capabilities, browserTesting, documentConversion, restrictedTools,
+   *  skills) differs: those mount only at spawn, so adds and revocations alike wait for the next resume. */
+  spawnTimeChanged: boolean;
+}
+
+/**
  * @decision 7fcb586a — SESSION-ID NAMING POLICY for every MCP surface returning a session id to an
  *  agent (a NEW/RENAMED output field is `loomSessionId`/`engineSessionId`, never a bare `sessionId`;
  *  role-prefixed names and primary keys are exempt; input params keep their names).

@@ -2,6 +2,7 @@ import type { Session } from "@loom/shared";
 import { Button } from "./ui";
 import { color, font, fs } from "../theme";
 import { canResumeSession } from "../lib/sessions";
+import { RepinGrantsControl } from "./RepinGrants";
 
 // The per-session quick-action cluster — Clear-rate-limit / Fork / Stop / Resume — with its
 // per-state gating. The Workspace cockpit and the Overview fleet-accordion cockpit drive the SAME
@@ -45,6 +46,8 @@ export function SessionActions({
           (the terminal-card cluster renders for manager/platform/setup/auditor; the role guard is the
           explicit backstop). Idle-gated like Fork (disabled while busy). */}
       {canEndSession(s) && <EndSessionButton s={s} onEnd={onEnd} ending={ending} />}
+      {/* Re-pin grants (card 158cb01a): renders only when the session's pinned grants differ from its agent's. */}
+      <RepinGrantsControl session={s} />
       {live && <Button disabled={forking || s.busy} onClick={(ev) => { ev.stopPropagation(); onFork(); }}
         title={s.busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}>Fork</Button>}
       {live && <Button disabled={stopping} title="Stop this session — graceful Ctrl-C, clean and resumable"

@@ -43,9 +43,11 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 // ============ 0. SELF-TEST (RED proof): the regex itself can catch a real violation ============
 // Shown against a synthetic fixture rather than a real planted router tool — cheaper and hermetic, but
 // proves the exact same discriminator the real sweep below relies on.
-const REPIN_PATTERN = /re-?pin/i;
+// Card 158cb01a: the read-only GET /api/sessions/:id/grant-drift twin is HUMAN-only REST too, so the same
+// sweep also refuses any tool named for a grant drift.
+const REPIN_PATTERN = /re-?pin|grant.?drift|drift.?grant/i;
 {
-  const plantedViolations = ["grant_repin", "repin_grants", "session_repin"];
+  const plantedViolations = ["grant_repin", "repin_grants", "session_repin", "grant_drift", "session_grant_drift", "drift_grants"];
   const innocentNames = ["tasks_list", "worker_report", "session_message", "pending_bindings"];
   check("(0) RED proof: the sweep pattern DOES match every planted violation name",
     plantedViolations.every((n) => REPIN_PATTERN.test(n)));

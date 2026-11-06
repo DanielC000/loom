@@ -189,7 +189,10 @@ const SKIP_CHECK_ALLOWLIST = [
   // session's at repin time; see the method's own doc comment for why that's safe here anyway). The
   // literal call site now derives the role from THIS SESSION's OWN ROW (`session.role`), never a
   // caller-supplied variable — this mustContain text also proves that invariant, not just the flag's presence.
-  { file: "sessions/service.ts", mustContain: "config, session.role ?? undefined, false, undefined", method: "repinCapabilitySurface" },
+  // Card 158cb01a moved the literal call into `resolveRepinSurface`, the WRITE-FREE read core that
+  // repinCapabilitySurface (the write) and sessionGrantDrift (the human-only, counts-only dry-run GET) both
+  // call — the same human-authorized REST class, same row-derived role; the site count stays 9.
+  { file: "sessions/service.ts", mustContain: "config, session.role ?? undefined, false, undefined", method: "resolveRepinSurface" },
   // forkSession — carries the SOURCE row's already-pinned role forward.
   { file: "sessions/service.ts", mustContain: "forkAgent, config, src.role", method: "forkSession" },
   // startRun — every forbidden-key field is hardcoded false/absent on the spawned run session regardless.

@@ -3709,6 +3709,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // session a tool like `ssh_exec`, which the task MCP registers off this row (never the agent or
           // profile). Omitted ⇒ [] ⇒ byte-identical to every existing seed call.
           connections?: string[];
+          // The session-row restrictedTools pin (card 158cb01a) — lets a spec seed a row pinned `true` whose
+          // agent resolves `false`, i.e. a restriction-LOOSENING re-pin. Omitted ⇒ false, byte-identical.
+          restrictedTools?: boolean;
         }[];
         // A pending scheduled wake for a session — the ONLY way an e2e spec can make the SessionWakes
         // sub-panel render (it draws nothing when empty). DB-backed (insertWake), so it round-trips
@@ -4066,6 +4069,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           ctxInputTokens: s.ctxInputTokens ?? null,
           harness: s.harness,
           ...(Array.isArray(s.connections) ? { connections: s.connections.filter((c): c is string => typeof c === "string") } : {}),
+          ...(s.restrictedTools === true ? { restrictedTools: true } : {}),
         };
         deps.db.insertSession(row);
         liveSessionIds.push(id);
@@ -6842,6 +6846,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     } catch (e) {
       // @decision 6745e4bc round 2 — map ONLY a known refusal to 409; an unexpected throw (e.g. a
       // data-integrity "project not found") rethrows for Fastify's default handler to surface as a 500.
+      if (e instanceof RepinGrantsRefusalError) return reply.code(409).send({ error: e.message });
+      throw e;
+    }
+  });
+  // Card 158cb01a — read-only dry-run of the route above (the web drift badge). Counts only, never an id.
+  // Deliberately NOT in trust-tier.ts's Tier-1 list, so it is Tier 0 (loopback-only) like the POST it
+  // mirrors; no MCP tool anywhere.
+  app.get("/api/sessions/:id/grant-drift", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    try {
+      return reply.send(deps.sessions.sessionGrantDrift(id));
+    } catch (e) {
       if (e instanceof RepinGrantsRefusalError) return reply.code(409).send({ error: e.message });
       throw e;
     }
