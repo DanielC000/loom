@@ -77,12 +77,15 @@ export function __setProcessBuiltInfoForTest(sha: string | null, dirty: boolean 
  * `deploySignatureMismatch`; route it through this function so `buildServedStatus` and
  * `resumeFleetOnBoot` keep reading the identical signal instead of silently drifting apart.
  */
+// Card bba7a8ec: SYNC driver — TEST/FIXTURE-ONLY (blocks the event loop on git). No production source file may
+// call it; `test/deploy-staleness-sync-driver-test-only-guard.mjs` enforces that. Production uses the Async twin.
 export function currentDeployStaleness(): DeployStalenessResult {
   return computeDeployStaleness({ processBuiltSha, processBuiltDirty });
 }
 
 /** Async twin of {@link currentDeployStaleness} (same captured pair, same single chokepoint) whose git
- *  history reads do not block the event loop — used only by {@link buildServedStatusAsync}. */
+ *  reads — ALL of them, conditional ones included — do not block the event loop. The production read:
+ *  {@link buildServedStatusAsync}, `SessionService.resolveDeployStalenessAsync` (spawn/boot/stamp paths). */
 export function currentDeployStalenessAsync(
   asyncGit?: (repoRoot: string, args: string[]) => Promise<string>,
 ): Promise<DeployStalenessResult> {
@@ -235,7 +238,7 @@ export function buildServedStatus(db: Db): ServedStatus {
 
 /** The request-serving twin: identical payload, but the deploy-staleness git history reads run without
  *  blocking the event loop. The REST route and the MCP `served_status` handler call THIS one; the sync
- *  {@link buildServedStatus} remains for synchronous callers/tests. */
+ *  {@link buildServedStatus} is the TEST/FIXTURE-ONLY sync form (card bba7a8ec). */
 export async function buildServedStatusAsync(db: Db): Promise<ServedStatus> {
   return composeServedStatus(db, await currentDeployStalenessAsync());
 }

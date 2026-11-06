@@ -96,6 +96,8 @@ function makeFakeSessions(opts = {}) {
   const calls = [];
   return {
     calls,
+    // Card bba7a8ec: a manager spawn through the lever pre-reads deploy staleness first (async, off the loop).
+    resolveDeployStalenessAsync: async () => undefined,
     spawnSessionAsPlatform(projectId, agentId, role) {
       calls.push({ projectId, agentId, role });
       if (opts.throwMessage) throw new Error(opts.throwMessage);

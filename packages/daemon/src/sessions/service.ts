@@ -75,8 +75,8 @@ import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeE
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
 import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, runBuildStep, DIST_IMPORTER_REFIRE_MAX_PATHS, type DistImporterRefireEntry, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult, type RequestDaemonRestartResult } from "../orchestration/restart.js";
 import { armHardShutdownWatchdog, GRACEFUL_TEARDOWN_HARD_EXIT_MS } from "../graceful-teardown.js";
-import { currentDeployStaleness } from "../served-status.js";
-import { advisoryBuildStamp, type DeployStalenessResult } from "../deploy-staleness.js";
+import { currentDeployStalenessAsync } from "../served-status.js";
+import { advisoryBuildStamp, notApplicableDeployStaleness, type DeployStalenessResult } from "../deploy-staleness.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible, willRecoverAutomatically } from "../orchestration/crash-recovery-watcher.js";
@@ -1174,6 +1174,8 @@ type ConfirmMergeResult = {
  *  merge-gate hairline keep SHOWING the terminal result before reverting to nothing — a cosmetic window,
  *  tunable independent of the dedupe safety net, deliberately kept short so a stale card doesn't linger. */
 const MERGE_OP_RETAIN_MS = 5_000;
+/** Overall cap on the PRE-SETTLE settle-nudge build-stamp read (`readStampSuffix`): ~2x the measured ~4 s post-merge read. */
+const SETTLE_STAMP_READ_CAP_MS = 8_000;
 
 /** How long a settled `spawn` op stays re-callable — closes card b1fcb6a7: `worker_spawn`'s own pending
  *  note tells a caller to "re-call worker_spawn with the SAME taskId/agentId/kickoffPrompt to fetch the
@@ -4293,7 +4295,7 @@ export class SessionService {
    * prompt via `composeWorkerStartupPrompt`'s brief+"---"+dynamicPart shape (reused verbatim, no new
    * compose path) — omitted ⇒ byte-identical to today.
    */
-  startNew(agentId: string, opts: { forcePlain?: boolean; companionName?: string; kickoffPrompt?: string } = {}): Session {
+  startNew(agentId: string, opts: { forcePlain?: boolean; companionName?: string; kickoffPrompt?: string; deployStaleness?: DeployStalenessResult } = {}): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -4380,7 +4382,7 @@ export class SessionService {
         ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
         : role === "manager"
         ? appendMemoryRecallToStartupPrompt(
-            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) }),
+            composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) }, opts.deployStaleness),
             codescapeStatus!.text,
           )
         : startupPrompt;
@@ -4447,7 +4449,7 @@ export class SessionService {
   // @decision 53edd8d5 — a scheduled manager's custom prompt + scheduledSpawn flag are both additive;
   // every non-Scheduler caller stays byte-identical to before either existed. Never fold the Scheduler's
   // own manager-cap budget into the standing human/Lead-spawned fleet's cap — they are separate budgets.
-  startManager(agentId: string, prompt?: string | null, opts?: { scheduled?: boolean; spawnHumanAuthorized?: boolean }): Session {
+  startManager(agentId: string, prompt?: string | null, opts?: { scheduled?: boolean; spawnHumanAuthorized?: boolean; deployStaleness?: DeployStalenessResult }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -4527,7 +4529,7 @@ export class SessionService {
         startupPrompt: ((): string | undefined => {
           const scheduled = appendScheduledPrompt(
             appendMemoryRecallToStartupPrompt(
-              composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) }),
+              composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) }, opts?.deployStaleness),
               codescapeStatus.text,
             ),
             prompt,
@@ -5010,7 +5012,7 @@ export class SessionService {
    *  (`allowSuperseded` stays false), matching every other AUTOMATIC resume caller: a companion-triggered
    *  resume never force-resurrects a recycled session out from under its live successor. Scope/roleFilter/
    *  Primitive-A enforcement live entirely in the lever (companion/capabilities.ts). */
-  resume(sessionId: string, opts: { allowSuperseded?: boolean } = {}): Session {
+  resume(sessionId: string, opts: { allowSuperseded?: boolean; deployStaleness?: DeployStalenessResult } = {}): Session {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     // Already-live short-circuit (latent orphan-pty guard): every automatic caller pre-checks liveness
@@ -5130,7 +5132,7 @@ export class SessionService {
       ? this.resolveAgentSpawn(agent, config, session.role ?? undefined, this.effectiveForcePlain(session, agent), undefined, { skipGrantCarryoverCheck: true })
       : undefined;
     if (forcedRoleFreshStart) {
-      return this.resumeForcedRoleAsFreshClaude(session, project, config, agent, resolvedSpawn);
+      return this.resumeForcedRoleAsFreshClaude(session, project, config, agent, resolvedSpawn, opts.deployStaleness);
     }
     const resumePermission = resolvedSpawn
       ? resolvedSpawn.permission
@@ -5298,6 +5300,7 @@ export class SessionService {
   private resumeForcedRoleAsFreshClaude(
     session: Session, project: Project, config: ResolvedConfig, agent: Agent | undefined,
     resolvedSpawn: ReturnType<SessionService["resolveAgentSpawn"]> | undefined,
+    deployStaleness?: DeployStalenessResult,
   ): Session {
     const role = session.role!;
     const forcedDetail = resolvedSpawn?.harnessRoleForced ?? {
@@ -5318,6 +5321,7 @@ export class SessionService {
         composeManagerStartupPrompt(
           (warmup ? warmup + "\n\n---\n" : "") + notice,
           { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) },
+          deployStaleness,
         ),
         codescapeStatus.text,
       );
@@ -8469,11 +8473,14 @@ export class SessionService {
     opts: { resumeOne?: (id: string) => ResumeOneResult; now?: Date; deployStaleness?: DeployStalenessResult } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; retiredSkipped: string[]; setupResumeSuperseded: string[] } {
     const now = opts.now ?? new Date();
-    const deployStaleness = opts.deployStaleness ?? currentDeployStaleness();
+    // Card bba7a8ec: this method is synchronous and reads NO git. Its one production caller (index.ts, inside
+    // an async boot) pre-reads `currentDeployStalenessAsync()` and passes it as `opts.deployStaleness`; a call
+    // without one gets the honest "not measured" wording (undefined), never a blocking read.
+    const deployStaleness = opts.deployStaleness ?? notApplicableDeployStaleness();
     // Card ee05750e: the reason a resume attempt failed now survives past the bare boolean this used to
     // return — see normalizeResumeOneResult's own doc for why the shape is a union, not a breaking change.
     const resumeOne = opts.resumeOne ?? ((id: string): ResumeOneResult => {
-      try { this.resume(id); return { ok: true }; } catch (e) { return { ok: false, reason: (e as Error).message }; }
+      try { this.resume(id, { deployStaleness }); return { ok: true }; } catch (e) { return { ok: false, reason: (e as Error).message }; }
     });
     const retiredSkipped: string[] = [];
     // @decision 08c81809 — CRITICAL (round 3): a retired recycle successor must never be re-resumed
@@ -9049,7 +9056,13 @@ export class SessionService {
             : `${failed.length} session(s) elsewhere in the fleet failed to resume.`;
         // @decision db2179f6 — "your merged daemon code is now LIVE" is caveated when intent.supervisorChanged (the supervisor script's own lines stay inert until a human re-runs `pnpm daemon:stable`).
         // @decision 062fa934 — deploySignatureMismatch is checked BEFORE supervisorChanged: a cache-replay signature mismatch is the strictly stronger doubt, so it must win the ladder; this gates the CLAIM text only, never the restart itself.
-        const liveClaim = deployStaleness.deploySignatureMismatch
+        const liveClaim = deployStaleness === undefined
+          // Card bba7a8ec: no pre-read was handed in (a caller without an async seam) — the signature check
+          // was not run, so neither "live" nor a mismatch may be claimed.
+          ? `whether this daemon process is now executing your merged code was NOT checked at boot (no deploy ` +
+            `signature was measured) — verify via \`deploySignatureMismatch\` on \`served_status\` rather than ` +
+            `assuming the merge landed`
+          : deployStaleness.deploySignatureMismatch
           ? `what this daemon process is now executing could NOT be confirmed as your merged code — its ` +
             `own build artifact's baked commit sha disagrees with what the derived build clocks imply (a ` +
             `turbo cache-replay signature; see \`deploySignatureMismatch\` on \`served_status\`). Verify ` +
@@ -11500,7 +11513,9 @@ export class SessionService {
    * "current") when the signal itself is unavailable. Reuses `advisoryBuildStamp` — never a second,
    * independently-derived stamp formula.
    */
-  private buildStampSuffix(staleness: DeployStalenessResult): string {
+  private buildStampSuffix(staleness: DeployStalenessResult | undefined): string {
+    // Card bba7a8ec: `undefined` = a sync site that never read git — say so, never imply current or stale.
+    if (staleness === undefined) return notApplicableDeployStaleness() ? "" : " [build: not measured]";
     const stamp = advisoryBuildStamp(staleness);
     return stamp ? ` [build: ${stamp}]` : "";
   }
@@ -11513,8 +11528,71 @@ export class SessionService {
    * `currentDeployStaleness()` directly whenever no override is set (the production default, and every
    * test that never calls {@link setDeployStalenessOverrideForTest}).
    */
-  resolveDeployStaleness(): DeployStalenessResult {
-    return this.deployStalenessOverride ?? currentDeployStaleness();
+  async resolveDeployStalenessAsync(): Promise<DeployStalenessResult> {
+    return this.deployStalenessOverride ?? await currentDeployStalenessAsync();
+  }
+
+  /**
+   * Card bba7a8ec — for an ASYNC entry point about to call the synchronous `startNew` on an agent that may
+   * resolve to a manager: the pre-read staleness to pass as `opts.deployStaleness`, or `undefined` (no git
+   * read at all) when the agent's Profile does not confer the manager role — a non-manager spawn never
+   * renders the notice, so it must not pay for the read.
+   */
+  async preReadDeployStalenessForAgent(agentId: string): Promise<DeployStalenessResult | undefined> {
+    const profileId = this.db.getAgent(agentId)?.profileId;
+    const role = profileId ? this.db.getProfile(profileId)?.role : undefined;
+    return role === "manager" ? this.resolveDeployStalenessAsync() : undefined;
+  }
+
+  /** Same idea for a RESUME: only a manager row can reach the kickoff-composing resume path. */
+  async preReadDeployStalenessForSession(sessionId: string): Promise<DeployStalenessResult | undefined> {
+    return this.db.getSession(sessionId)?.role === "manager" ? this.resolveDeployStalenessAsync() : undefined;
+  }
+
+  /**
+   * Card bba7a8ec — the build-stamp suffix for a one-shot terminal settle nudge, READ BEFORE THE OP SETTLES.
+   * A settle marks its `pending_gate_ops` row settled synchronously, and boot's reconcile only recovers rows
+   * still `pending`, so a git await BETWEEN settle and enqueue would lose the nudge to a restart in that window
+   * (ccb407eb). Every op body therefore awaits this (via {@link withSettleStamp}) and hands the stamp to its
+   * settle callback through a closure variable: settle → enqueue stays one synchronous span. Never throws; a
+   * failed read yields the honest "not measured" stamp.
+   */
+  private async readStampSuffix(): Promise<string> {
+    // Overall cap on this PRE-SETTLE read (the per-read git cap is separate and longer-tailed): a stuck read
+    // must not hold the op's settle open. On timeout it renders the honest "not measured" stamp. Only this
+    // pre-settle read carries the cap — the served_status / kickoff reads do not.
+    let timer: NodeJS.Timeout | undefined;
+    const cap = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), SETTLE_STAMP_READ_CAP_MS);
+      timer.unref?.();
+    });
+    try {
+      return this.buildStampSuffix(await Promise.race([this.resolveDeployStalenessAsync(), cap]));
+    } catch {
+      return this.buildStampSuffix(undefined);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** Runs `body`, then — on success OR failure, before returning/throwing, i.e. before the op settles — reads
+   *  the settle-nudge stamp and hands it to `capture`. The body's own value/error passes through unchanged. */
+  private async withSettleStamp<T>(body: () => Promise<T>, capture: (stampSuffix: string) => void): Promise<T> {
+    try {
+      return await body();
+    } finally {
+      capture(await this.readStampSuffix());
+    }
+  }
+
+  /**
+   * Card bba7a8ec — the SYNCHRONOUS counterpart for a caller with no async seam: it never spawns git. It
+   * yields the test pin when set, else the synchronous not-applicable result when there is no `.git` (a
+   * packaged install — renders nothing), else `undefined`, which {@link buildStampSuffix} and
+   * `composeManagerStartupPrompt` render as an honest "not measured" form (never a stale/fresh claim).
+   */
+  resolveDeployStalenessWithoutGit(): DeployStalenessResult | undefined {
+    return this.deployStalenessOverride ?? notApplicableDeployStaleness();
   }
 
   /**
@@ -11606,14 +11684,15 @@ export class SessionService {
    * @decision d7f3416b — beforeInstant bounds the sweep to rows minted strictly before this boot, so a
    *  genuinely-running fresh op is never mistaken for a restart orphan.
    */
-  reconcileOrphanedGateOps(beforeInstant: string): number {
+  reconcileOrphanedGateOps(beforeInstant: string, preReadDeployStaleness?: DeployStalenessResult): number {
     let cleared = 0;
     // Card 791def40: ONE staleness read shared across the WHOLE sweep, not one per row — this loop can
     // touch many ops in a single boot pass, and `currentDeployStaleness()` is a synchronous, uncached,
     // git-call-laden read (see deploy-staleness.ts's own module doc); a fresh call per row would multiply
     // that cost by the row count for no benefit (every row settles in the SAME boot, so the answer can't
     // change between them).
-    const deployStaleness = this.resolveDeployStaleness();
+    // Card bba7a8ec: synchronous, so it never spawns git — boot's async main passes `preReadDeployStaleness`.
+    const deployStaleness = preReadDeployStaleness ?? this.resolveDeployStalenessWithoutGit();
     for (const row of this.db.listSurfacedPendingGateOps(beforeInstant)) {
       // STRUCTURALLY UNREACHABLE for "deploy" (card bed91595): `deployOwnProject`'s tombstone is minted
       // and settled back-to-back in one synchronous span (see that insert's own comment) — it never calls
@@ -18045,6 +18124,9 @@ export class SessionService {
    * halt-and-notify branch.
    */
   async recycleManager(oldManagerId: string, continuationPrompt: string): Promise<Session> {
+    // Card bba7a8ec: the successor's kickoff carries the deploy-staleness notice; read it off the event loop
+    // FIRST (before any check or state change below) — every step after this await is as synchronous as before.
+    const deployStaleness = await this.resolveDeployStalenessAsync();
     const old = this.db.getSession(oldManagerId);
     if (!old || old.role !== "manager") throw new Error("not a manager session");
     // FAIL SAFE before any teardown/spawn: a blank/whitespace continuation would seed an empty successor
@@ -18179,6 +18261,7 @@ export class SessionService {
           `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
           `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
         { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename, orchestration: { maxConcurrentWorkers: config.orchestration.maxConcurrentWorkers, gateCommandTimeoutMs: config.orchestration.gateCommandTimeoutMs }, projectWorkDir: projectWorkDir(project.id) },
+        deployStaleness,
       ),
       codescapeStatus.text,
     );
@@ -19443,13 +19526,13 @@ export class SessionService {
    *  SAME `getByIdPrefix` resolver every sibling `*_get` tool uses. Do not hand-roll a second
    *  prefix-resolution scheme here, and do not drop the belongs-to-project check below as "redundant".
    */
-  spawnSessionAsPlatform(projectId: string, agentId: string, role: "manager" | "plain"): Session {
+  spawnSessionAsPlatform(projectId: string, agentId: string, role: "manager" | "plain", opts: { deployStaleness?: DeployStalenessResult } = {}): Session {
     const project = getByIdPrefix(projectId, (id) => this.db.getProject(id), () => this.db.listAllProjects(), "project");
     if ("error" in project) throw new Error(project.error);
     const agent = getByIdPrefix(agentId, (id) => this.db.getAgent(id), () => this.db.listAgents(project.id), "agent");
     if ("error" in agent) throw new Error(agent.error);
     if (agent.projectId !== project.id) throw new Error("agent does not belong to the given project");
-    if (role === "manager") return this.startManager(agent.id);
+    if (role === "manager") return this.startManager(agent.id, undefined, { deployStaleness: opts.deployStaleness });
     return this.startNew(agent.id, { forcePlain: true });
   }
 
@@ -20424,7 +20507,7 @@ export class SessionService {
           // gate_status's own read-time enrichment — this rejection nudge may be read long after the
           // event, possibly across a restart, so it needs the CURRENT build's stamp, not one captured
           // earlier in this method.
-          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness()), { sender: "system", taskId, kind: "agent" });
+          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(await this.resolveDeployStalenessAsync()), { sender: "system", taskId, kind: "agent" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): after a real hand-off — delivered OR durably queued/held
           // (card 646de997: `r.delivered` alone missed the queued case, see shouldCancelSettleWakeAfter's
           // own doc) — see autoCancelSettleWakes's doc for why a dropped push must leave every pending
@@ -23678,7 +23761,7 @@ export class SessionService {
     // @decision cc9bce38 — the success announcement is sent AFTER finalize (it may RETAIN the branch, and "finishing the cleanup" must never contradict that);
     // whether it is owed is decided BEFORE, since finalize itself files the merge_done this reads.
     const alreadyFinalizedBefore = !args.suppressNotify && this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
-    const announce = (retainedNote?: string): void => {
+    const announce = async (retainedNote?: string): Promise<void> => {
       if (!args.suppressNotify) {
       const alreadyFinalized = alreadyFinalizedBefore;
       if (!alreadyFinalized) {
@@ -23688,7 +23771,7 @@ export class SessionService {
         const target = this.resolveSettleNudgeTarget(args.managerSessionId);
         // Card 791def40: fresh read — this success announcement may be read long after the event,
         // possibly across a restart, and carries no other staleness-derived claim.
-        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main${args.gateSkipped ? ` (commit ${(args.attributedSha ?? args.mergedSha ?? "unknown").slice(0, 8)}); finished as already-landed WITHOUT running the merge gate — this is not a gate pass` : ""}; ${retainedNote ? `the branch was RETAINED, NOT cleaned up (${retainedNote})` : "finishing the worktree cleanup + task without a new commit."}` + this.settleNudgeAttribution(target, args.managerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness());
+        const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main${args.gateSkipped ? ` (commit ${(args.attributedSha ?? args.mergedSha ?? "unknown").slice(0, 8)}); finished as already-landed WITHOUT running the merge gate — this is not a gate pass` : ""}; ${retainedNote ? `the branch was RETAINED, NOT cleaned up (${retainedNote})` : "finishing the worktree cleanup + task without a new commit."}` + this.settleNudgeAttribution(target, args.managerSessionId) + this.buildStampSuffix(await this.resolveDeployStalenessAsync());
         try {
           // Card ccb407eb: a ONE-SHOT TERMINAL success announcement (never re-sent) — durable like every
           // other settle nudge.
@@ -23725,7 +23808,7 @@ export class SessionService {
     // @decision f2b4d684 (round 4) — read AFTER finalize, same timing as `retainedText` above: only
     // meaningful once a retain actually fired (the tip guard's closure sets it there, never earlier).
     const tipUnverifiableAtFinish = args.tipUnverifiable?.() === true;
-    announce(retainedText);
+    await announce(retainedText);
     const nestedWarning = finalizeResult.nestedRepoBlock ? nestedRepoBlockWarning(finalizeResult.nestedRepoBlock) : undefined;
     // Task 035fb673: same additive worktree-GC warning as the Green path (confirmWorkerMerge) — see its
     // own comment for why this is purely additive and never a failure signal.
@@ -24166,6 +24249,8 @@ export class SessionService {
     // @decision 641cc62c — extracted to a named const (byte-identical body) so the real attach() `run`
     // argument can be a tiny wrapper chaining `.finally()` onto ITS returned promise — the release must
     // fire on the RUN's own completion, not from `onSettle` (which never fires for an evicted entry).
+    // Card bba7a8ec: the settle nudge's build stamp, read inside the op body BEFORE settle (see readStampSuffix).
+    let batchSettleStamp = this.buildStampSuffix(undefined);
     const runBatchBody = async (opId: string): Promise<MergeBatchResult> => {
         // @decision 641cc62c — re-runs spawnMintConflict synchronously here (the pre-assembly check above
         // leaves a real await-window where a spawn can slip in before this mint); a newly-conflicting
@@ -25180,7 +25265,12 @@ export class SessionService {
     };
     return this.pendingOps.attach<MergeBatchResult>(
       batchKey, "merge", managerSessionId, this.syncAttachBudgetMs,
-      (opId) => runBatchBody(opId).finally(() => {
+      (opId) => runBatchBody(opId).finally(async () => {
+        // Card bba7a8ec: awaited BEFORE this run settles, so the settle callback below enqueues in the same span.
+        // Runs FIRST (before the task claim is released below) so a spawn/recycle cannot cut the worktree
+        // during the read window; `readStampSuffix` never throws, so the claim release below cannot leak.
+        batchSettleStamp = await this.readStampSuffix();
+      }).finally(() => {
         // @decision 641cc62c — released on the RUN's own completion (chained here), NEVER from the
         // `onSettle` opt below — that hook never fires for an entry `evictDeadOwner()` force-removed.
         for (const c of liveChosen) if (c.taskId) this.clearMergeInFlightForTask(c.taskId, opId);
@@ -25279,12 +25369,15 @@ export class SessionService {
           : outcome.value.canonicalTrustRefusal
           ? `[loom:merge-batch-trust-refusal] merge_batch [op ${opId}] refused: ${outcome.value.reason ?? "canonical-git trust refusal"}. Canonical repo untouched — this is a canonical-git TRUST refusal, not an ordinary merge failure. NOTHING was started: ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`
           : `[loom:merge-batch-failed] merge_batch [op ${opId}] landed nothing via the batch path (${outcome.value.reason ?? "see fallback"}) — ${fallbackSummary(outcome.value)}${fallbackList(outcome.value)}`;
-        try {
+        // Card bba7a8ec: the build stamp was read inside the op body BEFORE settle (`batchSettleStamp`), so this
+        // settle → enqueue is one synchronous span — no git await in between (ccb407eb durability).
+        const stampSuffix = batchSettleStamp;
+        { try {
           // Card 791def40: fresh read, mirroring the solo-merge settle nudge (confirmWorkerMergeTracked's
           // onSettledAfterPending) — this settle carries no other staleness-derived claim, and it may be
           // read long after the event, possibly across a restart.
-          this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness()), { sender: "system", taskId: null, kind: "warning" });
-        } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
+          this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + stampSuffix, { sender: "system", taskId: null, kind: "warning" });
+        } catch { /* manager not live — best-effort, mirrors every other completion nudge */ } }
       },
       {
         // RECOVERABLE-VERDICT RETENTION (card cf803152 — the finding: this key used to pass NEITHER
@@ -27383,6 +27476,8 @@ export class SessionService {
     // RESERVATION (see reserveMergeGate): a skip decision holds one ungated landing until this confirm settles, so overlapping confirms
     // cannot land past N. Taken in the SAME synchronous step as the decision. A batch fallback instead carries its own unit.
     let mgStarted = false;
+    // Card bba7a8ec: the settle nudge's build stamp, read inside the op body BEFORE settle (see readStampSuffix).
+    let settleStamp = this.buildStampSuffix(undefined);
     let mgRes: { release: () => void } | undefined;
     if (opts?.mergeGateDecision) {
       const shared = opts.mergeGateReservation;
@@ -27470,6 +27565,11 @@ export class SessionService {
           }
           throw err;
         }
+      }).finally(async () => {
+        // Card bba7a8ec: awaited BEFORE this run settles, so the settle callback below enqueues in the same span.
+        // Runs FIRST (before the task claim is released below) so a spawn/recycle cannot cut the worktree
+        // during the read window; `readStampSuffix` never throws, so the claim release below cannot leak.
+        settleStamp = await this.readStampSuffix();
       }).finally(() => {
         // @decision 641cc62c — released on the RUN's own completion (chained here), NEVER from the
         // `onSettle` opt below — that hook never fires for an entry `evictDeadOwner()` force-removed.
@@ -27605,18 +27705,21 @@ export class SessionService {
         // time, not the asking manager captured when the op started; attributed to the predecessor when
         // routed, so a manager juggling concurrent merges can tell this apart from one of its own.
         const target = this.resolveSettleNudgeTarget(managerSessionId);
-        try {
+        // Card bba7a8ec: the build stamp was read inside the op body BEFORE settle (`settleStamp`), so this
+        // settle → enqueue is one synchronous span — no git await in between (ccb407eb durability).
+        const stampSuffix = settleStamp;
+        { try {
           // Card ccb407eb: THE specimen this card fixed — this generic settle echo used to be a bare
           // enqueueStdin with no onDeliver and no DB record at all (zero durability at any layer), so a
           // give-up here was a total, unrecoverable loss even across a daemon restart. A ONE-SHOT TERMINAL
           // signal (never re-sent) — now durable like every other settle nudge.
           // Card fde10c75: same build-stamp suffix as the merge-rejected nudge above.
-          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness()), { sender: "system", taskId, kind: "warning" });
+          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId) + stampSuffix, { sender: "system", taskId, kind: "warning" });
           // @decision 9d521792 — reaps fallback wakes after a real hand-off (delivered OR durably
           // queued/held — card 646de997, see shouldCancelSettleWakeAfter's own doc); `opStartedAt` is
           // the CLOSED-OVER value captured before `attach()`, never a settle-time `peek()` re-derive.
           if (this.shouldCancelSettleWakeAfter(r)) this.autoCancelSettleWakes(target, opStartedAt, opId);
-        } catch { /* manager not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */ }
+        } catch { /* manager not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */ } }
       },
       {
         // @decision d1aee5f1 — keeps the settled op briefly `peek()`-able with a distinct terminal outcome
@@ -28026,9 +28129,11 @@ export class SessionService {
         }
       }
     }
+    // Card bba7a8ec: the settle nudge's build stamp, read inside the op body BEFORE settle (see readStampSuffix).
+    let gateSettleStamp = this.buildStampSuffix(undefined);
     const result = await this.pendingOps.attach<WorkerGateResult>(
       key, "gate", workerSessionId, this.syncAttachBudgetMs,
-      async (opId) => {
+      (opId) => this.withSettleStamp(async () => {
         // WORKTREE STAMP (card 50c1e0d0): recorded ONCE, at the true start of a genuinely fresh run — never
         // re-recorded by a call that merely attaches to this same running op. Cleared in `finally` so the
         // map only ever holds an entry for the lifetime of ITS OWN in-flight invocation.
@@ -28297,7 +28402,7 @@ export class SessionService {
           if (this.gateStartStamps.get(key) === startStamp) this.gateStartStamps.delete(key);
           if (admitStamp !== undefined && this.gateAdmitStamps.get(key) === admitStamp) this.gateAdmitStamps.delete(key);
         }
-      },
+      }, (stampSuffix) => { gateSettleStamp = stampSuffix; }),
       //
       // @decision 74716cfb — converting this callback to async is safe for its CALLER only
       // (`PendingOpRegistry.attach` invokes it fire-and-forget, no `await` of its own) — never assume
@@ -28349,7 +28454,7 @@ export class SessionService {
               `[loom:${tag}] op ${opId} — your gate self-check was cancelled (${outcome.value.reason ?? "cancelled"}). ` +
                 "This is NOT a failure — no verdict was reached, there is nothing to fix." +
                 this.settleNudgeAttribution(target, workerSessionId) +
-                this.buildStampSuffix(this.resolveDeployStaleness()),
+                gateSettleStamp,
               { sender: "system", taskId: worker.taskId ?? null },
             );
           } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
@@ -28440,7 +28545,7 @@ export class SessionService {
           // Card ccb407eb: a ONE-SHOT TERMINAL gate outcome (never re-sent) — durable like every other
           // settle nudge.
           // Card fde10c75: same build-stamp suffix as the merge nudges above.
-          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, workerSessionId) + this.buildStampSuffix(this.resolveDeployStaleness()), { sender: "system", taskId: worker.taskId ?? null, kind: "warning" });
+          const r = this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, workerSessionId) + gateSettleStamp, { sender: "system", taskId: worker.taskId ?? null, kind: "warning" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): after a real hand-off — delivered OR durably queued/
           // held (card 646de997: `r.delivered` alone missed the queued case — see
           // shouldCancelSettleWakeAfter's own doc). `opStartedAt` is the CLOSED-OVER value captured
@@ -29554,13 +29659,15 @@ export class SessionService {
    * same durable delivery (`enqueueDurableMessage`). One-shot: `db.markMergeReconcileEscalated` makes a
    * repeat call for an already-escalated entry a no-op, so this never re-fires on every subsequent boot.
    */
-  private escalateWedgedMergeReconcile(s: Session, project: Project, entry: MergeReconcileWedgeEntry): void {
+  private escalateWedgedMergeReconcile(s: Session, project: Project, entry: MergeReconcileWedgeEntry, staleness: DeployStalenessResult | undefined): void {
     const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
     const ageDays = Math.max(0, Math.round((Date.now() - new Date(entry.firstWedgedAt).getTime()) / 86_400_000));
     const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${s.branch ?? "?"}, task ${(s.taskId ?? "?").slice(0, 8)}) on project "${project.name}" has a merge reconciliation that can never complete automatically: repoKey "${entry.repoKey}" does not name a registered repo on this project, and retrying will never change that. Wedged since ${entry.firstWedgedAt} (~${ageDays} day(s), ${entry.attempts} boot retries) — NOTE: "wedged since" is when this daemon started TRACKING the wedge, not necessarily when it first began; a record can predate this tracking and be older than it reports. This is NOT a transient failure — a human should either register that repoKey on the project, or confirm the branch is gone and close the task by hand.`
       // Card 791def40: fresh read — this escalation fires rarely (past a give-up attempts/age threshold),
       // never in a per-row sweep like reconcileOrphanedGateOps, so a shared read buys nothing here.
-      + this.buildStampSuffix(this.resolveDeployStaleness());
+      // Card bba7a8ec: this method is synchronous, so it never reads git itself — its async caller pre-reads
+      // and passes `staleness` in, matching the sibling [loom:merge-orphaned] escalations below.
+      + this.buildStampSuffix(staleness);
     try {
       this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" });
     } catch {
@@ -29646,7 +29753,7 @@ export class SessionService {
         if (!entry.watermark.escalated) {
           const target = this.resolveSettleNudgeTarget(s.parentSessionId ?? s.id);
           const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path, and Loom cannot even attempt to check its landing: the stored mainline watermark for repo "${s.repoKey ?? "primary"}" is corrupt. This will never clear on its own — reset it via POST /api/projects/${project.id}/mainline-watermark/reset (after checking out the right branch), then this worker's own landing can be checked again on a later boot.`
-            + this.buildStampSuffix(this.resolveDeployStaleness());
+            + this.buildStampSuffix(await this.resolveDeployStalenessAsync());
           try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
           this.db.markStaleGenerationWatermarkEscalated(s.id);
           // eslint-disable-next-line no-console
@@ -29667,7 +29774,7 @@ export class SessionService {
         // @decision 1fae1b98 — this nudge must name a remedy too (worded conditionally — this cause may
         // self-heal, unlike the corrupt-cause nudge's certain reset).
         const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path, and ${wm.attempts} consecutive boot(s) over ~${ageDays} day(s) have each hit ${reason} — never a definitive content mismatch, so Loom cannot rule out this eventually self-healing, but it has gone on long enough to need a human look. If the stored branch was renamed or deleted, reset the project's mainline baseline via POST /api/projects/${project.id}/mainline-watermark/reset (after checking out the right branch); if it's a host/filesystem condition instead, no action may be needed. Loom will keep retrying every boot regardless; this alert will not repeat.`
-          + this.buildStampSuffix(this.resolveDeployStaleness());
+          + this.buildStampSuffix(await this.resolveDeployStalenessAsync());
         try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
         this.db.markStaleGenerationWatermarkEscalated(s.id);
         // eslint-disable-next-line no-console
@@ -29702,7 +29809,7 @@ export class SessionService {
         const ageDays = Math.max(0, Math.round(ageMs / 86_400_000));
         const escalationWhat = candidatesClause ? `verify ${candidatesClause}` : `run candidate discovery (git log --grep)`;
         const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path, and ${entry.attempts} consecutive boot(s) over ~${ageDays} day(s) have each hit a TRANSIENT git read failure trying to ${escalationWhat} — never a definitive content mismatch, so Loom cannot rule out this eventually self-healing, but it has gone on long enough to need a human look (an oversized tree, a persistent host I/O problem, or a git timeout that needs raising). Loom will keep retrying every boot regardless; this alert will not repeat.`
-          + this.buildStampSuffix(this.resolveDeployStaleness());
+          + this.buildStampSuffix(await this.resolveDeployStalenessAsync());
         try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
         this.db.markStaleGenerationEscalated(s.id);
         // eslint-disable-next-line no-console
@@ -29745,7 +29852,7 @@ export class SessionService {
         ? "Loom checked every landed commit on this branch for a content match against this worker's own recorded tip and found none it could verify"
         : "no candidate could be attributed; Loom could not confirm whether this was a definitive miss or a read failure during discovery or verification";
       const msg = `[loom:merge-orphaned] worker ${s.id.slice(0, 8)} (branch ${branch}, task ${taskId.slice(0, 8)}) on project "${project.name}" has its OWN unresolved merge_request from before a re-task reused its worktree path${tipNote}, active from ${s.createdAt} to ${s.lastActivity}. ${checkedNote} — the shared branch/worktree now belong to a different generation, so there is no further safe DB-only way to resolve it automatically, and no dedicated action exists to close just this alert. The branch name ${branch} is SHARED with the current generation — \`git log --grep "Loom-Worker-Branch: ${branch}"\` on the project's mainline will also match the CURRENT generation's own, later landing, not just this worker's; use this worker's own recorded tip and its createdAt→lastActivity window above to tell the generations apart. If this worker's own work is found there, this alert is stale and can be ignored (or the task closed by hand if it is otherwise idle); if not, the work may need to be redone.`
-        + this.buildStampSuffix(this.resolveDeployStaleness());
+        + this.buildStampSuffix(await this.resolveDeployStalenessAsync());
       try { this.enqueueDurableMessage(target, msg, { sender: "system", taskId: s.taskId ?? null, kind: "warning" }); } catch { /* best-effort, mirrors escalateWedgedMergeReconcile */ }
       this.db.markStaleGenerationEscalated(s.id);
       // eslint-disable-next-line no-console
@@ -30217,7 +30324,7 @@ export class SessionService {
           });
           const ageMs = Date.now() - new Date(entry.firstWedgedAt).getTime();
           if (!entry.escalated && (entry.attempts >= this.mergeReconcileEscalateAttempts || ageMs >= this.mergeReconcileEscalateMs)) {
-            this.escalateWedgedMergeReconcile(s, project, entry);
+            this.escalateWedgedMergeReconcile(s, project, entry, await this.resolveDeployStalenessAsync());
           }
           // eslint-disable-next-line no-console
           console.warn(`[reconcile] worker ${s.id} (branch ${s.branch}) merge reconciliation permanently wedged — ${e.message} (wedged since ${entry.firstWedgedAt}, ${entry.attempts} attempt(s))`);

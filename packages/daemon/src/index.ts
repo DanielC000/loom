@@ -923,7 +923,8 @@ async function main(): Promise<void> {
     // Card af165ec7: resolve/redirect a stale wake target to its live superseding manager — see
     // PollServiceDeps.resolveWakeTarget's own doc.
     resolveWakeTarget: (id) => sessions.resolveWakeDeliveryTarget(id),
-    spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
+    // Card bba7a8ec: the awaiting caller lets us pre-read deploy staleness (manager-profile agents only) off the loop.
+    spawn: async (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt, deployStaleness: await sessions.preReadDeployStalenessForAgent(agentId).catch(() => undefined) }),
     intervalMs: pollIntervalMs,
     // Card 61a012ce: durable fire dispatch — see PollServiceDeps.enqueueDurable's own doc.
     enqueueDurable: (id, text, ctx) => sessions.enqueueSystemNudge(id, text, ctx),
@@ -941,7 +942,8 @@ async function main(): Promise<void> {
     // Card af165ec7: resolve/redirect a stale wake target to its live superseding manager — see
     // EventTriggerServiceDeps.resolveWakeTarget's own doc.
     resolveWakeTarget: (id) => sessions.resolveWakeDeliveryTarget(id),
-    spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
+    // Card bba7a8ec: the awaiting caller lets us pre-read deploy staleness (manager-profile agents only) off the loop.
+    spawn: async (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt, deployStaleness: await sessions.preReadDeployStalenessForAgent(agentId).catch(() => undefined) }),
     // Card 90b9e904: MCP-seen-gated + durable dispatch — see EventTriggerServiceDeps.enqueueDurableNudge's own doc.
     enqueueDurableNudge: (id, role, text, taskId, opts) => sessions.enqueueDurableNudge(id, role, text, taskId, opts),
   });
@@ -1474,7 +1476,7 @@ async function main(): Promise<void> {
   // — every other startManager caller (REST, generic dispatch) omits it and stays unaffected.
   // @decision acd3c688 — forward the Scheduler's spawnHumanAuthorized opt (derived from the schedule's own
   // createdBy) alongside the scheduled:true flag; startAuditor/startWorkspaceAuditor forward it as-is.
-  const scheduler = new Scheduler({ db, control, startManager: (agentId, prompt, opts) => sessions.startManager(agentId, prompt, { scheduled: true, spawnHumanAuthorized: opts?.spawnHumanAuthorized }), startAuditor: (agentId, prompt, opts) => sessions.startAuditor(agentId, prompt, opts), startWorkspaceAuditor: (agentId, prompt, opts) => sessions.startWorkspaceAuditor(agentId, prompt, opts), intervalMs, maxConcurrentManagers, maxConcurrentAuditors });
+  const scheduler = new Scheduler({ db, control, startManager: (agentId, prompt, opts) => sessions.startManager(agentId, prompt, { scheduled: true, spawnHumanAuthorized: opts?.spawnHumanAuthorized, deployStaleness: opts?.deployStaleness }), preReadDeployStaleness: () => sessions.resolveDeployStalenessAsync(), startAuditor: (agentId, prompt, opts) => sessions.startAuditor(agentId, prompt, opts), startWorkspaceAuditor: (agentId, prompt, opts) => sessions.startWorkspaceAuditor(agentId, prompt, opts), intervalMs, maxConcurrentManagers, maxConcurrentAuditors });
   if (schedulerEnabled) {
     scheduler.start();
     console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);
@@ -1860,7 +1862,14 @@ async function main(): Promise<void> {
   // rest a continuation nudge, and honors a parked session's usage hold. Best-effort + runs once.
   if (restartIntent) {
     clearRestartIntent();
-    const { resumed, skippedParked, failed, retiredSkipped, setupResumeSuperseded } = sessions.resumeFleetOnBoot(restartIntent);
+    // Card bba7a8ec: resumeFleetOnBoot is synchronous and reads no git; the staleness it (and each resumed
+    // manager's kickoff) needs is read HERE, off the event loop, and handed in — never recomputed per session.
+    const { resumed, skippedParked, failed, retiredSkipped, setupResumeSuperseded } = sessions.resumeFleetOnBoot(
+      restartIntent,
+      // `.catch`: the restart intent is already consumed above, so a failed read must never abort the fleet
+      // resume — `undefined` falls back to resumeFleetOnBoot's honest "not checked at boot" wording.
+      { deployStaleness: await sessions.resolveDeployStalenessAsync().catch(() => undefined) },
+    );
     console.log(
       `[boot] self-host restart: resumed ${resumed.length} session(s) across the fleet` +
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +
@@ -1943,7 +1952,13 @@ async function main(): Promise<void> {
   // receive the push). Never gates boot. Bounded to rows minted before `bootStartedAt` (card d7f3416b) —
   // without that bound, a row minted moments into THIS boot (still genuinely running) could be swept.
   try {
-    const cleared = sessions.reconcileOrphanedGateOps(bootStartedAt.toISOString());
+    // Card bba7a8ec: the sweep is synchronous and spawns no git; read the staleness its nudges stamp HERE, off
+    // the event loop — and only when there is at least one row to sweep (no git read on an ordinary boot).
+    const sweepBefore = bootStartedAt.toISOString();
+    const sweepStaleness = db.listSurfacedPendingGateOps(sweepBefore).length > 0
+      ? await sessions.resolveDeployStalenessAsync().catch(() => undefined)
+      : undefined;
+    const cleared = sessions.reconcileOrphanedGateOps(sweepBefore, sweepStaleness);
     if (cleared > 0) console.log(`[boot] orphaned gate/merge-op sweep: resurfaced ${cleared} restart-killed op(s) to their owning session(s)`);
   } catch (err) {
     console.warn(`[boot] orphaned gate/merge-op sweep failed (continuing boot): ${(err as Error).message}`);

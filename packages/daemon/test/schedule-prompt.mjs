@@ -182,10 +182,11 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
   const optsFor = (sid) => host.capture.find((o) => o.sessionId === sid);
 
   // Card c0a7f564: a MANAGER's composed startupPrompt (unlike auditor/workspace-auditor) runs through
-  // composeManagerStartupPrompt, which calls the real, uncached computeDeployStaleness() on EVERY
-  // startManager call — several real `git` subprocess calls, each bound by deploy-staleness.ts's
-  // hardcoded 1000ms GIT_TIMEOUT_MS. SessionService.startManager never threads a stalenessOverride
-  // through, so this is not injectable from a test at this level. Under ordinary host contention
+  // composeManagerStartupPrompt. (Card bba7a8ec: it no longer reads git — a startManager call that is
+  // handed no pre-read staleness gets a deterministic "not measured" line — so the volatility described
+  // below is historical; the strip stays harmless.) It USED to call the real, uncached
+  // computeDeployStaleness() on EVERY startManager call — several real `git` subprocess calls, each bound
+  // by a hardcoded 1000ms GIT_TIMEOUT_MS, with no stalenessOverride threaded through. Under ordinary host contention
   // (measured: 6/10 bare reruns of this file failed before this fix — see this card's worker_report),
   // one of several per-call git subprocess calls can occasionally miss that timeout on SOME but not
   // all of the startManager calls below, intermittently inserting/removing a one-line

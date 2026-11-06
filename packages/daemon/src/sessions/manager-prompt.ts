@@ -1,7 +1,13 @@
 import path from "node:path";
 import type { RepoRegistryEntry } from "@loom/shared";
 import { resumeDocSizeWarning, resolveResumeDocPath } from "./resume-doc-notes.js";
-import { computeDeployStaleness, type DeployStalenessResult } from "../deploy-staleness.js";
+import { notApplicableDeployStaleness, type DeployStalenessResult } from "../deploy-staleness.js";
+
+/** One honest line for a manager spawn that arrived with no pre-read staleness (a synchronous spawn path
+ *  with no async entry point). Asserts NEITHER stale NOR current — only that nothing was measured. */
+export const DEPLOY_STALENESS_NOT_MEASURED_NOTICE =
+  "[loom:deploy-staleness-not-measured] Deploy staleness was not measured at spawn. This does NOT claim the " +
+  "daemon is current or stale; check `served_status`'s `deployStaleness` for the live answer.";
 
 /**
  * Injects a "Where things live" context block (the project's absolute `repoPath` + `vaultPath`, plus the
@@ -38,9 +44,9 @@ export function composeManagerStartupPrompt(
      *  optional so every existing caller/test that omits it composes byte-identically to before. */
     projectWorkDir?: string;
   },
-  // Test seam ONLY (card 5e30c4bd) — a real spawn always omits this and gets the live
-  // `computeDeployStaleness()` read; a hermetic test injects a fixed result so it can assert BOTH the
-  // STALE and CLEAN renderings deterministically, without needing a real git checkout + a rebuilt dist.
+  // The deploy-staleness read, PRE-RESOLVED by the caller's async entry point (card bba7a8ec — this function
+  // is sync and never runs git). Omitted ⇒ the "not measured at spawn" notice. A hermetic test injects a
+  // fixed result so it can assert the STALE / CLEAN / could-not-measure renderings deterministically.
   stalenessOverride?: DeployStalenessResult,
 ): string {
   // A project with no vault bound (`vaultPath === ""` — see shared/types.ts) has no resume doc to
@@ -67,13 +73,16 @@ export function composeManagerStartupPrompt(
       `(project settings) to a real absolute path; do not derive or guess one yourself.`
     : "";
   // @decision 5e30c4bd — derive fresh on every manager spawn/resume/recycle, scoped to ONLY
-  // daemon-src/shared commits, and run this SYNCHRONOUSLY (a bounded, rare git call, not the
-  // per-spawn hot path CLAUDE.md's event-loop discipline protects) — never cache/persist it.
+  // daemon-src/shared commits — never cache/persist it.
+  // @decision bba7a8ec — this function is SYNCHRONOUS and does NO git itself: the caller's ASYNC entry point
+  // pre-reads `currentDeployStalenessAsync()` and passes the result in. A call with none gets the honest
+  // "not measured at spawn" notice below — never a blocking read, never a stale/fresh claim.
   //
   // @decision d3d4d432 — `available:false` because the check itself failed is NOT silent like a
   // packaged install's `"not-applicable"` — see `deployStaleNote` below for why collapsing the two
   // was a false all-clear.
-  const staleness = stalenessOverride ?? computeDeployStaleness();
+  // No pre-read AND no `.git` (a packaged install) ⇒ the synchronous not-applicable result: renders NOTHING.
+  const staleness = stalenessOverride ?? notApplicableDeployStaleness();
   const shortSha = (sha: string) => sha.slice(0, 8);
   // Deliberately EMITS NOTHING when clean (or unavailable) — no "Deploy status: current" line. A quiet
   // reassurance on EVERY manager spawn, forever, is exactly the cry-wolf noise DoD #2 (`637558ca`) warns
@@ -85,7 +94,7 @@ export function composeManagerStartupPrompt(
   // clock (`runningCodeBuiltAt`) as "its own", and when the two diverge (`distAheadOfProcess`), say so
   // explicitly rather than silently swapping one number for the other — a manager reading this should be
   // able to tell "rebuilt but not yet running" from "not rebuilt at all".
-  const divergenceNote = staleness.distAheadOfProcess
+  const divergenceNote = staleness?.distAheadOfProcess
     ? ` (a newer build ALSO exists on disk, dated ${staleness.distBuiltAt}, that this process has not picked up — restarting would additionally pick that up)`
     : "";
   // Card d3d4d432: `available:false` used to emit nothing UNIFORMLY, byte-identical to a verified-clean
@@ -96,7 +105,9 @@ export function composeManagerStartupPrompt(
   // stays silent (byte-identical to before, for every packaged/end-user install — DoD #4); COULD-NOT-MEASURE
   // gets a short, honestly-worded notice. This is NOT the `[loom:deploy-stale]` alarm above — it asserts
   // staleness has NOT been established, only that it could not be checked.
-  const deployStaleNote = staleness.available && staleness.stale
+  const deployStaleNote = staleness === undefined
+    ? DEPLOY_STALENESS_NOT_MEASURED_NOTICE
+    : staleness.available && staleness.stale
     ? `[loom:deploy-stale] ⚠️ THIS DAEMON PROCESS IS RUNNING STALE CODE. Mainline HEAD \`${shortSha(staleness.mainlineHeadSha!)}\` ` +
       `(committed ${staleness.mainlineHeadDate}) carries ${staleness.commitsBehind} \`packages/daemon/src\`/\`packages/shared/src\` ` +
       `commit(s) this process was NOT built with (its executing code dates to ${staleness.runningCodeBuiltAt}${divergenceNote}). ` +

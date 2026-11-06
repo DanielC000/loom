@@ -221,12 +221,12 @@ if (!(realDistMtimeMs > Date.parse("2020-01-01T00:00:00Z"))) {
   // (5 injected timeouts > 3) is absorbed when a wall-clock deadline is supplied...
   globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 5, delayMs: FAULT_DELAY_MS };
   let burstRetries = 0;
-  const burstResult = withGitTimeoutRetry(computeDeployStaleness, faultOpts,performance.now() + GIT_TIMEOUT_RETRY_DEADLINE_MS, () => { burstRetries++; });
+  const burstResult = withGitTimeoutRetry(computeDeployStaleness, faultOpts, performance.now() + GIT_TIMEOUT_RETRY_DEADLINE_MS, () => { burstRetries++; });
   check("(4-setup-fault-proof) DEADLINE: a burst of 5 consecutive injected timeouts (> the 3-attempt minimum) is absorbed once a wall-clock deadline is supplied" + reasonSuffix(burstResult),
     burstResult.available === true && burstRetries >= 5 && globalThis.__dsLogFault.fired === 5);
   // ...and a timeout that never clears still fails loud once the deadline passes (never a silent pass).
   globalThis.__dsLogFault = { armed: true, fired: 0, maxFires: 999, delayMs: FAULT_DELAY_MS };
-  const deadlineExhausted = withGitTimeoutRetry(computeDeployStaleness, faultOpts,performance.now() + 300, () => {});
+  const deadlineExhausted = withGitTimeoutRetry(computeDeployStaleness, faultOpts, performance.now() + 300, () => {});
   check("(4-setup-fault-proof) DEADLINE NEGATIVE CONTROL: a persistent timeout still returns available:false after the deadline (loud, never a pass), having made at least the minimum attempts" + reasonSuffix(deadlineExhausted),
     isTransientGitTimeout(deadlineExhausted) && globalThis.__dsLogFault.fired >= GIT_TIMEOUT_RETRY_MIN_ATTEMPTS);
   globalThis.__dsLogFault = { armed: false, fired: 0, maxFires: 0, delayMs: 0 };

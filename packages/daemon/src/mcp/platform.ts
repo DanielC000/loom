@@ -2390,7 +2390,9 @@ export class PlatformMcpRouter {
         try {
           // Narrowed by spawnableRoleError above (only "manager"/"plain" reach here). projectId/agentId
           // prefix resolution (card e6a756ea) lives in spawnSessionAsPlatform itself.
-          return ok(sessions.spawnSessionAsPlatform(projectId, agentId, role as "manager" | "plain"));
+          // Card bba7a8ec: the sync spawn takes a manager's deploy staleness from this async pre-read.
+          const deployStaleness = role === "manager" ? await sessions.resolveDeployStalenessAsync().catch(() => undefined) : undefined;
+          return ok(sessions.spawnSessionAsPlatform(projectId, agentId, role as "manager" | "plain", { deployStaleness }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

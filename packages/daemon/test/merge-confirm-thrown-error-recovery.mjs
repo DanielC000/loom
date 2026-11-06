@@ -44,6 +44,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { STAMPED_STALENESS } from "./_deploy-staleness-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mtr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -141,6 +142,9 @@ async function setup(sfx, { preLand } = {}) {
   const sessions = new SessionService(db, pty, new OrchestrationControl(), {
     runGate: async () => { await sleep(SLOW_THROW_MS); throw new Error("Cannot use simple-git on a directory that does not exist"); },
     syncAttachBudgetMs: TEST_SYNC_BUDGET_MS,
+    // Card bba7a8ec: the settle nudge's build stamp reads deploy staleness off the event loop; pinned so the
+    // nudge is enqueued synchronously at settle (and no real git read races this test's assertions).
+    deployStaleness: STAMPED_STALENESS,
   });
 
   const pending = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
@@ -183,6 +187,9 @@ async function setup(sfx, { preLand } = {}) {
   const sessions = new SessionService(db, pty, new OrchestrationControl(), {
     runGate: async () => { await sleep(SLOW_THROW_MS); throw new Error("Cannot use simple-git on a directory that does not exist"); },
     syncAttachBudgetMs: TEST_SYNC_BUDGET_MS,
+    // Card bba7a8ec: the settle nudge's build stamp reads deploy staleness off the event loop; pinned so the
+    // nudge is enqueued synchronously at settle (and no real git read races this test's assertions).
+    deployStaleness: STAMPED_STALENESS,
   });
 
   const pending = await sessions.confirmWorkerMergeTracked(mgrId, workerId);
@@ -243,6 +250,9 @@ async function setup(sfx, { preLand } = {}) {
   const sessions = new SessionService(db, pty, new OrchestrationControl(), {
     runGate: async () => { gateCalls++; await sleep(SLOW_THROW_MS); throw new Error("Cannot use simple-git on a directory that does not exist"); },
     syncAttachBudgetMs: TEST_SYNC_BUDGET_MS,
+    // Card bba7a8ec: the settle nudge's build stamp reads deploy staleness off the event loop; pinned so the
+    // nudge is enqueued synchronously at settle (and no real git read races this test's assertions).
+    deployStaleness: STAMPED_STALENESS,
   });
 
   const pending = await sessions.confirmWorkerMergeTracked(mgrId, workerId);

@@ -1004,10 +1004,12 @@ const TEST_TIMEOUT_MS = 120_000;
 const TEST_TIMEOUT_OVERRIDES = {
   "taskless-landing-guard": 170_000, // card a880c391: ~11 real-git worker landings (solo confirms + a 3-candidate merge_batch) plus the fix-round (F) cases and the human-only trust-boundary checks. Measured solo, foreground, single lane: 71.0s (n=1, 2026-11-05, one host; was 57.6s before section F) — 170k is ~2.4x that run.
   "card-policy-enforcement": 260_000, // card 9623e943: ~15 scenario groups through the real SessionService with real git on a temp repo (spawn, solo merge, recycle lineage, landed re-confirm, pinned-tip re-check). Measured solo, foreground, single lane: 74.3s then 103.3s after the sticky-match scenarios (n=1 each, 2026-11-05, one host) — past the ~60s new-file-timing guidance and 86% of the 120s blanket ceiling. 260k gives ~2.5x the slower measured solo run.
-  "merge-confirm-verdict-cache-union-merge-refusal": 150_000, // card 3573d2fb: no prior override, measured
+  "merge-confirm-verdict-cache-union-merge-refusal": 240_000, // card 3573d2fb: no prior override, measured
     // right up against the 120s blanket ceiling under a loaded full-gate run (killed by SIGTERM). Measured
     // solo, foreground, single lane: 69.3s (n=1, 2026-11-03, one host) — 57.8% of the 120s default. 150k
-    // gives ~2.2x the measured solo run.
+    // gave ~2.2x the measured solo run. Card bba7a8ec: a full-gate run still killed it at ~148s (84s solo before
+    // the test pinned its staleness, 64s solo after: n=1 each, 2026-11-06, one host), so the entry is raised to
+    // 240k (~3.7x the pinned solo run) rather than left on a thin margin.
   "cut-base-restamp-eligibility": 200_000, // card cc788ae4: 9 scenarios (1-7 + 5/5b forgery pairs), real git repos throughout — scenario 7's own over-cap proof chains 2001 real `commit-tree` objects (cheap individually, but 2001 sequential git spawns add up) to exercise the real, non-configurable CUT_BASE_RESTAMP_MAX_SCAN bound. Measured solo, foreground, single lane: 79.47s (n=1, 2026-10-28, one host) and 71s (Code Review's own measurement, same host class) — both past the ~60s new-file-timing guidance. 200k gives ~2.5x the slower measured run (79.47s).
   "merge-confirm-post-squash-throw-recovery": 300_000, // card 7f86c02f (Code Review follow-up S2): 10 real createWorktree + confirmWorkerMergeTracked/mergeBatchTracked scenarios (pre/post x solo/solo-after-5s/batch/concurrent, plus 2 probe-throws variants), one with a deliberate 5.6s sleep past MERGE_OP_RETAIN_MS. Measured solo, foreground, single lane: 119.47s and 120.66s (n=2, 2026-10-27, one host) — right at the 120s blanket ceiling. 300k gives ~2.5x the slower solo run (120.66s).
   "comment-anchor-lint": 300_000, // card 04d9f322: the file grew a new real-repo regression-pin section (a

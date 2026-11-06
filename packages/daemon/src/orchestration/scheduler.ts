@@ -6,6 +6,7 @@ import type { OrchestrationControl } from "./control.js";
 import { nextFireAt } from "./cron.js";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 import { isProjectGatedOnPendingOwnerRequest } from "./pending-request-gate.js";
+import type { DeployStalenessResult } from "../deploy-staleness.js";
 
 /**
  * @decision acd3c688 — fail-closed provenance read: a legacy (`null`) `createdBy` is treated the SAME
@@ -39,7 +40,14 @@ export interface SchedulerDeps {
    */
   // @decision acd3c688 — the optional 3rd arg carries spawnHumanAuthorized (scheduleCreatedByIsHuman(s)),
   // bypassing the explicit-role-grant-carryover check ONLY for a schedule stamped createdBy:"human".
-  startManager: (agentId: string, prompt?: string | null, opts?: { spawnHumanAuthorized?: boolean }) => { id: string };
+  startManager: (agentId: string, prompt?: string | null, opts?: { spawnHumanAuthorized?: boolean; deployStaleness?: DeployStalenessResult }) => { id: string } | Promise<{ id: string }>;
+  /**
+   * Card bba7a8ec: reads deploy staleness off the event loop. `tick()` calls it ONCE at tick start (only when a
+   * manager-kind schedule is due) and passes the value to every manager spawn, so the per-schedule
+   * cap/pause/agent checks and the spawn run synchronously after it — no await sits between a check and the
+   * spawn it guards. Optional: omitted → `startManager` gets no pre-read.
+   */
+  preReadDeployStaleness?: () => Promise<DeployStalenessResult | undefined>;
   /**
    * Boots the read-and-file-only Platform Auditor session (P5) — the spawn for a schedule whose
    * `kind` is "auditor". Prod-wired to SessionService.startAuditor; a test injects a recording stub.
@@ -137,8 +145,19 @@ export class Scheduler {
    *
    */
   async tick(now: Date = new Date()): Promise<void> {
-    const due = this.deps.db.listDueSchedules(now.toISOString());
+    let due = this.deps.db.listDueSchedules(now.toISOString());
     if (due.length === 0) return;
+    // Card bba7a8ec: the ONLY await before the loop — pre-read deploy staleness once, and only when a
+    // manager-kind schedule is due. Everything after it (due list, pause/usage gates, caps, per-schedule
+    // checks, claim, spawn) is synchronous, so an overlapping interval tick cannot interleave between a
+    // check and the spawn it guards. `due` is RE-READ after the await so a schedule an overlapping tick
+    // already claimed (markFired) is not fired twice.
+    let managerStaleness: DeployStalenessResult | undefined;
+    if (this.deps.preReadDeployStaleness && due.some((s) => s.kind !== "auditor" && s.kind !== "workspace-auditor")) {
+      managerStaleness = await this.deps.preReadDeployStaleness().catch(() => undefined);
+      due = this.deps.db.listDueSchedules(now.toISOString());
+      if (due.length === 0) return;
+    }
     // Pause gate (global kill/pause switch): hold everything; next_fire_at stays, retried next tick.
     if (this.deps.control.pausedScopes().includes("global")) return;
     // §19c usage-limit gate: don't boot a manager into a known-limited account (whole-queue
@@ -228,7 +247,12 @@ export class Scheduler {
           s.kind === "workspace-auditor" && this.deps.startWorkspaceAuditor ? this.deps.startWorkspaceAuditor
           : s.kind === "auditor" && this.deps.startAuditor ? this.deps.startAuditor
           : this.deps.startManager;
-        const spawned = startFn(s.agentId, s.prompt, { spawnHumanAuthorized: scheduleCreatedByIsHuman(s) });
+        // Card bba7a8ec: `await` — the production manager start-fn pre-reads deploy staleness (async, off the
+        // event loop) before its synchronous spawn; the slot was already claimed above, so this cannot double-fire.
+        const spawned = await startFn(s.agentId, s.prompt, {
+          spawnHumanAuthorized: scheduleCreatedByIsHuman(s),
+          ...(!isAuditor && managerStaleness ? { deployStaleness: managerStaleness } : {}),
+        });
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),
           managerSessionId: spawned.id, kind: "schedule_fired",

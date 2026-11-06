@@ -416,7 +416,7 @@ export interface GrantSessions {
    *  (via the shared `spawnableRoleError` helper) BEFORE this is ever called; this method is the backing
    *  op only. `senderSessionId` is threaded through for traceability, mirroring `messageSession`/
    *  `redirectSession`'s own trailing param — the backing op does not itself consume it. */
-  spawnSession(projectId: string, agentId: string, role: string, senderSessionId: string): Session;
+  spawnSession(projectId: string, agentId: string, role: string, senderSessionId: string): Session | Promise<Session>;
 }
 
 /** Builds a bounded, non-interactive `GitWriter` for ONE repo path — the ONLY way the `git-push` lever
@@ -2658,7 +2658,7 @@ const SESSION_SPAWN: CompanionCapability = {
             return ok({ error: "the confirmed action no longer matches what was proposed — call session_spawn again to re-propose" });
           }
           try {
-            const spawned = ctx.sessions.spawnSession(project, agentId, role, ctx.sessionId);
+            const spawned = await ctx.sessions.spawnSession(project, agentId, role, ctx.sessionId);
             onStepUpCommitted(ctx.trustWindow, "X", friction, frictionScope);
             return ok({ status: "spawned", session: { id: spawned.id, projectId: spawned.projectId, role: spawned.role ?? null } });
           } catch (e) {

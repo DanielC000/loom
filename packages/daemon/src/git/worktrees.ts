@@ -5546,6 +5546,12 @@ export const STATIC_GUARD_REPO_PATHS = [
   // reproduced cache-replay chain and for what this guard deliberately does NOT flag (bare
   // `computeDeployStaleness()` calls, and `buildServedStatus()`'s two deliberate real-tree tests).
   "packages/daemon/test/deploy-staleness-fixture-guard.mjs",
+  // Card bba7a8ec: a corpus-wide source-TEXT scan asserting no non-test `packages/daemon/src/**/*.ts` file calls
+  // or imports the SYNC deploy-staleness drivers (`computeDeployStaleness` / `currentDeployStaleness` /
+  // `buildServedStatus` — they block the event loop on git). Same ground as its sibling above: an added call is a
+  // source-text property a reduced gate's compiled-output reasoning cannot see. See the guard's header for its
+  // blind spots (a computed-string dynamic access; callers outside `src/`).
+  "packages/daemon/test/deploy-staleness-sync-driver-test-only-guard.mjs",
   // Card 27d6c5a4 (Code Review finding #3): a corpus-wide source-TEXT scan consolidating six "this
   // human-only surface is NEVER an MCP tool" sub-assertions that used to live only inside their own full
   // behavioral test files (setup-project-init-rest.mjs, setup-templates-rest.mjs, companion-lead-mode.mjs,

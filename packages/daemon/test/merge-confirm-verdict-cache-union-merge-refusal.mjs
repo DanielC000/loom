@@ -57,6 +57,7 @@ import { requireHermeticEnv } from "./_guard.mjs";
 import { commitAll } from "./_git-commit.mjs";
 import { settleTracked } from "./_settle-tracked.mjs";
 import { awaitTrackedSettle } from "./_settle-tracked-monotonic.mjs";
+import { STAMPED_STALENESS } from "./_deploy-staleness-fixture.mjs";
 
 useOwnLoomHome("loom-mcvcumr-");
 requireHermeticEnv();
@@ -138,6 +139,9 @@ try {
       },
     });
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      // Card bba7a8ec: pinned — each settle nudge's build stamp otherwise costs a real async git read (~1 s), and
+      // this file settles dozens of ops against the 120 s default ceiling (84 s solo).
+      deployStaleness: STAMPED_STALENESS,
       syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
       runGate: async () => ({ passed: true, steps: [] }),
       unionMergeGitFactory: factory,
@@ -183,6 +187,9 @@ try {
       },
     });
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      // Card bba7a8ec: pinned — each settle nudge's build stamp otherwise costs a real async git read (~1 s), and
+      // this file settles dozens of ops against the 120 s default ceiling (84 s solo).
+      deployStaleness: STAMPED_STALENESS,
       syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
       runGate: async () => ({ passed: true, steps: [] }),
       unionMergeGitFactory: factory,
@@ -221,6 +228,9 @@ try {
       },
     });
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      // Card bba7a8ec: pinned — each settle nudge's build stamp otherwise costs a real async git read (~1 s), and
+      // this file settles dozens of ops against the 120 s default ceiling (84 s solo).
+      deployStaleness: STAMPED_STALENESS,
       syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
       runGate: async () => ({ passed: true, steps: [] }),
       unionMergeGitFactory: factory,
@@ -273,6 +283,9 @@ try {
       },
     });
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      // Card bba7a8ec: pinned — each settle nudge's build stamp otherwise costs a real async git read (~1 s), and
+      // this file settles dozens of ops against the 120 s default ceiling (84 s solo).
+      deployStaleness: STAMPED_STALENESS,
       syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
       runGate: async () => ({ passed: true, steps: [] }),
       unionMergeGitFactory: factory,
@@ -355,6 +368,9 @@ try {
     };
     let gateCalls = 0;
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      // Card bba7a8ec: pinned — each settle nudge's build stamp otherwise costs a real async git read (~1 s), and
+      // this file settles dozens of ops against the 120 s default ceiling (84 s solo).
+      deployStaleness: STAMPED_STALENESS,
       runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
       reapWorktreeProcesses: noReap,
       unionMergeGitFactory: proxyFailSecondMergeCall,
@@ -477,6 +493,9 @@ try {
     });
     let gateCalls = 0;
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      // Card bba7a8ec: pinned — each settle nudge's build stamp otherwise costs a real async git read (~1 s), and
+      // this file settles dozens of ops against the 120 s default ceiling (84 s solo).
+      deployStaleness: STAMPED_STALENESS,
       syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
       runGate: async () => { gateCalls++; return { passed: true, steps: [] }; },
       batchFfGitFactory: factory,
@@ -525,6 +544,9 @@ try {
       };
     };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      // Card bba7a8ec: pinned — each settle nudge's build stamp otherwise costs a real async git read (~1 s), and
+      // this file settles dozens of ops against the 120 s default ceiling (84 s solo).
+      deployStaleness: STAMPED_STALENESS,
       syncAttachBudgetMs: 60_000, reapWorktreeProcesses: noReap,
       runGate: async () => ({ passed: true, steps: [] }),
       batchFfGitFactory: factory,

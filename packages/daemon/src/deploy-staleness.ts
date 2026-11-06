@@ -39,24 +39,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  *
  * DoD #4: every clock is DERIVED at call time, NEVER persisted — the dist scans and `git log` calls all
  * run fresh on every call. No caching, no stored "deploy is current" flag (that would recreate the exact
- * defect one layer down). Bounded — THREE unconditional `runGit` calls (mainline HEAD, the restart-relevant
- * log, and `webStale`'s own web-relevant log), each capped at `GIT_TIMEOUT_MS`, PLUS a conditional FOURTH
- * (see `deploySignatureMismatch` below — a single-object `git log -1 <sha>` lookup, not a graph walk, fired
- * only when the date-based clock already claims `stale:false` and `processBuiltSha` differs from `mainlineHeadSha`)
- * PLUS a conditional FIFTH and SIXTH (card 3d7dccb9 — `builtContentMatchesHead`'s `git merge-base
- * --is-ancestor` + `git diff --name-only`, fired only when `processBuiltSha` is resolvable AND not an
- * ancestor of `mainlineHeadSha` — the same rare, already-anomalous branch the fourth call's sibling logic
- * lives in, not an additional unconditional cost) — worst case 6×`GIT_TIMEOUT_MS` of the event loop fully
- * blocked (this is a synchronous `execFileSync`, unlike the async claude-version cache — see the call-site
- * doc at `manager-prompt.ts` for why that's an acceptable tradeoff here) PLUS the (cheap, synchronous `fs`)
- * dist scans.
+ * defect one layer down). THE GIT READS (card bba7a8ec): the computation is ONE generator (`stalenessSteps`)
+ * whose git reads are performed by a DRIVER, and the PRODUCTION driver (`computeDeployStalenessAsync`) awaits
+ * every one of them with async `execFile` (`ASYNC_GIT_TIMEOUT_MS`), so none blocks the event loop: THREE
+ * unconditional reads issued as one concurrent batch (mainline HEAD, the restart-relevant log, `webStale`'s
+ * web-relevant log), PLUS a conditional commit-date lookup (`git log -1 <sha>`, see `deploySignatureMismatch`),
+ * PLUS `builtContentMatchesHead`'s `git merge-base --is-ancestor` — which runs on EVERY call whenever
+ * `processBuiltSha` is set, i.e. always on self-host (~85 ms) — and then either `git diff --name-only` (not an
+ * ancestor) or, when it IS an ancestor and the date clock says stale, the behavioural check's `git diff` plus
+ * up to 2×`MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES` `git show` reads (~4 s right after a daemon-src merge). The
+ * only synchronous work left is `fs` stats of the dist trees and that check's per-file transpile (CPU, bounded
+ * by the file cap). The sync driver (`computeDeployStaleness`, `GIT_TIMEOUT_MS`) is TEST/FIXTURE-ONLY.
  *
  * @decision 404bfc75 — the ancestor-path behavioural check (`computeAncestorBehaviouralMatch`) is a
- * SEPARATE, unbounded-in-N conditional cost NOT folded into the "worst case 6×" count above — see its own
- * record for why and how it's capped.
- * @decision c6e7ebe7 — never raise `GIT_TIMEOUT_MS` without a measured stall (147–275ms IDLE / 220–465ms
- * at 3× oversubscription measured, never approached up to 9×) and never single out a timeout from the
- * `unavailable()` reason taxonomy on its own initiative — see `d3d4d432`'s record for the actual axis.
+ * SEPARATE, unbounded-in-N conditional cost — see its own record for why and how it's capped.
+ * @decision c6e7ebe7 — never raise `GIT_TIMEOUT_MS` or add a production caller of the sync driver (the stall
+ * IS real, 869–944 ms; the fix is the async core). Never single out a timeout from the `unavailable()`
+ * reason taxonomy on its own initiative — see `d3d4d432`.
+ * @decision bba7a8ec — never add a prefetch map or any state that lets a drifted argv fall through to a real
+ * read, and never cache a read; synchronous spawn paths take a pre-read and render "not measured" without one.
  *
  * NEVER throws — any failure (not a git checkout, e.g. a packaged `loomctl` install; git unavailable; dist
  * not built; a timeout) degrades to `{available:false, reason}`, never a false stale/clean verdict — and
@@ -267,28 +268,42 @@ const REBUILD_ONLY_PATHSPECS = DEPLOY_PACKAGES.filter((p) => !p.restartRequired)
  * deploy scripts themselves — this file included), and `bin/` (the packaged CLI entry)). */
 const CONTENT_CHECK_PATHSPECS = ["packages/", "scripts/", "bin/"];
 
+/** Cap on each SYNC-driver git read — TEST/FIXTURE use only (no production caller; see `computeDeployStaleness`). */
 const GIT_TIMEOUT_MS = 1000;
 const UNIT_SEP = "\x1f";
 
-/** Results of the three unconditional history reads, produced ASYNCHRONOUSLY by
- *  {@link computeDeployStalenessAsync} and consumed by {@link runGit} for exactly one synchronous
- *  `computeDeployStaleness` run. Set and cleared inside one synchronous block (nothing can interleave), so it
- *  is call-scoped state, never a cache: `null` on every other path, which is byte-identical to before. */
-let prefetchedGit: Map<string, { out: string } | { err: unknown }> | null = null;
-const prefetchKey = (repoRoot: string, args: string[]): string => [repoRoot, ...args].join("\0");
+/** One git read the staleness computation asks its DRIVER to perform: `git -C <repoRoot> <args>`. */
+export interface GitRead {
+  repoRoot: string;
+  args: string[];
+}
+/** A driver's answer to one {@link GitRead}: its stdout, or the error the read failed with. */
+export type GitReadResult = { out: string } | { err: unknown };
+/** The staleness computation, written ONCE as a generator: it yields a BATCH of independent {@link GitRead}s
+ *  (the driver may run a batch concurrently) and is resumed with the results, in order. The async driver
+ *  ({@link computeDeployStalenessAsync}) is the production one; the sync driver
+ *  ({@link computeDeployStaleness}) exists for tests and fixtures only. */
+type GitSteps<T> = Generator<GitRead[], T, GitReadResult[]>;
 
-function runGit(repoRoot: string, args: string[]): string {
-  const pre = prefetchedGit?.get(prefetchKey(repoRoot, args));
-  if (pre) {
-    if ("err" in pre) throw pre.err;
-    return pre.out;
-  }
-  return execFileSync(resolveGitBinaryForSpawn(), ["-C", repoRoot, ...args], {
-    encoding: "utf8",
-    timeout: GIT_TIMEOUT_MS,
-    windowsHide: true,
-    env: nonInteractiveEnv(),
-  });
+/** Yields one batch of reads and returns their results, in order. */
+function* gitBatch(repoRoot: string, reads: string[][]): GitSteps<GitReadResult[]> {
+  return yield reads.map((args) => ({ repoRoot, args }));
+}
+
+/** One read; throws the read's own error on failure (so callers keep their existing try/catch shape). */
+function* runGit(repoRoot: string, args: string[]): GitSteps<string> {
+  const r = (yield [{ repoRoot, args }])[0]!;
+  if ("err" in r) throw r.err;
+  return r.out;
+}
+
+/** Exit status of a failed git read, from either driver: `execFileSync` reports `status`, async `execFile`
+ *  reports a numeric `code`. A non-numeric `code` (ENOENT, ETIMEDOUT...) is never an exit status. */
+function gitExitStatus(err: unknown): number | null {
+  const e = err as { status?: unknown; code?: unknown } | null;
+  if (typeof e?.status === "number") return e.status;
+  if (typeof e?.code === "number") return e.code;
+  return null;
 }
 
 /** Card f26339d7 (Code Review "ALSO REQUIRED") — the baked sha/dirty fields are DERIVED INDEPENDENTLY of
@@ -331,6 +346,18 @@ function unavailable(reason: string, reasonKind: DeployUnavailableReasonKind, ba
     webBuiltSha: baked?.webBuiltSha ?? null,
     webBuiltDirty: baked?.webBuiltDirty ?? null,
   };
+}
+
+/**
+ * Card bba7a8ec — the SYNCHRONOUS "not applicable" decision: with no `.git` at the repo root (a packaged
+ * `loomctl` install) staleness is never meaningful, and that is knowable from one `fs.existsSync` — no git is
+ * spawned. Returns the same `not-applicable` result the full computation would, or `undefined` when a `.git`
+ * exists (staleness COULD be measured, so the caller must pre-read it asynchronously or say "not measured").
+ * Lets a synchronous spawn path keep the d3d4d432 / DoD #4 promise that a packaged install renders NOTHING.
+ */
+export function notApplicableDeployStaleness(repoRoot: string = loomRepoRoot()): DeployStalenessResult | undefined {
+  if (fs.existsSync(path.join(repoRoot, ".git"))) return undefined;
+  return unavailable("this daemon is not running from a Loom source checkout (no .git at the resolved repo root) — not applicable to a packaged install", "not-applicable");
 }
 
 /** Counts entries in a `runGit`-produced `%H<UNIT_SEP>%cI` log whose committer date is after `sinceMs`. */
@@ -378,9 +405,9 @@ export function readBuildInfo(distDir: string): BuildInfo {
 /** Single-object `git log -1 --pretty=%cI <sha>` lookup (NOT a graph walk) — resolves one commit's own
  * committer date, in ms since epoch. Never throws: an unresolvable sha (pruned, wrong repo, garbage
  * input) degrades to `null`. Used only by `deploySignatureMismatch`'s discrepancy check, below. */
-function commitDateMs(repoRoot: string, sha: string): number | null {
+function* commitDateMs(repoRoot: string, sha: string): GitSteps<number | null> {
   try {
-    const out = runGit(repoRoot, ["log", "-1", "--pretty=%cI", sha]).trim();
+    const out = (yield* runGit(repoRoot, ["log", "-1", "--pretty=%cI", sha])).trim();
     if (!out) return null;
     const ms = new Date(out).getTime();
     return Number.isNaN(ms) ? null : ms;
@@ -394,13 +421,12 @@ function commitDateMs(repoRoot: string, sha: string): number | null {
  * outcome (an unresolvable/GC'd sha, a timeout, git itself missing) degrades to `null` — "unknown", never
  * a fabricated `true`/`false`. Used only by `builtContentMatchesHead`'s gate, below: the content diff is
  * worth its git cost only in the one case ancestry can't already answer the question. */
-function isAncestor(repoRoot: string, sha: string, of: string): boolean | null {
+function* isAncestor(repoRoot: string, sha: string, of: string): GitSteps<boolean | null> {
   try {
-    runGit(repoRoot, ["merge-base", "--is-ancestor", sha, of]);
+    yield* runGit(repoRoot, ["merge-base", "--is-ancestor", sha, of]);
     return true;
   } catch (err) {
-    const status = (err as { status?: number | null }).status;
-    if (status === 1) return false;
+    if (gitExitStatus(err) === 1) return false;
     return null;
   }
 }
@@ -420,9 +446,9 @@ const DEPLOY_STALENESS_EMIT_COMPARE_SCOPE: EmitCompareSoundnessScope = {
  * a real pnpm workspace checkout; `computeAncestorBehaviouralMatch` is only ever reached once this module
  * has already confirmed a `.git` exists (a packaged `loomctl` install bails out via `unavailable()` long
  * before this point), matching `computeEmitCompareGate`'s own precedent for relying on this devDependency
- * from production code. `require`, not `import()`: this whole module is synchronous by design (see the
- * module doc's `5e30c4bd` call-site note) — an async load here would force `computeDeployStaleness` itself
- * to become async. Never throws: an unresolvable module degrades to `null`, never a fabricated verdict. */
+ * from production code. `require`, not `import()`: the generator step that calls this does fs/CPU work
+ * between its git reads and is not itself a suspension point for module loading — keep this a plain,
+ * synchronous call. Never throws: an unresolvable module degrades to `null`, never a fabricated verdict. */
 function loadTypeScriptSync(): TypeScriptModuleLike | null {
   try {
     const req = createRequire(import.meta.url);
@@ -463,13 +489,13 @@ export const MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES = 25;
  * technique can't examine it at all), an unresolvable git read, the `typescript` module being unavailable,
  * or the soundness precondition failing to verify — and to `false` the moment a transpile comparison
  * proves a REAL difference on an examined file. Never a fabricated `true`. */
-function computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSha: string): boolean | null {
+function* computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSha: string): GitSteps<boolean | null> {
   let diffOut: string;
   try {
-    diffOut = execFileSync(resolveGitBinaryForSpawn(), [
-      "-C", repoRoot, "-c", "core.quotePath=false", "diff", "--name-status", "--no-renames",
+    diffOut = (yield* runGit(repoRoot, [
+      "-c", "core.quotePath=false", "diff", "--name-status", "--no-renames",
       fromSha, toSha, "--", ...RESTART_RELEVANT_PATHSPECS,
-    ], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() }).trim();
+    ])).trim();
   } catch {
     return null;
   }
@@ -492,18 +518,11 @@ function computeAncestorBehaviouralMatch(repoRoot: string, fromSha: string, toSh
     const status = line[0];
     const p = line.slice(tab + 1);
     if (status !== "M" || !p.endsWith(".ts")) return null;
-    let before: string;
-    let after: string;
-    try {
-      before = execFileSync(resolveGitBinaryForSpawn(), ["-C", repoRoot, "show", `${fromSha}:${p}`], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() });
-    } catch {
-      return null;
-    }
-    try {
-      after = execFileSync(resolveGitBinaryForSpawn(), ["-C", repoRoot, "show", `${toSha}:${p}`], { encoding: "utf8", timeout: GIT_TIMEOUT_MS, windowsHide: true, env: nonInteractiveEnv() });
-    } catch {
-      return null;
-    }
+    // Both snapshots of this file are independent reads: one batch, so an async driver runs them together.
+    const [beforeRead, afterRead] = yield* gitBatch(repoRoot, [["show", `${fromSha}:${p}`], ["show", `${toSha}:${p}`]]);
+    if (!beforeRead || !afterRead || "err" in beforeRead || "err" in afterRead) return null;
+    const before = beforeRead.out;
+    const after = afterRead.out;
     let outBefore: string;
     let outAfter: string;
     try {
@@ -608,7 +627,7 @@ export interface ComputeDeployStalenessOptions {
  * but DOES ship `dist/build-info.json`, so "what commit is this artifact/process?" must not be thrown away
  * just because every git-derived comparison field is correctly unavailable.
  */
-export function computeDeployStaleness(options: ComputeDeployStalenessOptions = {}): DeployStalenessResult {
+function* stalenessSteps(options: ComputeDeployStalenessOptions): GitSteps<DeployStalenessResult> {
   const {
     distEntry: distEntryOverride,
     repoRoot: repoRootOverride,
@@ -685,31 +704,30 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   const webBuildMaxMs = webBuildMaxMsRaw ?? 0;
   const webDistBuiltAt = webBuildMaxMsRaw === null ? null : new Date(webBuildMaxMsRaw).toISOString();
 
-  let headLine: string;
-  try {
-    headLine = runGit(repoRoot, ["log", "-1", `--pretty=%H${UNIT_SEP}%cI`]).trim();
-  } catch (err) {
-    return unavailable(`could not read mainline HEAD: ${err instanceof Error ? err.message : String(err)}`, "could-not-measure", baked);
-  }
+  // The three unconditional history reads are independent, so they are ONE batch (an async driver runs them
+  // concurrently). Their results are then consumed in the original order, so the first failure in that order
+  // still decides the `unavailable()` reason, exactly as when they were issued one after another.
+  const [headRead, relevantRead, webRead] = yield* gitBatch(repoRoot, [
+    ["log", "-1", `--pretty=%H${UNIT_SEP}%cI`],
+    ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...RESTART_RELEVANT_PATHSPECS],
+    ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...REBUILD_ONLY_PATHSPECS],
+  ]);
+  const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+  if (!headRead || !relevantRead || !webRead) return unavailable("the git driver returned fewer results than reads issued", "could-not-measure", baked);
+
+  if ("err" in headRead) return unavailable(`could not read mainline HEAD: ${errMsg(headRead.err)}`, "could-not-measure", baked);
+  const headLine = headRead.out.trim();
   const [mainlineHeadSha, mainlineHeadDate] = headLine.split(UNIT_SEP);
   if (!mainlineHeadSha) return unavailable("git log returned no HEAD commit (a commitless repo?)", "could-not-measure", baked);
 
-  let relevantLog: string;
-  try {
-    relevantLog = runGit(repoRoot, ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...RESTART_RELEVANT_PATHSPECS]);
-  } catch (err) {
-    return unavailable(`could not read daemon-src/shared commit history: ${err instanceof Error ? err.message : String(err)}`, "could-not-measure", baked);
-  }
+  if ("err" in relevantRead) return unavailable(`could not read daemon-src/shared commit history: ${errMsg(relevantRead.err)}`, "could-not-measure", baked);
+  const relevantLog = relevantRead.out;
   // Card 8ff7ccde: computed against `runningCodeBuiltAtMs`, NOT the raw dist clock `buildMaxMs` — a
   // rebuild-without-restart must not UNDERSTATE staleness (see the module doc).
   const commitsBehind = countCommitsAfter(relevantLog, runningCodeBuiltAtMs);
 
-  let webRelevantLog: string;
-  try {
-    webRelevantLog = runGit(repoRoot, ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...REBUILD_ONLY_PATHSPECS]);
-  } catch (err) {
-    return unavailable(`could not read web-src commit history: ${err instanceof Error ? err.message : String(err)}`, "could-not-measure", baked);
-  }
+  if ("err" in webRead) return unavailable(`could not read web-src commit history: ${errMsg(webRead.err)}`, "could-not-measure", baked);
+  const webRelevantLog = webRead.out;
   const webCommitsBehind = countCommitsAfter(webRelevantLog, webBuildMaxMs);
   const stale = commitsBehind > 0;
 
@@ -724,7 +742,7 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
     // true, both signals already agree something needs a rebuild, so there's no "disagreement" to surface,
     // and this also skips the extra git call entirely in that case.
     if (!stale && !processBuiltShaMatchesHead) {
-      const processBuiltShaDateMs = commitDateMs(repoRoot, processBuiltSha);
+      const processBuiltShaDateMs = yield* commitDateMs(repoRoot, processBuiltSha);
       if (processBuiltShaDateMs !== null) {
         // Re-run the SAME date-based count the mtime clock used for `commitsBehind`, but keyed to
         // `processBuiltSha`'s OWN real committer date instead of the (untrustworthy, mtime-derived)
@@ -752,17 +770,17 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   // correctly and no extra git call is spent confirming it — unchanged from before this card.
   let builtContentMatchesHead: boolean | null = null;
   if (processBuiltSha) {
-    const ancestor = isAncestor(repoRoot, processBuiltSha, mainlineHeadSha);
+    const ancestor = yield* isAncestor(repoRoot, processBuiltSha, mainlineHeadSha);
     if (ancestor === false) {
       try {
-        const diffOut = runGit(repoRoot, ["diff", "--name-only", processBuiltSha, mainlineHeadSha, "--", ...CONTENT_CHECK_PATHSPECS]).trim();
+        const diffOut = (yield* runGit(repoRoot, ["diff", "--name-only", processBuiltSha, mainlineHeadSha, "--", ...CONTENT_CHECK_PATHSPECS])).trim();
         builtContentMatchesHead = diffOut.length === 0;
       } catch {
         // An unresolvable sha on either side, or a timeout — unknown, not a fabricated verdict.
         builtContentMatchesHead = null;
       }
     } else if (ancestor === true && stale) {
-      builtContentMatchesHead = computeAncestorBehaviouralMatch(repoRoot, processBuiltSha, mainlineHeadSha);
+      builtContentMatchesHead = yield* computeAncestorBehaviouralMatch(repoRoot, processBuiltSha, mainlineHeadSha);
     }
   }
   // Card 404bfc75: `builtContentMatchesHead:true` is the ONE case that can make `stale` MORE lenient than
@@ -805,9 +823,53 @@ export function computeDeployStaleness(options: ComputeDeployStalenessOptions = 
   };
 }
 
-/** Ceiling for the ASYNC history reads in {@link computeDeployStalenessAsync}. Unlike the sync path's
- *  `GIT_TIMEOUT_MS` this does not block the event loop while it waits, so it can be generous; it exists only
- *  so a genuinely wedged git cannot hang a `served_status` request forever. */
+/**
+ * SYNC driver of {@link stalenessSteps} — TEST AND FIXTURE USE ONLY. No production source file may call it
+ * (nor `currentDeployStaleness` / `buildServedStatus`, which sit on it): every production read goes through
+ * {@link computeDeployStalenessAsync}, because this driver's `execFileSync` blocks the whole event loop for
+ * the duration of each git call (measured 870–944 ms for the daemon+shared history walk alone, on a
+ * 4816-commit checkout). `test/deploy-staleness-sync-driver-test-only-guard.mjs` fails on a production caller.
+ * Its `GIT_TIMEOUT_MS` cap therefore only bounds a TEST's wait, never a daemon stall.
+ * Same computation as the async driver by construction (one generator, two drivers), so the two cannot drift.
+ */
+export function computeDeployStaleness(options: ComputeDeployStalenessOptions = {}): DeployStalenessResult {
+  const steps = stalenessSteps(options);
+  let step = steps.next();
+  while (!step.done) {
+    // Sequential, and after the first failed read the rest of the batch is NOT run (recorded as skipped): the
+    // computation only ever consumes the first failure in batch order, so this keeps the sync driver's
+    // call count identical to the one-read-at-a-time walk it replaced.
+    let batchFailed = false;
+    const results: GitReadResult[] = step.value.map(({ repoRoot, args }) => {
+      if (batchFailed) return { err: new Error("skipped: an earlier read in this batch failed") };
+      try {
+        return {
+          out: execFileSync(resolveGitBinaryForSpawn(), ["-C", repoRoot, ...args], {
+            encoding: "utf8",
+            timeout: GIT_TIMEOUT_MS,
+            windowsHide: true,
+            env: nonInteractiveEnv(),
+          }),
+        };
+      } catch (err) {
+        batchFailed = true;
+        return { err };
+      }
+    });
+    step = steps.next(results);
+  }
+  return step.value;
+}
+
+/** Ceiling for each ASYNC git read in {@link computeDeployStalenessAsync}. It does not block the event loop
+ *  while it waits, so it can be generous; it exists only so a genuinely wedged git cannot hang a caller
+ *  forever. Node's `execFile` `timeout` kills the DIRECT child only (`SIGTERM`, i.e. `TerminateProcess` on
+ *  Windows) and settles when it exits. PROVEN on Windows (Git for Windows): that kill settles for both
+ *  `cmd\git.exe` (a shim that spawns the real git as a child) and `mingw64\bin\git.exe`, and the shim's git
+ *  child died with it (a stdin-blocked `hash-object`, the grandchild exits on pipe EOF). NOT proven: a
+ *  grandchild blocked on something other than stdin could survive the kill. Not routed through
+ *  `git/bounded.ts`'s tree-kill path: that is the canonical-merge machinery (quarantine, merge-driver
+ *  enumeration), too heavy and wrong in kind for a read-only log. */
 export const ASYNC_GIT_TIMEOUT_MS = 10_000;
 
 export interface ComputeDeployStalenessAsyncOptions extends ComputeDeployStalenessOptions {
@@ -828,38 +890,30 @@ function runGitAsync(repoRoot: string, args: string[]): Promise<string> {
 }
 
 /**
- * Async twin of {@link computeDeployStaleness} for the request-serving `served_status` surface (REST + MCP):
- * the three UNCONDITIONAL git history reads — the ones that cost ~0.9 s on a large repo and used to run as a
- * synchronous `execFileSync` capped at `GIT_TIMEOUT_MS` — are issued with async `execFile` (event loop free,
- * {@link ASYNC_GIT_TIMEOUT_MS} ceiling), then the unchanged synchronous computation runs with those results
- * substituted, so the two paths cannot drift apart. The conditional single-object reads (fourth to sixth call,
- * see the module doc) still run synchronously, exactly as before. No result is cached or kept: DoD #4 stands.
- * A failed async read is substituted as that read's own failure, so it degrades to the same
- * `{available:false}` shape the sync path produces for it.
+ * The PRODUCTION driver of {@link stalenessSteps}: EVERY git read of the staleness computation — the three
+ * unconditional history walks, `merge-base --is-ancestor`, the commit-date lookup, the content diff and the
+ * ancestor-path behavioural check's `diff`/`show` reads — is awaited via async `execFile`
+ * ({@link ASYNC_GIT_TIMEOUT_MS} ceiling), so none of them blocks the event loop. What remains synchronous is
+ * only `fs` stats of the dist trees and the per-file TypeScript transpile of the behavioural check (CPU, no
+ * subprocess, bounded by `MAX_ANCESTOR_BEHAVIOURAL_CHECK_FILES`). A failed read degrades exactly as the sync
+ * driver does. No result is cached or kept: DoD #4 stands.
  *
  * @decision 062fa934 — reached through `currentDeployStalenessAsync` (served-status.ts); never add another call site.
  */
 export async function computeDeployStalenessAsync(options: ComputeDeployStalenessAsyncOptions = {}): Promise<DeployStalenessResult> {
-  const { asyncGit, ...syncOptions } = options;
-  const repoRoot = syncOptions.repoRoot ?? loomRepoRoot();
-  // No `.git` (packaged install): no git is read at all, so there is nothing to move off the loop.
-  if (!fs.existsSync(path.join(repoRoot, ".git"))) return computeDeployStaleness(syncOptions);
+  const { asyncGit, ...stepOptions } = options;
   const read = asyncGit ?? runGitAsync;
-  const calls: string[][] = [
-    ["log", "-1", `--pretty=%H${UNIT_SEP}%cI`],
-    ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...RESTART_RELEVANT_PATHSPECS],
-    ["log", `--pretty=%H${UNIT_SEP}%cI`, "--max-count=2000", "--", ...REBUILD_ONLY_PATHSPECS],
-  ];
-  const settled = await Promise.all(calls.map((args) => read(repoRoot, args).then((out) => ({ out }), (err: unknown) => ({ err }))));
-  const map = new Map<string, { out: string } | { err: unknown }>();
-  calls.forEach((args, i) => map.set(prefetchKey(repoRoot, args), settled[i]!));
-  // Set and cleared inside one synchronous block: nothing can observe or interleave with `prefetchedGit`.
-  prefetchedGit = map;
-  try {
-    return computeDeployStaleness(syncOptions);
-  } finally {
-    prefetchedGit = null;
+  const steps = stalenessSteps(stepOptions);
+  let step = steps.next();
+  while (!step.done) {
+    const results = await Promise.all(
+      step.value.map(({ repoRoot, args }): Promise<GitReadResult> =>
+        read(repoRoot, args).then((out) => ({ out }), (err: unknown) => ({ err })),
+      ),
+    );
+    step = steps.next(results);
   }
+  return step.value;
 }
 
 /**

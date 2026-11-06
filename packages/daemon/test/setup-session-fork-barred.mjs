@@ -196,6 +196,8 @@ try {
   // ==================== (F) REST route error-mapping ====================
   const stub = {};
   const sessionsStub = {
+    // Card bba7a8ec: the /resume route pre-reads deploy staleness (a manager row only) before resume().
+    preReadDeployStalenessForSession: async () => undefined,
     forkSession: (id) => {
       if (id === "setupBarred") throw new Error(SETUP_SESSION_FORK_BARRED_ERROR);
       if (id === "mgrBarred") throw new Error(MANAGER_SESSION_BARRED_ERROR);

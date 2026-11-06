@@ -22,6 +22,7 @@ import { execSync } from "node:child_process";
 import { registerForCleanup } from "./_tmp-fixture.mjs";
 import { waitUntil, ambientScaledBudget } from "./_wait.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { STAMPED_STALENESS } from "./_deploy-staleness-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -87,8 +88,9 @@ try {
     if (onBatchGate) await onBatchGate();
     return batchPasses ? { passed: true } : { passed: false, reason: "test: batch gate red" };
   };
-  const svcSync = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0 });
-  const svcAsync = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0, syncAttachBudgetMs: 1 });
+  // Card bba7a8ec: `deployStaleness` pinned so the settle nudge's build stamp needs no (async) git read.
+  const svcSync = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0, deployStaleness: STAMPED_STALENESS });
+  const svcAsync = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0, syncAttachBudgetMs: 1, deployStaleness: STAMPED_STALENESS });
 
   let n = 0;
   async function scenario() {

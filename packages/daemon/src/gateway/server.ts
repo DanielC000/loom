@@ -6767,7 +6767,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     try {
       // @decision acd3c688 — this route is the ONE human-REST session-start call site; it passes
       // spawnHumanAuthorized:true into every explicit-role start* below to bypass the grant-carryover check.
-      if (role === "manager") return deps.sessions.startManager(id, undefined, { spawnHumanAuthorized: true });
+      // Card bba7a8ec: the sync spawn takes its deploy-staleness from this async pre-read (off the event loop).
+      if (role === "manager") return deps.sessions.startManager(id, undefined, { spawnHumanAuthorized: true, deployStaleness: await deps.sessions.resolveDeployStalenessAsync() });
       if (role === "platform") return deps.sessions.startPlatformLead(id, { spawnHumanAuthorized: true });
       // P5: spawn the read-and-file-only Platform Auditor. HUMAN-REST only (like startPlatformLead) — the
       // session role is locked to "auditor" via callerRole, regardless of the agent's profile role.
@@ -6798,7 +6799,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // manager/platform profile — bypasses the profile entirely (role null, agent's own prompt, no allow
       // delta). Absent/undefined role = auto (the profile's role applies — P2 default).
       if (role === "plain") return deps.sessions.startNew(id, { forcePlain: true });
-      return deps.sessions.startNew(id);
+      return deps.sessions.startNew(id, { deployStaleness: await deps.sessions.preReadDeployStalenessForAgent(id) });
     } catch (e) {
       if (e instanceof SecondLiveManagerError) return reply.code(409).send({ error: e.message, holderSessionId: e.holderSessionId });
       throw e;
@@ -6809,7 +6810,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // may deliberately bring a retired session back, to inspect or recover it.
   app.post("/api/sessions/:id/resume", async (req, reply) => {
     try {
-      return await deps.sessions.resume((req.params as { id: string }).id, { allowSuperseded: true });
+      const resumeId = (req.params as { id: string }).id;
+      return await deps.sessions.resume(resumeId, { allowSuperseded: true, deployStaleness: await deps.sessions.preReadDeployStalenessForSession(resumeId) });
     } catch (e) {
       // Card 15806f81: mirrors the /fork route's own honest-4xx mapping below — MANAGER_SESSION_BARRED_ERROR
       // was falling through to a generic 500 here (resume() has thrown it since 6ed0f922).

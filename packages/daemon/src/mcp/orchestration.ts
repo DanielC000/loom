@@ -943,7 +943,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, db: Db,
             // imported `currentDeployStaleness()`) so a hermetic test can pin this read via
             // `setDeployStalenessOverrideForTest` instead of racing a real git call — see that
             // method's own doc on `SessionService`.
-            const emittedBuild = advisoryBuildStamp(sessions.resolveDeployStaleness());
+            const emittedBuild = advisoryBuildStamp(await sessions.resolveDeployStalenessAsync());
             if (emittedBuild) enriched = { ...enriched, emittedBuild };
           } catch {
             // Advisory only, same posture as timingBand above.
@@ -2231,8 +2231,11 @@ export class OrchestrationMcpRouter {
       // traceability only, mirroring messageSession/redirectSession's own trailing param — the backing
       // op does not itself consume it. `role` is validated to "manager"|"plain" by the lever's own
       // spawnableRoleError guard before this is reachable, so the narrowing cast here is safe.
-      spawnSession: (projectId, agentId, role, _senderSessionId) =>
-        sessions.spawnSessionAsPlatform(projectId, agentId, role as "manager" | "plain"),
+      // Card bba7a8ec: async so a manager spawn can take its deploy staleness from an off-loop pre-read.
+      spawnSession: async (projectId, agentId, role, _senderSessionId) =>
+        sessions.spawnSessionAsPlatform(projectId, agentId, role as "manager" | "plain", {
+          deployStaleness: role === "manager" ? await sessions.resolveDeployStalenessAsync().catch(() => undefined) : undefined,
+        }),
     }, this.trustWindow,
     // `git-push` lever's own seam (card a3c3ade8) — builds a bounded, non-interactive GitWriter for ONE
     // repo path, sharing the SAME boot-resolved timeouts the human git-write REST routes and the Platform
