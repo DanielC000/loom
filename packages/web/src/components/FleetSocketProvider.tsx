@@ -4,6 +4,7 @@ import type { OrchestrationEvent, ServerFleetMessage, SessionListItem } from "@l
 import { api, orchStatusQuery } from "../lib/api";
 import { applyFleetDelta } from "../lib/fleetSocket";
 import { applyOrchEvent, invalidateOrchEventQueries, resyncOrchEvents } from "../lib/orchEvents";
+import { cancelPendingQuestionsSignal, invalidateQuestionQueries, resyncQuestions, signalQuestionsChanged } from "../lib/questionsSync";
 import { noteRemoteSocketRefusal, socketAuth } from "../lib/gatewayCredential";
 import { createReconnectBackoff, createRefusalEpisode, createRetryLoop, handleSocketClose } from "../lib/socketReconnect";
 import { WEB_BUNDLE_QUERY_KEY } from "../lib/newBuild";
@@ -86,7 +87,8 @@ export function FleetSocketProvider() {
     const seedRetry = createRetryLoop();
     const statusSeedRetry = createRetryLoop();
     const eventResyncRetry = createRetryLoop();
-    const stopSeedRetries = () => { seedRetry.stop(); statusSeedRetry.stop(); eventResyncRetry.stop(); };
+    const questionsResyncRetry = createRetryLoop();
+    const stopSeedRetries = () => { seedRetry.stop(); statusSeedRetry.stop(); eventResyncRetry.stop(); questionsResyncRetry.stop(); };
     // Card a6d7bf36 — the ONE held-credential probe this run of failures is allowed. A remote page whose
     // gateway token has died never gets a 1008 here either (the upgrade 401s, so there is no socket to
     // close and the browser reports a bare 1006), so this socket's own reconnect would otherwise retry a
@@ -144,7 +146,16 @@ export function FleetSocketProvider() {
           .then((s) => { if (!disposed) writeStatus(s); })
           .catch((err) => log("status fallback poll failed, will retry", err));
         invalidateOrchEventQueries(qc).catch((err) => log("event fallback poll failed, will retry", err));
+        invalidateQuestionQueries(qc).catch((err) => log("questions fallback poll failed, will retry", err));
       }, FALLBACK_POLL_MS);
+    };
+
+    // Request-inbox feed (card 55de3b68): a contentless `{t:"questions"}` signal, so the "seed" is just one
+    // invalidate-and-read of every inbox query per (re)open — once, never on a timer — retried while it fails.
+    let questionsResyncGen = 0;
+    const resyncQuestionsOnOpen = () => {
+      const gen = ++questionsResyncGen;
+      resyncQuestions(qc, { retry: questionsResyncRetry, isCurrent: () => !disposed && gen === questionsResyncGen, again: resyncQuestionsOnOpen });
     };
 
     // Re-reads every event list on (re)open — the event feed's seed. Runs on the FIRST open too: a list read
@@ -252,10 +263,12 @@ export function FleetSocketProvider() {
         seedRetry.disarm();
         statusSeedRetry.disarm();
         eventResyncRetry.disarm();
+        questionsResyncRetry.disarm();
         log("connected");
         seed();
         seedStatus(reconnecting);
         resyncEvents();
+        resyncQuestionsOnOpen();
         // Card e98bf784 — a RECONNECT (never the first connect) is the strongest "the daemon restarted"
         // signal this app has, and a restart is exactly when a rebuilt web bundle appears. Re-ask what is
         // being served so a tab still running the old bundle can offer a reload. Cheap by construction:
@@ -276,6 +289,7 @@ export function FleetSocketProvider() {
           writeStatus(frame);
           return;
         }
+        if (msg.t === "questions") { signalQuestionsChanged(qc); return; }
         if (msg.t === "event") {
           if (eventsResyncing) bufferedEvents.push(msg.event);
           else applyOrchEvent(qc, msg.event);
@@ -295,6 +309,8 @@ export function FleetSocketProvider() {
         eventsResyncing = false;
         bufferedEvents = [];
         eventResyncGen++;
+        questionsResyncGen++;
+        cancelPendingQuestionsSignal(qc);
         // Card f8d2684d: a 1008 close is TERMINAL — classified FIRST (shared policy, lib/socketReconnect).
         //
         // @decision 04314fbc — a terminal close must also stop the two SEED retry loops, not only the
@@ -365,6 +381,7 @@ export function FleetSocketProvider() {
             seedRetry.disarm();
             statusSeedRetry.disarm();
             eventResyncRetry.disarm();
+            questionsResyncRetry.disarm();
             // Card 97dd97e5 — the token-LESS arm must run before the probe is ever asked: with no
             // credential held there is nothing for `refusalEpisode.check` to learn (a token-less probe
             // settles as `"none"`), and asking anyway just re-arms this ladder forever at the 10s cap.
@@ -389,6 +406,7 @@ export function FleetSocketProvider() {
       clearTimeout(reconnectTimer);
       stopSeedRetries();
       stopFallbackPoll();
+      cancelPendingQuestionsSignal(qc);
       const socket = ws;
       ws = null;
       if (socket) {

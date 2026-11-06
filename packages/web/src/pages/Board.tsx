@@ -389,7 +389,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // ── Card-detail filter inputs (card cea577af) ──────────────────────────────────
   // Pending Requests come from the SAME app-wide key the sidebar badge already polls, so this is a cache
   // read, not a new request per board.
-  const openQuestions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 3000 });
+  const openQuestions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
   const facets = useMemo(() => {
     const ids = allTasks.map((t) => t.id);
     const parentOf = new Map(allTasks.map((t) => [t.id, t.parentId]));
@@ -1547,7 +1547,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
   // exact `q.taskId === task.id` check below — but a row filed BEFORE that fix landed can still carry a
   // raw 8-char id-PREFIX (`question_ask({taskId: "28f425c2"})`), which never equals the card's full id.
   // The `startsWith` fallback is belt-and-suspenders for those legacy rows (card c089a959).
-  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true), refetchInterval: 5000 });
+  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true) });
   const linked = (questions.data ?? []).filter(
     (q) => q.projectId === task.projectId && (q.taskId === task.id || (!!q.taskId && task.id.startsWith(`${q.taskId}-`))),
   );

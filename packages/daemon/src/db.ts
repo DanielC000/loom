@@ -3159,6 +3159,61 @@ export class Db {
    * that triggered it.
    */
   sessionChangeListener?: (id: string) => void;
+  /**
+   * Post-commit "the Request inbox changed" signal (card 55de3b68) — wired by the gateway to a contentless
+   * `{t:"questions"}` /ws/fleet frame; the web re-reads `GET /api/questions` on it (REST stays the source
+   * of truth), so the listener takes NO argument and nothing about WHICH row changed ever leaves the Db.
+   * Every `questions` mutator calls {@link Db.prototype.notifyQuestionsChanged} (pinned by
+   * `questions-change-notifier-guard.mjs`). Coalesced: any number of mutations before the next microtask
+   * produce one call. Faults never break the writing mutator. A rolled-back write signals nothing ONLY under
+   * `runInTransaction`; a raw `db.transaction(...)()` caller (the session/agent delete cascades, deleteTask,
+   * relocateTask, answerCredentialQuestion, the attachment flips), or `runInTransaction` nested inside one,
+   * can over-signal once on rollback — harmless (one redundant re-read of the REST route), so no machinery.
+   */
+  questionsChangeListener?: () => void;
+  /** Depth of `runInTransaction` calls on the stack; a notify inside one is parked until the OUTERMOST commit. */
+  private runTxDepth = 0;
+  private questionsChangePendingInTx = false;
+  private questionsChangeScheduled = false;
+  private notifyQuestionsChanged(): void {
+    if (!this.questionsChangeListener) return;
+    // @decision 87b1c8a1 — inside runInTransaction a later statement can still roll the write back: park
+    // the signal and let the outermost commit release it (a rollback drops it). Anywhere else (autocommit,
+    // or a raw db.transaction(...), which is synchronous) the microtask below runs after the statement/tx
+    // has finished, so it can never fire before the write is durable.
+    if (this.runTxDepth > 0) { this.questionsChangePendingInTx = true; return; }
+    this.scheduleQuestionsChange();
+  }
+  /**
+   * Card 55de3b68 — the inbox row (`listOpenQuestions`) JOINs fields that live OUTSIDE the questions table;
+   * a change to one of them must signal too, but ONLY when a question actually shows it. Each helper is
+   * an EXISTS check, so a change nobody displays costs one indexed read and no frame. Callers invoke them
+   * only on a REAL value transition (never a busy flip / last_activity touch — that would be a poll again).
+   * The sites are pinned by `questions-change-notifier-guard.mjs` (JOINED_FIELD_SITES).
+   */
+  private notifyQuestionsIfTaskReferenced(taskId: string): void {
+    if (!this.questionsChangeListener) return;
+    if (this.db.prepare("SELECT 1 FROM questions WHERE task_id = ? LIMIT 1").get(taskId)) this.notifyQuestionsChanged();
+  }
+  private notifyQuestionsIfSessionHasOpen(sessionId: string): void {
+    if (!this.questionsChangeListener) return;
+    // The default inbox view's own predicate (listOpenQuestions): pending/answered, or an undismissed notice.
+    if (this.db.prepare(
+      "SELECT 1 FROM questions WHERE session_id = ? AND (state IN ('pending','answered') OR (state = 'notice' AND dismissed_at IS NULL)) LIMIT 1",
+    ).get(sessionId)) this.notifyQuestionsChanged();
+  }
+  private notifyQuestionsIfProjectHasQuestions(projectId: string): void {
+    if (!this.questionsChangeListener) return;
+    if (this.db.prepare("SELECT 1 FROM questions WHERE project_id = ? LIMIT 1").get(projectId)) this.notifyQuestionsChanged();
+  }
+  private scheduleQuestionsChange(): void {
+    if (this.questionsChangeScheduled) return;
+    this.questionsChangeScheduled = true;
+    queueMicrotask(() => {
+      this.questionsChangeScheduled = false;
+      try { this.questionsChangeListener?.(); } catch { /* listener faults never break a questions write */ }
+    });
+  }
   constructor(file = DB_PATH, opts?: { allowProdDb?: boolean }) {
     assertProdDbOpenAllowed(file, opts?.allowProdDb);
     this.db = new Database(file);
@@ -4464,6 +4519,7 @@ export class Db {
     // passes run inside ONE transaction — see insertProject's own M-2 note for why.
     this.runInTransaction(() => {
       this.db.prepare(`UPDATE projects SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+      if (patch.name !== undefined) this.notifyQuestionsIfProjectHasQuestions(id); // the inbox row JOINs the project name
       if (before) this.resetMainlineBaselinesForRepoChange(id, before, patch);
     });
   }
@@ -6562,6 +6618,7 @@ export class Db {
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");
     this.db.prepare(`UPDATE agents SET ${set} WHERE id = ?`).run(...names.map((c) => cols[c]), id);
+    if (patch.name !== undefined) this.notifyQuestionsChanged(); // the inbox row JOINs the filing agent's name (rare, human-driven)
   }
   /**
    * Atomically ADD ONE connection id to an agent's `connections` grant list (human-only REST add-one).
@@ -7754,7 +7811,7 @@ export class Db {
     this.deleteCompanionCapabilityGrantsForSession(sessionId);
     this.db.prepare("DELETE FROM companion_messages WHERE session_id = ?").run(sessionId);
     this.db.prepare("DELETE FROM companion_conversations WHERE session_id = ?").run(sessionId);
-    this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sessionId);
+    if (this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sessionId).changes > 0) this.notifyQuestionsChanged();
     this.db.prepare("UPDATE poll_jobs SET session_id = NULL WHERE session_id = ?").run(sessionId);
     this.db.prepare("UPDATE event_triggers SET target_session_id = NULL WHERE target_session_id = ?").run(sessionId);
     this.db.prepare("UPDATE webhook_endpoints SET target_session_id = NULL WHERE target_session_id = ?").run(sessionId);
@@ -7844,8 +7901,10 @@ export class Db {
     this.notifySessionChanged(s.id);
   }
   setEngineSessionId(id: string, engineId: string): void {
+    const prior = (this.db.prepare("SELECT resumability FROM sessions WHERE id = ?").get(id) as Row | undefined)?.resumability;
     this.db.prepare("UPDATE sessions SET engine_session_id = ?, resumability = 'resumable', last_activity = ? WHERE id = ?")
       .run(engineId, new Date().toISOString(), id);
+    if (prior !== "resumable") this.notifyQuestionsIfSessionHasOpen(id); // card 55de3b68: resumability is JOINed into the inbox row
     this.notifySessionChanged(id);
   }
   /** @decision 08c81809 — durable counterpart to `PtyHost.markReady`'s in-memory latch.
@@ -7863,8 +7922,10 @@ export class Db {
     this.notifySessionChanged(id);
   }
   setProcessState(id: string, state: ProcessState): void {
+    const prior = (this.db.prepare("SELECT process_state FROM sessions WHERE id = ?").get(id) as Row | undefined)?.process_state;
     this.db.prepare("UPDATE sessions SET process_state = ?, last_activity = ? WHERE id = ?")
       .run(state, new Date().toISOString(), id);
+    if (prior !== state) this.notifyQuestionsIfSessionHasOpen(id); // card 55de3b68: the inbox row JOINs session liveness
     this.notifySessionChanged(id);
   }
   /**
@@ -7882,7 +7943,9 @@ export class Db {
     this.setProcessState(id, "live");
   }
   setResumability(id: string, r: Resumability): void {
+    const prior = (this.db.prepare("SELECT resumability FROM sessions WHERE id = ?").get(id) as Row | undefined)?.resumability;
     this.db.prepare("UPDATE sessions SET resumability = ? WHERE id = ?").run(r, id);
+    if (prior !== r) this.notifyQuestionsIfSessionHasOpen(id); // card 55de3b68: the inbox row JOINs session resumability
     this.notifySessionChanged(id);
   }
   /**
@@ -8027,7 +8090,7 @@ export class Db {
     this.db.prepare(
       "UPDATE sessions SET process_state = 'exited', busy = 0 WHERE process_state IN ('live','starting')",
     ).run();
-    for (const s of stale) this.notifySessionChanged(s.id);
+    for (const s of stale) { this.notifyQuestionsIfSessionHasOpen(s.id); this.notifySessionChanged(s.id); } // live/starting -> exited is a real transition
     return stale;
   }
   /** Sessions that have a captured engine id and aren't already marked dead. */
@@ -8665,8 +8728,10 @@ export class Db {
    *  ⛔ Touches ONLY `session_id` — NEVER write `filed_by_session_id` here; that
    *  immutability is the entire fix (card cb7d6998). Do not add a second column without re-reading it first. */
   reparentQuestions(oldSessionId: string, newSessionId: string): number {
-    return this.db.prepare("UPDATE questions SET session_id = ? WHERE session_id = ?")
+    const changes = this.db.prepare("UPDATE questions SET session_id = ? WHERE session_id = ?")
       .run(newSessionId, oldSessionId).changes;
+    if (changes > 0) this.notifyQuestionsChanged();
+    return changes;
   }
   /** Move a wake-mode event trigger's fixed `target_session_id` onto a recycle successor — mirrors
    *  reparentWakes/reparentQuestions exactly (an unconditional row move at recycle time, not a
@@ -9564,6 +9629,8 @@ export class Db {
       // `next.deferredUntilEvent` carries the CURRENT value forward on any field-only patch that never
       // mentions this field at all, and better-sqlite3 cannot bind a raw JS object as a parameter.
       deferredUntilEvent: serializeDeferredUntilEvent(next.deferredUntilEvent) });
+    // Card 55de3b68: the inbox row JOINs the card's lane + title — signal only on a real change.
+    if (next.title !== t.title || next.columnKey !== t.columnKey) this.notifyQuestionsIfTaskReferenced(id);
     if (patch.deferredUntilTaskId !== undefined) {
       const ids = patch.deferredUntilTaskId == null ? [] : Array.isArray(patch.deferredUntilTaskId) ? patch.deferredUntilTaskId : [patch.deferredUntilTaskId];
       this.setDeferralEdges(id, t.projectId, ids);
@@ -9673,9 +9740,9 @@ export class Db {
       // deferral edges (to = id) follow it; edges where it is only the BLOCKER (from = id) stay with the
       // dependent's project, and read deferredStuck there (cross-project blocker), exactly as before.
       this.db.prepare("UPDATE task_relations SET project_id = ? WHERE to_task_id = ? AND type = 'blocks' AND gates_deferral = 1").run(patch.projectId, id);
-      this.db.prepare(
+      if (this.db.prepare(
         "UPDATE questions SET project_id=? WHERE task_id = ? OR (length(task_id) = 8 AND ? LIKE task_id || '-%')",
-      ).run(patch.projectId, id, id);
+      ).run(patch.projectId, id, id).changes > 0) this.notifyQuestionsChanged();
       // Card f330faee: sticky card-policy matches are project-scoped (card_policy_matches_v2), so the source
       // project's rows stay behind under the source key (a later move back restores them) and are never read
       // against the destination. Record the destination's own selector matches for the card's CURRENT title here,
@@ -9695,6 +9762,7 @@ export class Db {
       this.db.prepare("UPDATE task_relations SET declared = 0 WHERE from_task_id = ? AND gates_deferral = 1").run(id);
       this.db.prepare("DELETE FROM task_relations WHERE to_task_id = ? OR (from_task_id = ? AND gates_deferral = 0)").run(id, id);
       this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+      this.notifyQuestionsIfTaskReferenced(id); // the row's joined lane/title go null
     })();
   }
   // --- task relations (card 3df86c87; docs/decisions/3df86c87-*.md) ---
@@ -9829,13 +9897,23 @@ export class Db {
       );
     }
     const snapshotLen = this.pendingEventNotifications.length;
+    const questionsPendingSnapshot = this.questionsChangePendingInTx;
+    this.runTxDepth++;
     try {
       const result = this.db.transaction(fn)();
       if (!nested) this.flushPendingEventNotifications();
       return result;
     } catch (e) {
       this.pendingEventNotifications.length = snapshotLen;
+      this.questionsChangePendingInTx = questionsPendingSnapshot; // card 55de3b68: a rolled-back runInTransaction write signals nothing (raw db.transaction callers may over-signal)
       throw e;
+    } finally {
+      this.runTxDepth--;
+      // Outermost exit on the success path releases the parked signal (microtask => after any enclosing raw tx).
+      if (this.runTxDepth === 0 && this.questionsChangePendingInTx) {
+        this.questionsChangePendingInTx = false;
+        this.scheduleQuestionsChange();
+      }
     }
   }
   /** Set a card's parent (null clears). Validation lives in tasks/relations.ts; this is a plain persist that
@@ -9925,6 +10003,8 @@ export class Db {
       // Backstop sweep: any card still on a key not in the new layout (incl. a pre-existing orphan) → landing.
       this.db.prepare(`UPDATE tasks SET column_key = ?, updated_at = ? WHERE project_id = ? AND column_key NOT IN (${placeholders})`)
         .run(defaultLandingKey, now, projectId, ...validKeys);
+      // Card 55de3b68: cards were re-laned in bulk — signal if any question in this project references a card.
+      this.notifyQuestionsIfProjectHasQuestions(projectId);
       // Persist the layout, preserving every other config field.
       this.db.prepare("UPDATE projects SET config_json = ? WHERE id = ?")
         .run(JSON.stringify({ ...project.config, kanbanColumns: columns }), projectId);
@@ -10809,6 +10889,7 @@ export class Db {
       // directly (e.g. to drive the History view) without a separate cancel call.
       cancelledReason: q.cancelledReason ?? null, cancelledBy: q.cancelledBy ?? null, cancelledAt: q.cancelledAt ?? null,
     });
+    this.notifyQuestionsChanged();
   }
   getQuestion(id: string): Question | undefined {
     const r = this.db.prepare("SELECT * FROM questions WHERE id = ?").get(id) as Row | undefined;
@@ -10833,22 +10914,28 @@ export class Db {
    *  while the row is still 'answered' with chosen_option = `authorizeOption`. Returns true iff exactly one
    *  row changed, so two racing redemptions can never both win. */
   claimApprovedQuestion(id: string, authorizeOption: string, consumedAt: string): boolean {
-    return this.db.prepare(
+    const won = this.db.prepare(
       "UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ? AND type = 'permission' AND state = 'answered' AND answered_via = 'human' AND chosen_option = ?",
     ).run(consumedAt, id, authorizeOption).changes === 1;
+    if (won) this.notifyQuestionsChanged();
+    return won;
   }
   /** Owner CLEAR of an answered/consumed ssh-approval Request: -> 'cancelled' (revokes a standing grant, ends a deny
    *  cooldown). Human-only REST route only. True iff changed. */
   clearSshApprovalQuestion(id: string, clearedAt: string): boolean {
-    return this.db.prepare(
+    const cleared = this.db.prepare(
       `UPDATE questions SET state = 'cancelled', cancelled_reason = 'cleared by owner', cancelled_by = 'human', cancelled_at = ?
        WHERE id = ? AND type = 'permission' AND state IN ('answered', 'consumed') AND substr(permission_action, 1, ${SSH_APPROVAL_ACTION_PREFIX.length}) = '${SSH_APPROVAL_ACTION_PREFIX}'`,
     ).run(clearedAt, id).changes === 1;
+    if (cleared) this.notifyQuestionsChanged();
+    return cleared;
   }
   /** Mark an 'answered' Request 'consumed' (it was delivered to its asker some other way). True iff changed. */
   acknowledgeAnsweredQuestion(id: string, consumedAt: string): boolean {
-    return this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ? AND state = 'answered'")
+    const flipped = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ? AND state = 'answered'")
       .run(consumedAt, id).changes === 1;
+    if (flipped) this.notifyQuestionsChanged();
+    return flipped;
   }
   /** An asking manager's own questions (any state), newest first — for a future project/session inbox read. */
   listQuestionsForSession(sessionId: string): Question[] {
@@ -10881,6 +10968,7 @@ export class Db {
     this.db.prepare(
       "UPDATE questions SET state = 'answered', chosen_option = ?, note = ?, answered_at = ?, decided_scope = ?, decided_expires_at = ?, answered_via = ? WHERE id = ?",
     ).run(patch.chosenOption, patch.note, patch.answeredAt, patch.decidedScope ?? null, patch.decidedExpiresAt ?? null, patch.answeredVia ?? null, id);
+    this.notifyQuestionsChanged();
     return this.getQuestion(id);
   }
   /**
@@ -10929,6 +11017,7 @@ export class Db {
         ).run(randomUUID(), existing.projectId, existing.credentialEnvVar, patch.secretBlob, id, patch.answeredAt);
       }
     })();
+    this.notifyQuestionsChanged();
     return this.getQuestion(id);
   }
   /**
@@ -11128,6 +11217,7 @@ export class Db {
       "UPDATE questions SET state = 'cancelled', cancelled_reason = ?, cancelled_by = ?, cancelled_at = ? WHERE id = ? AND state = 'pending'",
     ).run(patch.reason, patch.cancelledBy, cancelledAt, id);
     if (result.changes === 0) throw new Error(`question is already ${this.getQuestion(id)?.state ?? existing.state}`);
+    this.notifyQuestionsChanged();
     return this.getQuestion(id);
   }
   /**
@@ -11150,6 +11240,7 @@ export class Db {
       "UPDATE questions SET title = ?, body = ?, options_json = ? WHERE id = ? AND state = 'pending'",
     ).run(title, body, options ? JSON.stringify(options) : null, id);
     if (result.changes === 0) throw new Error(`question is already ${this.getQuestion(id)?.state ?? existing.state}`);
+    this.notifyQuestionsChanged();
     return this.getQuestion(id);
   }
   /**
@@ -11218,6 +11309,7 @@ export class Db {
     const result = this.db.prepare(
       "UPDATE questions SET escalated_at = ? WHERE id = ? AND state = 'pending' AND escalated_at IS NULL",
     ).run(escalatedAt, id);
+    if (result.changes > 0) this.notifyQuestionsChanged();
     return result.changes > 0;
   }
   /**
@@ -11234,6 +11326,7 @@ export class Db {
   acknowledgeQuestion(id: string, acknowledgedUntil: string | null): Question | undefined {
     const result = this.db.prepare("UPDATE questions SET acknowledged_until = ? WHERE id = ?").run(acknowledgedUntil, id);
     if (result.changes === 0) return undefined;
+    this.notifyQuestionsChanged();
     return this.getQuestion(id);
   }
   /**
@@ -11251,6 +11344,7 @@ export class Db {
     for (const id of ids) {
       if (stmt.run(readAt, id).changes > 0) updated.push(id);
     }
+    if (updated.length > 0) this.notifyQuestionsChanged();
     return updated;
   }
   /**
@@ -11268,6 +11362,7 @@ export class Db {
     for (const id of ids) {
       if (stmt.run(dismissedAt, id).changes > 0) updated.push(id);
     }
+    if (updated.length > 0) this.notifyQuestionsChanged();
     return updated;
   }
   /**
@@ -11316,6 +11411,7 @@ export class Db {
       const stamped: StoredQuestionAttachment = { ...existing, openedAt };
       stored[idx] = stamped;
       this.db.prepare("UPDATE questions SET attachments_json = ? WHERE id = ?").run(JSON.stringify(stored), questionId);
+      this.notifyQuestionsChanged();
       return stamped;
     })();
   }
@@ -11331,6 +11427,7 @@ export class Db {
       if (rows.length === 0) return rows;
       const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
       for (const r of rows) flip.run(consumedAt, r.id);
+      this.notifyQuestionsChanged();
       return rows;
     })();
   }
@@ -11362,6 +11459,7 @@ export class Db {
       if (rows.length === 0) return rows;
       const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
       for (const r of rows) flip.run(consumedAt, r.id);
+      this.notifyQuestionsChanged();
       return rows;
     })();
   }
@@ -11403,6 +11501,7 @@ export class Db {
       }
       const flip = this.db.prepare("UPDATE questions SET state = 'consumed', consumed_at = ? WHERE id = ?");
       for (const r of consumed) flip.run(consumedAt, r.id);
+      this.notifyQuestionsChanged();
       return { consumed, remaining: rows.length - consumed.length };
     })();
   }
@@ -11824,11 +11923,13 @@ export class Db {
     const placeholders = connectionIds.map(() => "?").join(",");
     // Card afe1bc90: keyed on the REQUESTING agent (filed_by_session_id → sessions.agent_id, the immutable
     // filer — decision e54996a4), not on the requested profile.
-    return this.db.prepare(
+    const changes = this.db.prepare(
       `UPDATE questions SET provision_binding_state = 'applied'
        WHERE provision_binding_state = 'pending' AND provision_connection_id IN (${placeholders})
          AND filed_by_session_id IN (SELECT id FROM sessions WHERE agent_id = ?)`,
     ).run(...connectionIds, agentId).changes;
+    if (changes > 0) this.notifyQuestionsChanged();
+    return changes;
   }
   /**
    * The DISTINCT set of connection ids auto-provisioned at a credential-answer boundary (card 193de09e) —

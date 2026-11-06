@@ -412,6 +412,8 @@ export interface LoomDaemon {
    * runs through the SAME production code either way. Requires a session already seeded with
    * `ptyGeometry`/`ptyBytes`; the new bytes are what the surviving viewer must end up showing.
    */
+  /** Card 55de3b68: flip a seeded session to `exited` through the daemon's own Db.setProcessState (what a real pty exit calls). */
+  exitSeededSession: (sessionId: string) => Promise<void>;
   respawnSeededPty: (opts: {
     sessionId: string;
     ptyGeometry?: { cols: number; rows: number };
@@ -862,6 +864,10 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       };
     };
 
+    const exitSeededSession: LoomDaemon["exitSeededSession"] = async (sessionId) => {
+      await apiPost(baseURL, "/internal/test/seed", { exitSessions: [sessionId] });
+    };
+
     const respawnSeededPty: LoomDaemon["respawnSeededPty"] = async (opts) => {
       await apiPost<{ respawnedSessionIds: string[] }>(baseURL, "/internal/test/seed", { respawnPty: [opts] });
     };
@@ -1032,7 +1038,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionHome, seedCompanionConversations, seedLiveSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedMainlineWatermark, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, deleteSeededCompanionConfigs, resolveSeededQuestions, supersedeSeededCrashAbandonments });
+    await use({ baseURL, loomHome, loopbackSecret, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionTurns, seedCompanionReplyDelivered, seedCompanionHome, seedCompanionConversations, seedLiveSession, exitSeededSession, respawnSeededPty, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedMainlineWatermark, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, deleteSeededCompanionConfigs, resolveSeededQuestions, supersedeSeededCrashAbandonments });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

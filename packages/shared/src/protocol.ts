@@ -472,7 +472,11 @@ export type ServerFleetMessage =
   // `event` is EXACTLY the row `GET /api/orchestration/events` returns (card 670b2081: same projection
   // function, no `seq`, nothing added) and goes to every fleet socket; `managerId` just repeats
   // `event.managerSessionId` for a consumer that wants the key without reaching into the row.
-  | { t: "event"; managerId: string; event: OrchestrationEvent };
+  | { t: "event"; managerId: string; event: OrchestrationEvent }
+  // Card 55de3b68: "the Request inbox changed — re-read GET /api/questions". Deliberately CONTENTLESS (no
+  // id, title, count or state): REST stays the source of truth and this frame can never reveal more than
+  // that route already does. Do not add a field.
+  | { t: "questions" };
 
 /** Client → server fleet subscription messages (a future `/ws/fleet`, not wired up by this card). */
 export type ClientFleetMessage =

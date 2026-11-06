@@ -145,11 +145,11 @@ export function Sidebar() {
   // mean the same thing (they read identical 4/4 whenever pending requests dominated the queue). A request
   // item is the one attention kind that carries a `questionId` (the structural "is a request" check —
   // preferred over a kind-string compare, see lib/attention.ts), so filtering on its absence de-dups the
-  // two badges. Requests badge = pending requests, from the shared openQuestions poll (react-query dedups
+  // two badges. Requests badge = pending requests, from the shared openQuestions query (kept live by the /ws/fleet `questions` signal, no interval; react-query dedups
   // it with the attention hook's own use of the key).
   const { items: attentionItems } = useAttention();
   const alertCount = attentionItems.filter((it) => !it.questionId).length;
-  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 4000 });
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
   const pendingRequests = (questions.data ?? []).filter((q) => q.state === "pending").length;
   // Phase 2 of card 59fa6403 (read/unread) — a SEPARATE, muted count from the red pending badge above:
   // unread is orthogonal to state (a notice can be unread with nothing pending at all), so this is never

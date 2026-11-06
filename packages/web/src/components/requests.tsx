@@ -648,7 +648,7 @@ function FilterChip({ label, count, active, dotTone, onClick }:
 // facet — both narrow WITHOUT leaving this destination. Pending rank first, then answered below. Row action
 // opens the detail modal in place.
 export function RequestsInbox() {
-  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 3000 });
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
   const qc = useQueryClient();
   const [typeFacet, setTypeFacet] = useState<QuestionType | "all">("all");
   const [projFacet, setProjFacet] = useState<string>("all"); // projectId | "all"
@@ -1281,7 +1281,7 @@ function SubmitRow({ label, disabled, pending, success, onSubmit }:
 // `openQuestions(true)` folds in the terminal (consumed) history. A console-style table with a search box
 // + type/project/outcome/date filters. Clicking a row opens the same detail modal (read-only readout).
 export function RequestHistory() {
-  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true), refetchInterval: 5000 });
+  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true) });
   const [search, setSearch] = useState("");
   const [typeF, setTypeF] = useState<QuestionType | "all">("all");
   const [projF, setProjF] = useState<string>("all");

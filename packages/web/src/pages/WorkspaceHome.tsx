@@ -173,7 +173,7 @@ export default function WorkspaceHome() {
   // The mockup gives a count to three of the seven: `Inbox 4`, `Gates 1·2`, `Automation 9`. The other
   // four carry none there and carry none here.
   //
-  // `["openQuestions"]` is already polled app-wide by `useAttention()` (App.tsx mounts it for BOTH
+  // `["openQuestions"]` is already kept fresh app-wide (signal-driven via `/ws/fleet`, no poll) by `useAttention()` (App.tsx mounts it for BOTH
   // shells), so the Inbox count is a free read off a cache entry that is always warm. The two
   // Automation reads are the only new fetches this card adds — one-shot, no interval, 30s stale — and
   // they are the same keys pages/Schedules.tsx and pages/EventTriggers.tsx fill, so landing on that tab

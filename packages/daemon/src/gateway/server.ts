@@ -917,6 +917,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     active: () => fleetHub.size > 0,
     notify: (event) => fleetHub.broadcast({ t: "event", managerId: event.managerSessionId, event }),
   };
+  // Card 55de3b68: the Request inbox's change signal — contentless, coalesced and post-commit by the Db
+  // (questionsChangeListener); `size > 0` keeps it inert with no fleet socket, like the event observer.
+  deps.db.questionsChangeListener = () => {
+    if (fleetHub.size > 0) fleetHub.broadcast({ t: "questions" });
+  };
   deps.control.statusChangeListener = () => {
     fleetHub.broadcast({ t: "status", pausedScopes: deps.control.pausedScopes(), schedulerEnabled: deps.schedulerEnabled ?? false });
   };
@@ -3730,6 +3735,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // copy of it, so what a spec proves here is the production path. No DB write: the session row
         // already exists and is untouched.
         respawnPty?: { sessionId: string; ptyGeometry?: { cols: number; rows: number }; ptyBytes?: string }[];
+        // Card 55de3b68: flip seeded sessions to processState "exited" through the SAME Db.setProcessState a real
+        // pty exit calls (a seeded/canned session has no process, so no real exit ever fires) — the only way an e2e
+        // can drive an asking-session liveness transition. DB write only; no pty side effects.
+        exitSessions?: string[];
         // Enqueue a message straight onto a LIVE session's pty FIFO with a chosen source+kind — the ONLY
         // way an e2e spec can seed a Loom `kind:"warning"` operational nudge (e.g. [loom:worker-idle]) into
         // a session's queue, since the human REST path (POST /input) only ever produces source:"human" +
@@ -4135,6 +4144,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           bytes: Buffer.from(r.ptyBytes ?? "", "utf8"),
         });
         respawnedSessionIds.push(r.sessionId);
+      }
+      for (const sid of b.exitSessions ?? []) {
+        if (typeof sid !== "string" || !deps.db.getSession(sid)) return reply.code(404).send({ error: `exitSessions: session ${String(sid)} not found` });
+        deps.db.setProcessState(sid, "exited");
       }
       // Cleanup: archive the named sessions (idempotent; a missing row is a no-op). Also drop any
       // `seedCanned` pty entry (card a53e6bc9) — the e2e worker daemon is SHARED across spec files, so a

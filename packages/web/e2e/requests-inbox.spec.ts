@@ -180,7 +180,13 @@ test.describe("requests inbox (card 695ebab0)", () => {
 
     // /platform is outside the collapsed request-pill's suppression set (/, /overview and /inbox render
     // the queue themselves instead), so the pill is available here as the level-triggered witness.
+    // The notice must be created AFTER the page's first inbox read (card 55de3b68): attention.ts seeds its
+    // seen-set silently from the first resolved read, so a notice already present at that read is "was there
+    // before load" and (correctly) never notifies. The inbox is no longer polled, so the race that used to
+    // be hidden by the poll is real: seeding straight after goto can land before that first read.
+    const firstInboxRead = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/questions" && r.ok());
     await page.goto(`${loomDaemon.baseURL}/platform`);
+    await firstInboxRead;
     const pillCount = async () => {
       const loc = page.getByTestId("request-count-pill");
       if ((await loc.count()) === 0) return 0; // not rendered yet ⇒ zero, never a wait-for-attach hang

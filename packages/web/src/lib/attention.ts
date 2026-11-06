@@ -282,7 +282,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // ONE attention item (tone cyan — the signed "actionable question" color); it clears the instant the
   // human answers it (state → 'answered', dropped server-side from the pending set). Same shared query
   // key as the inbox page/bell, so react-query dedups the poll.
-  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 3000 });
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
   // LIVE managers only: an EXITED manager has no actionable merge/idle state (it's gone), so its
   // events (e.g. an orphaned merge_request whose merge_done was never recorded) must not surface as
   // permanent attention items. Only a live manager's pending reviews / idle states are actionable.
@@ -492,7 +492,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     // Card 99d41588: `escalatedAt` is stamped ONCE, server-side (IdleWatcher.tickStaleRequests), the
     // instant this still-pending Request first crosses `orchestration.staleRequestMinutes` — read directly
     // off the question row rather than cross-referencing a `request_escalated` orchestration event, since
-    // this bell already polls `openQuestions` globally (unlike the idle/context escalation rows below,
+    // this bell already reads `openQuestions` globally (kept live by the /ws/fleet `questions` signal; unlike the idle/context escalation rows below,
     // which can only surface for a currently-LIVE manager's own fetched event stream — a Request's asking
     // session may since have exited without ever answering it, and this must still show the escalation).
     // A row that's ALSO sessionOrphaned takes the orphaned branch instead — "asking session is gone" is
@@ -951,7 +951,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
 // FIRST (newest) pending question for that session — the "Answer →" jump target.
 export interface PendingDecision { questionId: string; count: number }
 export function usePendingDecisionsBySession(): Map<string, PendingDecision> {
-  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 3000 });
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
   return useMemo(() => {
     const m = new Map<string, PendingDecision>();
     // openQuestions is newest-first, so the first pending row seen per session is the newest → the jump target.
