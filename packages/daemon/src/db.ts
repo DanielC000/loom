@@ -6347,16 +6347,43 @@ export class Db {
     this.db.prepare("UPDATE connections SET oauth_needs_reauth = 1 WHERE id = ?").run(id);
   }
   /**
-   * Update an `ssh` connection's EDITABLE config (design record a3d5c7f4) — readOnly / commandAllowlist /
-   * riskyPatterns only. Never touches host/port/user/the private key/the host-key fingerprint — rotating
-   * those is a separate (not-yet-built) operation, since they change what the connection authenticates as
-   * or trusts, not how it's used. `commandAllowlist`/`riskyPatterns` are ALREADY-VALIDATED JSON strings
-   * (this layer never parses/validates — `connections/store.ts`'s `updateSshConnectionConfig` does).
+   * Update an `ssh` connection's usage config (design record a3d5c7f4) — readOnly / commandAllowlist /
+   * riskyPatterns only. Host/port/user/key/pin edits go through `updateConnection` below (card 923dfc9d), which
+   * the store only calls after its re-pin rule passes. `commandAllowlist`/`riskyPatterns` are
+   * ALREADY-VALIDATED JSON strings (this layer never parses/validates — `connections/store.ts` does).
    */
   updateSshConnectionConfig(id: string, patch: { readOnly: boolean; commandAllowlist: string; riskyPatterns: string }): void {
     this.db.prepare(
       "UPDATE connections SET ssh_read_only = @readOnly, ssh_command_allowlist = @commandAllowlist, ssh_risky_patterns = @riskyPatterns WHERE id = @id",
     ).run({ id, readOnly: patch.readOnly ? 1 : 0, commandAllowlist: patch.commandAllowlist, riskyPatterns: patch.riskyPatterns });
+  }
+  /**
+   * Owner edit of an existing connection (card 923dfc9d) — ONE UPDATE over a fixed column whitelist; a key
+   * absent from `patch` keeps its stored value. `secretBlob` is ALREADY envelope ciphertext. Never touches
+   * id/created_at/project_id/auth_scheme-specific oauth columns (immutable). `authScheme` is only ever passed
+   * for an api-key<->bearer swap (validated by `connections/store.ts`, which owns every rule; this layer
+   * never validates).
+   */
+  updateConnection(id: string, patch: {
+    name?: string; host?: string; authScheme?: ConnectionAuthScheme; secretBlob?: string;
+    sshPort?: number; sshUser?: string; sshHostKeyFingerprint?: string;
+    sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+  }): void {
+    const cols: Array<[keyof typeof patch, string]> = [
+      ["name", "name"], ["host", "host"], ["authScheme", "auth_scheme"], ["secretBlob", "secret_blob"],
+      ["sshPort", "ssh_port"], ["sshUser", "ssh_user"], ["sshHostKeyFingerprint", "ssh_host_key_fingerprint"],
+      ["sshReadOnly", "ssh_read_only"], ["sshCommandAllowlist", "ssh_command_allowlist"], ["sshRiskyPatterns", "ssh_risky_patterns"],
+    ];
+    const sets: string[] = [];
+    const params: Record<string, unknown> = { id };
+    for (const [key, col] of cols) {
+      const v = patch[key];
+      if (v === undefined) continue;
+      sets.push(`${col} = @${key}`);
+      params[key] = typeof v === "boolean" ? (v ? 1 : 0) : v;
+    }
+    if (sets.length === 0) return;
+    this.db.prepare(`UPDATE connections SET ${sets.join(", ")} WHERE id = @id`).run(params);
   }
 
   // --- capability_defs (owner-added registry-capability catalog rows, agent-tooling epic P4) ---
@@ -7432,6 +7459,23 @@ export class Db {
       "SELECT DISTINCT cwd FROM sessions WHERE project_id = ? AND role = ? AND archived_at IS NULL AND resumability != 'dead'",
     ).all(projectId, role) as { cwd: string }[];
     return rows.map((r) => r.cwd);
+  }
+  /**
+   * Every NON-ARCHIVED, non-`"dead"` session that pins a `codexProvider` on its OWN row (card 923dfc9d). A
+   * resume re-reads that pinned value (never the profile) and `PtyHost` re-checks its connection binding at
+   * spawn, so a connection host edit must consider these sessions too, not only the profiles. Mirrors
+   * `listSessionCwdsForProjectRole`'s "still resumable" filter; a proven-dead or archived row can never resume.
+   */
+  listResumableSessionsWithCodexProvider(): Array<{ id: string; codexProvider: CodexProvider }> {
+    const rows = this.db.prepare(
+      "SELECT id, codex_provider FROM sessions WHERE codex_provider IS NOT NULL AND archived_at IS NULL AND resumability != 'dead'",
+    ).all() as Row[];
+    const out: Array<{ id: string; codexProvider: CodexProvider }> = [];
+    for (const r of rows) {
+      const cp = parseCodexProviderColumn(r.codex_provider);
+      if (cp) out.push({ id: r.id as string, codexProvider: cp });
+    }
+    return out;
   }
   getSession(id: string): Session | undefined {
     const r = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as Row | undefined;

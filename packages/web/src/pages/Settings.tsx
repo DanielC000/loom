@@ -14,6 +14,7 @@ import {
   type PlatformConfigPatch,
   type RemoteAccessConfig,
   type ConnectionAuthScheme,
+  type ConnectionMetadata,
   type OAuthProviderSlug,
   type PollJob,
   type CapabilityProvisionKind,
@@ -2322,6 +2323,7 @@ const SSH_CREATE_MUTATION_KEY = ["connections", "ssh-create"] as const;
 function ConnectionsPanel() {
   const qc = useQueryClient();
   const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["connections"],
     queryFn: () => api.connections(),
@@ -2459,16 +2461,84 @@ function ConnectionsPanel() {
                     {c.connected && !c.needsReauth ? "Reconnect" : "Connect"}
                   </Button>
                 )}
+                {c.authScheme !== "ssh" && editingId !== c.id && (
+                  <Button variant="ghost" data-testid={`connection-edit-open-${c.id}`} onClick={() => setEditingId(c.id)}>Edit</Button>
+                )}
                 <Button variant="danger" disabled={remove.isPending}
                   onClick={() => { if (window.confirm(`Revoke "${c.name}"? This cannot be undone — you'll need to re-create it with the secret to restore it.`)) remove.mutate(c.id); }}>
                   Revoke
                 </Button>
                 {c.authScheme === "ssh" && <SshConnectionRowDetail c={c} grantedTo={grantedTo(c.id)} />}
+                {c.authScheme !== "ssh" && editingId === c.id && (
+                  <ConnectionEditForm c={c} onDone={() => { setEditingId(null); invalidate(); }} onCancel={() => setEditingId(null)} />
+                )}
               </div>
             );
           })}
         </div>
       </Panel>
+    </div>
+  );
+}
+
+// Inline owner edit of an api-key / bearer / oauth2 connection (card 923dfc9d). The secret is WRITE-ONLY: its
+// field starts empty (there is nothing to pre-fill it from) and blank means "keep the stored secret". An oauth2
+// row edits name/host only; scope is immutable for every kind (delete and re-create to change it). A saved
+// change applies at the next use, not to a call or spawn already made.
+function ConnectionEditForm({ c, onDone, onCancel }: { c: ConnectionMetadata; onDone: () => void; onCancel: () => void }) {
+  const isOauth = c.authScheme === "oauth2";
+  const [name, setName] = useState(c.name);
+  const [host, setHost] = useState(c.host);
+  const [authScheme, setAuthScheme] = useState<ConnectionAuthScheme>(c.authScheme);
+  const [secret, setSecret] = useState("");
+  const [localErr, setLocalErr] = useState<string | null>(null);
+  // gcTime: 0 so the rotated secret does not linger in the MutationCache once this form unmounts.
+  const save = useMutation({
+    meta: { inlineError: true },
+    gcTime: 0,
+    mutationFn: (b: Parameters<typeof api.updateConnection>[1]) => api.updateConnection(c.id, b),
+    onSuccess: () => { setSecret(""); onDone(); },
+  });
+  const submit = () => {
+    setLocalErr(null);
+    if (!name.trim()) { setLocalErr("A name is required."); return; }
+    if (!host.trim()) { setLocalErr("A host is required."); return; }
+    save.mutate({
+      name: name.trim(), host: host.trim(),
+      ...(isOauth ? {} : { authScheme, ...(secret.trim() !== "" ? { secret: secret.trim() } : {}) }),
+    });
+  };
+  return (
+    <div data-testid={`connection-edit-${c.id}`} style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", paddingTop: 8, borderTop: `1px solid ${color.line}` }}>
+      <Hint>A saved change applies the next time an agent uses this connection (its next request), or at its next spawn for a codex provider or capability. The secret is never shown; leave it blank to keep the stored one. Scope cannot be changed: revoke and re-create to change it.</Hint>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Name</span>
+        <Input aria-label="Connection name" value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Host</span>
+        <Input aria-label="Connection host" value={host} onChange={(e) => setHost(e.target.value)} spellCheck={false} />
+      </label>
+      {!isOauth && (
+        <>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Auth scheme</span>
+            <Select aria-label="Connection auth scheme" value={authScheme} onChange={(e) => setAuthScheme(e.target.value as ConnectionAuthScheme)}>
+              <option value="api-key">api-key</option>
+              <option value="bearer">bearer</option>
+            </Select>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>New secret</span>
+            <Input type="password" aria-label="New connection secret" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" placeholder="leave blank to keep the stored secret" />
+          </label>
+        </>
+      )}
+      {(localErr || save.error) && <span role="alert" style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{localErr ?? errorText(save.error)}</span>}
+      <div style={{ display: "flex", gap: 8 }}>
+        <Button variant="primary" onClick={submit} disabled={save.isPending}>{save.isPending ? "Saving…" : "Save changes"}</Button>
+        <Button variant="ghost" onClick={onCancel} disabled={save.isPending}>Cancel</Button>
+      </div>
     </div>
   );
 }

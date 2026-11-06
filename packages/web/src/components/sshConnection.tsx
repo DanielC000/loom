@@ -288,15 +288,48 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
   const [readOnly, setReadOnly] = useState(c.readOnly ?? true);
   const [allow, setAllow] = useState<SshCommandRule[]>(c.commandAllowlist ?? []);
   const [risky, setRisky] = useState<SshCommandRule[]>(c.riskyCommandPatterns ?? []);
+  // Card 923dfc9d: the identity fields are editable too. The key and passphrase are WRITE-ONLY drafts (blank =
+  // keep the stored key; never pre-filled, there is nothing to pre-fill them from). A host/port change clears
+  // the pin so the owner must re-pin (fetch + confirm, or paste) before saving — never a silently kept pin.
+  const [name, setName] = useState(c.name);
+  const [host, setHost] = useState(c.host);
+  const [port, setPort] = useState(String(c.port ?? 22));
+  const [user, setUser] = useState(c.user ?? "");
+  const [privateKey, setPrivateKey] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [fingerprint, setFingerprint] = useState(c.hostKeyFingerprint ?? "");
+  const [fetched, setFetched] = useState<{ fingerprint: string; target: string } | null>(null);
+  const probe = useMutation({ meta: { inlineError: true }, mutationFn: (b: { host: string; port: number }) => api.fetchSshHostFingerprint(b) });
   const [localErr, setLocalErr] = useState<string | null>(null);
+  // gcTime: 0 so a pasted key does not linger in the MutationCache after the observer detaches (create form's posture).
   const save = useMutation({
     meta: { inlineError: true },
-    mutationFn: (b: { readOnly: boolean; commandAllowlist: SshCommandRule[]; riskyCommandPatterns: SshCommandRule[] }) => api.updateSshConnection(c.id, b),
-    onSuccess: () => { setEditing(false); void qc.invalidateQueries({ queryKey: ["connections"] }); },
+    gcTime: 0,
+    mutationFn: (b: Parameters<typeof api.updateSshConnection>[1]) => api.updateSshConnection(c.id, b),
+    onSuccess: () => { setEditing(false); setPrivateKey(""); setPassphrase(""); void qc.invalidateQueries({ queryKey: ["connections"] }); },
   });
   const open = () => {
     setReadOnly(c.readOnly ?? true); setAllow(c.commandAllowlist ?? []); setRisky(c.riskyCommandPatterns ?? []);
+    setName(c.name); setHost(c.host); setPort(String(c.port ?? 22)); setUser(c.user ?? ""); setPrivateKey(""); setPassphrase("");
+    setFingerprint(c.hostKeyFingerprint ?? ""); setFetched(null); probe.reset();
     setLocalErr(null); save.reset(); setEditing(true);
+  };
+  const portNum = parseSshPort(port);
+  const targetChanged = host.trim() !== c.host || portNum !== (c.port ?? 22);
+  const changeTarget = (p: { host?: string; port?: string }) => {
+    const nextHost = p.host ?? host;
+    const nextPort = parseSshPort(p.port ?? port);
+    if (p.host !== undefined) setHost(p.host);
+    if (p.port !== undefined) setPort(p.port);
+    setFetched(null); probe.reset();
+    // The pin is the host KEY of the machine at the original address: another address must be re-pinned.
+    if (nextHost.trim() !== c.host || nextPort !== (c.port ?? 22)) { if (fingerprint === (c.hostKeyFingerprint ?? "")) setFingerprint(""); }
+  };
+  const fetchFingerprint = () => {
+    if (!host.trim() || portNum === null) return;
+    const at = `${host.trim()}:${portNum}`;
+    setFetched(null);
+    probe.mutate({ host: host.trim(), port: portNum }, { onSuccess: (r) => setFetched({ fingerprint: r.fingerprint, target: at }) });
   };
   const submit = () => {
     setLocalErr(null);
@@ -304,7 +337,19 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
     if (!a.ok) { setLocalErr(a.error); return; }
     const r = cleanSshRules(risky, "Hold these commands for my approval");
     if (!r.ok) { setLocalErr(r.error); return; }
-    save.mutate({ readOnly, commandAllowlist: a.value, riskyCommandPatterns: r.value });
+    if (!name.trim()) { setLocalErr("A name is required."); return; }
+    if (!host.trim()) { setLocalErr("A host is required."); return; }
+    if (portNum === null) { setLocalErr("Port must be a whole number from 1 to 65535."); return; }
+    if (!user.trim()) { setLocalErr("A user is required."); return; }
+    const fp = fingerprint.trim();
+    if (fp !== "" && !SSH_FINGERPRINT_RE.test(fp)) { setLocalErr("Expected SHA256: followed by 43 base64 characters, exactly as ssh-keygen -l prints it."); return; }
+    if (targetChanged && fp === "") { setLocalErr("The host or port changed: pin the new host's key fingerprint (fetch it and confirm, or paste it) before saving."); return; }
+    save.mutate({
+      name: name.trim(), host: host.trim(), port: portNum, user: user.trim(),
+      ...(fp !== "" ? { hostKeyFingerprint: fp } : {}),
+      ...(privateKey.trim() !== "" ? { privateKey, ...(passphrase !== "" ? { passphrase } : {}) } : {}),
+      readOnly, commandAllowlist: a.value, riskyCommandPatterns: r.value,
+    });
   };
   const allowN = c.commandAllowlist?.length ?? 0;
   const riskyN = c.riskyCommandPatterns?.length ?? 0;
@@ -327,11 +372,59 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
               : <Badge tone="live">{`Granted to ${grantedTo.length} agent${grantedTo.length === 1 ? "" : "s"}`}</Badge>}
           </span>
         )}
-        {!editing && <Button variant="ghost" onClick={open}>Edit rules</Button>}
+        {!editing && <Button variant="ghost" onClick={open} data-testid={`ssh-edit-open-${c.id}`}>Edit</Button>}
       </div>
       {editing && (
         <div data-testid={`ssh-edit-${c.id}`} style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", paddingTop: 8, borderTop: `1px solid ${color.line}` }}>
-          <Hint>Host, port, user, key and fingerprint are fixed once saved. To change them, revoke this connection and create it again.</Hint>
+          <Hint>
+            A saved change applies the next time an agent uses this connection (its next ssh_exec call), not to a call already made.
+            Changing the host or port means the old host key no longer applies: pin the new host's fingerprint. The key below is
+            never shown; leave it blank to keep the stored one.
+          </Hint>
+          <Field label="Name"><Input aria-label="Connection name" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 220px", minWidth: 0 }}>
+              <Field label="Host"><Input aria-label="SSH host" value={host} onChange={(e) => changeTarget({ host: e.target.value })} spellCheck={false} /></Field>
+            </div>
+            <div style={{ flex: "0 0 96px" }}>
+              <Field label="Port"><Input aria-label="SSH port" value={port} onChange={(e) => changeTarget({ port: e.target.value })} inputMode="numeric" spellCheck={false} style={{ width: "100%", boxSizing: "border-box" }} /></Field>
+            </div>
+          </div>
+          <Field label="User"><Input aria-label="SSH user" value={user} onChange={(e) => setUser(e.target.value)} spellCheck={false} autoComplete="off" /></Field>
+          <Field label="Replace private key">
+            <textarea aria-label="Replacement private key" value={privateKey} onChange={(e) => setPrivateKey(e.target.value)} spellCheck={false} autoComplete="off"
+              rows={4} placeholder="leave blank to keep the stored key"
+              style={{ width: "100%", boxSizing: "border-box", resize: "vertical", fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.45,
+                background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: 8 }} />
+          </Field>
+          {privateKey.trim() !== "" && (
+            <Field label="Key passphrase"><Input type="password" aria-label="Replacement key passphrase" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} spellCheck={false} autoComplete="off" placeholder="only if the key has one" /></Field>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Host key fingerprint</span>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <Input aria-label="Pinned host key fingerprint" value={fingerprint} onChange={(e) => { setFingerprint(e.target.value); }}
+                placeholder="SHA256:…" spellCheck={false} style={{ flex: "1 1 260px", minWidth: 0 }} />
+              <Button variant="ghost" onClick={fetchFingerprint} disabled={!host.trim() || portNum === null || probe.isPending}>
+                {probe.isPending ? "Fetching…" : "Fetch from host"}
+              </Button>
+            </div>
+            {targetChanged && fingerprint === (c.hostKeyFingerprint ?? "") && (
+              <span role="status" style={{ ...hintStyle, color: color.busy }}>This is still the OLD address's pin. Re-pin it for the new host.</span>
+            )}
+            {probe.error && <span role="alert" style={{ ...hintStyle, color: color.danger }}>Could not read the host key: {errorText(probe.error)}</span>}
+            {fetched && (
+              <div data-testid="ssh-edit-fingerprint-confirm" style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4, padding: "10px 12px", border: `1px solid ${color.busy}`, borderRadius: radius.sm, background: color.surface }}>
+                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>{fetched.target} presented this host key:</span>
+                <code style={{ fontFamily: font.mono, fontSize: fs.body, color: color.busy, overflowWrap: "anywhere" }}>{fetched.fingerprint}</code>
+                <span style={hintStyle}>Only pin it if it matches what the host itself reports.</span>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Button variant="primary" onClick={() => { setFingerprint(fetched.fingerprint); setFetched(null); }}>Pin this fingerprint</Button>
+                  <Button variant="ghost" onClick={() => setFetched(null)}>Discard</Button>
+                </div>
+              </div>
+            )}
+          </div>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
             <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} style={{ accentColor: color.live, width: 15, height: 15 }} />
             <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Read-only</span>
@@ -346,7 +439,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
           </div>
           {(localErr || save.error) && <span role="alert" style={{ ...hintStyle, color: color.danger }}>{localErr ?? errorText(save.error)}</span>}
           <div style={{ display: "flex", gap: 8 }}>
-            <Button variant="primary" onClick={submit} disabled={save.isPending}>{save.isPending ? "Saving…" : "Save rules"}</Button>
+            <Button variant="primary" onClick={submit} disabled={save.isPending}>{save.isPending ? "Saving…" : "Save changes"}</Button>
             <Button variant="ghost" onClick={() => setEditing(false)} disabled={save.isPending}>Cancel</Button>
           </div>
         </div>

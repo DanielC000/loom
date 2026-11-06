@@ -27,7 +27,8 @@ import { DEFAULT_SSH_RISKY_COMMAND_PATTERNS } from "@loom/shared";
 export class SshConnectionInputError extends Error {
   constructor(message: string) { super(message); this.name = "SshConnectionInputError"; }
 }
-import type { ConnectionAuthScheme, ConnectionMetadata, OAuthProviderSlug, SshCommandRule } from "@loom/shared";
+import type { CodexProvider, ConnectionAuthScheme, ConnectionMetadata, OAuthProviderSlug, SshCommandRule } from "@loom/shared";
+import { codexProviderBindingError } from "../profiles/codex-provider.js";
 
 /** The narrow db surface this module needs (mirrors CompanionConfigStore's shape in companion/store.ts). */
 export interface ConnectionsDbStore {
@@ -49,6 +50,30 @@ export interface ConnectionsDbStore {
   markConnectionNeedsReauth(id: string): void;
   /** Update an `ssh` connection's editable config (design record a3d5c7f4) — see `Db`'s own doc. */
   updateSshConnectionConfig(id: string, patch: { readOnly: boolean; commandAllowlist: string; riskyPatterns: string }): void;
+  /** Owner edit over a fixed column whitelist (card 923dfc9d) — see `Db.updateConnection`. */
+  updateConnection(id: string, patch: {
+    name?: string; host?: string; authScheme?: ConnectionAuthScheme; secretBlob?: string;
+    sshPort?: number; sshUser?: string; sshHostKeyFingerprint?: string;
+    sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+  }): void;
+  /** The profiles' codexProvider bindings — read by an edit's host-change dependent check. */
+  listProfiles(): Array<{ name: string; codexProvider?: CodexProvider | null }>;
+  /** Resumable sessions' own pinned codexProvider (a resume re-reads the row, not the profile). */
+  listResumableSessionsWithCodexProvider(): Array<{ id: string; codexProvider: CodexProvider }>;
+}
+
+/** A caller-correctable problem from `updateConnection`/`updateSshConnection` — fixed text, safe to show the
+ *  caller (never echoes a submitted value). `status` is the HTTP code the route answers with. */
+export class ConnectionInputError extends Error {
+  constructor(message: string, readonly status: 400 | 404 | 409 = 400) { super(message); this.name = "ConnectionInputError"; }
+}
+
+/** What an owner edit reports: the metadata, the NAMES of the fields that changed (never values), and
+ *  whether the secret was rotated. The REST route files the `connection_updated` audit event from this. */
+export interface ConnectionUpdateResult {
+  metadata: ConnectionMetadata;
+  changedFields: string[];
+  secretRotated: boolean;
 }
 
 /** Parse an `ssh_command_allowlist`/`ssh_risky_patterns` column back to a rule list. Every writer in this
@@ -349,32 +374,248 @@ export function getSshPrivateKeyForUse(db: ConnectionsDbStore, id: string, keyPa
 }
 
 /**
- * Update an `ssh` connection's EDITABLE config — `readOnly` / `commandAllowlist` / `riskyCommandPatterns`
- * only (design record a3d5c7f4: the risky-pattern list and allowlist are owner-editable per connection).
- * Deliberately does NOT touch host/port/user/the private key/the host-key fingerprint — those identify or
- * authenticate the connection, not how it's used, and rotating them is a separate (not-yet-built)
- * operation. THROWS if `id` doesn't resolve to an `ssh` row, or on an invalid patch field. Any field
- * omitted from `patch` keeps its current stored value.
+ * Update an `ssh` connection's usage config — `readOnly` / `commandAllowlist` / `riskyCommandPatterns`
+ * (design record a3d5c7f4: the risky-pattern list and allowlist are owner-editable per connection). A thin
+ * wrapper over `updateSshConnection` (below), which also owns host/port/user/key/pin edits (card 923dfc9d)
+ * and the re-pin rule. THROWS if `id` doesn't resolve to an `ssh` row, or on an invalid patch field. Any
+ * field omitted from `patch` keeps its current stored value.
  */
 export function updateSshConnectionConfig(
   db: ConnectionsDbStore,
   id: string,
   patch: { readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[] },
 ): ConnectionMetadata {
+  return updateSshConnection(db, id, patch).metadata;
+}
+
+/** Trimmed non-blank string, or a fixed-text 400 — the name rule every scheme shares. */
+function editedName(v: unknown): string {
+  if (!isNonBlankStr(v, CONNECTION_NAME_MAX)) {
+    throw new ConnectionInputError(`name must be a non-empty string of at most ${CONNECTION_NAME_MAX} characters`);
+  }
+  return v.trim();
+}
+
+/** A rename must not collide with ANY other row: `provisionConnection` and `getConnectionByName` resolve by
+ *  exact name (card 193de09e), so a duplicate would make the by-name lookup ambiguous. */
+function assertNameFree(db: ConnectionsDbStore, id: string, name: string): void {
+  const other = db.getConnectionByName(name);
+  if (other && other.id !== id) throw new ConnectionInputError("a connection with that name already exists", 409);
+}
+
+/**
+ * A host change must keep every dependent invariant true (card 923dfc9d): a profile whose `codexProvider`
+ * names this connection requires `endpointHostname(baseUrl) === endpointHostname(connection.host)`, and
+ * `PtyHost` re-checks that at EVERY codex spawn and REFUSES on a mismatch — so letting the edit through would
+ * brick those profiles' codex spawns. A RESUMABLE session pins its own `codexProvider` on its row and a
+ * resume re-reads that (never the profile), so those sessions are checked too — a profile edited away from this
+ * connection does not free a session still pinned to it. Runs the SAME `codexProviderBindingError` the
+ * profile-save routes and the spawn use, so the rules cannot drift. Names profiles and sessions only
+ * (never a secret).
+ */
+function assertHostKeepsCodexBindings(db: ConnectionsDbStore, id: string, newHost: string, scheme: ConnectionAuthScheme): void {
+  const probe = { getConnection: () => ({ host: newHost, authScheme: scheme }) };
+  const brokenProfiles: string[] = [];
+  for (const p of db.listProfiles()) {
+    const cp = p.codexProvider;
+    if (!cp || cp.connectionId !== id) continue;
+    if (codexProviderBindingError(cp, probe)) brokenProfiles.push(`"${p.name}"`);
+  }
+  const brokenSessions: string[] = [];
+  for (const s of db.listResumableSessionsWithCodexProvider()) {
+    if (s.codexProvider.connectionId !== id) continue;
+    if (codexProviderBindingError(s.codexProvider, probe)) brokenSessions.push(s.id.slice(0, 8));
+  }
+  if (brokenProfiles.length > 0 || brokenSessions.length > 0) {
+    const who = [
+      ...(brokenProfiles.length > 0 ? [`profile(s) ${brokenProfiles.join(", ")}`] : []),
+      ...(brokenSessions.length > 0 ? [`resumable session(s) ${brokenSessions.join(", ")}`] : []),
+    ].join(" and ");
+    throw new ConnectionInputError(
+      `host change refused: ${who} use this connection as their codexProvider and the new host no longer matches the provider's baseUrl host — update or retire those first`,
+      409,
+    );
+  }
+}
+
+const IMMUTABLE_CONNECTION_FIELDS = ["projectId", "provider", "clientId", "clientSecret", "authUrl", "tokenUrl", "scopes", "createdAt", "id"] as const;
+
+/**
+ * Owner edit of an api-key / bearer / oauth2 connection (card 923dfc9d). HUMAN-only REST (no MCP path).
+ * Editable: `name`, `host` (every scheme); `authScheme` (api-key<->bearer only) and `secret` (api-key/bearer
+ * only, WRITE-ONLY: absent or blank means UNCHANGED, never echoed). An oauth2 row takes name/host only —
+ * its client id/secret/URLs/scopes would invalidate the stored token bundle, so those stay delete-and-recreate.
+ * `projectId` is immutable (re-scoping could orphan grants held by other projects' agents). Anything else is a
+ * 400 naming the field. The id (hence every agent grant / capability binding that stores it) is preserved.
+ * An `ssh` row is edited via `updateSshConnection`.
+ *
+ * A change takes effect on the NEXT use: the next `authenticated_request`/`ssh_exec` tool call, the next
+ * spawn for codexProvider/capability env — never retroactively inside an already-built spawn environment.
+ * @decision 923dfc9d — do not echo a secret value anywhere (response, event, log) and do not add an MCP path.
+ */
+export function updateConnection(
+  db: ConnectionsDbStore,
+  id: string,
+  patch: Record<string, unknown>,
+  keyPath?: string,
+): ConnectionUpdateResult {
+  const row = db.getConnection(id);
+  if (!row) throw new ConnectionInputError("no connection with that id", 404);
+  if (row.authScheme === "ssh") throw new ConnectionInputError("an ssh connection is edited through PUT /api/connections/:id/ssh");
+  const editable = row.authScheme === "oauth2" ? ["name", "host"] : ["name", "host", "authScheme", "secret"];
+  for (const key of Object.keys(patch)) {
+    if (patch[key] === undefined || editable.includes(key)) continue;
+    // `projectId` echoing its current value is a harmless no-op; any other immutable/unknown key is refused.
+    if (key === "projectId" && patch[key] === row.projectId) continue;
+    const immutable = (IMMUTABLE_CONNECTION_FIELDS as readonly string[]).includes(key) || key === "secret";
+    throw new ConnectionInputError(
+      `${key} cannot be changed on a ${row.authScheme} connection (${immutable ? "immutable" : "unsupported"}; editable: ${editable.join(", ")}) — delete and re-create the connection to change it`,
+    );
+  }
+  const next: Parameters<ConnectionsDbStore["updateConnection"]>[1] = {};
+  const changed: string[] = [];
+  if (patch.name !== undefined) {
+    const name = editedName(patch.name);
+    if (name !== row.name) { assertNameFree(db, id, name); next.name = name; changed.push("name"); }
+  }
+  let scheme = row.authScheme;
+  if (patch.authScheme !== undefined) {
+    if (patch.authScheme !== "api-key" && patch.authScheme !== "bearer") {
+      throw new ConnectionInputError("authScheme must be 'api-key' or 'bearer'");
+    }
+    if (patch.authScheme !== row.authScheme) { scheme = patch.authScheme; next.authScheme = scheme; changed.push("authScheme"); }
+  }
+  if (patch.host !== undefined) {
+    if (!isNonBlankStr(patch.host, CONNECTION_HOST_MAX)) {
+      throw new ConnectionInputError(`host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters`);
+    }
+    const host = patch.host.trim();
+    if (host !== row.host) { assertHostKeepsCodexBindings(db, id, host, scheme); next.host = host; changed.push("host"); }
+  }
+  let secretRotated = false;
+  if (patch.secret !== undefined && patch.secret !== null) {
+    if (typeof patch.secret !== "string") throw new ConnectionInputError("secret, when given, must be a string");
+    if (patch.secret.trim() !== "") {
+      if (!isNonBlankStr(patch.secret, CONNECTION_SECRET_MAX)) {
+        throw new ConnectionInputError(`secret must be at most ${CONNECTION_SECRET_MAX} characters`);
+      }
+      next.secretBlob = encryptSecret(patch.secret.trim(), keyPath);
+      secretRotated = true;
+    }
+  }
+  // A host change that also swaps api-key<->bearer is validated with the NEW scheme above; a scheme-only swap
+  // between the two codex-bindable schemes can never break a binding, so it needs no dependent check.
+  if (changed.length > 0 || secretRotated) db.updateConnection(id, next);
+  return { metadata: getConnectionMetadata(db, id)!, changedFields: changed, secretRotated };
+}
+
+/**
+ * Owner edit of an `ssh` connection (card 923dfc9d), the superset of the config-only update: `name`, `host`,
+ * `port`, `user`, a rotated `privateKey` (+ optional `passphrase`, stripped in memory exactly like create),
+ * `hostKeyFingerprint`, and the three usage fields. WRITE-ONLY key: absent or blank `privateKey` means
+ * UNCHANGED, never echoed.
+ *
+ * A change of `host` or `port` REQUIRES a new `hostKeyFingerprint` in the same request — the pin is the host
+ * KEY of the machine at that address, so keeping the old one would trust one machine's key for another
+ * address; there is no "clear the pin" (an unpinned ssh connection is refused by `ssh_exec`). A `user`-only or
+ * key-only change does NOT need a re-pin (the host key is unchanged). Editing host/port/user/pin changes
+ * `sshApprovalAction`, so every pending/standing/deny hold for the old target stops matching by construction.
+ * @decision 923dfc9d — a host/port change requires an EXPLICIT hostKeyFingerprint in the same request (it may equal the old pin when the owner re-confirms it); the old pin is never implicitly carried over.
+ */
+export function updateSshConnection(
+  db: ConnectionsDbStore,
+  id: string,
+  patch: {
+    name?: string; host?: string; port?: number; user?: string; privateKey?: string; passphrase?: string;
+    hostKeyFingerprint?: string; readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[];
+  },
+  keyPath?: string,
+): ConnectionUpdateResult {
   const row = db.getConnection(id);
   if (!row || row.authScheme !== "ssh") throw new SshConnectionInputError("no ssh connection with that id");
-  const readOnly = patch.readOnly === undefined ? row.sshReadOnly : patch.readOnly;
-  if (typeof readOnly !== "boolean") throw new SshConnectionInputError("readOnly, when given, must be a boolean");
-  const allow = patch.commandAllowlist === undefined
-    ? { ok: true as const, value: parseSshRuleListColumn(row.sshCommandAllowlist) }
-    : validateSshCommandRuleList(patch.commandAllowlist, "commandAllowlist");
-  if (!allow.ok) throw new SshConnectionInputError(allow.error);
-  const risky = patch.riskyCommandPatterns === undefined
-    ? { ok: true as const, value: parseSshRuleListColumn(row.sshRiskyPatterns) }
-    : validateSshCommandRuleList(patch.riskyCommandPatterns, "riskyCommandPatterns");
-  if (!risky.ok) throw new SshConnectionInputError(risky.error);
-  db.updateSshConnectionConfig(id, { readOnly, commandAllowlist: JSON.stringify(allow.value), riskyPatterns: JSON.stringify(risky.value) });
-  return getConnectionMetadata(db, id)!;
+  const next: Parameters<ConnectionsDbStore["updateConnection"]>[1] = {};
+  const changed: string[] = [];
+  try {
+    if (patch.name !== undefined) {
+      const name = editedName(patch.name);
+      if (name !== row.name) { assertNameFree(db, id, name); next.name = name; changed.push("name"); }
+    }
+    let host = row.host;
+    if (patch.host !== undefined) {
+      const ok = validateSshHost(patch.host);
+      if (!ok.ok) throw new SshConnectionInputError(ok.error);
+      host = patch.host.trim();
+    }
+    let port = row.sshPort ?? SSH_DEFAULT_PORT;
+    if (patch.port !== undefined) {
+      if (typeof patch.port !== "number" || !Number.isInteger(patch.port) || patch.port < SSH_PORT_MIN || patch.port > SSH_PORT_MAX) {
+        throw new SshConnectionInputError(`port must be an integer between ${SSH_PORT_MIN} and ${SSH_PORT_MAX}`);
+      }
+      port = patch.port;
+    }
+    const targetChanged = host !== row.host || port !== (row.sshPort ?? SSH_DEFAULT_PORT);
+    if (host !== row.host) changed.push("host");
+    if (port !== (row.sshPort ?? SSH_DEFAULT_PORT)) changed.push("port");
+    if (patch.hostKeyFingerprint !== undefined && (typeof patch.hostKeyFingerprint !== "string" || !SSH_HOST_KEY_FINGERPRINT_RE.test(patch.hostKeyFingerprint.trim()))) {
+      throw new SshConnectionInputError('hostKeyFingerprint must match "SHA256:<43-char base64 digest>" (the exact form `ssh-keygen -l` prints)');
+    }
+    if (targetChanged && patch.hostKeyFingerprint === undefined) {
+      throw new SshConnectionInputError("changing the host or port requires a new hostKeyFingerprint in the same request (the pinned key belongs to the old address)");
+    }
+    if (patch.hostKeyFingerprint !== undefined && patch.hostKeyFingerprint.trim() !== row.sshHostKeyFingerprint) {
+      next.sshHostKeyFingerprint = patch.hostKeyFingerprint.trim();
+      changed.push("hostKeyFingerprint");
+    }
+    if (patch.user !== undefined) {
+      if (!isNonBlankStr(patch.user, SSH_USER_MAX)) {
+        throw new SshConnectionInputError(`user must be a non-empty string of at most ${SSH_USER_MAX} characters`);
+      }
+      if (patch.user.trim() !== row.sshUser) { next.sshUser = patch.user.trim(); changed.push("user"); }
+    }
+    const passphrase = patch.passphrase === "" ? undefined : patch.passphrase;
+    if (passphrase !== undefined && typeof passphrase !== "string") throw new SshConnectionInputError("passphrase, when given, must be a string");
+    let secretRotated = false;
+    if (patch.privateKey !== undefined && typeof patch.privateKey === "string" && patch.privateKey.trim() !== "") {
+      if (!isNonBlankStr(patch.privateKey, CONNECTION_SECRET_MAX)) {
+        throw new SshConnectionInputError(`privateKey must be at most ${CONNECTION_SECRET_MAX} characters`);
+      }
+      const stripped = stripSshKeyPassphrase(patch.privateKey, passphrase);
+      if (!stripped.ok) throw new SshConnectionInputError(stripped.error);
+      next.secretBlob = encryptSecret(stripped.privateKeyPem, keyPath);
+      secretRotated = true;
+    } else if (patch.privateKey !== undefined && typeof patch.privateKey !== "string") {
+      throw new SshConnectionInputError("privateKey, when given, must be a string");
+    } else if (passphrase !== undefined) {
+      throw new SshConnectionInputError("passphrase only applies together with a new privateKey");
+    }
+    const readOnly = patch.readOnly === undefined ? row.sshReadOnly : patch.readOnly;
+    if (typeof readOnly !== "boolean") throw new SshConnectionInputError("readOnly, when given, must be a boolean");
+    const allow = patch.commandAllowlist === undefined
+      ? { ok: true as const, value: parseSshRuleListColumn(row.sshCommandAllowlist) }
+      : validateSshCommandRuleList(patch.commandAllowlist, "commandAllowlist");
+    if (!allow.ok) throw new SshConnectionInputError(allow.error);
+    const risky = patch.riskyCommandPatterns === undefined
+      ? { ok: true as const, value: parseSshRuleListColumn(row.sshRiskyPatterns) }
+      : validateSshCommandRuleList(patch.riskyCommandPatterns, "riskyCommandPatterns");
+    if (!risky.ok) throw new SshConnectionInputError(risky.error);
+    // Host-dependent invariants: an ssh row is never a codexProvider (api-key/bearer only), so there is no
+    // codex binding to re-check here; the pin re-pin rule above is its host invariant.
+    if (host !== row.host) next.host = host;
+    if (port !== (row.sshPort ?? SSH_DEFAULT_PORT)) next.sshPort = port;
+    if (readOnly !== row.sshReadOnly) { next.sshReadOnly = readOnly; changed.push("readOnly"); }
+    const allowJson = JSON.stringify(allow.value);
+    if (allowJson !== row.sshCommandAllowlist) { next.sshCommandAllowlist = allowJson; changed.push("commandAllowlist"); }
+    const riskyJson = JSON.stringify(risky.value);
+    if (riskyJson !== row.sshRiskyPatterns) { next.sshRiskyPatterns = riskyJson; changed.push("riskyCommandPatterns"); }
+    if (changed.length > 0 || secretRotated) db.updateConnection(id, next);
+    return { metadata: getConnectionMetadata(db, id)!, changedFields: changed, secretRotated };
+  } catch (err) {
+    // One error class for the route: a generic rule from the shared helpers becomes the ssh class (same 400/409).
+    if (err instanceof ConnectionInputError && !(err instanceof SshConnectionInputError)) {
+      if (err.status === 400) throw new SshConnectionInputError(err.message);
+    }
+    throw err;
+  }
 }
 
 /**

@@ -2311,7 +2311,11 @@ export type OrchestrationEventKind =
   // `projectId` is the card's project at write time, since waivers are project-keyed).
   // Audit-only, same bucket as `codex_auto_commit`: not a lifecycle signal.
   // @decision 9623e943 — waivers are human-REST-only; no agent surface may write or revoke one.
-  | "card_policy_waived";
+  | "card_policy_waived"
+  // An owner edit of a stored connection (human-only REST, never an MCP tool). `detail` =
+  // {connectionId, fields: string[] (NAMES of changed fields only), secretRotated: boolean} — never a value,
+  // never the secret. Audit-only, same bucket as `card_policy_waived`.
+  | "connection_updated";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -2378,6 +2382,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   worker_cut_base_restamped: true,
   merge_quarantine_broad_union_cleared: true,
   card_policy_waived: true,
+  connection_updated: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

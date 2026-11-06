@@ -761,10 +761,13 @@ check("the exact read/write split is unchanged by card 66b9e590's fail-closed fi
   // REST, no MCP path): 234→235 total, 133→134 writes, reads unchanged.
   // Card f549a0ae added ONE WRITE member, `dismissNotices` (POST /api/questions/dismiss-notices, human-only
   // loopback REST, no MCP path): 235→236 total, 134→135 writes, reads unchanged.
-  assert.equal(API_MEMBERS.total, 236, `api.ts now has ${API_MEMBERS.total} members, not 236`);
+  // Card 923dfc9d added ONE more WRITE member, `updateConnection` (patchErr, PATCH /api/connections/:id, human-only
+  // loopback REST, no MCP path): 236→237 total, 135→136 writes, reads unchanged.
+  assert.equal(API_MEMBERS.total, 237, `api.ts now has ${API_MEMBERS.total} members, not 237`);
   assert.ok(API_MEMBERS.writes.has("dismissNotices"), "api.dismissNotices must classify as a WRITE (card f549a0ae)");
+  assert.ok(API_MEMBERS.writes.has("updateConnection"), "api.updateConnection must classify as a WRITE (card 923dfc9d)");
   assert.equal(API_MEMBERS.reads.size, 101, `api.ts now has ${API_MEMBERS.reads.size} reads, not 101`);
-  assert.equal(API_MEMBERS.writes.size, 135, `api.ts now has ${API_MEMBERS.writes.size} writes, not 135`);
+  assert.equal(API_MEMBERS.writes.size, 136, `api.ts now has ${API_MEMBERS.writes.size} writes, not 136`);
   assert.ok(API_MEMBERS.writes.has("addAgentConnection"), "api.addAgentConnection must classify as a WRITE (card b1df40f2)");
   // Card 61d32daf, pinned by name: the two reads are Tier-1 routes (gateway/trust-tier.ts) and the waiver pair is
   // the human-only escape from a card policy. A flipped verdict means re-reviewing that route's trust posture.

@@ -52,7 +52,7 @@ import { reconcileCompanionBindingRoutes, companionRouteBlockReason } from "../c
 import { buildCompanionReplyStatus, checkCompanionReplyHealth } from "../companion/reply-watch.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
-import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection, createSshConnection, updateSshConnectionConfig, validateSshHost, SshConnectionInputError } from "../connections/store.js";
+import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection, createSshConnection, updateSshConnection, updateConnection, ConnectionInputError, validateSshHost, SshConnectionInputError } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { validateSonarQubeCredential } from "../connections/sonarqube.js";
 import { fetchHostKeyFingerprint } from "../connections/ssh.js";
@@ -2856,6 +2856,38 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true };
   });
 
+  // Owner edit of an existing connection (card 923dfc9d). HUMAN-only REST — no MCP path. The secret is
+  // write-only (absent/blank = unchanged, never echoed); the audit event carries field NAMES and
+  // `secretRotated` only. A change is read at the NEXT use (next authenticated_request/ssh_exec call; next
+  // spawn for codexProvider/capability env), never inside an already-built spawn environment.
+  const sendConnectionEditError = (reply: FastifyReply, err: unknown) => {
+    if (err instanceof ConnectionInputError) return reply.code(err.status).send({ error: err.message });
+    return sendSshConnectionError(reply, err, "update");
+  };
+  const auditConnectionUpdated = (connectionId: string, r: { changedFields: string[]; secretRotated: boolean }) => {
+    if (r.changedFields.length === 0 && !r.secretRotated) return;
+    deps.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "connection_updated",
+      detail: { connectionId, fields: r.changedFields, secretRotated: r.secretRotated },
+    });
+  };
+  app.patch("/api/connections/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    try {
+      // ONE transaction: the UPDATE and its audit row commit together, so a saved credential change always
+      // has its event and an event failure saves nothing.
+      const result = deps.db.runInTransaction(() => {
+        const r = updateConnection(deps.db, id, b);
+        auditConnectionUpdated(id, r);
+        return r;
+      });
+      return reply.code(200).send({ ...result.metadata, autoProvisioned: deps.db.listAutoProvisionedConnectionIds().includes(id) });
+    } catch (err) {
+      return sendConnectionEditError(reply, err);
+    }
+  });
+
   // --- SSH connections (design record a3d5c7f4) — a DEDICATED route (not the generic POST /api/connections
   // above), same precedent as the oauth2 route below: the field shape (port/user/privateKey/passphrase/
   // hostKeyFingerprint/readOnly/commandAllowlist/riskyCommandPatterns) is structurally different from
@@ -2911,21 +2943,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { fingerprint: result.fingerprint };
   });
 
-  // Update an EXISTING ssh connection's editable config only (readOnly / commandAllowlist /
-  // riskyCommandPatterns) — never host/port/user/the key/the fingerprint (see updateSshConnectionConfig's
-  // own doc for why). A field omitted from the body keeps its current stored value.
+  // Update an EXISTING ssh connection (card 923dfc9d: name/host/port/user/key/pin plus the usage config).
+  // A field omitted from the body keeps its stored value; a blank privateKey is "unchanged" (write-only);
+  // a host or port change REQUIRES a new hostKeyFingerprint in the same request (see updateSshConnection).
   app.put("/api/connections/:id/ssh", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const b = (req.body ?? {}) as Record<string, unknown>;
     try {
-      const updated = updateSshConnectionConfig(deps.db, id, {
-        readOnly: b.readOnly as boolean | undefined,
-        commandAllowlist: b.commandAllowlist as never,
-        riskyCommandPatterns: b.riskyCommandPatterns as never,
+      const result = deps.db.runInTransaction(() => {
+        const r = updateSshConnection(deps.db, id, {
+          name: b.name as string | undefined, host: b.host as string | undefined, port: b.port as number | undefined,
+          user: b.user as string | undefined, privateKey: b.privateKey as string | undefined,
+          passphrase: b.passphrase as string | undefined, hostKeyFingerprint: b.hostKeyFingerprint as string | undefined,
+          readOnly: b.readOnly as boolean | undefined,
+          commandAllowlist: b.commandAllowlist as never,
+          riskyCommandPatterns: b.riskyCommandPatterns as never,
+        });
+        auditConnectionUpdated(id, r);
+        return r;
       });
-      return reply.code(200).send(updated);
+      return reply.code(200).send(result.metadata);
     } catch (err) {
-      return sendSshConnectionError(reply, err, "update");
+      return sendConnectionEditError(reply, err);
     }
   });
 

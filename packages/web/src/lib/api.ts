@@ -369,6 +369,16 @@ async function putErr<T>(url: string, body: unknown): Promise<T> {
   return r.json() as Promise<T>;
 }
 
+async function patchErr<T>(url: string, body: unknown): Promise<T> {
+  const r = await guardedFetch(url, { method: "PATCH", headers: { "content-type": "application/json", ...authHeaders() }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    let msg = `${url} -> ${r.status}`;
+    try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
+    throw new Error(msg);
+  }
+  return r.json() as Promise<T>;
+}
+
 // One live worktree session blocking a repoPath rebind (the daemon's shared rebind guard). Surfaced
 // in the Settings UI so the user can name + stop them before retrying.
 // Round 2 (Code Review 70d926b8): a manager session named here (4b2e0146's checkRepoRebind gate 2) has
@@ -1508,9 +1518,16 @@ export const api = {
   // Human-clicked probe: DISPLAYS the host's current key fingerprint for the owner to confirm; pins nothing.
   fetchSshHostFingerprint: (b: { host: string; port: number }) =>
     postErr<{ fingerprint: string }>("/api/connections/ssh/fingerprint", b),
-  // Editable config only — host/port/user/key/fingerprint are fixed after create (revoke + recreate).
-  updateSshConnection: (id: string, b: { readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[] }) =>
-    putErr<ConnectionMetadata>(`/api/connections/${encodeURIComponent(id)}/ssh`, b),
+  // Owner edit (card 923dfc9d). Omitted field = unchanged; a blank/omitted privateKey keeps the stored key
+  // (write-only, never returned); a host or port change REQUIRES a new hostKeyFingerprint in the same body.
+  updateSshConnection: (id: string, b: {
+    name?: string; host?: string; port?: number; user?: string; privateKey?: string; passphrase?: string;
+    hostKeyFingerprint?: string; readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[];
+  }) => putErr<ConnectionMetadata>(`/api/connections/${encodeURIComponent(id)}/ssh`, b),
+  // Owner edit of an api-key/bearer/oauth2 connection (card 923dfc9d). A blank `secret` = unchanged
+  // (write-only, never returned); oauth2 takes name/host only; scope (projectId) is immutable.
+  updateConnection: (id: string, b: { name?: string; host?: string; authScheme?: ConnectionAuthScheme; secret?: string }) =>
+    patchErr<ConnectionMetadata>(`/api/connections/${encodeURIComponent(id)}`, b),
   // Card 1e8e9b1e: a live pre-save probe for the SonarQube preset — never persists anything. The preset's
   // "Create connection" submit calls this FIRST and only proceeds to createConnection() once it resolves.
   validateSonarQubeConnection: (b: { host: string; token: string }) =>
