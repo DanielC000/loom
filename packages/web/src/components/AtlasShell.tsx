@@ -392,7 +392,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                 className={`loom-atlas-crumblist${collapsibleTrail ? " is-collapsible" : ""}`
                   + `${trailOpen ? " is-open" : ""}`}
                 style={{ display: "flex", alignItems: "center", listStyle: "none", margin: 0, padding: 0,
-                  overflow: "hidden", fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+                  overflow: "hidden", fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
                 {crumbs.map((crumb, i) => {
                   const last = i === crumbs.length - 1;
                   return (
@@ -410,8 +410,8 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                     // up as every segment still rendering at 420px with the disclosure beside them.
                     <li key={`${i}-${crumb}`} aria-current={last ? "page" : undefined}
                       style={{ flexShrink: last ? 1 : 999,
-                        color: last ? color.text : color.textMuted }}>
-                      {i > 0 && <span aria-hidden style={{ color: color.border }}>/</span>}
+                        color: last ? color.text : color.text3 }}>
+                      {i > 0 && <span aria-hidden style={{ color: color.line }}>/</span>}
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{crumb}</span>
                     </li>
                   );
@@ -456,7 +456,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
           </div>
 
           <div className="loom-atlas-nodehead">
-            <h1 style={{ margin: 0, fontFamily: font.head, fontWeight: 600, fontSize: fs.lg, letterSpacing: "0.02em",
+            <h1 style={{ margin: 0, fontFamily: font.ui, fontWeight: 600, fontSize: fs.lg, letterSpacing: "0.02em",
               color: color.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {heading}
             </h1>
@@ -547,7 +547,7 @@ function AtlasEmptyNode() {
       <SectionLabel style={{ margin: "0 0 10px" }}>Nothing here yet</SectionLabel>
       {/* Copy stays position-neutral on purpose: the tree rail moves above the content below the
           narrow breakpoint (styles/global.css), so "the tree on the left" would be false on a phone. */}
-      <p style={{ margin: 0, color: color.textDim, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.7 }}>
+      <p style={{ margin: 0, color: color.text2, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.7 }}>
         This address has no node in the Atlas preview yet. Pick a destination from the entity tree, or
         switch back to the classic UI for anything the preview has not reached.
       </p>

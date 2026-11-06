@@ -70,7 +70,7 @@ export default function Git() {
 
   return (
     <div>
-      {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
+      {!projectId && <p style={{ color: color.text3 }}>No project selected.</p>}
       {projectId && (
         <>
           {feedback && (
@@ -79,13 +79,13 @@ export default function Git() {
                 {feedback.ok ? "✓ " : "✗ "}{feedback.text}
               </span>
               {feedback.warning && (
-                <div data-git-commit-warning style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, marginTop: 6 }}>
+                <div data-git-commit-warning style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, marginTop: 6 }}>
                   ⚠ {feedback.warning}
                 </div>
               )}
               {feedback.mainlineTrustRisk && (
                 <div data-mainline-trust-prompt style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
-                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber }}>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy }}>
                     ⚠ This commit landed on the branch Loom trusts for merges — landing trust will freeze
                     on the next landing unless you re-adopt this head.
                   </span>
@@ -107,7 +107,7 @@ export default function Git() {
                 <BranchList data={branches.data} busy={busy} onCheckout={(b) => checkout.mutate(b)} />
               )}
             </div>
-            <div style={{ display: "flex", gap: 6, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.border}` }}>
+            <div style={{ display: "flex", gap: 6, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.line}` }}>
               <Input mono placeholder="new-branch-name" value={newBranch} onChange={(e) => setNewBranch(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && newBranch.trim() && !busy) createBranch.mutate(newBranch.trim()); }}
                 style={{ flex: 1, minWidth: 0 }} />
@@ -159,7 +159,7 @@ export default function Git() {
           {project && project.repos.length > 0 && (
             <Panel>
               <SectionLabel>Registered Repos</SectionLabel>
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
                 writable · a card targets one by its key
               </span>
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
@@ -222,7 +222,7 @@ function BranchList({ data, busy, onCheckout }: {
 
   const checkoutBtn = (b: string) => (
     <button key={b} title="checkout" disabled={busy} onClick={() => onCheckout(b)}
-      style={branchButtonStyle(color.textDim, busy)}>
+      style={branchButtonStyle(color.text2, busy)}>
       {b}
     </button>
   );
@@ -232,7 +232,7 @@ function BranchList({ data, busy, onCheckout }: {
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
         <Input aria-label="Filter branches" placeholder="filter branches…" value={query}
           onChange={(e) => setQuery(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, whiteSpace: "nowrap" }}>
           {q === "" ? `${data.all.length} branches` : `${otherShown} of ${otherTotal} match`}
         </span>
       </div>
@@ -242,10 +242,10 @@ function BranchList({ data, busy, onCheckout }: {
           name (repository.spec keys `getByRole("button", { name: /^(main|master)$/ })` on it). */}
       {current && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: named.length || workers.length ? 12 : 0 }}>
-          <button title="current branch" disabled style={{ ...branchButtonStyle(color.phosphor, true), cursor: "default" }}>
+          <button title="current branch" disabled style={{ ...branchButtonStyle(color.live, true), cursor: "default" }}>
             <Dot tone="live" glow />{current}
           </button>
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
             current
           </span>
         </div>
@@ -261,11 +261,11 @@ function BranchList({ data, busy, onCheckout }: {
       {/* Worker branches — folded away by default so hashes don't drown the named branches, with the
           count always shown. */}
       {workers.length > 0 && (
-        <div style={{ marginTop: named.length > 0 ? 12 : 0, paddingTop: named.length > 0 ? 10 : 0, borderTop: named.length > 0 ? `1px solid ${color.border}` : "none" }}>
+        <div style={{ marginTop: named.length > 0 ? 12 : 0, paddingTop: named.length > 0 ? 10 : 0, borderTop: named.length > 0 ? `1px solid ${color.line}` : "none" }}>
           <button onClick={() => setWorkersOpen((o) => !o)}
             aria-expanded={showWorkers}
-            style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", padding: 0, cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
-            <span style={{ color: color.phosphor }}>{showWorkers ? "▾" : "▸"}</span>
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", padding: 0, cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+            <span style={{ color: color.live }}>{showWorkers ? "▾" : "▸"}</span>
             worker branches ({q === "" ? workers.length : `${workersShown.length} of ${workers.length}`})
           </button>
           {showWorkers && (
@@ -295,10 +295,10 @@ function CommitTable({ commits }: { commits: { hash: string; date: string; messa
     <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: fs.body }}>
       <tbody>
         {commits?.map((c) => (
-          <tr key={c.hash} style={{ borderTop: `1px solid ${color.border}` }}>
-            <td style={{ color: color.cyan, padding: "3px 8px 3px 0", whiteSpace: "nowrap" }}>{c.hash.slice(0, 7)}</td>
+          <tr key={c.hash} style={{ borderTop: `1px solid ${color.line}` }}>
+            <td style={{ color: color.info, padding: "3px 8px 3px 0", whiteSpace: "nowrap" }}>{c.hash.slice(0, 7)}</td>
             <td style={{ color: color.text, padding: "3px 8px 3px 0" }}>{c.message}</td>
-            <td style={{ color: color.textMuted, padding: "3px 0", whiteSpace: "nowrap" }}>{c.author}</td>
+            <td style={{ color: color.text3, padding: "3px 0", whiteSpace: "nowrap" }}>{c.author}</td>
           </tr>
         ))}
       </tbody>
@@ -318,12 +318,12 @@ function ReferenceRepoLog({ projectId, index, path }: { projectId: string; index
     retry: false, // a git read failure is deterministic — see the primary branches/log queries above
   });
   return (
-    <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+    <div style={{ borderTop: `1px solid ${color.line}`, paddingTop: 8 }}>
       <button onClick={() => setOpen((o) => !o)}
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: 0,
-          fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
-        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>{path}
+          fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+        <span style={{ color: color.live }}>{open ? "▾" : "▸"}</span>{path}
       </button>
       {open && (
         <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }} data-git-pane={`reference-repo-${index}`}>
@@ -349,15 +349,15 @@ function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; ind
     retry: false, // a git read failure is deterministic — see the primary branches/log queries above
   });
   return (
-    <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+    <div style={{ borderTop: `1px solid ${color.line}`, paddingTop: 8 }}>
       <button onClick={() => setOpen((o) => !o)}
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: 0,
-          fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
-        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>
-        <span style={{ color: color.cyan }}>{entry.key}</span>
+          fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+        <span style={{ color: color.live }}>{open ? "▾" : "▸"}</span>
+        <span style={{ color: color.info }}>{entry.key}</span>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.path}</span>
-        <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: fs.sm, color: entry.gateCommand ? color.textMuted : color.amber }}
+        <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: fs.sm, color: entry.gateCommand ? color.text3 : color.busy }}
           title={entry.gateCommand
             ? `This repo's own gate command — the merge gate and a worker's run_gate both run this here`
             : "No gate command configured — work merged here is reported unverified. It does not fall back to this project's gate command."}>
@@ -378,9 +378,9 @@ function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; ind
 // panels and both secondary (reference/registered repo) panels, so the four surfaces render consistently
 // instead of three different not-quite-matching shapes (card 60b53c8d).
 function ErrorLine({ error }: { error: unknown }) {
-  return <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(error)}</span>;
+  return <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(error)}</span>;
 }
 
 function Hint({ children }: { children: ReactNode }) {
-  return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{children}</span>;
+  return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{children}</span>;
 }

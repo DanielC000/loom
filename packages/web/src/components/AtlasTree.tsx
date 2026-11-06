@@ -723,7 +723,7 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
             {/* Deliberately a HINT, not a gate — see above. The branch below it holds only what is
                 RUNNING since card 4a0ad464, and with no project there is nothing to run, so the hint
                 is what the empty branch means rather than a caveat on a list of surfaces. */}
-            <p style={{ margin: "6px 10px 0", color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6 }}>
+            <p style={{ margin: "6px 10px 0", color: color.text3, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6 }}>
               No project yet. Create one on the Platform node and its agents appear here.
             </p>
           </>

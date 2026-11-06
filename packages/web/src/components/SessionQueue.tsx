@@ -138,27 +138,27 @@ export function SessionQueue({
         title={expanded ? "Collapse the queue" : "Expand to reorder / edit / remove queued messages"}
         style={{
           display: "flex", alignItems: "center", gap: 8, cursor: "pointer", userSelect: "none",
-          background: color.panel2, border: `1px solid ${expanded ? color.borderStrong : color.border}`,
+          background: color.inset, border: `1px solid ${expanded ? color.lineStrong : color.line}`,
           borderRadius: radius.base, padding: "5px 8px",
         }}
       >
         <Dot tone="busy" />
-        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted, flexShrink: 0 }}>
-          Queued <span style={{ color: color.amber }}>({pending.length})</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3, flexShrink: 0 }}>
+          Queued <span style={{ color: color.busy }}>({pending.length})</span>
         </span>
         {expanded ? (
-          <span style={{ flex: 1, minWidth: 0, fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>
+          <span style={{ flex: 1, minWidth: 0, fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>
             Manage · reorder · edit
           </span>
         ) : (
           <>
-            <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted, flexShrink: 0 }}>Next</span>
-            <span title={pending[0]!.text} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
+            <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3, flexShrink: 0 }}>Next</span>
+            <span title={pending[0]!.text} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
               {peek}
             </span>
           </>
         )}
-        <span aria-hidden style={{ marginLeft: "auto", flexShrink: 0, color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono }}>
+        <span aria-hidden style={{ marginLeft: "auto", flexShrink: 0, color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>
           {expanded ? "▾" : "▸"}
         </span>
       </div>
@@ -169,7 +169,7 @@ export function SessionQueue({
         <div
           data-testid="queue-drawer"
           style={{
-            marginTop: 4, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base,
+            marginTop: 4, background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.base,
             padding: 4, maxHeight: DRAWER_MAX_H, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3,
           }}
         >
@@ -226,10 +226,10 @@ function QueueRow({
     return (
       <div style={rowStyle} title={`${m.text}\n\n(worker / agent message — read-only)`}>
         <Dot tone="info" />
-        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
           {preview}
         </span>
-        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>worker</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>worker</span>
       </div>
     );
   }
@@ -254,13 +254,13 @@ function QueueRow({
       <span
         onClick={editable ? onEditStart : undefined}
         title={editable ? m.text : `${m.text}\n\n(Loom nudge — remove or reorder, not editable)`}
-        style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, cursor: editable ? "text" : "default" }}
+        style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text2, cursor: editable ? "text" : "default" }}
       >
         {preview}
       </span>
       {editable
         ? <IconBtn title="Edit this queued message" disabled={busy} onClick={onEditStart}>✎</IconBtn>
-        : <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>loom</span>}
+        : <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>loom</span>}
       <IconBtn title="Remove from queue" variant="danger" disabled={busy} onClick={onDelete}>✕</IconBtn>
     </div>
   );
@@ -291,7 +291,7 @@ function QueueEditor({ sessionId, entryId, initial, busy, onSave, onCancel }: {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }
           else if (e.key === "Escape") { e.preventDefault(); onCancel(); }
         }}
-        style={{ flex: 1, minWidth: 0, resize: "vertical", boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: "4px 6px", fontFamily: font.mono, fontSize: fs.mono }}
+        style={{ flex: 1, minWidth: 0, resize: "vertical", boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "4px 6px", fontFamily: font.mono, fontSize: fs.mono }}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <Button variant="primary" disabled={!draft.trim() || busy} onClick={submit} style={{ padding: "2px 8px", fontSize: fs.sm }}>Save</Button>

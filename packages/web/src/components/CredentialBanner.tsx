@@ -81,11 +81,11 @@ export function CredentialBanner() {
 
   return (
     <div role="status" data-testid="credential-banner" style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "9px 20px",
-      background: wash(color.danger, 7), borderBottom: `1px solid ${color.red}`, fontFamily: font.mono, fontSize: fs.mono }}>
+      background: wash(color.danger, 7), borderBottom: `1px solid ${color.danger}`, fontFamily: font.mono, fontSize: fs.mono }}>
       <Dot tone="danger" glow style={{ marginTop: 4, flex: "0 0 auto" }} />
       <div style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}>
         <span style={{ color: color.text }}>
-          <strong style={{ color: color.red, fontWeight: 600 }}>
+          <strong style={{ color: color.danger, fontWeight: 600 }}>
             {linkLeads && linkCopy ? linkCopy.headline : "Writes are locked in this browser."}
           </strong>{" "}
           {/* A link outcome's wording lives in lib/loopbackCredential (pure, and unit-tested per variant):
@@ -103,15 +103,15 @@ export function CredentialBanner() {
         {/* Both at once: the lock keeps the headline, and the link outcome still gets said — otherwise a
             held candidate's Retry button would appear below with nothing explaining what it retries. */}
         {!linkLeads && linkCopy
-          ? <span style={{ color: color.textDim }}>{linkCopy.headline} {linkCopy.detail}</span>
+          ? <span style={{ color: color.text2 }}>{linkCopy.headline} {linkCopy.detail}</span>
           : null}
-        <span style={{ color: color.textDim }}>
+        <span style={{ color: color.text2 }}>
           On the machine running the daemon, print the credential and paste it here —{" "}
-          <code style={{ color: color.cyan, background: color.panel2, border: `1px solid ${color.border}`,
+          <code style={{ color: color.info, background: color.inset, border: `1px solid ${color.line}`,
             borderRadius: radius.sm, padding: "1px 5px" }}>
             cat ~/.loom/gateway-loopback.key
           </code>{" "}
-          <span style={{ color: color.textMuted }}>(or {"<LOOM_HOME>"}/gateway-loopback.key if you set LOOM_HOME).</span>
+          <span style={{ color: color.text3 }}>(or {"<LOOM_HOME>"}/gateway-loopback.key if you set LOOM_HOME).</span>
         </span>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <Input
@@ -142,9 +142,9 @@ export function CredentialBanner() {
           {reason === null
             ? <Button onClick={() => dismissLoopbackLinkOutcome()} data-testid="loopback-link-dismiss">Dismiss</Button>
             : null}
-          {error ? <span style={{ color: color.red }}>{error}</span> : null}
+          {error ? <span style={{ color: color.danger }}>{error}</span> : null}
         </div>
-        <span style={{ color: color.textMuted }}>
+        <span style={{ color: color.text3 }}>
           This credential carries full local API authority. It is stored only in this browser, and only on
           this origin.
         </span>

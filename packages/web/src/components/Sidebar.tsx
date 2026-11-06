@@ -88,14 +88,14 @@ function RailProjectControl({ onOpenChange }: { onOpenChange: (open: boolean) =>
         onClick={() => choose(p.id)}
         onMouseEnter={() => setHoveredId(p.id)} onMouseLeave={() => setHoveredId((h) => (h === p.id ? null : h))}
         style={{ display: "inline-flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
-          background: hoveredId === p.id ? color.panel2 : "transparent", border: "none", cursor: "pointer",
-          color: selected ? color.phosphor : color.text, fontFamily: font.mono, fontSize: fs.body, padding: "6px 12px" }}>
+          background: hoveredId === p.id ? color.inset : "transparent", border: "none", cursor: "pointer",
+          color: selected ? color.live : color.text, fontFamily: font.mono, fontSize: fs.body, padding: "6px 12px" }}>
         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
         {count > 0 && (
           <span title={`${count} live session${count === 1 ? "" : "s"}`}
-            style={{ display: "inline-flex", alignItems: "center", gap: 5, flex: "none", color: color.textDim, fontSize: fs.sm }}>
+            style={{ display: "inline-flex", alignItems: "center", gap: 5, flex: "none", color: color.text2, fontSize: fs.sm }}>
             {count}
-            <span style={{ width: 8, height: 8, borderRadius: radius.base, background: color.phosphor, boxShadow: `0 0 6px ${color.phosphor}` }} />
+            <span style={{ width: 8, height: 8, borderRadius: radius.base, background: color.live, boxShadow: `0 0 6px ${color.live}` }} />
           </span>
         )}
       </button>
@@ -120,11 +120,11 @@ function RailProjectControl({ onOpenChange }: { onOpenChange: (open: boolean) =>
             // brought into view by window-scrolling, so with no cap a long project list would render rows
             // permanently below the fold (unreachable by mouse, keyboard, or Playwright's auto-scroll alike).
             maxHeight: `calc(100vh - ${rect.top + 16}px)`, overflowY: "auto", overflowX: "hidden",
-            background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
+            background: color.surface, border: `1px solid ${color.lineStrong}`, borderRadius: radius.base,
             display: "flex", flexDirection: "column", padding: "4px 0", boxShadow: "0 6px 20px rgba(0,0,0,0.45)" }}>
           {liveProjects.map(renderItem)}
           {liveProjects.length > 0 && idleProjects.length > 0 && (
-            <div aria-hidden style={{ height: 1, background: color.border, margin: "4px 0" }} />
+            <div aria-hidden style={{ height: 1, background: color.line, margin: "4px 0" }} />
           )}
           {idleProjects.map(renderItem)}
         </div>
@@ -216,7 +216,7 @@ export function Sidebar() {
             <span className="loom-rail-lbl">Settings</span>
             <ScopeDot />
             {status.data && (
-              <span className="loom-rail-lbl loom-rail-runpill" style={globalPaused ? { color: color.red, borderColor: color.red } : undefined}>
+              <span className="loom-rail-lbl loom-rail-runpill" style={globalPaused ? { color: color.danger, borderColor: color.danger } : undefined}>
                 {globalPaused ? "paused" : "running"}
               </span>
             )}

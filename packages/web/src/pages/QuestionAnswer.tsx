@@ -14,7 +14,7 @@ export default function QuestionAnswer() {
     <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 900 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <Button onClick={() => navigate(-1)}>← back</Button>
-        <span style={{ fontFamily: font.head, fontSize: fs.body, color: color.text }}>Request</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>Request</span>
       </div>
       <RequestDetail key={id} id={id} />
     </div>

@@ -67,7 +67,7 @@ export function CardPolicyBlock({ taskId, projectId }: { taskId: string; project
   };
   if (q.isError && !q.data) {
     return (
-      <div data-testid="card-policy-unavailable" style={{ display: "flex", alignItems: "center", gap: 6, color: color.textMuted, fontFamily: font.mono, fontSize: fs.xs }}>
+      <div data-testid="card-policy-unavailable" style={{ display: "flex", alignItems: "center", gap: 6, color: color.text3, fontFamily: font.mono, fontSize: fs.xs }}>
         <Dot tone="busy" />
         <span>card policy unavailable: couldn’t read this card’s requirements (retrying…)</span>
       </div>
@@ -141,7 +141,7 @@ function RequirementRow({ taskId, v, onChanged }: { taskId: string; v: CardPolic
         )}
       </div>
       {v.detail && v.status !== "waived" && v.status !== "deferred" && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.45 }}>{v.detail}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, lineHeight: 1.45 }}>{v.detail}</span>
       )}
       {waiving && (
         <form onSubmit={(e) => { e.preventDefault(); if (reason.trim()) waive.mutate(); }}

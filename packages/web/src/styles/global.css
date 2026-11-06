@@ -1,4 +1,4 @@
-/* Loom "Terminal Cockpit" — global stylesheet.
+/* Loom "Graphite" — global stylesheet.
    Token values (the single source of truth) + base element styling.
    Spec: packages/web/design/DESIGN.md. TS access: src/theme.ts. */
 
@@ -140,26 +140,9 @@
 }
 
 :root {
-  /* Legacy names, kept as aliases onto the Graphite layer so every existing call site follows the
-     theme with no edit. Later Graphite cards move call sites onto the semantic names and delete these.
-     --loom-phosphor aliases to LIVE (green) on purpose: it also marks primary, focus and selection
-     today, and those move to --loom-accent call site by call site, so nothing changes meaning here. */
-  --loom-panel: var(--loom-surface);
-  --loom-panel-2: var(--loom-inset);
-  --loom-border: var(--loom-line);
-  --loom-border-strong: var(--loom-line-strong);
-  --loom-phosphor: var(--loom-live);
-  --loom-phosphor-dim: var(--loom-live-soft);
-  --loom-amber: var(--loom-busy);
-  --loom-cyan: var(--loom-info);
-  --loom-red: var(--loom-danger);
-  --loom-text-dim: var(--loom-text-2);
-  --loom-text-muted: var(--loom-text-3);
-
   /* Type */
   --loom-font-ui: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
   --loom-font-mono: "Geist Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
-  --loom-font-head: var(--loom-font-ui);
 
   /* Type scale (Graphite). xs is for the densest mono ids only, so those rows don't grow and wrap. */
   --loom-fs-xs: 11px;
@@ -224,14 +207,14 @@ body {
 /* Scrollbars — thin, instrument-grade, square */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--loom-border-strong) transparent;
+  scrollbar-color: var(--loom-line-strong) transparent;
 }
 *::-webkit-scrollbar {
   width: 10px;
   height: 10px;
 }
 *::-webkit-scrollbar-thumb {
-  background: var(--loom-border-strong);
+  background: var(--loom-line-strong);
 }
 *::-webkit-scrollbar-track {
   background: transparent;
@@ -282,22 +265,22 @@ body {
    header so a resting board stays quiet. The ⋯ menu button is always present (dim at rest) because it is
    the keyboard path, and a control that only appears on hover is unreachable to a keyboard user. */
 .loom-lane-handle { cursor: grab; }
-.loom-lane-grip { width: 10px; color: var(--loom-text-muted); opacity: 0; transition: opacity 120ms ease; }
+.loom-lane-grip { width: 10px; color: var(--loom-text-3); opacity: 0; transition: opacity 120ms ease; }
 .loom-lane-head:hover .loom-lane-grip,
 .loom-lane-head:focus-within .loom-lane-grip { opacity: 1; }
 .loom-lane-more {
   display: grid; place-items: center; width: 24px; height: 24px; padding: 0;
   background: transparent; border: 1px solid transparent; border-radius: var(--loom-radius-sm);
-  color: var(--loom-text-muted); font-size: 14px; line-height: 1; cursor: pointer;
+  color: var(--loom-text-3); font-size: 14px; line-height: 1; cursor: pointer;
 }
 .loom-lane-head:hover .loom-lane-more,
-.loom-lane-more[aria-expanded="true"] { border-color: var(--loom-border-strong); color: var(--loom-text-dim); }
+.loom-lane-more[aria-expanded="true"] { border-color: var(--loom-line-strong); color: var(--loom-text-2); }
 .loom-lane-more:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: 1px; color: var(--loom-text); }
 /* Portalled to <body> and positioned inline (fixed, from the trigger's rect) by LaneMenu. */
 .loom-lane-menu {
   z-index: 60;
   min-width: 228px; padding: 4px; display: flex; flex-direction: column;
-  background: var(--loom-panel); border: 1px solid var(--loom-border-strong); border-radius: var(--loom-radius);
+  background: var(--loom-surface); border: 1px solid var(--loom-line-strong); border-radius: var(--loom-radius);
   box-shadow: var(--loom-pop-shadow);
 }
 .loom-lane-menu-item {
@@ -305,20 +288,20 @@ body {
   background: transparent; border: 0; border-radius: var(--loom-radius-sm); text-align: left; text-decoration: none;
   font-family: var(--loom-font-mono); font-size: 12px; color: var(--loom-text); cursor: pointer; white-space: nowrap;
 }
-.loom-lane-menu-item.is-quiet { color: var(--loom-text-dim); }
-.loom-lane-menu-item:hover { background: var(--loom-panel-2); }
+.loom-lane-menu-item.is-quiet { color: var(--loom-text-2); }
+.loom-lane-menu-item:hover { background: var(--loom-inset); }
 .loom-lane-menu-item:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
-.loom-lane-menu-item[aria-disabled="true"] { color: var(--loom-text-muted); cursor: default; }
+.loom-lane-menu-item[aria-disabled="true"] { color: var(--loom-text-3); cursor: default; }
 .loom-lane-menu-item[aria-disabled="true"]:hover { background: transparent; }
-.loom-lane-menu-hint { margin-left: auto; color: var(--loom-text-muted); font-size: 10px; }
-.loom-lane-menu-sep { height: 1px; margin: 4px 2px; background: var(--loom-border); }
+.loom-lane-menu-hint { margin-left: auto; color: var(--loom-text-3); font-size: 10px; }
+.loom-lane-menu-sep { height: 1px; margin: 4px 2px; background: var(--loom-line); }
 /* A collapsed lane: the whole slim rail is the expand button, label running bottom-to-top. */
 .loom-lane-rail {
   flex: 1; display: flex; justify-content: center; padding: 10px 0; width: 100%;
   background: transparent; border: 0; cursor: pointer;
-  font-family: var(--loom-font-head); font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+  font-family: var(--loom-font-ui); font-size: 11px; font-weight: 700;
 }
-.loom-lane-rail:hover { background: var(--loom-panel-2); }
+.loom-lane-rail:hover { background: var(--loom-inset); }
 .loom-lane-rail:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
 .loom-lane-rail-label { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) {
@@ -338,7 +321,7 @@ body {
    `min-width: 0` on the items is what actually removes the overflow (the inputs then stretch to
    whatever track they are given, at any width); the breakpoints keep the result READABLE rather than
    three slivers. 560px is the same phone breakpoint the board grid above uses; 760px is where three
-   numeric fields plus their uppercase labels stop being legible three-up in this page's 820px column. */
+   numeric fields plus their labels stop being legible three-up in this page's 820px column. */
 .loom-field-grid {
   display: grid;
   gap: 12px;
@@ -559,7 +542,7 @@ body {
    the tie to resolve here; each carries its own 3-class :not(:disabled):hover so the hover end state is
    the modifier's, not whichever variant it happens to be composed with. */
 .loom-btn-muted {
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-btn-muted:not(:disabled):hover {
   color: var(--loom-text);
@@ -620,7 +603,7 @@ body {
     color 80ms linear;
 }
 .loom-toggle:not(.is-active):hover {
-  border-color: var(--loom-text-dim);
+  border-color: var(--loom-text-2);
   color: var(--loom-text);
 }
 
@@ -633,8 +616,8 @@ body {
     background 80ms linear;
 }
 .loom-task-link:hover {
-  color: var(--loom-phosphor);
-  background: var(--loom-phosphor-dim);
+  color: var(--loom-live);
+  background: var(--loom-live-soft);
   text-decoration: underline;
 }
 
@@ -728,7 +711,7 @@ body {
   transition: background 80ms linear;
 }
 .loom-manifest-row:hover {
-  background: var(--loom-panel-2);
+  background: var(--loom-inset);
 }
 
 /* NavTab: sentence-case sans; the active tab is semibold with a cobalt underline. */
@@ -796,8 +779,8 @@ button.loom-cardtab:focus-visible {
   z-index: 40;
   display: flex;
   flex-direction: column;
-  background: var(--loom-panel);
-  border-right: 1px solid var(--loom-border);
+  background: var(--loom-surface);
+  border-right: 1px solid var(--loom-line);
   transition:
     width 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
     box-shadow 160ms ease;
@@ -850,13 +833,13 @@ button.loom-cardtab:focus-visible {
   /* A <button>: the UA border's other three sides drew (dark, under color-scheme light). Keep their 2px
      width, transparent, because the collapsed mark's -16px centring below is measured against it. */
   border: 2px solid transparent;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
   background: transparent;
   cursor: pointer;
   text-align: left;
 }
 .loom-rail-mark {
-  color: var(--loom-phosphor);
+  color: var(--loom-live);
   flex: none;
   display: flex;
 }
@@ -870,7 +853,7 @@ button.loom-cardtab:focus-visible {
   place-items: center;
 }
 .loom-rail-wordmark {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-weight: 600;
   font-size: 16px;
   letter-spacing: 0.12em;
@@ -878,7 +861,7 @@ button.loom-cardtab:focus-visible {
 }
 .loom-rail-pinbtn {
   margin-left: auto;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   flex: none;
   display: flex;
 }
@@ -890,7 +873,7 @@ button.loom-cardtab:focus-visible {
   color: var(--loom-text);
 }
 .loom-rail.is-pinned .loom-rail-pinbtn {
-  color: var(--loom-phosphor);
+  color: var(--loom-live);
 }
 
 /* Active-project chip */
@@ -902,7 +885,7 @@ button.loom-cardtab:focus-visible {
   padding: 0 14px;
   flex: none;
   border: 2px solid transparent; /* the UA button border's width, minus its colour (see .loom-rail-brand) */
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
   background: transparent;
   cursor: pointer;
   text-align: left;
@@ -917,14 +900,14 @@ button.loom-cardtab:focus-visible {
   height: 32px;
   flex: none;
   border-radius: var(--loom-radius);
-  background: var(--loom-panel-2);
-  border: 1px solid var(--loom-border-strong);
+  background: var(--loom-inset);
+  border: 1px solid var(--loom-line-strong);
   display: grid;
   place-items: center;
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-weight: 600;
   font-size: 13px;
-  color: var(--loom-phosphor);
+  color: var(--loom-live);
 }
 .loom-rail-sig-live {
   position: absolute;
@@ -933,9 +916,9 @@ button.loom-cardtab:focus-visible {
   width: 8px;
   height: 8px;
   border-radius: 8px;
-  background: var(--loom-phosphor);
-  box-shadow: 0 0 6px var(--loom-phosphor);
-  border: 2px solid var(--loom-panel);
+  background: var(--loom-live);
+  box-shadow: 0 0 6px var(--loom-live);
+  border: 2px solid var(--loom-surface);
 }
 .loom-rail-proj-meta {
   display: flex;
@@ -943,11 +926,9 @@ button.loom-cardtab:focus-visible {
   line-height: 1.25;
 }
 .loom-rail-eyebrow {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 9px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-rail-proj-name {
   font-size: 13px;
@@ -958,7 +939,7 @@ button.loom-cardtab:focus-visible {
 }
 .loom-rail-caret {
   margin-left: auto;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   font-size: 11px;
   flex: none;
 }
@@ -972,12 +953,10 @@ button.loom-cardtab:focus-visible {
 }
 .loom-rail-grp {
   padding: 10px 16px 4px;
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   height: 24px;
 }
 /* Collapsed: group labels hide (no room), but the first keeps a thin gap so the rail doesn't jump. */
@@ -990,7 +969,7 @@ button.loom-cardtab:focus-visible {
 }
 .loom-rail-sep {
   height: 1px;
-  background: var(--loom-border);
+  background: var(--loom-line);
   margin: 8px 16px;
 }
 .loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-sep {
@@ -1002,7 +981,7 @@ button.loom-cardtab:focus-visible {
   gap: 0;
   height: 38px;
   padding: 0 16px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   text-decoration: none;
   cursor: pointer;
   position: relative;
@@ -1029,21 +1008,21 @@ button.loom-cardtab:focus-visible {
 }
 .loom-rail-item:hover {
   color: var(--loom-text);
-  background: var(--loom-panel-2);
+  background: var(--loom-inset);
 }
 .loom-rail-item.is-active {
   color: var(--loom-text);
-  border-left-color: var(--loom-phosphor);
-  background: linear-gradient(90deg, var(--loom-phosphor-dim), transparent 70%);
+  border-left-color: var(--loom-live);
+  background: linear-gradient(90deg, var(--loom-live-soft), transparent 70%);
 }
 .loom-rail-item.is-active .loom-rail-ico {
-  color: var(--loom-phosphor);
+  color: var(--loom-live);
 }
 .loom-rail-scopedot {
   width: 4px;
   height: 4px;
   border-radius: 4px;
-  background: var(--loom-cyan);
+  background: var(--loom-info);
   opacity: 0.85;
   margin-left: 6px;
   flex: none;
@@ -1057,7 +1036,7 @@ button.loom-cardtab:focus-visible {
   height: 18px;
   padding: 0 5px;
   border-radius: 9px;
-  background: var(--loom-amber);
+  background: var(--loom-busy);
   color: var(--loom-on-busy);
   font-size: 10px;
   font-weight: 700;
@@ -1076,8 +1055,8 @@ button.loom-cardtab:focus-visible {
   height: 16px;
   padding: 0 4px;
   border-radius: 8px;
-  background: var(--loom-border-strong);
-  color: var(--loom-text-muted);
+  background: var(--loom-line-strong);
+  color: var(--loom-text-3);
   font-size: 10px;
   font-weight: 700;
   display: inline-flex;
@@ -1102,7 +1081,7 @@ button.loom-cardtab:focus-visible {
 /* Footer status (Alerts · Settings + running pill · version) */
 .loom-rail-foot {
   flex: none;
-  border-top: 1px solid var(--loom-border);
+  border-top: 1px solid var(--loom-line);
   padding: 8px 0 6px;
 }
 .loom-rail-statrow {
@@ -1111,7 +1090,7 @@ button.loom-cardtab:focus-visible {
   gap: 0;
   height: 34px;
   padding: 0 16px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   cursor: pointer;
   text-decoration: none;
   background: transparent;
@@ -1138,17 +1117,17 @@ button.loom-cardtab:focus-visible {
 }
 .loom-rail-statrow:hover {
   color: var(--loom-text);
-  background: var(--loom-panel-2);
+  background: var(--loom-inset);
 }
 .loom-rail-statrow.is-alert {
-  color: var(--loom-amber);
+  color: var(--loom-busy);
 }
 .loom-rail-statrow.is-active {
   color: var(--loom-text);
-  border-left-color: var(--loom-phosphor);
+  border-left-color: var(--loom-live);
 }
 .loom-rail-statrow.is-active .loom-rail-ico {
-  color: var(--loom-phosphor);
+  color: var(--loom-live);
 }
 .loom-rail-statrow .loom-rail-lbl {
   font-size: 12px;
@@ -1160,17 +1139,15 @@ button.loom-cardtab:focus-visible {
   align-items: center;
   font-family: var(--loom-font-mono);
   font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--loom-phosphor);
-  border: 1px solid var(--loom-phosphor);
+  color: var(--loom-live);
+  border: 1px solid var(--loom-live);
   border-radius: var(--loom-radius-sm);
   padding: 1px 7px;
 }
 .loom-rail-ver {
   padding: 6px 16px 2px;
   font-size: 10px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   letter-spacing: 0.04em;
 }
 .loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-ver {
@@ -1197,7 +1174,7 @@ button.loom-cardtab:focus-visible {
     background 90ms linear;
 }
 .loom-rolecard:not(.is-locked):not(.is-selected):hover {
-  border-color: var(--loom-text-dim);
+  border-color: var(--loom-text-2);
 }
 .loom-rolecard:focus-visible {
   outline: 2px solid var(--loom-ring);
@@ -1223,7 +1200,7 @@ button.loom-cardtab:focus-visible {
   transition: background-color 80ms linear;
 }
 .loom-sched-row:hover {
-  background-color: var(--loom-panel-2) !important;
+  background-color: var(--loom-inset) !important;
 }
 
 /* Vault file-tree rows + breadcrumb segments: a quiet hover wash, no layout shift. */
@@ -1231,7 +1208,7 @@ button.loom-cardtab:focus-visible {
   transition: background-color 80ms linear;
 }
 .loom-tree-row:hover {
-  background-color: var(--loom-panel-2) !important;
+  background-color: var(--loom-inset) !important;
 }
 .loom-crumb {
   transition: color 80ms linear;
@@ -1340,20 +1317,18 @@ button.loom-cardtab:focus-visible {
 .loom-chat-day::after {
   content: "";
   height: 1px;
-  background: var(--loom-border);
+  background: var(--loom-line);
   flex: 1;
 }
 .loom-chat-day span {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 10px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.11em;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   padding: 3px 11px;
-  border: 1px solid var(--loom-border);
+  border: 1px solid var(--loom-line);
   border-radius: 999px;
-  background: var(--loom-panel-2);
+  background: var(--loom-inset);
   white-space: nowrap;
 }
 
@@ -1368,14 +1343,12 @@ button.loom-cardtab:focus-visible {
 .loom-chat-reset::after {
   content: "";
   flex: 1;
-  border-top: 1px dashed var(--loom-border-strong);
+  border-top: 1px dashed var(--loom-line-strong);
 }
 .loom-chat-reset span {
   font-family: var(--loom-font-mono);
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   white-space: nowrap;
 }
 
@@ -1392,8 +1365,8 @@ button.loom-cardtab:focus-visible {
   padding: 7px 14px 7px 11px;
   border-radius: 999px;
   cursor: pointer;
-  background: var(--loom-panel);
-  border: 1px solid var(--loom-phosphor);
+  background: var(--loom-surface);
+  border: 1px solid var(--loom-live);
   color: var(--loom-text);
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
@@ -1448,7 +1421,7 @@ button.loom-cardtab:focus-visible {
   transition: background 80ms;
 }
 .loom-gate-row:hover {
-  background: var(--loom-panel-2);
+  background: var(--loom-inset);
 }
 /* Settled: a solid full-width fill (color set inline — phosphor merged / red failed). */
 .loom-merge-fill {
@@ -1527,7 +1500,7 @@ button.loom-cardtab:focus-visible {
   min-height: 24px;
   padding: 0 10px;
   border-left: 2px solid transparent;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
   font-style: italic;
@@ -1614,7 +1587,7 @@ button.loom-atlas-node.is-branch.is-open {
   place-items: center;
   font-size: 9px;
   line-height: 1;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   transition:
     transform 110ms cubic-bezier(0.2, 0, 0, 1),
     color 80ms linear;
@@ -1630,7 +1603,7 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: center;
   gap: 5px;
   flex: none;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   font-size: 11px;
 }
 .loom-atlas-livedot {
@@ -1701,7 +1674,7 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 0;
   background: transparent;
   border: none;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   font-family: var(--loom-font-mono);
   font-size: 9px;
   line-height: 1;
@@ -1756,7 +1729,7 @@ button.loom-atlas-node.is-branch.is-open {
   width: 7px;
   height: 7px;
   border-radius: 7px;
-  background: var(--loom-text-muted);
+  background: var(--loom-text-3);
 }
 .loom-atlas-entdot.is-live {
   background: var(--loom-live);
@@ -1777,12 +1750,12 @@ button.loom-atlas-node.is-branch.is-open {
    hue — no new colour enters the system. */
 .loom-atlas-nodemeta {
   flex: none;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
 }
 .loom-atlas-nodemeta.is-amber {
-  color: var(--loom-amber);
+  color: var(--loom-busy);
 }
 .loom-atlas-nodebadge {
   flex: none;
@@ -1791,7 +1764,7 @@ button.loom-atlas-node.is-branch.is-open {
   border: 1px solid color-mix(in oklab, var(--loom-busy) 30%, transparent);
   border-radius: 7px;
   background: color-mix(in oklab, var(--loom-busy) 14%, transparent);
-  color: var(--loom-amber);
+  color: var(--loom-busy);
   font-size: 10px;
   line-height: 15px;
   text-align: center;
@@ -1944,7 +1917,7 @@ button.loom-atlas-node.is-branch.is-open {
        thirds of a phone viewport, and the tree scrolls for the rest. */
     max-height: 33dvh;
     border-right: none;
-    border-bottom: 1px solid var(--loom-border);
+    border-bottom: 1px solid var(--loom-line);
   }
 }
 
@@ -2063,7 +2036,7 @@ button.loom-atlas-node.is-branch.is-open {
     width: 34px;
     height: 34px;
     padding: 0;
-    border: 1px solid var(--loom-border-strong);
+    border: 1px solid var(--loom-line-strong);
     border-radius: var(--loom-radius);
     background: transparent;
     color: var(--loom-text);
@@ -2073,8 +2046,8 @@ button.loom-atlas-node.is-branch.is-open {
       border-color 80ms linear;
   }
   .loom-atlas-drawerbtn:hover {
-    background: var(--loom-panel);
-    border-color: var(--loom-text-dim);
+    background: var(--loom-surface);
+    border-color: var(--loom-text-2);
   }
   /* Above the drawer, not under it: the toggle is the one control that has to stay hittable while the
      panel it opened covers its own corner, or "the toggle closes it" is only true in prose. The
@@ -2082,7 +2055,7 @@ button.loom-atlas-node.is-branch.is-open {
   .loom-atlas-drawerbtn.is-open {
     position: relative;
     z-index: 46;
-    border-color: var(--loom-text-dim);
+    border-color: var(--loom-text-2);
   }
   .loom-atlas-treehead {
     padding-left: 56px;
@@ -2151,10 +2124,10 @@ button.loom-atlas-node.is-branch.is-open {
     min-width: 22px;
     height: 20px;
     padding: 0 3px;
-    border: 1px solid var(--loom-border-strong);
+    border: 1px solid var(--loom-line-strong);
     border-radius: var(--loom-radius-sm);
     background: transparent;
-    color: var(--loom-text-dim);
+    color: var(--loom-text-2);
     font-family: var(--loom-font-mono);
     font-size: 12px;
     line-height: 1;
@@ -2165,13 +2138,13 @@ button.loom-atlas-node.is-branch.is-open {
       color 80ms linear;
   }
   .loom-atlas-crumbmore:hover {
-    background: var(--loom-panel);
-    border-color: var(--loom-text-dim);
+    background: var(--loom-surface);
+    border-color: var(--loom-text-2);
     color: var(--loom-text);
   }
   .loom-atlas-crumbmore[aria-expanded="true"] {
     color: var(--loom-text);
-    border-color: var(--loom-text-dim);
+    border-color: var(--loom-text-2);
     /* The nav centres its items, which against a wrapped two-or-three-line trail would leave the
        control floating beside the MIDDLE of the path it just opened. On the first line it reads as
        what it is: the thing the trail starts at. */
@@ -2216,7 +2189,7 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: center;
   gap: 16px;
   flex-wrap: wrap;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
   padding-bottom: 6px;
 }
 .loom-atlas-tabrow {
@@ -2248,7 +2221,7 @@ button.loom-atlas-node.is-branch.is-open {
 }
 .loom-atlas-tabcount {
   margin-left: 6px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2281,10 +2254,10 @@ button.loom-atlas-node.is-branch.is-open {
    active tab is never in this menu (components/atlasHome.tsx › NodeTabs). Open is a neutral state. */
 .loom-atlas-tabmore[aria-expanded="true"] {
   color: var(--loom-text);
-  border-bottom-color: var(--loom-border-strong);
+  border-bottom-color: var(--loom-line-strong);
 }
 .loom-atlas-tabmore-dots {
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   letter-spacing: 0;
 }
 .loom-atlas-tabmenu {
@@ -2313,17 +2286,15 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 9px 11px;
   font-family: var(--loom-font-mono);
   font-size: 12px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
   text-decoration: none;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   border-radius: var(--loom-radius-sm);
   transition:
     background 80ms linear,
     color 80ms linear;
 }
 .loom-atlas-tabmenu-item:hover {
-  background: var(--loom-panel-2);
+  background: var(--loom-inset);
   color: var(--loom-text);
 }
 /* Inset, unlike the row's own 3px offset ring: the panel's 4px padding is all the room there is, so
@@ -2400,27 +2371,25 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp {
   container-type: inline-size;
   container-name: mcp;
-  border: 1px solid var(--loom-border);
+  border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius);
-  background: var(--loom-panel-2);
+  background: var(--loom-inset);
   min-width: 0;
 }
 .loom-mcp-lab {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   flex-shrink: 0;
 }
-.loom-mcp-muted { color: var(--loom-text-muted); }
+.loom-mcp-muted { color: var(--loom-text-3); }
 .loom-mcp-empty-bar {
   display: flex;
   align-items: baseline;
   gap: 10px;
   padding: 8px 12px;
   font-size: 11px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 .loom-mcp-bar {
   display: grid;
@@ -2436,7 +2405,7 @@ button.loom-atlas-node.is-branch.is-open {
   text-align: left;
   cursor: pointer;
 }
-.loom-mcp-bar:hover { background: color-mix(in oklab, var(--loom-panel-2), var(--loom-text) 3%); }
+.loom-mcp-bar:hover { background: color-mix(in oklab, var(--loom-inset), var(--loom-text) 3%); }
 .loom-mcp-bar:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
 .loom-mcp-l1 {
   display: flex;
@@ -2444,11 +2413,11 @@ button.loom-atlas-node.is-branch.is-open {
   gap: 8px;
   min-width: 0;
   font-size: 10.5px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   white-space: nowrap;
 }
 .loom-mcp-beads { display: inline-flex; gap: 3px; align-items: center; min-width: 0; overflow: hidden; }
-.loom-mcp-more { font-size: 10px; color: var(--loom-text-muted); margin-right: 2px; }
+.loom-mcp-more { font-size: 10px; color: var(--loom-text-3); margin-right: 2px; }
 .loom-mcp-bead {
   width: 14px;
   height: 14px;
@@ -2456,11 +2425,11 @@ button.loom-atlas-node.is-branch.is-open {
   place-items: center;
   flex-shrink: 0;
   border-radius: 3px;
-  border: 1px solid var(--loom-border-strong);
-  background: var(--loom-panel);
+  border: 1px solid var(--loom-line-strong);
+  background: var(--loom-surface);
 }
-.loom-mcp-bead.error { border-color: var(--loom-red); background: color-mix(in oklab, var(--loom-red) 18%, transparent); }
-.loom-mcp-bead.pending { border-color: var(--loom-cyan); border-style: dashed; }
+.loom-mcp-bead.error { border-color: var(--loom-danger); background: color-mix(in oklab, var(--loom-danger) 18%, transparent); }
+.loom-mcp-bead.pending { border-color: var(--loom-info); border-style: dashed; }
 .loom-mcp-bead .loom-mcp-gl { transform: scale(0.75); }
 .loom-mcp-bead .loom-mcp-gl.gate { transform: rotate(45deg) scale(0.62); }
 .loom-mcp-l2 {
@@ -2473,7 +2442,7 @@ button.loom-atlas-node.is-branch.is-open {
   animation: loom-mcp-arrive 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .loom-mcp-say {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 15px;
   letter-spacing: -0.005em;
   color: var(--loom-text);
@@ -2484,15 +2453,15 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-say b, .loom-mcp-s b {
   font-family: var(--loom-font-mono);
   font-weight: 500;
-  color: var(--loom-cyan);
+  color: var(--loom-info);
 }
 .loom-mcp-say b { font-size: 13px; }
-.loom-mcp-tail { color: var(--loom-text-dim); }
-.loom-mcp-meta { font-size: 11px; color: var(--loom-text-muted); flex-shrink: 0; }
+.loom-mcp-tail { color: var(--loom-text-2); }
+.loom-mcp-meta { font-size: 11px; color: var(--loom-text-3); flex-shrink: 0; }
 .loom-mcp-ocx { font-size: 12px; font-weight: 600; flex-shrink: 0; }
-.loom-mcp-ocx.ok { color: var(--loom-phosphor); }
-.loom-mcp-ocx.error { color: var(--loom-red); }
-.loom-mcp-ocx.pending { color: var(--loom-cyan); }
+.loom-mcp-ocx.ok { color: var(--loom-live); }
+.loom-mcp-ocx.error { color: var(--loom-danger); }
+.loom-mcp-ocx.pending { color: var(--loom-info); }
 .loom-mcp-right {
   grid-column: 2;
   grid-row: 1 / span 2;
@@ -2500,15 +2469,15 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: center;
   gap: 2px;
   font-size: 11px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-.loom-mcp-errn { color: var(--loom-red); }
+.loom-mcp-errn { color: var(--loom-danger); }
 .loom-mcp-chev {
   display: inline-block;
   margin-left: 8px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .loom-mcp.open .loom-mcp-chev { transform: rotate(180deg); }
@@ -2519,21 +2488,21 @@ button.loom-atlas-node.is-branch.is-open {
 
 /* Subsystem glyphs. */
 .loom-mcp-gl { display: inline-block; width: 9px; height: 9px; flex-shrink: 0; box-sizing: border-box; }
-.loom-mcp-gl.board { background: var(--loom-cyan); border-radius: 1px; }
-.loom-mcp-gl.fleet { background: var(--loom-phosphor); border-radius: 50%; }
-.loom-mcp-gl.gate { background: var(--loom-amber); transform: rotate(45deg) scale(0.82); }
-.loom-mcp-gl.memory { border: 2px solid var(--loom-cyan); border-radius: 50%; }
-.loom-mcp-gl.inbox { border: 2px solid var(--loom-amber); border-radius: 1px; }
-.loom-mcp-gl.self { border: 2px solid var(--loom-text-dim); border-radius: 50%; }
+.loom-mcp-gl.board { background: var(--loom-info); border-radius: 1px; }
+.loom-mcp-gl.fleet { background: var(--loom-live); border-radius: 50%; }
+.loom-mcp-gl.gate { background: var(--loom-busy); transform: rotate(45deg) scale(0.82); }
+.loom-mcp-gl.memory { border: 2px solid var(--loom-info); border-radius: 50%; }
+.loom-mcp-gl.inbox { border: 2px solid var(--loom-busy); border-radius: 1px; }
+.loom-mcp-gl.self { border: 2px solid var(--loom-text-2); border-radius: 50%; }
 
 /* Expanded: facet rail + turn-grouped log. */
 .loom-mcp-x {
   display: grid;
   grid-template-columns: 208px minmax(0, 1fr);
-  border-top: 1px solid var(--loom-border);
+  border-top: 1px solid var(--loom-line);
 }
 .loom-mcp-facets {
-  border-right: 1px solid var(--loom-border);
+  border-right: 1px solid var(--loom-line);
   padding: 10px 12px 14px;
   display: flex;
   flex-direction: column;
@@ -2545,11 +2514,9 @@ button.loom-atlas-node.is-branch.is-open {
   justify-content: space-between;
   align-items: baseline;
   margin-bottom: 6px;
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-mcp-fh button {
   background: none;
@@ -2560,20 +2527,20 @@ button.loom-atlas-node.is-branch.is-open {
   font-size: 10.5px;
   letter-spacing: 0;
   text-transform: none;
-  color: var(--loom-cyan);
+  color: var(--loom-info);
 }
 .loom-mcp-search {
   width: 100%;
   box-sizing: border-box;
-  background: var(--loom-panel);
-  border: 1px solid var(--loom-border-strong);
+  background: var(--loom-surface);
+  border: 1px solid var(--loom-line-strong);
   border-radius: var(--loom-radius);
   color: var(--loom-text);
   font: inherit;
   font-size: 11px;
   padding: 4px 8px;
 }
-.loom-mcp-search::placeholder { color: var(--loom-text-muted); }
+.loom-mcp-search::placeholder { color: var(--loom-text-3); }
 .loom-mcp-search:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: 1px; }
 .loom-mcp-fr {
   display: grid;
@@ -2587,29 +2554,29 @@ button.loom-atlas-node.is-branch.is-open {
   border: 0;
   border-radius: var(--loom-radius-sm);
   cursor: pointer;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   font: inherit;
   font-size: 11px;
   text-align: left;
 }
-.loom-mcp-fr:hover { background: var(--loom-panel); color: var(--loom-text); }
+.loom-mcp-fr:hover { background: var(--loom-surface); color: var(--loom-text); }
 .loom-mcp-fr:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -1px; }
-.loom-mcp-fr[aria-pressed="true"] { background: var(--loom-panel); color: var(--loom-text); box-shadow: inset 2px 0 0 var(--loom-text); }
+.loom-mcp-fr[aria-pressed="true"] { background: var(--loom-surface); color: var(--loom-text); box-shadow: inset 2px 0 0 var(--loom-text); }
 .loom-mcp-nm { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .loom-mcp-nm > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.loom-mcp-bar3 { height: 3px; border-radius: 2px; background: var(--loom-border); position: relative; overflow: hidden; }
-.loom-mcp-bar3 i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--loom-text-muted); }
-.loom-mcp-n { text-align: right; color: var(--loom-text-muted); font-variant-numeric: tabular-nums; }
-.loom-mcp-bar3 i.board, .loom-mcp-bar3 i.memory, .loom-mcp-stack i.board, .loom-mcp-stack i.memory { background: var(--loom-cyan); }
-.loom-mcp-bar3 i.fleet, .loom-mcp-stack i.fleet, .loom-mcp-bar3 i.ok { background: var(--loom-phosphor); }
-.loom-mcp-bar3 i.gate, .loom-mcp-bar3 i.inbox, .loom-mcp-stack i.gate, .loom-mcp-stack i.inbox { background: var(--loom-amber); }
-.loom-mcp-bar3 i.self, .loom-mcp-stack i.self { background: var(--loom-text-dim); }
-.loom-mcp-bar3 i.error, .loom-mcp-stack i.error { background: var(--loom-red); }
-.loom-mcp-bar3 i.pending { background: var(--loom-cyan); }
-.loom-mcp-stack i.pending { background: none; outline: 1px dashed var(--loom-cyan); outline-offset: -1px; }
+.loom-mcp-bar3 { height: 3px; border-radius: 2px; background: var(--loom-line); position: relative; overflow: hidden; }
+.loom-mcp-bar3 i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--loom-text-3); }
+.loom-mcp-n { text-align: right; color: var(--loom-text-3); font-variant-numeric: tabular-nums; }
+.loom-mcp-bar3 i.board, .loom-mcp-bar3 i.memory, .loom-mcp-stack i.board, .loom-mcp-stack i.memory { background: var(--loom-info); }
+.loom-mcp-bar3 i.fleet, .loom-mcp-stack i.fleet, .loom-mcp-bar3 i.ok { background: var(--loom-live); }
+.loom-mcp-bar3 i.gate, .loom-mcp-bar3 i.inbox, .loom-mcp-stack i.gate, .loom-mcp-stack i.inbox { background: var(--loom-busy); }
+.loom-mcp-bar3 i.self, .loom-mcp-stack i.self { background: var(--loom-text-2); }
+.loom-mcp-bar3 i.error, .loom-mcp-stack i.error { background: var(--loom-danger); }
+.loom-mcp-bar3 i.pending { background: var(--loom-info); }
+.loom-mcp-stack i.pending { background: none; outline: 1px dashed var(--loom-info); outline-offset: -1px; }
 
 .loom-mcp-log { min-width: 0; max-height: 520px; overflow: auto; padding-bottom: 6px; }
-.loom-mcp-none { margin: 0; padding: 18px 12px; color: var(--loom-text-muted); font-size: 11.5px; }
+.loom-mcp-none { margin: 0; padding: 18px 12px; color: var(--loom-text-3); font-size: 11.5px; }
 .loom-mcp-turnh {
   position: sticky;
   top: 0;
@@ -2618,13 +2585,13 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: center;
   gap: 10px;
   padding: 7px 12px 6px;
-  background: var(--loom-panel-2);
-  border-bottom: 1px solid var(--loom-border);
+  background: var(--loom-inset);
+  border-bottom: 1px solid var(--loom-line);
   font-size: 11px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   white-space: nowrap;
 }
-.loom-mcp-tn { font-family: var(--loom-font-head); font-size: 12px; font-weight: 600; color: var(--loom-text); }
+.loom-mcp-tn { font-family: var(--loom-font-ui); font-size: 12px; font-weight: 600; color: var(--loom-text); }
 .loom-mcp-stack { margin-left: auto; display: flex; gap: 1px; width: 90px; height: 5px; flex-shrink: 0; }
 .loom-mcp-stack i { flex: 1; height: 100%; border-radius: 1px; }
 .loom-mcp-ent {
@@ -2636,19 +2603,19 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 6px 12px;
   background: none;
   border: 0;
-  border-bottom: 1px solid var(--loom-border);
-  color: var(--loom-text-dim);
+  border-bottom: 1px solid var(--loom-line);
+  color: var(--loom-text-2);
   font: inherit;
   font-size: 11.5px;
   text-align: left;
   cursor: pointer;
 }
-.loom-mcp-ent:hover, .loom-mcp-ent[aria-expanded="true"] { background: var(--loom-panel); }
+.loom-mcp-ent:hover, .loom-mcp-ent[aria-expanded="true"] { background: var(--loom-surface); }
 .loom-mcp-ent:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
-.loom-mcp-ent.error { box-shadow: inset 2px 0 0 var(--loom-red); }
-.loom-mcp-ent.error .loom-mcp-s { color: color-mix(in oklab, var(--loom-red) 55%, var(--loom-text)); }
+.loom-mcp-ent.error { box-shadow: inset 2px 0 0 var(--loom-danger); }
+.loom-mcp-ent.error .loom-mcp-s { color: color-mix(in oklab, var(--loom-danger) 55%, var(--loom-text)); }
 .loom-mcp-s {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 13px;
   color: var(--loom-text);
   overflow: hidden;
@@ -2656,14 +2623,14 @@ button.loom-atlas-node.is-branch.is-open {
   white-space: nowrap;
 }
 .loom-mcp-s b { font-size: 11.5px; }
-.loom-mcp-tool { color: var(--loom-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.loom-mcp-tool { color: var(--loom-text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .loom-mcp-ob {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 10px;
   padding: 6px 12px 12px 36px;
-  border-bottom: 1px solid var(--loom-border);
-  background: var(--loom-panel);
+  border-bottom: 1px solid var(--loom-line);
+  background: var(--loom-surface);
   animation: loom-mcp-arrive 0.2s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .loom-mcp-obmeta {
@@ -2672,34 +2639,32 @@ button.loom-atlas-node.is-branch.is-open {
   flex-wrap: wrap;
   gap: 4px 16px;
   font-size: 10.5px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
-.loom-mcp-obmeta b { color: var(--loom-text-dim); font-weight: 500; }
+.loom-mcp-obmeta b { color: var(--loom-text-2); font-weight: 500; }
 .loom-mcp-subh {
   margin-bottom: 4px;
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-mcp-blk {
   margin: 0;
   max-height: 160px;
   overflow: auto;
   padding: 8px 10px;
-  background: var(--loom-panel-2);
-  border: 1px solid var(--loom-border);
+  background: var(--loom-inset);
+  border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius);
   font-family: var(--loom-font-mono);
   font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
-.loom-mcp-blk.error { color: var(--loom-red); border-color: color-mix(in oklab, var(--loom-red) 40%, var(--loom-border)); }
-.loom-mcp-blk.pending { color: var(--loom-text-muted); }
+.loom-mcp-blk.error { color: var(--loom-danger); border-color: color-mix(in oklab, var(--loom-danger) 40%, var(--loom-line)); }
+.loom-mcp-blk.pending { color: var(--loom-text-3); }
 .loom-mcp-links { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11px; }
 .loom-mcp-links .loom-mcp-subh { margin: 0; }
 .loom-mcp-lk {
@@ -2707,11 +2672,11 @@ button.loom-atlas-node.is-branch.is-open {
   gap: 5px;
   align-items: center;
   padding: 1px 7px;
-  border: 1px solid var(--loom-border-strong);
+  border: 1px solid var(--loom-line-strong);
   border-radius: var(--loom-radius-sm);
   color: var(--loom-text);
 }
-.loom-mcp-lk span { color: var(--loom-text-muted); }
+.loom-mcp-lk span { color: var(--loom-text-3); }
 
 @container mcp (max-width: 700px) {
   .loom-mcp-x { grid-template-columns: minmax(0, 1fr); }
@@ -2720,7 +2685,7 @@ button.loom-atlas-node.is-branch.is-open {
     overflow-x: auto;
     gap: 18px;
     border-right: 0;
-    border-bottom: 1px solid var(--loom-border);
+    border-bottom: 1px solid var(--loom-line);
     padding-bottom: 10px;
   }
   .loom-mcp-facets > div { min-width: 150px; }
@@ -2816,7 +2781,7 @@ button.loom-atlas-node.is-branch.is-open {
   font-family: var(--loom-font-mono);
   font-size: 11px;
   line-height: 1.5;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 
 /* ── KPI deck ──────────────────────────────────────────────────────────────────────────
@@ -2886,11 +2851,9 @@ button.loom-kpi.is-open {
   background: var(--loom-selected);
 }
 .loom-kpi-label {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 10px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
   color: var(--loom-text-2);
 }
 .loom-kpi-value {
@@ -2904,7 +2867,7 @@ button.loom-kpi.is-open {
 .loom-kpi-sub {
   font-family: var(--loom-font-mono);
   font-size: 11px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2949,7 +2912,7 @@ button.loom-kpi.is-open {
   align-items: center;
   gap: 8px;
   padding: 9px 10px 8px 12px;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
 }
 .loom-kpi-popbody {
   padding: 10px 12px 12px;
@@ -2967,7 +2930,7 @@ button.loom-kpi.is-open {
   align-items: baseline;
   gap: 5px;
   padding: 2px 8px;
-  border: 1px solid var(--loom-border);
+  border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius-sm);
   font-family: var(--loom-font-mono);
   font-size: 11px;
@@ -2976,9 +2939,7 @@ button.loom-kpi.is-open {
   font-variant-numeric: tabular-nums;
 }
 .loom-kpipill-l {
-  color: var(--loom-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  color: var(--loom-text-3);
   font-size: 9.5px;
 }
 
@@ -3056,15 +3017,15 @@ button.loom-kpi.is-open {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  background: var(--loom-panel-2);
-  border: 1px solid var(--loom-border);
+  background: var(--loom-inset);
+  border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius);
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   transition: border-color 80ms linear, background 80ms linear;
 }
 .loom-banddisc-bar:hover {
-  border-color: var(--loom-border-strong);
-  background: var(--loom-panel);
+  border-color: var(--loom-line-strong);
+  background: var(--loom-surface);
 }
 /* Inset, like the board card's own ring (card a6d7a102): the bar is a full-width block, so a
    positive offset would put the ring under the panel edge above it. */
@@ -3078,7 +3039,7 @@ button.loom-kpi.is-open {
   place-items: center;
   width: 12px;
   font-size: 9px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   transition: transform 110ms cubic-bezier(0.2, 0, 0, 1);
 }
 .loom-banddisc-bar[aria-expanded="true"] .loom-banddisc-twist {
@@ -3086,12 +3047,10 @@ button.loom-kpi.is-open {
 }
 .loom-banddisc-lbl {
   flex: none;
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 11px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 /* Wraps rather than ellipsising: every pill here is a figure the fold has hidden, so a pill
    pushed out of sight would be the one thing this row exists to prevent. */
@@ -3106,7 +3065,7 @@ button.loom-kpi.is-open {
 .loom-banddisc-hint {
   flex: none;
   font-size: 10.5px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-bandpanel {
   display: flex;
@@ -3119,7 +3078,7 @@ button.loom-kpi.is-open {
 }
 .loom-bandslot {
   background: transparent;
-  border: 1px dashed var(--loom-border-strong);
+  border: 1px dashed var(--loom-line-strong);
   border-radius: var(--loom-radius);
 }
 .loom-bandhead {
@@ -3131,12 +3090,12 @@ button.loom-kpi.is-open {
   flex-wrap: wrap;
   flex: none;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
 }
 .loom-bandcount {
   font-family: var(--loom-font-mono);
   font-size: 11px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -3164,17 +3123,17 @@ button.loom-kpi.is-open {
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
   line-height: 1.65;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-slotcard {
   margin-top: 8px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 .loom-bandfoot {
   margin-top: 8px;
   font-size: 10.5px;
   line-height: 1.6;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 
 /* ── Fleet controls (card 7b893d54) ─────────────────────────────────────────────────────
@@ -3195,7 +3154,7 @@ button.loom-kpi.is-open {
 .loom-fleetbar-note {
   font-family: var(--loom-font-mono);
   font-size: 11px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   white-space: nowrap;
 }
 .loom-fleetctl {
@@ -3212,7 +3171,7 @@ button.loom-kpi.is-open {
 .loom-fleetctl-ask {
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
-  color: var(--loom-red);
+  color: var(--loom-danger);
   white-space: nowrap;
 }
 
@@ -3227,17 +3186,17 @@ button.loom-kpi.is-open {
   cursor: pointer;
   font-family: var(--loom-font-mono);
   font-size: 11px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   background: transparent;
-  border: 1px solid var(--loom-border);
+  border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius-sm);
   padding: 2px 8px;
   white-space: nowrap;
   transition: border-color 120ms cubic-bezier(0.22, 0.61, 0.36, 1), color 120ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 .loom-orchchip:hover {
-  border-color: var(--loom-border-strong);
-  color: var(--loom-text-dim);
+  border-color: var(--loom-line-strong);
+  color: var(--loom-text-2);
 }
 .loom-orchchip:focus-visible {
   outline: 2px solid var(--loom-ring);
@@ -3246,12 +3205,12 @@ button.loom-kpi.is-open {
 /* PAUSED is a state you must not be able to miss from any node — hence both the chip's own colour
    and the frame's inset below, which reads without being looked at. */
 .loom-orchchip.is-paused {
-  color: var(--loom-red);
+  color: var(--loom-danger);
   border-color: color-mix(in oklab, var(--loom-danger) 50%, transparent);
   background: color-mix(in oklab, var(--loom-danger) 8%, transparent);
 }
 .loom-atlas-topbar.is-paused {
-  box-shadow: inset 0 2px 0 var(--loom-red);
+  box-shadow: inset 0 2px 0 var(--loom-danger);
 }
 @media (prefers-reduced-motion: reduce) {
   .loom-orchchip { transition: none; }
@@ -3275,7 +3234,7 @@ button.loom-kpi.is-open {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 .loom-datarow-v,
 .loom-meterrow-v {
@@ -3287,7 +3246,7 @@ button.loom-kpi.is-open {
   flex: 0 1 110px;
   height: 4px;
   border-radius: var(--loom-radius-sm);
-  background: var(--loom-border);
+  background: var(--loom-line);
   overflow: hidden;
 }
 
@@ -3334,12 +3293,10 @@ button.loom-kpi.is-open {
   min-width: 0;
 }
 .loom-atlas-primarylbl {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 11px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 /* In a board HEAD the lane bar is a COMPACT trailing readout, and the base `width: 100%` below is
    not it: after the head's own `flex: 1` spacer a full-width bar stretches the whole content column
@@ -3387,7 +3344,7 @@ button.loom-kpi.is-open {
   display: flex;
   min-width: 0;
   flex: 1 1 auto;
-  border-left: 1px solid var(--loom-border);
+  border-left: 1px solid var(--loom-line);
 }
 .loom-ovbrief > :first-child {
   border-left: 0;
@@ -3428,12 +3385,10 @@ button.loom-ovbrief-cell.is-open {
   box-shadow: inset 0 2px 0 var(--loom-accent);
 }
 .loom-ovbrief-l {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 9.5px;
   font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   white-space: nowrap;
 }
 .loom-ovbrief-v {
@@ -3448,7 +3403,7 @@ button.loom-ovbrief-cell.is-open {
 .loom-ovbrief-v em {
   font-style: normal;
   font-size: 11.5px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   margin-left: 6px;
 }
 .loom-ovbrief-trail {
@@ -3487,11 +3442,11 @@ button.loom-ovbrief-cell.is-open {
 .loom-ovcard-foot {
   margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px solid var(--loom-border);
+  border-top: 1px solid var(--loom-line);
   font-family: var(--loom-font-mono);
   font-size: 10.5px;
   line-height: 1.6;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 
 /* The work-in-flight roster. Fixed cells for every column whose content has a KNOWN natural
@@ -3514,29 +3469,27 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-ovroster-head {
   padding: 0 0 7px;
-  border-bottom: 1px solid var(--loom-border);
-  font-family: var(--loom-font-head);
+  border-bottom: 1px solid var(--loom-line);
+  font-family: var(--loom-font-ui);
   font-size: 9.5px;
   font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-ovroster-row {
   padding: 9px 0;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
 }
 .loom-ovroster-row:last-child {
   border-bottom: 0;
 }
 .loom-ovroster-row:hover {
-  background: var(--loom-panel-2);
+  background: var(--loom-inset);
 }
 /* The table's ONE level of indent: a worker under the manager that owns it. */
 .loom-ovroster-row.is-child > .loom-ovroster-agent {
   margin-left: 3px;
   padding-left: 14px;
-  border-left: 1px solid var(--loom-border);
+  border-left: 1px solid var(--loom-line);
 }
 .loom-ovroster-agent {
   display: flex;
@@ -3556,12 +3509,10 @@ button.loom-ovbrief-cell.is-open {
 .loom-ovroster-agent i {
   flex: none;
   font-style: normal;
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-ovroster-state {
   min-width: 0;
@@ -3571,7 +3522,7 @@ button.loom-ovbrief-cell.is-open {
   min-width: 0;
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3583,14 +3534,14 @@ button.loom-ovbrief-cell.is-open {
   min-width: 0;
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 .loom-ovroster-track {
   flex: 1 1 auto;
   min-width: 24px;
   height: 4px;
   border-radius: var(--loom-radius-sm);
-  background: var(--loom-border);
+  background: var(--loom-line);
   overflow: hidden;
 }
 .loom-ovroster-track > span {
@@ -3631,7 +3582,7 @@ button.loom-ovbrief-cell.is-open {
   gap: 7px;
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 .loom-ovlane-dot {
   flex: none;
@@ -3656,12 +3607,12 @@ button.loom-ovbrief-cell.is-open {
     border-left: 0;
   }
   .loom-ovbrief > :nth-child(n + 3) {
-    border-top: 1px solid var(--loom-border);
+    border-top: 1px solid var(--loom-line);
   }
   .loom-ovbrief-trail {
     flex: 1 1 100%;
     border-left: 0;
-    border-top: 1px solid var(--loom-border);
+    border-top: 1px solid var(--loom-line);
     justify-content: space-between;
   }
   .loom-ovbrief-chart {
@@ -3683,12 +3634,10 @@ button.loom-ovbrief-cell.is-open {
     clip-path: none;
     display: inline-block;
     flex: none;
-    font-family: var(--loom-font-head);
+    font-family: var(--loom-font-ui);
     font-size: 9px;
     font-weight: 700;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--loom-text-muted);
+    color: var(--loom-text-3);
   }
   .loom-ovroster-row {
     grid-template-columns: minmax(0, 1fr) auto;
@@ -3755,7 +3704,7 @@ button.loom-ovbrief-cell.is-open {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
 }
 .loom-wsessionrow:last-child {
   border-bottom: none;
@@ -3764,7 +3713,7 @@ button.loom-ovbrief-cell.is-open {
    without a mark on the row the pair reads as unrelated. A left edge rather than a fill: the row
    is still a row, and a filled row competes with the project cards two sections down. */
 .loom-wsessionrow.is-expanded {
-  box-shadow: inset 2px 0 0 0 var(--loom-phosphor);
+  box-shadow: inset 2px 0 0 0 var(--loom-live);
 }
 .loom-wsessionbtn {
   flex: 1 1 auto;
@@ -3790,7 +3739,7 @@ button.loom-ovbrief-cell.is-open {
   white-space: nowrap;
 }
 .loom-wsessionbtn:hover {
-  background: var(--loom-panel-2);
+  background: var(--loom-inset);
 }
 /* INSET, because the list above is an `overflow-y: auto` track: a positive offset is clipped on the
    first and last row, which is how a focus ring goes missing on exactly the two rows a keyboard
@@ -3805,14 +3754,14 @@ button.loom-ovbrief-cell.is-open {
   width: 12px;
   font-size: 9px;
   line-height: 1;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   transition:
     transform 110ms cubic-bezier(0.2, 0, 0, 1),
     color 80ms linear;
 }
 .loom-wsession-twist.is-expanded {
   transform: rotate(90deg);
-  color: var(--loom-phosphor);
+  color: var(--loom-live);
 }
 /* State + role as ONE cluster of fixed minimum width, so every row's identity text starts at the
    same x. `min-width` rather than `width`: a longer badge pushes its own row a pixel or two instead
@@ -3838,14 +3787,14 @@ button.loom-ovbrief-cell.is-open {
    given the readable weight it repeats at full strength on every row and buries the one token that
    tells two rows of the same block apart. */
 .loom-wsession-proj {
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-wsession-agent {
   color: var(--loom-text);
   font-weight: 600;
 }
 .loom-wsession-short {
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   /* Flex items are blockified and a block box strips a leading space at the start of its line —
      the same fix `TileTitle` needs for its own " · " prefix. */
   white-space: pre;
@@ -3853,7 +3802,7 @@ button.loom-ovbrief-cell.is-open {
 .loom-wsession-up {
   font-family: var(--loom-font-mono);
   font-size: 11px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   font-variant-numeric: tabular-nums;
 }
 .loom-wsession-open {
@@ -3862,7 +3811,7 @@ button.loom-ovbrief-cell.is-open {
 .loom-wsession-term {
   margin-top: 10px;
   padding-top: 10px;
-  border-top: 1px solid var(--loom-border);
+  border-top: 1px solid var(--loom-line);
 }
 /* Below Atlas's own 820px breakpoint (where the tree rail becomes a drawer and hands the content
    column its width back) the shared label origin stops being worth what it costs: at 600px the
@@ -3887,8 +3836,8 @@ button.loom-ovbrief-cell.is-open {
   gap: 8px;
   text-align: left;
   padding: 12px 14px 13px;
-  background: var(--loom-panel);
-  border: 1px solid var(--loom-border);
+  background: var(--loom-surface);
+  border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius);
   cursor: pointer;
   font: inherit;
@@ -3897,8 +3846,8 @@ button.loom-ovbrief-cell.is-open {
     background 80ms linear;
 }
 .loom-projcard:hover {
-  border-color: var(--loom-border-strong);
-  background: var(--loom-panel-2);
+  border-color: var(--loom-line-strong);
+  background: var(--loom-inset);
 }
 .loom-projcard:focus-visible {
   outline: 2px solid var(--loom-ring);
@@ -3916,7 +3865,7 @@ button.loom-ovbrief-cell.is-open {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 14px;
   color: var(--loom-text);
 }
@@ -3924,12 +3873,12 @@ button.loom-ovbrief-cell.is-open {
 .loom-projcard-foot {
   font-family: var(--loom-font-mono);
   font-size: 11px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 .loom-projcard-foot {
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   padding-top: 7px;
-  border-top: 1px solid var(--loom-border);
+  border-top: 1px solid var(--loom-line);
 }
 
 /* The KPI deck's first fold, at the mockup's own breakpoint. Below this a six-up tile is too
@@ -4000,7 +3949,7 @@ button.loom-ovbrief-cell.is-open {
   flex-direction: column;
   gap: 5px;
   padding: 9px 0;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
 }
 .loom-agentrow:last-of-type {
   border-bottom: none;
@@ -4034,7 +3983,7 @@ button.loom-ovbrief-cell.is-open {
   font-family: var(--loom-font-mono);
   font-size: 11px;
   line-height: 1.5;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4051,7 +4000,7 @@ button.loom-ovbrief-cell.is-open {
   font-family: var(--loom-font-mono);
   font-size: 11px;
   line-height: 1.5;
-  color: var(--loom-red);
+  color: var(--loom-danger);
 }
 
 /* The "workers are dispatched" line. Sticky ONLY inside a band panel's own scroll: that is
@@ -4063,22 +4012,22 @@ button.loom-ovbrief-cell.is-open {
   font-family: var(--loom-font-mono);
   font-size: 11px;
   line-height: 1.6;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 .loom-bandbody > .loom-agentnote {
   position: sticky;
   bottom: -8px;
   margin-bottom: -8px;
   padding: 6px 0 8px;
-  background: var(--loom-panel);
-  border-top: 1px solid var(--loom-border);
+  background: var(--loom-surface);
+  border-top: 1px solid var(--loom-line);
 }
 .loom-agentnote strong {
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   font-weight: 600;
 }
 .loom-agentnote-names {
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 
 /* The Sessions tab's controls bar — the project filter, and (project-scoped mounts only) the inline
@@ -4126,16 +4075,15 @@ button.loom-ovbrief-cell.is-open {
   min-width: 0;
   max-width: 240px;
 }
-/* A deliberate one-step lift off the `--loom-text-muted` both of these classes carry by default,
-   which measures 3.2:1 on `--loom-bg` — under the 4.5:1 floor at 11px. Muted is right for their
-   usual job (a passive subtitle inside a card or a band panel, read once that panel already has your
-   attention); here the same two lines are the live answer to "what is this button about to start" /
-   "why is there no button", in a row where everything else is interactive and nothing else is dim.
-   `--loom-text-dim` measures 6.3:1. Scoped to this one mount on purpose — re-toning either shared
-   class is a design-system call, not this row's. */
+/* A deliberate one-step lift off the `--loom-text-3` both of these classes carry by default. Muted
+   is right for their usual job (a passive subtitle inside a card or a band panel, read once that
+   panel already has your attention); here the same two lines are the live answer to "what is this
+   button about to start" / "why is there no button", in a row where everything else is interactive
+   and nothing else is dim, so they take `--loom-text-2`. Scoped to this one mount on purpose —
+   re-toning either shared class is a design-system call, not this row's. */
 .loom-quickstart > .loom-agentrow-meta,
 .loom-quickstart > .loom-bandempty {
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 
 /* ── The Agents node's LAUNCH BAY (card 699fe92a) ──────────────────────────────────────
@@ -4177,25 +4125,24 @@ button.loom-ovbrief-cell.is-open {
   flex-wrap: wrap;
   padding-bottom: 8px;
   margin-bottom: 12px;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
 }
 /* The group's own reason for existing, beside the label rather than orphaned below the grid.
-   `--loom-text-dim` (6.3:1), not `--loom-text-muted` (3.2:1 on `--loom-bg`): at 11px this is
-   the one line that answers "why does this group have no Spawn", so it is read deliberately
-   rather than skimmed past, and muted is under the 4.5:1 floor for that job. */
+   `--loom-text-2`, not `--loom-text-3`: at 11px this is the one line that answers "why does this
+   group have no Spawn", so it is read deliberately rather than skimmed past. */
 .loom-baygroup-why {
   flex: 1 1 auto;
   min-width: 0;
   font-family: var(--loom-font-mono);
   font-size: 11px;
   line-height: 1.6;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
 }
 .loom-baygroup-n {
   flex: none;
   font-family: var(--loom-font-mono);
   font-size: 11px;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   font-variant-numeric: tabular-nums;
 }
 
@@ -4274,18 +4221,16 @@ button.loom-ovbrief-cell.is-open {
   white-space: nowrap;
 }
 .loom-baycard.is-dispatched .loom-baycard-name {
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   font-weight: 500;
 }
 .loom-baycard-role {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 9.5px;
   font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
 }
 .loom-baycard-tier {
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   font-weight: 400;
   letter-spacing: 0.08em;
 }
@@ -4308,7 +4253,7 @@ button.loom-ovbrief-cell.is-open {
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
   line-height: 1.6;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -4327,12 +4272,10 @@ button.loom-ovbrief-cell.is-open {
   padding: 0 12px 11px;
 }
 .loom-bayfacts dt {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   padding-top: 3px;
 }
 .loom-bayfacts dd {
@@ -4346,7 +4289,7 @@ button.loom-ovbrief-cell.is-open {
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
   line-height: 1.5;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4358,26 +4301,26 @@ button.loom-ovbrief-cell.is-open {
   line-height: 1.5;
   padding: 1px 6px;
   border-radius: var(--loom-radius-sm);
-  border: 1px solid var(--loom-border-strong);
-  color: var(--loom-text-dim);
+  border: 1px solid var(--loom-line-strong);
+  color: var(--loom-text-2);
   white-space: nowrap;
 }
 /* An opt-in HOST capability the rig confers (a browser, document conversion) is toned apart
    from the skill subset every rig has — the two answer different questions. */
 .loom-baychip.is-cap {
-  color: var(--loom-cyan);
-  border-color: var(--loom-cyan);
+  color: var(--loom-info);
+  border-color: var(--loom-info);
 }
 .loom-baychip.is-cron {
-  color: var(--loom-amber);
-  border-color: var(--loom-amber);
+  color: var(--loom-busy);
+  border-color: var(--loom-busy);
   font-variant-numeric: tabular-nums;
 }
 /* An absence, drawn as one: a plain agent has no rig, and a dashed outline says so without
    needing the word "none" beside it. */
 .loom-baychip.is-none {
   border-style: dashed;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 
 /* Vitals exist only while something is running, so they are their own strip rather than an
@@ -4388,12 +4331,12 @@ button.loom-ovbrief-cell.is-open {
   gap: 8px;
   margin: 0 12px 11px;
   padding: 6px 9px;
-  border: 1px solid var(--loom-border);
+  border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius);
-  background: var(--loom-phosphor-dim);
+  background: var(--loom-live-soft);
   font-family: var(--loom-font-mono);
   font-size: 11px;
-  color: var(--loom-text-dim);
+  color: var(--loom-text-2);
   font-variant-numeric: tabular-nums;
 }
 
@@ -4406,8 +4349,8 @@ button.loom-ovbrief-cell.is-open {
   gap: 8px;
   flex-wrap: wrap;
   padding: 10px 12px;
-  border-top: 1px solid var(--loom-border);
-  background: var(--loom-panel-2);
+  border-top: 1px solid var(--loom-line);
+  background: var(--loom-inset);
   /* The card cannot clip (it would clip the ▾ menu — see `.loom-baycard`), so the bottom
      corners are the bar's own job. */
   border-radius: 0 0 var(--loom-radius) var(--loom-radius);
@@ -4419,12 +4362,10 @@ button.loom-ovbrief-cell.is-open {
    control reads as a deliberate fact about this agent rather than a button that failed to
    render — which is what an empty gap there would say. */
 .loom-baystamp {
-  font-family: var(--loom-font-head);
+  font-family: var(--loom-font-ui);
   font-size: 9.5px;
   font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
 }
 
 /* Schedules, given a home. It used to float as a bare line below the panels, belonging to
@@ -4433,7 +4374,7 @@ button.loom-ovbrief-cell.is-open {
 .loom-baysched {
   margin-top: 18px;
   padding-top: 14px;
-  border-top: 1px solid var(--loom-border);
+  border-top: 1px solid var(--loom-line);
 }
 
 /* The Workspace root's standing-operator rows — a status read, so no control cluster. */
@@ -4442,7 +4383,7 @@ button.loom-ovbrief-cell.is-open {
   flex-direction: column;
   gap: 4px;
   padding: 8px 0;
-  border-bottom: 1px solid var(--loom-border);
+  border-bottom: 1px solid var(--loom-line);
 }
 .loom-operrow:last-of-type {
   border-bottom: none;
@@ -4457,7 +4398,7 @@ button.loom-ovbrief-cell.is-open {
   flex: none;
   font-family: var(--loom-font-mono);
   font-size: 11px;
-  color: var(--loom-cyan);
+  color: var(--loom-info);
   text-decoration: none;
 }
 .loom-inlinelink:hover {
@@ -4485,9 +4426,9 @@ button.loom-ovbrief-cell.is-open {
   margin-right: 6px;
   padding: 0;
   background: transparent;
-  border: 1px solid var(--loom-border);
+  border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius-sm);
-  color: var(--loom-text-muted);
+  color: var(--loom-text-3);
   font-family: var(--loom-font-mono);
   font-size: 13px;
   line-height: 1;
@@ -4497,8 +4438,8 @@ button.loom-ovbrief-cell.is-open {
     border-color 80ms linear;
 }
 .loom-atlas-plus:hover {
-  color: var(--loom-phosphor);
-  border-color: var(--loom-border-strong);
+  color: var(--loom-live);
+  border-color: var(--loom-line-strong);
 }
 .loom-atlas-plus:focus-visible {
   outline: 2px solid var(--loom-ring);

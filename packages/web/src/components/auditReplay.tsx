@@ -97,17 +97,17 @@ function ReplayEvent({ t, e, state }: { t: AuditTimeline; e: AuditEvent; state: 
       display: "flex", alignItems: "baseline", gap: 8, padding: "2px 6px",
       fontFamily: font.mono, fontSize: fs.mono, opacity: future ? 0.34 : 1,
       borderLeft: `2px solid ${state === "current" ? tone[tn] : "transparent"}`,
-      background: state === "current" ? color.panel2 : "transparent",
+      background: state === "current" ? color.inset : "transparent",
     }}>
-      <span style={{ color: color.textMuted, width: 26, textAlign: "right", flexShrink: 0 }}>{e.seq}</span>
+      <span style={{ color: color.text3, width: 26, textAlign: "right", flexShrink: 0 }}>{e.seq}</span>
       <Dot tone={tn} glow={state === "current"} />
       <span title={e.kind} style={{ color: tone[tn], whiteSpace: "nowrap", minWidth: 0, flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{e.kind}</span>
-      <span title={actorLine} style={{ color: color.textMuted, whiteSpace: "nowrap", minWidth: 0, flexShrink: 1000, overflow: "hidden", textOverflow: "ellipsis" }}>
+      <span title={actorLine} style={{ color: color.text3, whiteSpace: "nowrap", minWidth: 0, flexShrink: 1000, overflow: "hidden", textOverflow: "ellipsis" }}>
         {actorLine}
       </span>
-      {detail && <span title={detail} style={{ color: color.textDim, minWidth: 0, flexShrink: 100000, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail}</span>}
+      {detail && <span title={detail} style={{ color: color.text2, minWidth: 0, flexShrink: 100000, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail}</span>}
       <span data-testid="audit-replay-event-time"
-        style={{ color: color.textMuted, whiteSpace: "nowrap", flexShrink: 0, marginLeft: "auto" }}>{timeOfDay(e.ts)}</span>
+        style={{ color: color.text3, whiteSpace: "nowrap", flexShrink: 0, marginLeft: "auto" }}>{timeOfDay(e.ts)}</span>
     </div>
   );
 }
@@ -125,10 +125,10 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
     retry: false,
   });
 
-  if (q.isLoading) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "8px 6px" }}>diffing…</div>;
+  if (q.isLoading) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "8px 6px" }}>diffing…</div>;
   if (q.isError) {
     return (
-      <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, padding: "8px 6px", display: "flex", gap: 10, alignItems: "center" }}>
+      <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, padding: "8px 6px", display: "flex", gap: 10, alignItems: "center" }}>
         <span>{(q.error as Error).message}</span>
         <Button variant="ghost" onClick={onClose}>Dismiss</Button>
       </div>
@@ -139,9 +139,9 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
   const changedSteps = d.steps.filter((s) => s.op !== "same");
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${color.border}` }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${color.line}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>
           A {d.a.rootId.slice(0, 8)} ({d.a.eventCount}) vs B {d.b.rootId.slice(0, 8)} ({d.b.eventCount})
         </span>
         <span style={{ flex: 1 }} />
@@ -151,14 +151,14 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
         <Button variant="ghost" onClick={onClose}>Close</Button>
       </div>
 
-      {!d.summary.changed && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.phosphor }}>Identical event sequences.</span>}
+      {!d.summary.changed && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.live }}>Identical event sequences.</span>}
 
       {changedKinds.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {changedKinds.map((k) => (
             <span key={k.kind} title={`A:${k.a} B:${k.b}`} style={{
               fontFamily: font.mono, fontSize: fs.mono, padding: "1px 6px", borderRadius: radius.sm,
-              border: `1px solid ${color.border}`, color: k.delta > 0 ? color.phosphor : color.red,
+              border: `1px solid ${color.line}`, color: k.delta > 0 ? color.live : color.danger,
             }}>
               {k.kind} {k.delta > 0 ? "+" : ""}{k.delta}
             </span>
@@ -173,9 +173,9 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
             const added = s.op === "added";
             return (
               <div key={i} style={{ display: "flex", gap: 8, fontFamily: font.mono, fontSize: fs.mono, alignItems: "baseline" }}>
-                <span style={{ color: added ? color.phosphor : color.red, width: 14, flexShrink: 0 }}>{added ? "+B" : "−A"}</span>
-                <span style={{ color: color.textDim }}>{s.signature}</span>
-                <span style={{ color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detailLine(ev)}</span>
+                <span style={{ color: added ? color.live : color.danger, width: 14, flexShrink: 0 }}>{added ? "+B" : "−A"}</span>
+                <span style={{ color: color.text2 }}>{s.signature}</span>
+                <span style={{ color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detailLine(ev)}</span>
               </div>
             );
           })}
@@ -292,7 +292,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
     return (
       <div data-testid="audit-replay">
         {!hideLabel && <SectionLabel>Wave replay</SectionLabel>}
-        <Panel><span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No manager waves to replay yet.</span></Panel>
+        <Panel><span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No manager waves to replay yet.</span></Panel>
       </div>
     );
   }
@@ -308,13 +308,13 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
               <option key={o.id} value={o.id}>{o.label}</option>
             ))}
           </Select>
-          <div style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden" }}>
+          <div style={{ display: "inline-flex", border: `1px solid ${color.line}`, borderRadius: radius.base, overflow: "hidden" }}>
             {(["wave", "session"] as const).map((sc) => (
               <button key={sc} onClick={() => flipScope(sc)} className="loom-btn"
                 title={sc === "wave" ? "The whole manager wave (every agent)" : "Focus one agent — the manager or one of its workers"}
                 style={{
-                  background: scope === sc ? color.panel2 : "transparent", border: "none",
-                  color: scope === sc ? color.phosphor : color.textMuted,
+                  background: scope === sc ? color.inset : "transparent", border: "none",
+                  color: scope === sc ? color.live : color.text3,
                   fontFamily: font.mono, fontSize: fs.mono, padding: "4px 12px", cursor: "pointer",
                 }}>{sc}</button>
             ))}
@@ -333,7 +333,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
 
         {/* Span summary */}
         {timeline && (
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
             <Chip label="events" value={timeline.eventCount} />
             <Chip label="actors" value={Object.keys(timeline.sessions).length} />
             {timeline.firstTs && <span>{timeOfDay(timeline.firstTs)} → {timeline.lastTs ? timeOfDay(timeline.lastTs) : "—"}</span>}
@@ -350,9 +350,9 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
             <Button variant="ghost" title="Step forward" onClick={() => { setPlaying(false); setSeq(Math.min(last, cur + 1)); }}>›</Button>
             <input type="range" min={0} max={last} value={cur}
               onChange={(e) => { setPlaying(false); setSeq(Number(e.target.value)); }}
-              style={{ flex: 1, accentColor: color.phosphor }} aria-label="Replay position" />
+              style={{ flex: 1, accentColor: color.live }} aria-label="Replay position" />
             <span data-testid="audit-replay-position"
-              style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, minWidth: 64, textAlign: "right" }}>
+              style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, minWidth: 64, textAlign: "right" }}>
               {cur + 1}/{events.length}
             </span>
             {seq !== null && cur < last && <Button variant="ghost" title="Jump to live edge" onClick={() => setSeq(null)}>↦ live</Button>}
@@ -361,8 +361,8 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
 
         {/* Event stream up to the scrub head; future events dimmed */}
         <div style={{ maxHeight: "40vh", overflow: "auto", display: "flex", flexDirection: "column", gap: 1 }}>
-          {q.isLoading && <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>loading timeline…</span>}
-          {timeline && events.length === 0 && <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No events recorded for this {scope}.</span>}
+          {q.isLoading && <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>loading timeline…</span>}
+          {timeline && events.length === 0 && <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No events recorded for this {scope}.</span>}
           {events.map((e) => (
             <ReplayEvent key={e.id} t={timeline!} e={e} state={e.seq < cur ? "past" : e.seq === cur ? "current" : "future"} />
           ))}

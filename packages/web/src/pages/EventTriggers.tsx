@@ -80,7 +80,7 @@ export default function EventTriggers() {
       <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
         <SectionLabel style={{ margin: 0 }}>Event Triggers</SectionLabel>
         <StatusPill tone="live" label="dispatcher active" glow />
-        <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
+        <p style={{ color: color.text3, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
           React to internal orchestration events. When an event of the chosen kind fires — optionally
           scoped to one project — the trigger wakes an existing session or spawns a fresh agent. The
           dispatcher is always on; changes apply on the next matching event.
@@ -90,7 +90,7 @@ export default function EventTriggers() {
 
       <div style={{ marginTop: 12, overflowX: "auto" }}>
         {rows.length === 0 ? (
-          <p style={{ color: color.textMuted, fontSize: fs.body, fontFamily: font.mono, padding: "20px 4px" }}>
+          <p style={{ color: color.text3, fontSize: fs.body, fontFamily: font.mono, padding: "20px 4px" }}>
             No event triggers yet. Create one to wake or spawn an agent when an orchestration event fires.
           </p>
         ) : (
@@ -100,8 +100,8 @@ export default function EventTriggers() {
                 {["Event kind", "Scope", "Mode", "Target", "Last fired", "Status", ""].map((h, i) => (
                   <th key={h || "actions"} style={{
                     textAlign: i === 5 || i === 6 ? "right" : "left",
-                    color: color.textDim, fontFamily: font.head, fontSize: fs.xs, fontWeight: 700,
-                    padding: "0 12px 8px", borderBottom: `1px solid ${color.border}`, whiteSpace: "nowrap",
+                    color: color.text2, fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700,
+                    padding: "0 12px 8px", borderBottom: `1px solid ${color.line}`, whiteSpace: "nowrap",
                   }}>{h}</th>
                 ))}
               </tr>
@@ -110,17 +110,17 @@ export default function EventTriggers() {
               {rows.map((t) => (
                 <tr key={t.id} className="loom-sched-row"
                   onClick={() => setModal({ mode: "edit", trigger: t })}
-                  style={{ cursor: "pointer", borderBottom: `1px solid ${color.border}` }}>
+                  style={{ cursor: "pointer", borderBottom: `1px solid ${color.line}` }}>
                   <td style={{ padding: "10px 12px", color: color.text, fontWeight: 600, whiteSpace: "nowrap" }}>
                     {humanizeKind(t.eventKind)}
-                    <span style={{ display: "block", color: color.cyan, fontWeight: 400, fontSize: fs.sm }}>{t.eventKind}</span>
+                    <span style={{ display: "block", color: color.info, fontWeight: 400, fontSize: fs.sm }}>{t.eventKind}</span>
                   </td>
-                  <td style={{ padding: "10px 12px", color: t.projectId ? color.textDim : color.textMuted, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{projectName(t.projectId)}</td>
+                  <td style={{ padding: "10px 12px", color: t.projectId ? color.text2 : color.text3, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{projectName(t.projectId)}</td>
                   <td style={{ padding: "10px 12px" }}>
                     <Badge tone={t.mode === "wake" ? "info" : "live"}>{t.mode}</Badge>
                   </td>
-                  <td style={{ padding: "10px 12px", color: color.textDim, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{targetLabel(t)}</td>
-                  <td style={{ padding: "10px 12px", color: color.textDim, whiteSpace: "nowrap" }}>{fmt(t.lastFiredAt)}</td>
+                  <td style={{ padding: "10px 12px", color: color.text2, maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{targetLabel(t)}</td>
+                  <td style={{ padding: "10px 12px", color: color.text2, whiteSpace: "nowrap" }}>{fmt(t.lastFiredAt)}</td>
                   <td style={{ padding: "10px 12px", textAlign: "right" }}>
                     {/* Inline enable/disable — the most common action; row-click opens the editor (this cell stops propagation). */}
                     <button
@@ -129,13 +129,13 @@ export default function EventTriggers() {
                       title={t.enabled ? "Pause this trigger (stops firing)" : "Resume this trigger"}
                       aria-pressed={t.enabled}
                       style={{
-                        cursor: "pointer", background: "transparent", border: `1px solid ${t.enabled ? color.phosphor : color.borderStrong}`,
-                        color: t.enabled ? color.phosphor : color.textMuted, borderRadius: radius.sm,
+                        cursor: "pointer", background: "transparent", border: `1px solid ${t.enabled ? color.live : color.lineStrong}`,
+                        color: t.enabled ? color.live : color.text3, borderRadius: radius.sm,
                         fontFamily: font.mono, fontSize: fs.xs, padding: "2px 8px",
                       }}>{t.enabled ? "On" : "Off"}</button>
                   </td>
                   <td style={{ padding: "10px 12px", textAlign: "right", whiteSpace: "nowrap" }}>
-                    <span style={{ color: color.textMuted }}>Edit ›</span>
+                    <span style={{ color: color.text3 }}>Edit ›</span>
                   </td>
                 </tr>
               ))}
@@ -165,7 +165,7 @@ export default function EventTriggers() {
 
 // ── The create/edit modal ─────────────────────────────────────────────────────────────────────────
 
-const fieldLabel = { fontFamily: font.head as string, fontSize: fs.sm, fontWeight: 700, color: color.textDim };
+const fieldLabel = { fontFamily: font.ui as string, fontSize: fs.sm, fontWeight: 700, color: color.text2 };
 
 function EventTriggerModal({
   mode, projects, agents, agentsLoading, sessions, sessionsLoading,
@@ -237,10 +237,10 @@ function EventTriggerModal({
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}
         role="dialog" aria-modal="true" aria-label={editing ? "Edit event trigger" : "New event trigger"}
-        style={{ width: 620, maxWidth: "92vw", background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, display: "flex", flexDirection: "column", gap: 14, padding: 18 }}>
+        style={{ width: 620, maxWidth: "92vw", background: color.surface, border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, display: "flex", flexDirection: "column", gap: 14, padding: 18 }}>
 
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <strong style={{ fontFamily: font.head, color: color.text }}>
+          <strong style={{ fontFamily: font.ui, color: color.text }}>
             {editing ? "Edit event trigger" : "New event trigger"}
           </strong>
           <span style={{ flex: 1 }} />
@@ -257,7 +257,7 @@ function EventTriggerModal({
 
         {/* Project scope — explicit "All projects" (null) */}
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span style={fieldLabel}>Scope <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· which project's events fire this</span></span>
+          <span style={fieldLabel}>Scope <span style={{ fontWeight: 400, color: color.text3 }}>· which project's events fire this</span></span>
           <Select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
             <option value="">All projects</option>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
@@ -288,30 +288,30 @@ function EventTriggerModal({
               <option value="">{sessionsLoading ? "Loading sessions…" : noSessions ? "— no sessions available —" : "— select a session —"}</option>
               {sessions.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
             </Select>
-            {noSessions && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>No sessions exist yet — start one first, or use Spawn instead.</span>}
-            {!targetSessionId && !noSessions && !sessionsLoading && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>Wake mode requires a target session.</span>}
+            {noSessions && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>No sessions exist yet — start one first, or use Spawn instead.</span>}
+            {!targetSessionId && !noSessions && !sessionsLoading && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>Wake mode requires a target session.</span>}
           </label>
         ) : (
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={fieldLabel}>Target agent <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· a fresh session spawns in it</span></span>
+            <span style={fieldLabel}>Target agent <span style={{ fontWeight: 400, color: color.text3 }}>· a fresh session spawns in it</span></span>
             <Select value={agentId} onChange={(e) => setAgentId(e.target.value)} disabled={agentsLoading || noAgents}>
               <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents available —" : "— select an agent —"}</option>
               {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
             </Select>
-            {noAgents && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
-            {!agentId && !noAgents && !agentsLoading && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>Spawn mode requires a target agent.</span>}
+            {noAgents && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>No agents exist yet — create one on the Projects page first.</span>}
+            {!agentId && !noAgents && !agentsLoading && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>Spawn mode requires a target agent.</span>}
           </label>
         )}
 
         {/* Enabled */}
         <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} style={{ accentColor: "var(--loom-phosphor)", width: 16, height: 16 }} />
-          <span style={{ ...fieldLabel, textTransform: "none", letterSpacing: 0, fontFamily: font.mono, fontWeight: 400, fontSize: fs.mono, color: color.textDim }}>
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} style={{ accentColor: "var(--loom-live)", width: 16, height: 16 }} />
+          <span style={{ ...fieldLabel, fontFamily: font.mono, fontWeight: 400, fontSize: fs.mono, color: color.text2 }}>
             Enabled {enabled ? <Chip value="on" tone="live" /> : <Chip value="off" tone="muted" />}
           </span>
         </label>
 
-        {mutError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(mutError)}</span>}
+        {mutError && <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(mutError)}</span>}
 
         {/* Actions */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
@@ -322,7 +322,7 @@ function EventTriggerModal({
           <span style={{ flex: 1 }} />
           {editing && (confirmDel ? (
             <>
-              <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>delete?</span>
+              <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>delete?</span>
               <Button variant="danger" disabled={deleting} onClick={() => onDelete(existing!.id)}>Confirm</Button>
               <Button onClick={() => setConfirmDel(false)}>Keep</Button>
             </>

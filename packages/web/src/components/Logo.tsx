@@ -54,12 +54,12 @@ export function LogoMark({ size = 20, style }: { size?: number; style?: CSSPrope
 export function Logo({ size = 20 }: { size?: number }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
-      <span style={{ color: color.phosphor, display: "inline-flex" }}>
+      <span style={{ color: color.live, display: "inline-flex" }}>
         <LogoMark size={size} />
       </span>
       <span
         style={{
-          fontFamily: font.head,
+          fontFamily: font.ui,
           fontWeight: 600,
           fontSize: fs.lg,
           letterSpacing: "0.12em",

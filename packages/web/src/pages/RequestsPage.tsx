@@ -20,7 +20,7 @@ export default function RequestsPage() {
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
         {ownIdentity && (
-          <span data-testid="page-identity" style={{ fontFamily: font.head, fontSize: fs.lg, color: color.text, marginRight: 12 }}>Inbox</span>
+          <span data-testid="page-identity" style={{ fontFamily: font.ui, fontSize: fs.lg, color: color.text, marginRight: 12 }}>Inbox</span>
         )}
         <TabButton label="Waiting on me" active={tab === "inbox"} onClick={() => setTab("inbox")} />
         <TabButton label="History" active={tab === "history"} onClick={() => setTab("history")} />
@@ -33,9 +33,9 @@ export default function RequestsPage() {
 function TabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
     <button onClick={onClick}
-      style={{ background: active ? color.panel2 : "transparent", border: `1px solid ${active ? color.phosphor : color.border}`,
+      style={{ background: active ? color.inset : "transparent", border: `1px solid ${active ? color.live : color.line}`,
         borderRadius: radius.sm, padding: "4px 12px", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono,
-        color: active ? color.phosphor : color.textDim }}>
+        color: active ? color.live : color.text2 }}>
       {label}
     </button>
   );

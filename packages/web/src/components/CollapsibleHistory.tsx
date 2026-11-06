@@ -16,11 +16,11 @@ export function CollapsibleHistory({ title, hint, children }: { title: string; h
         title={open ? `Collapse ${title}` : `Expand ${title}`}
         style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none",
           padding: 0, margin: "4px 0 8px", cursor: "pointer", textAlign: "left", width: "100%" }}>
-        <span aria-hidden style={{ color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: fs.mono, width: 10 }}>{open ? "▾" : "▸"}</span>
-        <span style={{ fontFamily: font.head, fontSize: fs.sm, fontWeight: 700, color: color.textDim }}>
+        <span aria-hidden style={{ color: open ? color.live : color.text2, fontFamily: font.mono, fontSize: fs.mono, width: 10 }}>{open ? "▾" : "▸"}</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.text2 }}>
           {title}
         </span>
-        <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
           {hint}
         </span>
       </button>

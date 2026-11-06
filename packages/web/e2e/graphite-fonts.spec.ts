@@ -68,7 +68,6 @@ test("fonts are self-hosted Instrument Sans + Geist Mono, and the terminal keeps
     return {
       family: body.fontFamily, size: body.fontSize, lineHeight: body.lineHeight, numeric: body.fontVariantNumeric,
       mono, fs,
-      head: root.getPropertyValue("--loom-font-head").trim(), ui: root.getPropertyValue("--loom-font-ui").trim(),
     };
   });
   expect(metrics.family.startsWith('"Instrument Sans"'), `body font-family: ${metrics.family}`).toBe(true);
@@ -76,7 +75,6 @@ test("fonts are self-hosted Instrument Sans + Geist Mono, and the terminal keeps
   expect(parseFloat(metrics.lineHeight)).toBeCloseTo(14 * 1.45, 1);
   expect(metrics.numeric).toBe("tabular-nums");
   expect(metrics.mono.startsWith('"Geist Mono"'), `mono font-family: ${metrics.mono}`).toBe(true);
-  expect(metrics.head, "--loom-font-head aliases the UI face").toBe(metrics.ui);
   expect(metrics.fs).toEqual({ xs: "11px", sm: "12px", mono: "12.5px", body: "14px", lg: "17.5px", h1: "22px", kpi: "27.5px" });
 
   // (3) The terminal grid keeps xterm's default font. Read off the rows xterm itself styles.

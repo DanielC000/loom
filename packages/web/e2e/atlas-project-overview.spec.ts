@@ -54,7 +54,7 @@ const NARROW = { width: 900, height: 1000 };
 const CTX_WINDOW = 1_000_000;
 const WARM_PCT = 42;
 const RED_PCT = 96;
-// The red tone is read from the live --loom-red token at run time (`cssColor`), never typed as a literal.
+// The red tone is read from the live --loom-danger token at run time (`cssColor`), never typed as a literal.
 
 // The four readings that carry a breakdown. `merged` is deliberately NOT here — leg 5 is the
 // assertion that it is a plain readout, and listing it would make that leg contradict this list.

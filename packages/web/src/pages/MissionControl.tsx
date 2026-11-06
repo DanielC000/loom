@@ -238,7 +238,7 @@ export default function MissionControl() {
       {/* Attention queue — everything else needing a human (merge requests live in the Review queue). */}
       <div>
         <SectionLabel>Attention queue ({otherAttention.length})</SectionLabel>
-        {otherAttention.length === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing needs you right now.</span></Panel>}
+        {otherAttention.length === 0 && <Panel><span style={{ color: color.text3 }}>Nothing needs you right now.</span></Panel>}
         {otherAttention.map((item) => (
           <AttentionRow key={item.key} item={item}
             onOpen={(() => {
@@ -258,7 +258,7 @@ export default function MissionControl() {
       <div className="loom-mc-split">
         <div>
           <SectionLabel>Fleet</SectionLabel>
-          {projectNames.length === 0 && <Panel><span style={{ color: color.textMuted }}>No active sessions.</span></Panel>}
+          {projectNames.length === 0 && <Panel><span style={{ color: color.text3 }}>No active sessions.</span></Panel>}
           {/* Small summary cards flow in a multi-column grid; an expanded card spans the full width
               (gridColumn 1/-1) and renders the full managers→workers view, identical to before. */}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "start" }}>
@@ -283,7 +283,7 @@ export default function MissionControl() {
               return (
                 <Panel key={pn} style={{ gridColumn: "1 / -1" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontFamily: font.head, color: color.text }}>{pn}</span>
+                    <span style={{ fontFamily: font.ui, color: color.text }}>{pn}</span>
                     <span style={{ flex: 1 }} />
                     <WaveConsumption sessions={[...projManagers, ...projWorkers]} />
                     <Button variant="ghost" style={{ padding: "0 6px" }} title="Collapse" onClick={() => toggleExpanded(pn)}>⤡</Button>
@@ -298,7 +298,7 @@ export default function MissionControl() {
                   ))}
                   {looseWorkers.map((w) => <FleetRow key={w.id} s={w} />)}
                   {projManagers.length === 0 && looseWorkers.length === 0 && (
-                    <span style={{ color: color.textMuted, fontSize: fs.sm }}>idle — no live manager</span>
+                    <span style={{ color: color.text3, fontSize: fs.sm }}>idle — no live manager</span>
                   )}
                 </Panel>
               );
@@ -314,7 +314,7 @@ export default function MissionControl() {
         <div>
           <SectionLabel>Activity</SectionLabel>
           <Panel grid style={{ maxHeight: "62vh", overflow: "auto" }}>
-            {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: fs.sm }}>No events yet.</span>}
+            {allEvents.length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No events yet.</span>}
             {allEvents.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
           </Panel>
         </div>
@@ -330,13 +330,12 @@ export default function MissionControl() {
         <button type="button" onClick={toggleReplay} aria-expanded={replayOpen} className="loom-btn"
           title={replayOpen ? "Collapse Wave replay" : "Expand Wave replay — scrub & compare wave audit timelines"}
           style={{ display: "flex", alignItems: "baseline", gap: 8, width: "100%", textAlign: "left", background: "transparent",
-            border: "none", cursor: "pointer", padding: "4px 0 8px", fontFamily: font.head, fontSize: fs.sm, fontWeight: 700,
-            color: color.textDim }}>
-          <span style={{ color: color.textMuted }}>{replayOpen ? "▾" : "▸"}</span>
+            border: "none", cursor: "pointer", padding: "4px 0 8px", fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700,
+            color: color.text2 }}>
+          <span style={{ color: color.text3 }}>{replayOpen ? "▾" : "▸"}</span>
           Wave replay
           {!replayOpen && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 400, textTransform: "none",
-              letterSpacing: 0, color: color.textMuted }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 400, color: color.text3 }}>
               scrub &amp; compare wave audit timelines
             </span>
           )}

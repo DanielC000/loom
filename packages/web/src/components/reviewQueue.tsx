@@ -104,13 +104,13 @@ const MERGE_TITLE =
  */
 export function MergeOutcome({ merge }: { merge: WorkerMerge }) {
   if (merge.data?.pending) {
-    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan }}>still running — {merge.data.reason}</span>;
+    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info }}>still running — {merge.data.reason}</span>;
   }
   if (merge.data && !merge.data.pending && merge.data.merged === false) {
-    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red }}>rejected — {merge.data.reason}</span>;
+    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>rejected — {merge.data.reason}</span>;
   }
   if (merge.data && !merge.data.pending && merge.data.merged === true) {
-    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.phosphor }}>
+    return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.live }}>
       {merge.data.commitSubject ? `merged — ${merge.data.commitSubject}` : "merged"}
     </span>;
   }
@@ -157,7 +157,7 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
 }) {
   const merge = useWorkerMerge(workerId);
 
-  const accent = analysis?.highRisk ? color.red : analysis?.mediumRisk ? color.amber : color.phosphor;
+  const accent = analysis?.highRisk ? color.danger : analysis?.mediumRisk ? color.busy : color.live;
   const topRisk = (analysis?.files ?? []).filter((f) => f.risk !== "low").slice(0, 3);
 
   return (
@@ -167,33 +167,33 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>w:{workerId.slice(0, 8)}</span>
         {worker?.taskId && <Chip label="task" value={worker.taskId.slice(0, 8)} />}
         <span style={{ flex: 1 }} />
-        {worker?.projectName && <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{worker.projectName}</span>}
+        {worker?.projectName && <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>{worker.projectName}</span>}
       </div>
-      {worker?.branch && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{worker.branch} → main</span>}
+      {worker?.branch && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{worker.branch} → main</span>}
 
       {/* auto-summary + stats */}
-      {loading && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>loading diff…</span>}
-      {error && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red }}>diff unavailable (no branch / merged)</span>}
+      {loading && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>loading diff…</span>}
+      {error && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>diff unavailable (no branch / merged)</span>}
       {analysis && (
         <>
-          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.45 }}>{analysis.headline}</div>
+          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.45 }}>{analysis.headline}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono }}>
             <span style={{ color: color.text }}>{analysis.files.length} file{analysis.files.length === 1 ? "" : "s"}</span>
-            {analysis.totalInsertions > 0 && <span style={{ color: color.phosphor }}>+{analysis.totalInsertions}</span>}
-            {analysis.totalDeletions > 0 && <span style={{ color: color.red }}>−{analysis.totalDeletions}</span>}
+            {analysis.totalInsertions > 0 && <span style={{ color: color.live }}>+{analysis.totalInsertions}</span>}
+            {analysis.totalDeletions > 0 && <span style={{ color: color.danger }}>−{analysis.totalDeletions}</span>}
             <span style={{ flex: 1 }} />
-            {analysis.highRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.red }}><Dot tone="danger" glow />{analysis.highRisk} high-risk</span>}
-            {analysis.highRisk === 0 && analysis.mediumRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.amber }}><Dot tone="busy" />{analysis.mediumRisk} to watch</span>}
-            {analysis.highRisk === 0 && analysis.mediumRisk === 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.phosphor }}><Dot tone="live" />low risk</span>}
+            {analysis.highRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.danger }}><Dot tone="danger" glow />{analysis.highRisk} high-risk</span>}
+            {analysis.highRisk === 0 && analysis.mediumRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.busy }}><Dot tone="busy" />{analysis.mediumRisk} to watch</span>}
+            {analysis.highRisk === 0 && analysis.mediumRisk === 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.live }}><Dot tone="live" />low risk</span>}
           </div>
 
           {/* top risk files inline */}
           {topRisk.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 2, borderTop: `1px solid ${color.border}`, paddingTop: 6 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2, borderTop: `1px solid ${color.line}`, paddingTop: 6 }}>
               {topRisk.map((f) => (
                 <div key={f.path} style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono }}>
                   <Dot tone={riskTone(f.risk)} glow={f.risk === "high"} />
-                  <span style={{ color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={`${f.path} — ${f.reasons.join(", ")}`}>{f.path}</span>
+                  <span style={{ color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={`${f.path} — ${f.reasons.join(", ")}`}>{f.path}</span>
                   <span style={{ color: tone[riskTone(f.risk)], fontSize: fs.xs }}>{f.risk}</span>
                 </div>
               ))}

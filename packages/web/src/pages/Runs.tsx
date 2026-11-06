@@ -48,7 +48,7 @@ export default function Runs() {
   const { projectId } = useActiveProject();
   const [tab, setTab] = useState<RunsTab>("runs");
 
-  if (!projectId) return <p style={{ color: color.textMuted }}>No project selected.</p>;
+  if (!projectId) return <p style={{ color: color.text3 }}>No project selected.</p>;
 
   // The Runs|Keys toggle — observability vs the trust-boundary admin, co-located but distinct.
   return (
@@ -109,7 +109,7 @@ function RunsView({ projectId }: { projectId: string }) {
         </div>
         <div style={{ maxHeight: "76vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, paddingRight: 4 }}>
           {rows.length === 0 && (
-            <p style={{ color: color.textMuted, fontSize: fs.body }}>
+            <p style={{ color: color.text3, fontSize: fs.body }}>
               No runs yet. An agent run is an ephemeral, structured invocation started over the keyed Run
               REST — they appear here newest-first as callers fire them.
             </p>
@@ -126,7 +126,7 @@ function RunsView({ projectId }: { projectId: string }) {
       <div>
         <SectionLabel>{selected ? `Run · ${selected.id.slice(0, 8)}` : "Run detail"}</SectionLabel>
         <Panel style={{ height: "76vh", padding: 12, overflowY: "auto" }}>
-          {!selected && <span style={{ color: color.textMuted, fontSize: fs.sm }}>Select a run to view its input, result, usage, and transcript.</span>}
+          {!selected && <span style={{ color: color.text3, fontSize: fs.sm }}>Select a run to view its input, result, usage, and transcript.</span>}
           {selected && <RunDetail run={selected} agentName={agentName(selected.agentId)}
             onCancel={() => cancel.mutate(selected.id)} cancelling={cancel.isPending} />}
         </Panel>
@@ -151,7 +151,7 @@ function CapRejections({ events, agentName }: { events: RunEvent[]; agentName: (
                 <StatusPill tone="danger" label="429" />
                 <span style={{ fontSize: fs.sm, color: color.text }}>{capLabel} cap</span>
                 <span style={{ flex: 1 }} />
-                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{ts(e.createdAt)}</span>
+                <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{ts(e.createdAt)}</span>
               </div>
               <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <Chip label="key" value={e.keyId ? e.keyId.slice(0, 8) : "—"} />
@@ -175,7 +175,7 @@ function RunRow({ run, selected, agentName, onSelect, onCancel, cancelling }:
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatusPill tone={statusTone[run.status]} label={run.status} glow={inFlight} />
         <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{run.id.slice(0, 8)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{run.id.slice(0, 8)}</span>
       </div>
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <Chip label="agent" value={agentName} tone="info" />
@@ -184,7 +184,7 @@ function RunRow({ run, selected, agentName, onSelect, onCancel, cancelling }:
         {run.endedAt && <Chip label="ended" value={ts(run.endedAt)} />}
       </div>
       {p && (
-        <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.mono, color: run.error ? color.red : color.textDim,
+        <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.mono, color: run.error ? color.danger : color.text2,
           whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={p}>
           {run.error ? "✗ " : "↳ "}{p}
         </div>
@@ -231,10 +231,10 @@ function RunDetail({ run, agentName, onCancel, cancelling }:
       {run.usage != null && <Field label="Usage"><Json value={run.usage} /></Field>}
       {run.error && (
         <Field label="Error">
-          <pre style={{ ...preStyle, color: color.red }}>{run.error}</pre>
+          <pre style={{ ...preStyle, color: color.danger }}>{run.error}</pre>
         </Field>
       )}
-      {run.webhookUrl && <Field label="Webhook"><span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, wordBreak: "break-all" }}>{run.webhookUrl}</span></Field>}
+      {run.webhookUrl && <Field label="Webhook"><span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, wordBreak: "break-all" }}>{run.webhookUrl}</span></Field>}
 
       {/* Transcript: the run's retained conversation via the RUN-scoped transcript route — live engine
           JSONL while in-flight, else the retained snapshot (transcriptRef). The session-transcript route
@@ -242,11 +242,11 @@ function RunDetail({ run, agentName, onCancel, cancelling }:
       <Field label={`Transcript${run.transcriptRef ? " · retained" : ""}`}>
         {run.sessionId
           ? (
-            <div style={{ height: "40vh", border: `1px solid ${color.border}`, borderRadius: radius.sm }}>
+            <div style={{ height: "40vh", border: `1px solid ${color.line}`, borderRadius: radius.sm }}>
               <TranscriptPane sessionId={run.sessionId} runRef={{ projectId: run.projectId, runId: run.id }} />
             </div>
           )
-          : <span style={{ color: color.textMuted, fontSize: fs.sm }}>No session — the run failed before one was minted.</span>}
+          : <span style={{ color: color.text3, fontSize: fs.sm }}>No session — the run failed before one was minted.</span>}
       </Field>
     </div>
   );
@@ -267,7 +267,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 function Json({ value }: { value: unknown }) {
   const text = typeof value === "string" ? value : safeStringify(value);
   return (
-    <Panel style={{ padding: 8, background: color.panel2, maxHeight: "30vh", overflow: "auto" }}>
+    <Panel style={{ padding: 8, background: color.inset, maxHeight: "30vh", overflow: "auto" }}>
       <pre style={preStyle}>{text}</pre>
     </Panel>
   );

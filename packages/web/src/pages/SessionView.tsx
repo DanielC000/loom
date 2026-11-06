@@ -55,7 +55,7 @@ export default function SessionView() {
       <Button onClick={() => navigate(-1)}>← back</Button>
       <span style={{ fontFamily: font.ui, fontSize: fs.lg, fontWeight: 600, letterSpacing: "-0.01em", color: color.text }}>{label}</span>
       {session && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
           {session.projectName} · {session.agentName}{session.role ? ` · ${session.role}` : ""} · {session.id.slice(0, 8)}
         </span>
       )}
@@ -64,7 +64,7 @@ export default function SessionView() {
 
   // Still resolving (neither feed has answered) — don't flash "not found" before the archived fetch lands.
   if (!session && (sessions.isLoading || archived.isLoading)) {
-    return <div>{header("Session")}<Panel><span style={{ color: color.textMuted }}>Loading…</span></Panel></div>;
+    return <div>{header("Session")}<Panel><span style={{ color: color.text3 }}>Loading…</span></Panel></div>;
   }
 
   // A real fetch failure (403 remote-access denial, 500, network drop) is NOT the same claim as "this id
@@ -76,7 +76,7 @@ export default function SessionView() {
     return (
       <div>
         {header("Session")}
-        <Panel><span style={{ color: color.red }}>Couldn’t load this session’s archive record — {(archived.error as Error).message}. Try again.</span></Panel>
+        <Panel><span style={{ color: color.danger }}>Couldn’t load this session’s archive record — {(archived.error as Error).message}. Try again.</span></Panel>
       </div>
     );
   }
@@ -85,7 +85,7 @@ export default function SessionView() {
     return (
       <div>
         {header("Session")}
-        <Panel><span style={{ color: color.textMuted }}>Session {id.slice(0, 8)} not found — it may have been deleted from the archive.</span></Panel>
+        <Panel><span style={{ color: color.text3 }}>Session {id.slice(0, 8)} not found — it may have been deleted from the archive.</span></Panel>
       </div>
     );
   }
@@ -115,7 +115,7 @@ export default function SessionView() {
       <Panel style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <StatusPill tone="muted" label={session.processState} />
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
             last active {new Date(session.lastActivity).toLocaleString()}
           </span>
         </div>
@@ -123,12 +123,12 @@ export default function SessionView() {
           <div>
             <SectionLabel style={{ marginTop: 0 }}>Last error</SectionLabel>
             <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: font.mono, fontSize: fs.mono,
-              color: color.red, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "8px 10px" }}>
+              color: color.danger, background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "8px 10px" }}>
               {session.lastError}
             </pre>
           </div>
         ) : (
-          <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No error recorded — the session exited cleanly.</span>
+          <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No error recorded — the session exited cleanly.</span>
         )}
         <div>
           <Button variant="primary" onClick={openArchive}>View transcript in Archive →</Button>

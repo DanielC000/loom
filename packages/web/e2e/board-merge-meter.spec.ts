@@ -37,7 +37,7 @@ function cardByTitle(page: Page, title: string) {
 //   --loom-busy         the running sweep gradient AND the rejected fill
 //   --loom-live         the merged fill (the live FILL shade, not the live text shade)
 //   --loom-danger       the failed fill
-//   --loom-text-muted   the queued fill (card 53ad9ed3)
+//   --loom-text-3   the queued fill (card 53ad9ed3)
 
 // `state` is the raw op state; `outcome` (only meaningful once `state !== "running"`) is what actually
 // distinguishes a merge SUCCESS from a gate REJECTION — both settle to `state:"done"` (see PendingMerge's
@@ -90,7 +90,7 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   const AMBER = await cssColor(page, "--loom-busy");
   const PHOSPHOR = await cssColor(page, "--loom-live");
   const RED = await cssColor(page, "--loom-danger");
-  const MUTED = await cssColor(page, "--loom-text-muted");
+  const MUTED = await cssColor(page, "--loom-text-3");
   const sweep = card.locator(".loom-merge-sweep");
   await expect(sweep).toBeVisible();
   await expect(card.locator(".loom-merge-fill")).toHaveCount(0);

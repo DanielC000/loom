@@ -297,7 +297,7 @@ test.describe("Gates page (card a1c86452)", () => {
   // tooltip fragment that cannot drift as the 1s clock ticks during the assertions — a percentage-based
   // locator would go stale mid-test.
   test("the long-run cue scales to each row's own gate timeout, and never warns on an unknown bound", async ({ page, loomDaemon }) => {
-    // AMBER (--loom-amber) is running and healthy; RED (--loom-red) is close to this row's own bound.
+    // AMBER (--loom-busy) is running and healthy; RED (--loom-danger) is close to this row's own bound.
     // Both are resolved from the live tokens once the page has loaded, below.
     const since = (secondsAgo: number) => new Date(Date.now() - secondsAgo * 1000).toISOString();
     const base = {

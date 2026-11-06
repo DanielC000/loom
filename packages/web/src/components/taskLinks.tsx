@@ -38,7 +38,7 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
     <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", alignItems: "baseline", columnGap: 8, rowGap: 2,
       fontFamily: font.mono, fontSize: fs.xs, lineHeight: 1.4 }}>
       {h.blockedByOpen > 0 && (
-        <span style={{ ...metaItem, maxWidth: 150, color: color.amber }}
+        <span style={{ ...metaItem, maxWidth: 150, color: color.busy }}
           title={h.blockedByFirst
             ? `Blocked by "${h.blockedByFirst.title}"${h.blockedByOpen > 1 ? ` and ${h.blockedByOpen - 1} more` : ""} — open the card for the full list`
             : `Blocked by ${h.blockedByOpen} unresolved ${h.blockedByOpen === 1 ? "card" : "cards"}`}>
@@ -51,14 +51,14 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
         </span>
       )}
       {h.childCount > 0 && (
-        <span style={{ ...metaItem, color: complete ? color.phosphor : color.textDim }}
+        <span style={{ ...metaItem, color: complete ? color.live : color.text2 }}
           title={`${h.childDone} of ${h.childCount} child ${h.childCount === 1 ? "card" : "cards"} done`}>
           <span aria-hidden>⊞</span>
           <span>{h.childDone}/{h.childCount}</span>
         </span>
       )}
       {h.parentId && (
-        <span style={{ ...metaItem, maxWidth: 140, color: color.textMuted }}
+        <span style={{ ...metaItem, maxWidth: 140, color: color.text3 }}
           title={parentTitle
             ? `Child of "${parentTitle}"`
             : `Child of card ${h.parentId.slice(0, 8)} — that card isn't on this board (archived, or in another project)`}>
@@ -95,7 +95,7 @@ const RELATION_HINT: Record<RelationKind, string> = {
 };
 
 const linkLabel: CSSProperties = {
-  fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.textDim, paddingTop: 2, whiteSpace: "nowrap",
+  fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.text2, paddingTop: 2, whiteSpace: "nowrap",
 };
 
 export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
@@ -123,12 +123,12 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
   );
   return (
     <div data-testid="task-links" style={{ display: "grid", gridTemplateColumns: "minmax(64px, auto) 1fr",
-      columnGap: 10, rowGap: 6, alignItems: "start", padding: "8px 10px", background: color.panel2,
-      border: `1px solid ${color.border}`, borderRadius: radius.base }}>
+      columnGap: 10, rowGap: 6, alignItems: "start", padding: "8px 10px", background: color.inset,
+      border: `1px solid ${color.line}`, borderRadius: radius.base }}>
       {links.children.total > 0 && row("Children", `${links.children.done} of ${links.children.total} done`,
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono,
-            color: allDone ? color.phosphor : color.textDim }}>
+            color: allDone ? color.live : color.text2 }}>
             <span>{links.children.done}/{links.children.total} done</span>
             <Meter value={links.children.done} max={links.children.total} width={56} tone={allDone ? "live" : "info"} />
           </div>
@@ -144,7 +144,7 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
           )}
           {/* Say so when the list is capped, rather than letting it read as the whole set. */}
           {links.children.total > links.children.items.length && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
               showing {links.children.items.length} of {links.children.total}
             </span>
           )}
@@ -161,7 +161,7 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
           <>
             {open.map((r) => (
               <TaskLinkRow key={r.id} ref_={r} columns={columns} titleById={titleById} onOpenTask={onOpenTask}
-                glyph={kind === "blockedBy" ? "⊘" : "·"} tone={kind === "blockedBy" ? color.amber : undefined} />
+                glyph={kind === "blockedBy" ? "⊘" : "·"} tone={kind === "blockedBy" ? color.busy : undefined} />
             ))}
             {/* Both read as muted history, but they are NOT the same fact and the label says which:
                 `resolved` is a DECLARED dependency whose blocker is done; `released` is auto-released
@@ -197,12 +197,12 @@ export function TaskLinkRow({ ref_, columns, titleById, onOpenTask, glyph, tone,
 }) {
   const col = columns.find((c) => c.key === ref_.columnKey) ?? null;
   const openable = titleById.has(ref_.id);
-  const textColor = muted ? color.textMuted : (tone ?? (openable ? color.cyan : color.textMuted));
+  const textColor = muted ? color.text3 : (tone ?? (openable ? color.info : color.text3));
   const label = (
     <>
-      <span aria-hidden style={{ flexShrink: 0, color: color.textMuted }}>{glyph}</span>
+      <span aria-hidden style={{ flexShrink: 0, color: color.text3 }}>{glyph}</span>
       <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ref_.title}</span>
-      {suffix && <span style={{ flexShrink: 0, color: color.textMuted, fontSize: fs.xs }}>{suffix}</span>}
+      {suffix && <span style={{ flexShrink: 0, color: color.text3, fontSize: fs.xs }}>{suffix}</span>}
       {col && <Badge tone={columnTone(col) ?? "muted"} style={{ flexShrink: 0, fontSize: fs.xs, padding: "0 5px" }}>{col.label}</Badge>}
     </>
   );

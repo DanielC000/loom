@@ -94,11 +94,11 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
       <div>
         <SectionLabel>Endpoints</SectionLabel>
         <Panel style={{ padding: 12 }}>
-          <p style={{ margin: "0 0 10px", fontSize: fs.sm, color: color.textMuted }}>
+          <p style={{ margin: "0 0 10px", fontSize: fs.sm, color: color.text3 }}>
             An agent must be flagged an <strong style={{ color: color.text }}>endpoint</strong> before it can be put on a key's
             allowlist below. This is a trust-boundary flag (human-only) — it changes no spawn behavior, only run-API eligibility.
           </p>
-          {(agents.data ?? []).length === 0 && <span style={{ color: color.textMuted, fontSize: fs.sm }}>No agents in this project.</span>}
+          {(agents.data ?? []).length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No agents in this project.</span>}
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {(agents.data ?? []).map((a) => (
               <EndpointRow key={a.id} agent={a} pending={toggleEndpoint.isPending}
@@ -127,7 +127,7 @@ export function KeyAdmin({ projectId }: { projectId: string }) {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {rows.length === 0 && !creating && (
-            <p style={{ color: color.textMuted, fontSize: fs.body }}>
+            <p style={{ color: color.text3, fontSize: fs.body }}>
               No keys yet. A key authenticates the public Run API and binds to an allowlist of this project's endpoint agents.
             </p>
           )}
@@ -168,14 +168,14 @@ function OneTimeSecret({ name, plaintext, onDismiss }: { name: string; plaintext
         <span style={{ flex: 1 }} />
         <Button variant="ghost" onClick={onDismiss} title="Dismiss — the secret is cleared and can never be shown again">Dismiss</Button>
       </div>
-      <p style={{ margin: "0 0 8px", fontSize: fs.sm, color: color.amber }}>
+      <p style={{ margin: "0 0 8px", fontSize: fs.sm, color: color.busy }}>
         This is the ONLY time the token for <strong>{name}</strong> is shown. Copy it now — it is never stored in plaintext and
         can never be retrieved again. If you lose it, rotate the key for a new one.
       </p>
       <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
         <code style={{
-          flex: 1, fontFamily: font.mono, fontSize: fs.body, color: color.text, background: color.panel2,
-          border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: "8px 10px", wordBreak: "break-all", userSelect: "all",
+          flex: 1, fontFamily: font.mono, fontSize: fs.body, color: color.text, background: color.inset,
+          border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "8px 10px", wordBreak: "break-all", userSelect: "all",
         }}>{plaintext}</code>
         <Button variant="primary" onClick={copy} style={{ whiteSpace: "nowrap" }}>{copied ? "Copied ✓" : "Copy"}</Button>
       </div>
@@ -207,7 +207,7 @@ function KeyRow({ k, agentName, onEdit, onRotate, onKill, onDelete, onRevoke, on
         <StatusPill tone={statusTone[k.status]} label={k.status} glow={k.status === "active"} />
         <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{k.name || "(unnamed)"}</span>
         <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{k.id.slice(0, 8)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{k.id.slice(0, 8)}</span>
       </div>
 
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -217,8 +217,8 @@ function KeyRow({ k, agentName, onEdit, onRotate, onKill, onDelete, onRevoke, on
       </div>
 
       <div style={{ marginTop: 8, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        <span style={{ fontSize: fs.mono, color: color.textMuted, fontFamily: font.mono }}>endpoints:</span>
-        {k.endpointAgentIds.length === 0 && <span style={{ fontSize: fs.sm, color: color.textMuted }}>none</span>}
+        <span style={{ fontSize: fs.mono, color: color.text3, fontFamily: font.mono }}>endpoints:</span>
+        {k.endpointAgentIds.length === 0 && <span style={{ fontSize: fs.sm, color: color.text3 }}>none</span>}
         {k.endpointAgentIds.map((id) => <Chip key={id} value={agentName(id)} tone="info" />)}
       </div>
 
@@ -306,9 +306,9 @@ function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, 
             loaded-with-rows. The first used to render as the second, which read as a settled fact about
             the project while actually being "we have not fetched this yet". */}
         {endpointAgents === null
-          ? <span style={{ fontSize: fs.sm, color: color.amber }}>{ALLOWLIST_NOT_READY}</span>
+          ? <span style={{ fontSize: fs.sm, color: color.busy }}>{ALLOWLIST_NOT_READY}</span>
           : endpointAgents.length === 0
-          ? <span style={{ fontSize: fs.sm, color: color.textMuted }}>No endpoint agents yet — flag one above first.</span>
+          ? <span style={{ fontSize: fs.sm, color: color.text3 }}>No endpoint agents yet — flag one above first.</span>
           : (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               {endpointAgents.map((a) => (
@@ -322,7 +322,7 @@ function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, 
         {/* Disclose the grants being dropped (see the `staleAllow` note above) — these ids have no row to
             untick because their agent is no longer an endpoint agent, and re-sending one 400s the save. */}
         {staleAllow.length > 0 && (
-          <span style={{ fontSize: fs.sm, color: color.amber, marginTop: 6, display: "block" }}>
+          <span style={{ fontSize: fs.sm, color: color.busy, marginTop: 6, display: "block" }}>
             {staleAllow.length === 1 ? "1 stored grant is" : `${staleAllow.length} stored grants are`} no longer
             an endpoint agent ({staleAllow.map((id) => agentName(id)).join(", ")}) and will be dropped on
             save. Re-flag the agent as an endpoint first if you meant to keep it.
@@ -348,7 +348,7 @@ function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, 
         </Labeled>
       )}
 
-      {(localErr || error) && <div style={{ fontSize: fs.mono, color: color.red, fontFamily: font.mono }}>{localErr ?? error}</div>}
+      {(localErr || error) && <div style={{ fontSize: fs.mono, color: color.danger, fontFamily: font.mono }}>{localErr ?? error}</div>}
 
       <div style={{ display: "flex", gap: 8 }}>
         {/* Saving is blocked while the eligible set is unknown: submitting then would either strip every
@@ -367,7 +367,7 @@ function KeyForm({ endpointAgents, agentName, initial, showStatus, submitLabel, 
 function CapInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontSize: fs.mono, color: color.textMuted, fontFamily: font.mono }}>{label}</span>
+      <span style={{ fontSize: fs.mono, color: color.text3, fontFamily: font.mono }}>{label}</span>
       <Input type="number" min={0} value={value} onChange={(e) => onChange(e.target.value)} placeholder="∞" style={{ width: 140 }} />
     </div>
   );

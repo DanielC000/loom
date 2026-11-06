@@ -1,32 +1,15 @@
-// Loom "Terminal Cockpit" design tokens.
+// Loom "Graphite" design tokens.
 //
-// The actual values live ONCE as CSS custom properties in styles/global.css (:root).
-// This module exposes them to TS / React inline-styles as var() references, so there is
-// a single source of truth and no drifting hex literals. Spec: packages/web/design/DESIGN.md.
+// The actual values live ONCE as CSS custom properties in styles/global.css, one set per theme
+// (:root[data-theme="dark" | "light"]). This module exposes them to TS / React inline styles as var()
+// references, so every value follows the theme and nothing drifts into a literal.
+// Spec: packages/web/design/DESIGN.md.
 
 import type { ColumnRole, KanbanColumn, SessionRole } from "@loom/shared";
 
 export const color = {
-  // Surfaces — depth comes from hairline borders, not shadows.
   bg: "var(--loom-bg)",
-  panel: "var(--loom-panel)",
-  panel2: "var(--loom-panel-2)",
-  border: "var(--loom-border)",
-  borderStrong: "var(--loom-border-strong)",
-  // Signal — used sparingly, only where there is state.
-  phosphor: "var(--loom-phosphor)", // live / primary / interactive
-  phosphorDim: "var(--loom-phosphor-dim)", // fills, glows, selection
-  amber: "var(--loom-amber)", // busy / attention
-  cyan: "var(--loom-cyan)", // info / links / metadata
-  red: "var(--loom-red)", // kill / error / dead / rate-limited
-  // Text
   text: "var(--loom-text)",
-  textDim: "var(--loom-text-dim)",
-  textMuted: "var(--loom-text-muted)",
-
-  // ── Graphite semantic tokens (epic e25fa8a9). Each one follows the light/dark theme. The legacy
-  // keys above are aliases onto these in global.css and move over call site by call site in later
-  // Graphite cards, which then delete them.
   inset: "var(--loom-inset)",
   fieldBg: "var(--loom-field-bg)",
   railBg: "var(--loom-rail-bg)",
@@ -84,7 +67,6 @@ export const wash = (c: string, pct: number): string => `color-mix(in oklab, ${c
 
 export const font = {
   ui: "var(--loom-font-ui)", // Instrument Sans — prose, labels, buttons
-  head: "var(--loom-font-head)", // alias of the UI face
   mono: "var(--loom-font-mono)", // Geist Mono — data / IDs / code
 } as const;
 
@@ -121,7 +103,7 @@ export const tone: Record<Tone, string> = {
   busy: color.busy,
   info: color.info,
   danger: color.danger,
-  muted: color.textMuted,
+  muted: color.text3,
   accent: color.accentFg,
 };
 
@@ -135,7 +117,7 @@ export const toneFill: Record<Tone, string> = {
   busy: color.busy,
   info: color.info,
   danger: color.danger,
-  muted: color.textMuted,
+  muted: color.text3,
   accent: color.meterOk,
 };
 

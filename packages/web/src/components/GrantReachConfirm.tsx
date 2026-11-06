@@ -28,18 +28,18 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
       style={{ boxShadow: `inset 0 0 0 1px ${color.busy}`, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <Badge tone="busy">grant</Badge>
-        <strong style={{ fontFamily: font.head, fontSize: fs.sm, color: color.text }}>
+        <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>
           This save widens what agents can do
         </strong>
       </div>
 
       <p style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
-        You are granting <strong style={{ color: color.amber }}>{grantKeyList(plan.addedKeys)}</strong> on this profile.
+        You are granting <strong style={{ color: color.busy }}>{grantKeyList(plan.addedKeys)}</strong> on this profile.
         {" "}
         {unknown ? GRANT_REACH_UNKNOWN : (
           <>
             Profiles are shared across every project, so{" "}
-            <strong style={{ color: color.amber }} data-testid="grant-reach-count">
+            <strong style={{ color: color.busy }} data-testid="grant-reach-count">
               {plan.agentCount} agent{plan.agentCount === 1 ? "" : "s"}
             </strong>{" "}
             already bound to it {plan.agentCount === 1 ? "picks" : "pick"} this up on their next session.
@@ -51,8 +51,8 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
           line rather than folded into grantKeyList's prose clause. */}
       {plan.roleChange && (
         <p data-testid="grant-reach-role-change" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
-          Role changes from <strong style={{ color: color.amber }}>{plan.roleChange.from ?? "none"}</strong>
-          {" "}to <strong style={{ color: color.amber }}>{plan.roleChange.to ?? "none"}</strong>.
+          Role changes from <strong style={{ color: color.busy }}>{plan.roleChange.from ?? "none"}</strong>
+          {" "}to <strong style={{ color: color.busy }}>{plan.roleChange.to ?? "none"}</strong>.
         </p>
       )}
 
@@ -63,14 +63,14 @@ export function GrantReachConfirm({ plan, saving, onConfirm, onCancel }: {
             style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 2 }}>
             {shown.map((a) => (
               <li key={a.id} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>
-                <span style={{ color: color.textDim }}>{a.projectName}</span>
-                <span style={{ color: color.textMuted }}> / </span>
+                <span style={{ color: color.text2 }}>{a.projectName}</span>
+                <span style={{ color: color.text3 }}> / </span>
                 {a.name}
               </li>
             ))}
           </ul>
           {hidden > 0 && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>+{hidden} more</span>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>+{hidden} more</span>
           )}
         </div>
       )}

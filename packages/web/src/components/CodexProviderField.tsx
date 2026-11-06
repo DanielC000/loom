@@ -20,15 +20,15 @@ export function CodexProviderField({ value, onChange, connections }: {
 }) {
   const mode = modeOf(value);
   const usable = connections.filter((c) => c.authScheme === undefined || c.authScheme === "api-key" || c.authScheme === "bearer");
-  const label = { fontFamily: font.head as string, fontSize: fs.sm, fontWeight: 700, color: color.textDim };
-  const select = { background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.mono, fontSize: fs.mono };
+  const label = { fontFamily: font.ui as string, fontSize: fs.sm, fontWeight: 700, color: color.text2 };
+  const select = { background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.mono, fontSize: fs.mono };
   const setMode = (m: Mode) => {
     if (m === "default") return onChange(null);
     if (m === "custom") return onChange({ id: value && modeOf(value) === "custom" ? value.id : "", baseUrl: "", connectionId: "" });
     onChange({ id: m });
   };
   return (
-    <div data-testid="codex-provider-field" style={{ display: "flex", flexDirection: "column", gap: 8, border: `1px solid ${color.border}`, borderRadius: radius.base, padding: "9px 11px", background: color.panel2 }}>
+    <div data-testid="codex-provider-field" style={{ display: "flex", flexDirection: "column", gap: 8, border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "9px 11px", background: color.inset }}>
       <span style={label}>Codex model provider</span>
       <select aria-label="Codex model provider" data-testid="codex-provider-mode" value={mode} onChange={(e) => setMode(e.target.value as Mode)} style={select}>
         <option value="default">codex default (no custom endpoint)</option>
@@ -53,7 +53,7 @@ export function CodexProviderField({ value, onChange, connections }: {
               {usable.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.host}</option>)}
             </select>
           </label>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.amber }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.busy }}>
             Spend surface: sessions under this rig send their work to that endpoint and bill the connection's key.
             https only (http is allowed to a loopback host); the URL host must equal the connection's host.
           </span>

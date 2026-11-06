@@ -189,7 +189,7 @@ export function PresetAccentDots({ accents, title, style, ...rest }: PresetAccen
   return (
     <span {...rest} aria-hidden title={title} style={{ display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0, ...style }}>
       {accents.map((a, i) => (
-        <span key={i} style={{ width: 8, height: 8, borderRadius: radius.base, flexShrink: 0, background: a ?? color.border }} />
+        <span key={i} style={{ width: 8, height: 8, borderRadius: radius.base, flexShrink: 0, background: a ?? color.line }} />
       ))}
     </span>
   );
@@ -203,7 +203,7 @@ type ChipProps = { label?: string; value: ReactNode; tone?: Tone } & HTMLAttribu
 export function Chip({ label, value, tone: t, style, ...rest }: ChipProps) {
   return (
     <span {...rest} style={{ display: "inline-flex", gap: 4, alignItems: "baseline", fontFamily: font.mono, fontSize: fs.xs, background: color.surface2, borderRadius: radius.pill, padding: "1px 8px", minWidth: 0, maxWidth: "100%", ...style }}>
-      {label && <span style={{ color: color.textMuted, flexShrink: 0 }}>{label}</span>}
+      {label && <span style={{ color: color.text3, flexShrink: 0 }}>{label}</span>}
       <span style={{ color: t ? tone[t] : color.text, minWidth: 0, overflowWrap: "anywhere" }}>{value}</span>
     </span>
   );
@@ -321,15 +321,15 @@ export function Segmented<T extends string>({
 export function StaleStartupPromptWarning({ warnings }: { warnings: StalePromptWarning[] | undefined }) {
   if (!warnings || warnings.length === 0) return null;
   return (
-    <div style={{ marginTop: 10, padding: 10, background: color.panel2, border: `1px solid ${color.amber}`, borderRadius: radius.sm }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
+    <div style={{ marginTop: 10, padding: 10, background: color.inset, border: `1px solid ${color.busy}`, borderRadius: radius.sm }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
         these agent startup prompts still reference the OLD value — edit them manually if that's a problem:
       </span>
       <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6 }}>
         {warnings.map((w) => (
           <li key={w.agentId}>
             <span style={{ color: color.text }}>{w.agentName}</span>
-            <span style={{ color: color.textMuted }}> · stale {w.staleFields.join(", ")}</span>
+            <span style={{ color: color.text3 }}> · stale {w.staleFields.join(", ")}</span>
           </li>
         ))}
       </ul>

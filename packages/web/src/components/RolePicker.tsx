@@ -54,9 +54,9 @@ function RoleCard({ d, selected, locked, onSelect }: {
     padding: 0,
     overflow: "hidden",
     borderRadius: radius.base,
-    background: selected ? color.panel : color.panel2,
-    border: `1px solid ${selected ? color.phosphor : color.borderStrong}`,
-    ...(selected ? { boxShadow: `inset 0 0 0 1px ${color.phosphorDim}` } : null),
+    background: selected ? color.surface : color.inset,
+    border: `1px solid ${selected ? color.live : color.lineStrong}`,
+    ...(selected ? { boxShadow: `inset 0 0 0 1px ${color.liveSoft}` } : null),
     ...(d.tier === "readonly" ? { opacity: 0.92 } : null),
     cursor: locked ? "not-allowed" : "pointer",
   } as CSSProperties;
@@ -70,8 +70,8 @@ function RoleCard({ d, selected, locked, onSelect }: {
     padding: "11px 12px",
     ...(selected
       ? {
-          background: "color-mix(in oklab, var(--tone) 12%, var(--loom-panel-2))",
-          borderBottom: "1px solid color-mix(in oklab, var(--tone) 28%, var(--loom-border))",
+          background: "color-mix(in oklab, var(--tone) 12%, var(--loom-inset))",
+          borderBottom: "1px solid color-mix(in oklab, var(--tone) 28%, var(--loom-line))",
         }
       : null),
   };
@@ -91,24 +91,24 @@ function RoleCard({ d, selected, locked, onSelect }: {
       <span style={bandStyle}>
         <span aria-hidden style={{ width: 30, height: 30, flex: "none", display: "grid", placeItems: "center",
           fontFamily: font.mono, fontSize: fs.lg, borderRadius: radius.base, color: "var(--tone)",
-          border: "1px solid color-mix(in oklab, var(--tone) 45%, var(--loom-border-strong))",
+          border: "1px solid color-mix(in oklab, var(--tone) 45%, var(--loom-line-strong))",
           background: "color-mix(in oklab, var(--tone) 9%, transparent)" }}>{d.sigil}</span>
         <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-          <span style={{ fontFamily: font.head, fontSize: fs.body, fontWeight: 600, letterSpacing: "0.01em", color: color.text }}>{d.label}</span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, marginTop: 2 }}>{d.role ?? "— (no role)"}</span>
+          <span style={{ fontFamily: font.ui, fontSize: fs.body, fontWeight: 600, letterSpacing: "0.01em", color: color.text }}>{d.label}</span>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, marginTop: 2 }}>{d.role ?? "— (no role)"}</span>
         </span>
-        <span aria-hidden style={{ flex: "none", fontSize: fs.body, color: selected ? color.phosphor : "transparent" }}>✓</span>
+        <span aria-hidden style={{ flex: "none", fontSize: fs.body, color: selected ? color.live : "transparent" }}>✓</span>
       </span>
 
       {/* body: description + powers + tier tag; faint tinted wash for elevated tiers */}
       <span style={{ display: "flex", flexDirection: "column", gap: 9, flex: 1, padding: "11px 12px 12px",
         ...(elevated ? { background: "color-mix(in oklab, var(--tone) 5%, transparent)" } : null),
         ...(locked ? { opacity: 0.62 } : null) }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.textDim }}>{d.description}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text2 }}>{d.description}</span>
         <span style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {d.powers.map((p, i) => (
-            <span key={i} style={{ display: "flex", gap: 7, alignItems: "flex-start", fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.45, color: color.textDim }}>
-              <span aria-hidden style={{ flex: "none", marginTop: 1, fontSize: fs.xs, color: p.has ? color.phosphor : color.textMuted }}>▹</span>
+            <span key={i} style={{ display: "flex", gap: 7, alignItems: "flex-start", fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.45, color: color.text2 }}>
+              <span aria-hidden style={{ flex: "none", marginTop: 1, fontSize: fs.xs, color: p.has ? color.live : color.text3 }}>▹</span>
               {p.text}
             </span>
           ))}
@@ -119,8 +119,8 @@ function RoleCard({ d, selected, locked, onSelect }: {
           </span>
           {locked && (
             <span style={{ marginLeft: "auto", flex: "none", display: "inline-flex", alignItems: "center", gap: 4,
-              fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted,
-              border: `1px solid ${color.borderStrong}`, borderRadius: radius.pill, padding: "1px 7px" }}>
+              fontFamily: font.mono, fontSize: fs.xs, color: color.text3,
+              border: `1px solid ${color.lineStrong}`, borderRadius: radius.pill, padding: "1px 7px" }}>
               ⚿ dev-layer
             </span>
           )}

@@ -106,15 +106,15 @@ export default function Archive() {
         />
         <div style={{ maxHeight: "70vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, paddingRight: 4 }}>
           {!projectId && (
-            <p style={{ color: color.textMuted, fontSize: fs.body }}>No project selected.</p>
+            <p style={{ color: color.text3, fontSize: fs.body }}>No project selected.</p>
           )}
           {projectId && rows.length === 0 && !searching && (
-            <p style={{ color: color.textMuted, fontSize: fs.body }}>
+            <p style={{ color: color.text3, fontSize: fs.body }}>
               No archived sessions in this project. Sessions are archived automatically when they exit.
             </p>
           )}
           {projectId && rows.length === 0 && searching && (
-            <p style={{ color: color.textMuted, fontSize: fs.body }}>No archived sessions match “{query}”.</p>
+            <p style={{ color: color.text3, fontSize: fs.body }}>No archived sessions match “{query}”.</p>
           )}
           {nodes.map((n) => (
             <TreeNodeView key={n.session.id} node={n} forceOpen={searching}
@@ -135,7 +135,7 @@ export default function Archive() {
       <div>
         <SectionLabel>{selected ? `Transcript · ${selected.id.slice(0, 8)}` : "Transcript"}</SectionLabel>
         <Panel style={{ height: "76vh", padding: 6 }}>
-          {!selected && <span style={{ color: color.textMuted, fontSize: fs.sm }}>Select an archived session to view its stored transcript.</span>}
+          {!selected && <span style={{ color: color.text3, fontSize: fs.sm }}>Select an archived session to view its stored transcript.</span>}
           {/* Always attempt the real read rather than gating on `snapshotExists` — that flag is only a
               cheap, bulk-computed hint about the ARCHIVE snapshot and can be false while a transcript is
               still readable from the raw engine JSONL (a failed on-exit snapshot, card 0138c09b); the
@@ -207,10 +207,10 @@ function TreeNodeView({ node, forceOpen, sessionId, onSelect, onRestore, restori
             style={{
               display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2,
               width: 26, flexShrink: 0, cursor: "pointer", padding: 0,
-              background: "transparent", border: "none", color: color.textMuted, fontFamily: font.mono,
+              background: "transparent", border: "none", color: color.text3, fontFamily: font.mono,
             }}>
             <span style={{ fontSize: fs.sm }}>{open ? "▾" : "▸"}</span>
-            <span style={{ fontSize: fs.sm, color: color.textDim }}>{node.children.length}</span>
+            <span style={{ fontSize: fs.sm, color: color.text2 }}>{node.children.length}</span>
           </button>
         ) : (
           <span style={{ width: 26, flexShrink: 0 }} />
@@ -223,7 +223,7 @@ function TreeNodeView({ node, forceOpen, sessionId, onSelect, onRestore, restori
         </div>
       </div>
       {hasChildren && open && (
-        <div style={{ marginTop: 8, marginLeft: 12, paddingLeft: 14, borderLeft: `1px solid ${color.border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ marginTop: 8, marginLeft: 12, paddingLeft: 14, borderLeft: `1px solid ${color.line}`, display: "flex", flexDirection: "column", gap: 8 }}>
           {node.children.map((s) => (
             <ArchiveRow key={s.id} s={s} selected={s.id === sessionId}
               onSelect={() => onSelect(s.id)}
@@ -265,7 +265,7 @@ function ArchiveRow({ s, selected, onSelect, onRestore, restoring, onDelete, del
             never as an empty meter or 0%, so "never measured" stays distinguishable from a measured 0%. */}
         <Chip label="context" value={
           <ContextUsage ctxInputTokens={s.ctxInputTokens} model={s.model}
-            unmeasured={<span title="Never measured — this session completed no turn, so no context reading was ever recorded. Not the same as 0%." style={{ color: color.textMuted }}>—</span>} />
+            unmeasured={<span title="Never measured — this session completed no turn, so no context reading was ever recorded. Not the same as 0%." style={{ color: color.text3 }}>—</span>} />
         } />
         <Chip label="created" value={ts(s.createdAt)} />
         <Chip label="exited" value={ts(s.lastActivity)} />

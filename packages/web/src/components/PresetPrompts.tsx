@@ -53,8 +53,8 @@ export function PresetPromptsPopover({ onInsert }: { onInsert: (prompt: string) 
       onClick={(e) => e.stopPropagation()}
       style={{ position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 30, minHeight: "100%",
         maxHeight: 320, overflowY: "auto", background: PRESET_OVERLAY_SURFACE,
-        border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
-        boxShadow: `inset 0 0 0 1px ${color.phosphorDim}, ${shadow.pop}`,
+        border: `1px solid ${color.lineStrong}`, borderRadius: radius.base,
+        boxShadow: `inset 0 0 0 1px ${color.liveSoft}, ${shadow.pop}`,
         padding: `8px 8px ${TRIGGER_CLUSTER_RESERVE}px`,
         display: "flex", flexDirection: "column", gap: 6, outline: "none",
         transformOrigin: "bottom right" }}>
@@ -93,9 +93,9 @@ function SuggestionsSection() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4, paddingTop: 8,
-      borderTop: `1px solid ${color.border}` }}>
+      borderTop: `1px solid ${color.line}` }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span aria-hidden style={{ width: 6, height: 6, borderRadius: radius.pill, background: color.cyan, flex: "0 0 auto" }} />
+        <span aria-hidden style={{ width: 6, height: 6, borderRadius: radius.pill, background: color.info, flex: "0 0 auto" }} />
         <SectionLabel style={{ margin: 0 }}>Suggested from your usage</SectionLabel>
       </div>
       {list.map((s) => <SuggestionRow key={s.id} suggestion={s} />)}
@@ -141,18 +141,18 @@ export function SuggestionRow({ suggestion }: { suggestion: PresetPromptSuggesti
   const busy = adopt.isPending || dismiss.isPending;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 5, border: `1px solid ${color.border}`,
-      borderRadius: radius.sm, padding: 8, background: color.panel2 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 5, border: `1px solid ${color.line}`,
+      borderRadius: radius.sm, padding: 8, background: color.inset }}>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 600, color: color.text }}>
         {suggestion.label}
       </span>
       <span title={suggestion.prompt}
-        style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.4,
+        style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.4,
           display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
         {suggestion.prompt}
       </span>
       {suggestion.rationale && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan, lineHeight: 1.4 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info, lineHeight: 1.4 }}>
           {suggestion.rationale}
         </span>
       )}
@@ -180,7 +180,7 @@ function PresetRow({ preset, onInsert, onEdit }: {
       {/* Click INSERTS the prompt into the composer for review — it does NOT send. Label on line 1, a
           dim prompt preview on line 2 (the "Spark" signature — the prompt is visible before you insert). */}
       {/* No `color`/`border` of its own: `.loom-btn-default` already states both (--loom-text on a
-          --loom-border-strong 1px border), and an inline `border` SHORTHAND here shadowed that variant's
+          --loom-line-strong 1px border), and an inline `border` SHORTHAND here shadowed that variant's
           own border-color hover rule outright. @decision 6cefdf25 — a call site's chrome lives in a class. */}
       <button type="button" onClick={onInsert} disabled={del.isPending} title={preset.prompt}
         className="loom-btn loom-btn-default"
@@ -188,7 +188,7 @@ function PresetRow({ preset, onInsert, onEdit }: {
           fontSize: fs.mono, padding: "5px 8px", borderRadius: radius.base,
           overflow: "hidden", display: "flex", flexDirection: "column", gap: 2 }}>
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preset.label}</span>
-        <span style={{ color: color.textMuted, fontSize: fs.sm, lineHeight: 1.35, overflow: "hidden",
+        <span style={{ color: color.text3, fontSize: fs.sm, lineHeight: 1.35, overflow: "hidden",
           textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{preset.prompt}</span>
       </button>
       <IconButton label={`Edit ${preset.label}`} onClick={onEdit} disabled={del.isPending}>✎</IconButton>
@@ -219,7 +219,7 @@ function PresetForm({ preset, onDone }: { preset?: PresetPrompt; onDone: () => v
   const canSave = label.trim().length > 0 && prompt.trim().length > 0 && !save.isPending;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${color.border}`,
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${color.line}`,
       borderRadius: radius.sm, padding: 8 }}>
       <FieldLabel text="Label">
         <input ref={labelRef} value={label} maxLength={200}
@@ -246,22 +246,22 @@ function PresetForm({ preset, onDone }: { preset?: PresetPrompt; onDone: () => v
 
 // ── small local helpers ────────────────────────────────────────────────────────
 const fieldStyle = {
-  width: "100%", boxSizing: "border-box" as const, background: color.panel2, color: color.text,
-  border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: "4px 8px",
+  width: "100%", boxSizing: "border-box" as const, background: color.inset, color: color.text,
+  border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "4px 8px",
   fontFamily: font.mono, fontSize: fs.mono,
 };
 
 function FieldLabel({ text, children }: { text: string; children: ReactNode }) {
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.textMuted }}>{text}</span>
+      <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.text3 }}>{text}</span>
       {children}
     </label>
   );
 }
 
 function Muted({ children, tone }: { children: ReactNode; tone?: "danger" }) {
-  return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone === "danger" ? color.red : color.textMuted, padding: "2px 0" }}>{children}</span>;
+  return <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone === "danger" ? color.danger : color.text3, padding: "2px 0" }}>{children}</span>;
 }
 
 // @decision 6cefdf25 — do not restate the variant's own `color` inline here, even to the identical

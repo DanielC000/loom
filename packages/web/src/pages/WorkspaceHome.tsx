@@ -244,7 +244,7 @@ export default function WorkspaceHome() {
       popover: <AttentionList items={attention} cap={8} />,
     },
     {
-      key: "gates", label: "gate run·queued", value: `${lanes.running}·${lanes.queued}`,
+      key: "gates", label: "gate run · queued", value: `${lanes.running}·${lanes.queued}`,
       tone: lanes.queued > 0 ? "busy" : lanes.running > 0 ? "live" : "muted",
       sub: `cap ${lanes.cap} · daemon-wide`,
       popover: <GateLaneList lanes={lanes} />,
@@ -623,7 +623,7 @@ export function GateLaneList({ lanes }: { lanes: ReturnType<typeof gateLanes> })
       {lanes.runs.length === 0 && <BandEmpty>No gate is running or queued.</BandEmpty>}
       {lanes.runs.map((g) => (
         <DataRow key={g.id}
-          label={<><Dot tone={g.phase === "running" ? "busy" : "muted"} style={{ marginRight: 6 }} />{g.gateType} <span style={{ color: color.textMuted }}>{g.projectName}</span></>}
+          label={<><Dot tone={g.phase === "running" ? "busy" : "muted"} style={{ marginRight: 6 }} />{g.gateType} <span style={{ color: color.text3 }}>{g.projectName}</span></>}
           tone={g.phase === "running" ? "busy" : "muted"}
           value={g.phase === "running" ? relativeTime(g.since).replace(" ago", "") : `queued${g.queuePosition ? ` ·${g.queuePosition}` : ""}`}
           title={g.workerLabel ?? g.branch ?? undefined} />
@@ -717,7 +717,7 @@ function ProjectGrid({ projects, boards, liveByProject, lastMerge, sessions, onO
         {/* Names the node that actually holds project creation now that the Projects page is retired
             (card 5afd71bd) — and the "New project ↗" control directly above this panel is the link,
             so the copy points at it by name rather than repeating it as a second anchor. */}
-        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>
           No projects yet — create one with guided setup on the Platform node.
         </span>
       </Panel>

@@ -50,9 +50,9 @@ export function HarnessPicker({ value, onChange }: { value: Harness; onChange: (
           "--tone": toneVar[o.tone],
           display: "flex", flexDirection: "column", textAlign: "left", padding: 0, overflow: "hidden",
           borderRadius: radius.base, cursor: "pointer",
-          background: selected ? color.panel : color.panel2,
-          border: `1px solid ${selected ? color.phosphor : color.borderStrong}`,
-          ...(selected ? { boxShadow: `inset 0 0 0 1px ${color.phosphorDim}` } : null),
+          background: selected ? color.surface : color.inset,
+          border: `1px solid ${selected ? color.live : color.lineStrong}`,
+          ...(selected ? { boxShadow: `inset 0 0 0 1px ${color.liveSoft}` } : null),
         } as CSSProperties;
         return (
           <button key={o.value} type="button" role="radio" aria-checked={selected} onClick={() => onChange(o.value)}
@@ -62,17 +62,17 @@ export function HarnessPicker({ value, onChange }: { value: Harness; onChange: (
             <span style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 11px",
               background: selected ? "color-mix(in oklab, var(--tone) 8%, transparent)" : "transparent" }}>
               <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <span style={{ fontFamily: font.head, fontSize: fs.body, fontWeight: 600, color: color.text }}>{o.label}</span>
-                <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, marginTop: 2 }}>{o.value}</span>
+                <span style={{ fontFamily: font.ui, fontSize: fs.body, fontWeight: 600, color: color.text }}>{o.label}</span>
+                <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, marginTop: 2 }}>{o.value}</span>
               </span>
-              <span aria-hidden style={{ flex: "none", fontSize: fs.body, color: selected ? color.phosphor : "transparent" }}>✓</span>
+              <span aria-hidden style={{ flex: "none", fontSize: fs.body, color: selected ? color.live : "transparent" }}>✓</span>
             </span>
             <span style={{ display: "flex", flexDirection: "column", gap: 7, flex: 1, padding: "9px 11px 11px" }}>
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.textDim }}>{o.summary}</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text2 }}>{o.summary}</span>
               <span style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                 {o.implications.map((t, i) => (
                   <span key={i} style={{ display: "flex", gap: 7, alignItems: "flex-start", fontFamily: font.mono,
-                    fontSize: fs.mono, lineHeight: 1.45, color: color.textMuted }}>
+                    fontSize: fs.mono, lineHeight: 1.45, color: color.text3 }}>
                     <span aria-hidden style={{ flex: "none", marginTop: 1, fontSize: fs.xs, color: "var(--tone)" }}>▹</span>
                     {t}
                   </span>
@@ -99,15 +99,15 @@ export function HarnessDropSummary({ harness }: { harness: Harness }) {
   // five "stay stored", which was false for the two codex also refuses to store (card 6232fe9d).
   const stored = CODEX_DROPPED_BUT_STORED_FIELDS.length;
   const storedLabels = CODEX_DROPPED_BUT_STORED_FIELDS.map((f) => HARNESS_FIELD_LABELS[f]).join(", ");
-  const accent = CODEX_FAIL_OPEN_FIELDS.length > 0 ? color.red : color.amber;
+  const accent = CODEX_FAIL_OPEN_FIELDS.length > 0 ? color.danger : color.busy;
   return (
     <div data-testid="harness-drop-summary" role="status"
       style={{ border: `1px solid ${accent}`, borderRadius: radius.base, padding: "8px 10px",
-        background: color.panel2, display: "flex", flexDirection: "column", gap: 5 }}>
+        background: color.inset, display: "flex", flexDirection: "column", gap: 5 }}>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: accent, lineHeight: 1.5 }}>
         {n} settings below are not read by the codex spawn path.
       </span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.5 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.5 }}>
         {stored} of them ({storedLabels}) stay stored and become live again if you switch this rig back to
         Claude Code, so they are shown disabled rather than cleared. The rest Codex refuses to store at
         all — if this rig has any of them set, saving removes them, and the panel below says which.
@@ -135,13 +135,13 @@ export function HarnessRejectWarning({ harness, values }: { harness: Harness; va
   if (rejected.length === 0) return null;
   return (
     <div data-testid="harness-reject-warning" role="status"
-      style={{ border: `1px solid ${color.amber}`, borderRadius: radius.base, padding: "8px 10px",
-        background: color.panel2, display: "flex", flexDirection: "column", gap: 5 }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, lineHeight: 1.5 }}>
+      style={{ border: `1px solid ${color.busy}`, borderRadius: radius.base, padding: "8px 10px",
+        background: color.inset, display: "flex", flexDirection: "column", gap: 5 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, lineHeight: 1.5 }}>
         Saving removes {rejected.length === 1 ? "one setting" : `${rejected.length} settings`} Codex cannot
         honour: {rejected.map((f) => HARNESS_FIELD_LABELS[f]).join(", ")}.
       </span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.5 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.5 }}>
         Codex has no per-tool disallow lever and mounts only HTTP MCP servers, so Loom refuses to store
         these against a codex rig rather than let them read as active. They are still set until you save —
         switch back to Claude Code now and nothing is lost. To keep them, keep this rig on Claude Code.
@@ -166,7 +166,7 @@ export function HarnessFieldDrop({ harness, field }: { harness: Harness; field: 
       <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: accent }}>
         {meta.tag} on codex
       </span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.textMuted }}>{drop.note}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text3 }}>{drop.note}</span>
     </span>
   );
 }
@@ -207,7 +207,7 @@ export function HarnessMixProvider({ sessions, children }: { sessions: readonly 
 export function HarnessTag({ harness, title }: { harness: Harness; title?: string }): ReactNode {
   const mixed = useHarnessMixed();
   if (harness !== "codex" && !mixed) return null;
-  const accent = harness === "codex" ? color.amber : color.textMuted;
+  const accent = harness === "codex" ? color.busy : color.text3;
   return (
     <span data-testid="harness-tag" data-harness={harness}
       title={title ?? (harness === "codex" ? "Spawns the codex CLI, not claude" : "Spawns claude, Loom's native harness")}

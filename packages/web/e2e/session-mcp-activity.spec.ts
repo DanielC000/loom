@@ -104,9 +104,9 @@ test.describe("session Loom MCP activity strip", () => {
     await expect(errRow).toHaveAttribute("data-outcome", "error");
     await expect(errRow).toContainText("Tried to redirect worker 1c07b3e5");
     // Colours resolved from the live tokens (helpers/themeToken.ts), never typed as literals.
-    const red = await cssColor(page, "--loom-red");
+    const red = await cssColor(page, "--loom-danger");
     await expect(errRow.getByRole("img", { name: "error" })).toHaveCSS("color", red);
-    await expect(page.getByTestId("mcp-call-5").getByRole("img", { name: "ok" })).toHaveCSS("color", await cssColor(page, "--loom-phosphor"));
+    await expect(page.getByTestId("mcp-call-5").getByRole("img", { name: "ok" })).toHaveCSS("color", await cssColor(page, "--loom-live"));
     await errRow.click();
     await expect(errRow).toHaveAttribute("aria-expanded", "true");
     const detail = page.getByTestId("mcp-call-3-detail");

@@ -22,6 +22,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Button, Dot, Panel, SectionLabel, Segmented, StatusPill } from "./ui";
 import { useDismissable } from "../lib/useDismissable";
+import { sentenceCase } from "../lib/textCase";
 import type { BoardLane } from "../lib/atlasHome";
 import type { RosterRow, RosterScope } from "../lib/atlasProjectOverview";
 import { color, columnTone, font, tone, toneFill, type Tone } from "../theme";
@@ -81,7 +82,7 @@ function BriefCell({ reading, open, onToggle, onClose }: {
   const popId = `atlas-brief-pop-${reading.key}`;
   const body = (
     <>
-      <span className="loom-ovbrief-l">{reading.label}</span>
+      <span className="loom-ovbrief-l">{sentenceCase(reading.label)}</span>
       {/* The FIGURE carries its own class so a reader — and a spec — can address it apart from the
           qualifier beside it: the two sit in one line box with no text node between them, so the
           cell's own `textContent` reads "3open · 1 review" and no prefix match can split them. */}
@@ -127,7 +128,7 @@ export function BriefTrailing({ label, value, sub, tone: t = "live", children, t
   return (
     <div className="loom-ovbrief-trail" data-testid={testId}>
       <span className="loom-ovbrief-trailtext">
-        <span className="loom-ovbrief-l">{label}</span>
+        <span className="loom-ovbrief-l">{sentenceCase(label)}</span>
         <span className="loom-ovbrief-v">
           <span className="loom-ovbrief-n" style={{ color: tone[t] }}>{value}</span>
           {sub !== undefined && <em>{sub}</em>}
@@ -271,14 +272,14 @@ export function RosterTable({ rows, cellFor }: {
             <span className="loom-ovroster-cell is-card" title={c.card?.text ?? undefined}>
               <span className="loom-ovroster-lbl">Card</span>
               {c.card
-                ? <span style={c.card.muted ? { color: color.textMuted } : undefined}>{c.card.text}</span>
-                : <span style={{ color: color.textMuted }}>—</span>}
+                ? <span style={c.card.muted ? { color: color.text3 } : undefined}>{c.card.text}</span>
+                : <span style={{ color: color.text3 }}>—</span>}
             </span>
             <span className="loom-ovroster-cell is-branch">
               <span className="loom-ovroster-lbl">Branch</span>
               {c.branch
-                ? <span style={{ color: color.cyan }} title={c.branch}>{c.branch}</span>
-                : <span style={{ color: color.textMuted }}>—</span>}
+                ? <span style={{ color: color.info }} title={c.branch}>{c.branch}</span>
+                : <span style={{ color: color.text3 }}>—</span>}
             </span>
             <span className="loom-ovroster-ctx">
               <span className="loom-ovroster-lbl">Context</span>
@@ -289,13 +290,13 @@ export function RosterTable({ rows, cellFor }: {
                   </span>
                   <span className="loom-ovroster-pct" style={{ color: tone[c.context.tone] }}>{c.context.pct}%</span>
                 </>
-              ) : <span style={{ color: color.textMuted }}>no reading</span>}
+              ) : <span style={{ color: color.text3 }}>no reading</span>}
             </span>
             <span className="loom-ovroster-cell is-last">
               <span className="loom-ovroster-lbl">Last</span>
               {c.lastEvent
-                ? <>{c.lastEvent.kind} <span style={{ color: color.textMuted }}>{c.lastEvent.at}</span></>
-                : <span style={{ color: color.textMuted }}>—</span>}
+                ? <>{c.lastEvent.kind} <span style={{ color: color.text3 }}>{c.lastEvent.at}</span></>
+                : <span style={{ color: color.text3 }}>—</span>}
             </span>
             <span className="loom-ovroster-open">
               <Link to={`/session/${session.id}`} className="loom-btn loom-btn-default loom-bandlink"
@@ -315,12 +316,12 @@ export function LaneChips({ lanes }: { lanes: BoardLane[] }) {
     <div className="loom-ovlanes" data-testid="atlas-overview-lanechips">
       {lanes.map((l) => {
         const t = columnTone(l);
-        const accent = l.accentColor ?? (t ? tone[t] : color.borderStrong);
+        const accent = l.accentColor ?? (t ? tone[t] : color.lineStrong);
         return (
           <span key={l.key} className="loom-ovlane" data-testid={`atlas-overview-lane-${l.key}`}>
-            <span className="loom-ovlane-dot" style={{ background: l.count > 0 ? accent : color.border }} aria-hidden />
+            <span className="loom-ovlane-dot" style={{ background: l.count > 0 ? accent : color.line }} aria-hidden />
             {l.label}
-            <span className="loom-ovlane-n" style={{ color: l.count > 0 ? accent : color.textMuted, fontFamily: font.mono }}>{l.count}</span>
+            <span className="loom-ovlane-n" style={{ color: l.count > 0 ? accent : color.text3, fontFamily: font.mono }}>{l.count}</span>
           </span>
         );
       })}

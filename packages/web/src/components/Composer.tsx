@@ -142,7 +142,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
             // `minWidth: 0` overrides the UA's intrinsic textarea width (~232px at this font), which is
             // otherwise a hard floor this flex item cannot shrink past — the column's own basis above
             // is what picks the wrap point, not this floor.
-            style={{ flex: 1, minWidth: 0, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: "6px 52px 6px 8px", fontFamily: font.mono, fontSize: fs.body }}
+            style={{ flex: 1, minWidth: 0, resize: "none", minHeight: 44, boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "6px 52px 6px 8px", fontFamily: font.mono, fontSize: fs.body }}
           />
           {/* Two-icon cluster in the bottom-right corner: the presets (Spark) trigger + the expand
               button, both ghost, absolutely positioned so they add ZERO height to the composer.
@@ -314,7 +314,7 @@ function LargeEditor({
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="Compose a longer message…  (Ctrl/Cmd+Enter to send)"
-            style={{ flex: 1, minHeight: 320, resize: "vertical", boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: "10px 12px", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5 }}
+            style={{ flex: 1, minHeight: 320, resize: "vertical", boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "10px 12px", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5 }}
           />
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 8 }}>
             <div>{voiceCluster}</div>
@@ -349,7 +349,7 @@ function MicButton({ speech }: { speech: SpeechRecognitionApi }) {
     >
       <span
         className={listening ? "loom-mic-pulse" : undefined}
-        style={{ width: 7, height: 7, borderRadius: radius.base, display: "inline-block", background: listening ? color.red : color.phosphor }}
+        style={{ width: 7, height: 7, borderRadius: radius.base, display: "inline-block", background: listening ? color.danger : color.live }}
       />
       {listening ? "Stop" : requesting ? "starting…" : "Voice"}
     </Button>
@@ -391,24 +391,24 @@ function ComposerStatusLine({ speech, sendStatus }: { speech: SpeechRecognitionA
   const { status, interim, error, secure, supported } = speech;
   let node: React.ReactNode = null;
   if (supported && !secure) {
-    node = <span style={{ color: color.amber }}>voice needs a secure context</span>;
+    node = <span style={{ color: color.busy }}>voice needs a secure context</span>;
   } else if (status === "requesting") {
-    node = <span style={{ color: color.textDim }}>requesting microphone…</span>;
+    node = <span style={{ color: color.text2 }}>requesting microphone…</span>;
   } else if (status === "listening") {
     node = (
       <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
         <StatusPill tone="danger" label="rec" glow />
         {interim
-          ? <span style={{ color: color.textMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{interim}…</span>
-          : <span style={{ color: color.textDim }}>listening — speak, then Stop</span>}
+          ? <span style={{ color: color.text3, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{interim}…</span>
+          : <span style={{ color: color.text2 }}>listening — speak, then Stop</span>}
       </span>
     );
   } else if (status === "denied") {
-    node = <span style={{ color: color.red }}>mic permission denied — allow it in your browser site settings</span>;
+    node = <span style={{ color: color.danger }}>mic permission denied — allow it in your browser site settings</span>;
   } else if (status === "error") {
-    node = <span style={{ color: color.red }}>{error ?? "voice error"} — click Voice to retry</span>;
+    node = <span style={{ color: color.danger }}>{error ?? "voice error"} — click Voice to retry</span>;
   } else if (sendStatus) {
-    node = <span style={{ color: color.textMuted }}>{sendStatus}</span>;
+    node = <span style={{ color: color.text3 }}>{sendStatus}</span>;
   }
   // Nothing to say → render nothing, so the composer sits flush against the card's bottom edge.
   if (!node) return null;

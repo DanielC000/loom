@@ -100,8 +100,8 @@ export function WindowSelect({ value, onChange, testId }: {
 // Section header with a right-aligned tag pill so the live vs historical distinction reads at a glance.
 export function SectionHead({ title, tag, tagTone }: { title: string; tag: string; tagTone: Tone }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${color.border}`, paddingBottom: 6 }}>
-      <span style={{ fontFamily: font.head, fontSize: fs.body, fontWeight: 700, color: color.text }}>{title}</span>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${color.line}`, paddingBottom: 6 }}>
+      <span style={{ fontFamily: font.ui, fontSize: fs.body, fontWeight: 700, color: color.text }}>{title}</span>
       <Badge tone={tagTone}>{tag}</Badge>
     </div>
   );
@@ -111,7 +111,7 @@ export function SectionHead({ title, tag, tagTone }: { title: string; tag: strin
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label style={{ display: "inline-flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{sentenceCase(label)}</span>
+      <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>{sentenceCase(label)}</span>
       {children}
     </label>
   );
@@ -120,9 +120,9 @@ export function Field({ label, children }: { label: string; children: ReactNode 
 export function Stat({ label, value, tone: t = "live", testId }: { label: string; value: string; tone?: Tone; testId?: string }) {
   return (
     <span data-testid={testId}
-      style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "4px 12px", minWidth: 72 }}>
+      style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "4px 12px", minWidth: 72 }}>
       <span style={{ fontFamily: font.mono, fontSize: fs.h1, color: tone[t] }}>{value}</span>
-      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{sentenceCase(label)}</span>
+      <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>{sentenceCase(label)}</span>
     </span>
   );
 }
@@ -143,7 +143,7 @@ export function RowName({ name, subtitle, width = 160, maxWidth = 200, indent = 
     <span style={{ display: "flex", flexDirection: "column", minWidth: width, maxWidth, overflow: "hidden", paddingLeft: indent }}>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
       {subtitle && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subtitle}</span>
       )}
     </span>
   );
@@ -168,15 +168,15 @@ function SegToggle<T extends "tokens" | "cost">({ value, onChange, lead }: {
   const items = [{ key: "cost", label: "Cost" }, { key: "tokens", label: "Tokens" }] as const;
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>{lead}</span>
-      <span style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.sm, overflow: "hidden" }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>{lead}</span>
+      <span style={{ display: "inline-flex", border: `1px solid ${color.line}`, borderRadius: radius.sm, overflow: "hidden" }}>
         {items.map((it) => {
           const active = value === it.key;
           return (
             <button key={it.key} onClick={() => onChange(it.key as T)}
               style={{
-                background: active ? color.phosphorDim : "transparent",
-                color: active ? color.phosphor : color.textDim,
+                background: active ? color.liveSoft : "transparent",
+                color: active ? color.live : color.text2,
                 border: "none", padding: "3px 10px", fontFamily: font.mono, fontSize: fs.mono,
                 cursor: "pointer",
               }}>

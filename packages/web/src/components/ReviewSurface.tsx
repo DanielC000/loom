@@ -100,8 +100,8 @@ export function ReviewSurface({ workerId, embedded = false }: {
       ) : (
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <Button onClick={() => navigate(-1)}>← back</Button>
-          <span style={{ fontFamily: font.head, fontSize: fs.body, color: color.text }}>Merge request</span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
+          <span style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>Merge request</span>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
             worker w:{workerId.slice(0, 8)}{worker?.taskId ? ` · task ${worker.taskId.slice(0, 8)}` : ""}
           </span>
           <span style={{ flex: 1 }} />
@@ -110,21 +110,21 @@ export function ReviewSurface({ workerId, embedded = false }: {
           {ctx > 0 && (
             <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
               <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "busy" : "accent"} width={60} />
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k ctx</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{(ctx / 1000).toFixed(1)}k ctx</span>
             </span>
           )}
         </div>
       )}
 
-      {!workerId && <Panel><span style={{ color: color.textMuted }}>No worker.</span></Panel>}
-      {workerId && diff.isError && <Panel><span style={{ color: color.red, fontSize: fs.sm }}>No diff (worker has no branch, or it was merged/removed).</span></Panel>}
+      {!workerId && <Panel><span style={{ color: color.text3 }}>No worker.</span></Panel>}
+      {workerId && diff.isError && <Panel><span style={{ color: color.danger, fontSize: fs.sm }}>No diff (worker has no branch, or it was merged/removed).</span></Panel>}
 
       {/* Auto-summary + risk surface — read this BEFORE the raw diff. */}
       {analysis && (
-        <Panel style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `2px solid ${analysis.highRisk ? color.red : analysis.mediumRisk ? color.amber : color.phosphor}` }}>
+        <Panel style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: `2px solid ${analysis.highRisk ? color.danger : analysis.mediumRisk ? color.busy : color.live}` }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <SectionLabel style={{ margin: 0 }}>Summary</SectionLabel>
-            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>auto-derived</span>
+            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>auto-derived</span>
             <span style={{ flex: 1 }} />
             {merged && <Badge tone="live">already merged</Badge>}
             {uncommitted && <Badge tone="busy">uncommitted</Badge>}
@@ -144,14 +144,14 @@ export function ReviewSurface({ workerId, embedded = false }: {
 
           {/* Risk callout: the high/medium files + why, so attention lands here first. */}
           {(analysis.highRisk > 0 || analysis.mediumRisk > 0) && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, borderTop: `1px solid ${color.line}`, paddingTop: 8 }}>
               {analysis.files.filter((f) => f.risk !== "low")
                 .sort((a, b) => riskOrder(b.risk) - riskOrder(a.risk))
                 .map((f) => (
                   <div key={f.path} style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono }}>
                     <Dot tone={riskTone(f.risk)} glow={f.risk === "high"} />
                     <button onClick={() => jumpTo(f.path)} className="loom-btn"
-                      style={{ background: "transparent", border: "none", color: color.textDim, cursor: "pointer", padding: 0, fontFamily: font.mono, fontSize: fs.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 360, textAlign: "left" }}
+                      style={{ background: "transparent", border: "none", color: color.text2, cursor: "pointer", padding: 0, fontFamily: font.mono, fontSize: fs.mono, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 360, textAlign: "left" }}
                       title={`jump to ${f.path}`}>{f.path}</button>
                     <span style={{ color: tone[riskTone(f.risk)], fontSize: fs.sm }}>{f.reasons.join(", ")}</span>
                   </div>
@@ -176,14 +176,14 @@ export function ReviewSurface({ workerId, embedded = false }: {
             </Button>
             <span className="rv-changes" style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap", flex: "1 1 320px", minWidth: 0 }}>
               <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder="changes to request (sent to the worker as a turn)…"
-                style={{ flex: "1 1 200px", minWidth: 0, maxWidth: 420, resize: "vertical", boxSizing: "border-box", background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.mono, fontSize: fs.mono }} />
+                style={{ flex: "1 1 200px", minWidth: 0, maxWidth: 420, resize: "vertical", boxSizing: "border-box", background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.mono, fontSize: fs.mono }} />
               <Button variant="danger" disabled={!note.trim() || requestChanges.isPending} onClick={() => requestChanges.mutate()}>Request changes</Button>
             </span>
           </div>
-          <p style={{ color: color.textMuted, fontSize: fs.sm, marginTop: 8 }}>
+          <p style={{ color: color.text3, fontSize: fs.sm, marginTop: 8 }}>
             Approve runs the project's build/DoD gate in the worktree (fail-closed) before squash-merging; on green the worktree is removed and the task closed. Request changes sends your note to the worker as a turn.
           </p>
-          {result && <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.body, color: result.startsWith("✓") ? color.phosphor : result.startsWith("error") || result.startsWith("rejected") ? color.red : color.amber }}>{result}</div>}
+          {result && <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.body, color: result.startsWith("✓") ? color.live : result.startsWith("error") || result.startsWith("rejected") ? color.danger : color.busy }}>{result}</div>}
         </Panel>
       )}
 
@@ -206,7 +206,7 @@ export function ReviewSurface({ workerId, embedded = false }: {
       )}
 
       {analysis && analysis.files.length === 0 && diff.data && (
-        <Panel><span style={{ color: color.textMuted }}>{diff.data.patch ? "Could not parse the diff." : "No changes vs main."}</span></Panel>
+        <Panel><span style={{ color: color.text3 }}>{diff.data.patch ? "Could not parse the diff." : "No changes vs main."}</span></Panel>
       )}
     </div>
   );

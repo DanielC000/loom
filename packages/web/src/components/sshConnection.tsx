@@ -69,9 +69,9 @@ export function cleanSshRules(rules: SshCommandRule[], label: string): { ok: tru
 }
 
 const fieldLabel: CSSProperties = {
-  fontFamily: font.head, fontSize: fs.sm, fontWeight: 700, color: color.textDim,
+  fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.text2,
 };
-const hintStyle: CSSProperties = { color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 };
+const hintStyle: CSSProperties = { color: color.text3, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 };
 const Hint = ({ children }: { children: ReactNode }) => <span style={hintStyle}>{children}</span>;
 const Field = ({ label, children }: { label: string; children: ReactNode }) => (
   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -171,7 +171,7 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
         <textarea value={draft.privateKey} onChange={(e) => patch({ privateKey: e.target.value })} spellCheck={false} autoComplete="off"
           rows={5} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical", fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.45,
-            background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, padding: 8 }} />
+            background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: 8 }} />
         <Hint>Paste the whole key file (ed25519 recommended) · encrypted at rest when saved · never shown again</Hint>
       </Field>
       <Field label="Key passphrase">
@@ -190,19 +190,19 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
           </Button>
         </div>
         {fpInvalid
-          ? <span style={{ ...hintStyle, color: color.red }}>Expected SHA256: followed by 43 base64 characters, exactly as ssh-keygen -l prints it.</span>
+          ? <span style={{ ...hintStyle, color: color.danger }}>Expected SHA256: followed by 43 base64 characters, exactly as ssh-keygen -l prints it.</span>
           : <Hint>Paste it from the host itself: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub. Every later connection is refused if the host presents a different key.</Hint>}
         {pinClearedFor && (
-          <span data-testid="ssh-pin-cleared" role="status" style={{ ...hintStyle, color: color.amber }}>
+          <span data-testid="ssh-pin-cleared" role="status" style={{ ...hintStyle, color: color.busy }}>
             Pin cleared: it was fetched from {pinClearedFor}, and the host has changed. Fetch it again, or paste the fingerprint.
           </span>
         )}
-        {probe.error && <span role="alert" style={{ ...hintStyle, color: color.red }}>Could not read the host key from {target}: {errorText(probe.error)}</span>}
+        {probe.error && <span role="alert" style={{ ...hintStyle, color: color.danger }}>Could not read the host key from {target}: {errorText(probe.error)}</span>}
         {fetched && (
           <div data-testid="ssh-fingerprint-confirm" style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4, padding: "10px 12px",
-            border: `1px solid ${color.amber}`, borderRadius: radius.sm, background: color.panel }}>
+            border: `1px solid ${color.busy}`, borderRadius: radius.sm, background: color.surface }}>
             <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>{fetched.target} presented this host key:</span>
-            <code data-testid="ssh-fingerprint-fetched" style={{ fontFamily: font.mono, fontSize: fs.body, color: color.amber, overflowWrap: "anywhere" }}>{fetched.fingerprint}</code>
+            <code data-testid="ssh-fingerprint-fetched" style={{ fontFamily: font.mono, fontSize: fs.body, color: color.busy, overflowWrap: "anywhere" }}>{fetched.fingerprint}</code>
             <span style={hintStyle}>
               Only pin it if it matches what the host itself reports. A fetch over the network cannot tell the real
               host from an impostor in between; comparing it by hand is what makes the pin trustworthy.
@@ -217,7 +217,7 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
 
       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
         <input type="checkbox" checked={draft.readOnly} onChange={(e) => patch({ readOnly: e.target.checked })}
-          style={{ accentColor: color.phosphor, width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
+          style={{ accentColor: color.live, width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
         <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Read-only</span>
           <Hint>On by default. Untick only for a host where agents should deploy or restart things.</Hint>
@@ -312,12 +312,12 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", width: "100%" }}>
-        <span data-testid={`ssh-target-${c.id}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{c.user}@{c.host}:{c.port}</span>
+        <span data-testid={`ssh-target-${c.id}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{c.user}@{c.host}:{c.port}</span>
         {c.readOnly ? <Badge tone="live">Read-only</Badge> : <Badge tone="busy">Read-write</Badge>}
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
           {allowN === 0 ? "no allowlist" : `${allowN} allowed`} · {riskyN} held for approval
         </span>
-        <span title={c.hostKeyFingerprint} data-testid={`ssh-fingerprint-${c.id}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
+        <span title={c.hostKeyFingerprint} data-testid={`ssh-fingerprint-${c.id}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
           pinned {c.hostKeyFingerprint ? `${c.hostKeyFingerprint.slice(0, 19)}…` : "—"}
         </span>
         {grantedTo !== null && (
@@ -330,10 +330,10 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
         {!editing && <Button variant="ghost" onClick={open}>Edit rules</Button>}
       </div>
       {editing && (
-        <div data-testid={`ssh-edit-${c.id}`} style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", paddingTop: 8, borderTop: `1px solid ${color.border}` }}>
+        <div data-testid={`ssh-edit-${c.id}`} style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", paddingTop: 8, borderTop: `1px solid ${color.line}` }}>
           <Hint>Host, port, user, key and fingerprint are fixed once saved. To change them, revoke this connection and create it again.</Hint>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-            <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} style={{ accentColor: color.phosphor, width: 15, height: 15 }} />
+            <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} style={{ accentColor: color.live, width: 15, height: 15 }} />
             <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Read-only</span>
           </label>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -344,7 +344,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
             <span style={fieldLabel}>Hold these commands for my approval</span>
             <SshRuleList rules={risky} onChange={setRisky} testId={`ssh-edit-risky-${c.id}`} emptyText="No patterns: no command waits for your approval for matching one." />
           </div>
-          {(localErr || save.error) && <span role="alert" style={{ ...hintStyle, color: color.red }}>{localErr ?? errorText(save.error)}</span>}
+          {(localErr || save.error) && <span role="alert" style={{ ...hintStyle, color: color.danger }}>{localErr ?? errorText(save.error)}</span>}
           <div style={{ display: "flex", gap: 8 }}>
             <Button variant="primary" onClick={submit} disabled={save.isPending}>{save.isPending ? "Saving…" : "Save rules"}</Button>
             <Button variant="ghost" onClick={() => setEditing(false)} disabled={save.isPending}>Cancel</Button>

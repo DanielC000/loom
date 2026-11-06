@@ -35,7 +35,7 @@ export default function Platform() {
   const setView = (v: ViewAs) => { setViewAs(v); localStorage.setItem(VIEW_AS_KEY, v); };
 
   // Hold until the edition signal settles, so a shipping user never flashes the dev surface.
-  if (home.isLoading) return <p style={{ color: color.textMuted }}>Loading the Platform home…</p>;
+  if (home.isLoading) return <p style={{ color: color.text3 }}>Loading the Platform home…</p>;
 
   // Shipping edition: the end-user surface only — no "View as" toggle (a shipping user never sees "Developer").
   // The edition is a STATIC config passed to the shared PlatformView shell; `viewAs` is not consulted here.
@@ -94,9 +94,9 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
     // tell you it could be changed. The control keeps its intrinsic width (`flexShrink: 0`) and the
     // caption takes the next line instead.
     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-      <span style={{ fontFamily: font.head, fontSize: fs.sm, color: color.textDim }}>View as</span>
+      <span style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>View as</span>
       <div role="group" aria-label="Preview edition"
-        style={{ display: "inline-flex", flexShrink: 0, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, overflow: "hidden" }}>
+        style={{ display: "inline-flex", flexShrink: 0, border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, overflow: "hidden" }}>
         {options.map((o) => {
           const active = value === o.key;
           return (
@@ -104,8 +104,8 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
               title={o.key === "developer" ? "The dev Loom Platform surface" : "Preview the shipping end-user surface (client-side only)"}
               style={{
                 fontFamily: font.mono, fontSize: fs.mono, padding: "4px 14px", cursor: "pointer", border: "none",
-                background: active ? color.phosphor : "transparent",
-                color: active ? color.bg : color.textDim,
+                background: active ? color.live : "transparent",
+                color: active ? color.bg : color.text2,
                 fontWeight: active ? 700 : 400,
               }}>
               {o.label}
@@ -113,7 +113,7 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
           );
         })}
       </div>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
         client-side preview — your real platform capability is unchanged
       </span>
     </div>

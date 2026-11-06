@@ -31,9 +31,9 @@ export function sessionStatus(s: SessionListItem): { tone: Tone; label: string; 
 
 export function Stat({ label, value, tone: t = "live" }: { label: string; value: number; tone?: Tone }) {
   return (
-    <span style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "4px 12px", minWidth: 64 }}>
+    <span style={{ display: "inline-flex", flexDirection: "column", border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "4px 12px", minWidth: 64 }}>
       <span style={{ fontFamily: font.mono, fontSize: fs.h1, color: tone[t] }}>{value}</span>
-      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{sentenceCase(label)}</span>
+      <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>{sentenceCase(label)}</span>
     </span>
   );
 }
@@ -68,14 +68,14 @@ function UsageGauge({ label, window: w }: { label: string; window: UsageWindow }
   const util = Math.round(w.utilization);
   const t = usageTone(w.utilization);
   return (
-    <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
+    <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
       <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>{sentenceCase(label)}</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>{sentenceCase(label)}</span>
         <span style={{ flex: 1 }} />
         <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[t] }}>{util}%</span>
       </span>
       <Meter value={util} max={100} tone={t} width={110} />
-      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>resets in {resetCountdown(w.resetsAt)}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>resets in {resetCountdown(w.resetsAt)}</span>
     </div>
   );
 }
@@ -89,8 +89,8 @@ export function PlanUsageStrip() {
     const reason = data && !data.available ? data.reason : usage.isLoading ? "loading…" : "no data";
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Plan usage</span>
-        <span title={reason} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>unavailable</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Plan usage</span>
+        <span title={reason} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>unavailable</span>
       </div>
     );
   }
@@ -103,20 +103,20 @@ export function PlanUsageStrip() {
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-      <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Plan usage</span>
+      <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Plan usage</span>
       {data.fiveHour && <UsageGauge label="5h session" window={data.fiveHour} />}
       <UsageGauge label="7d weekly" window={data.sevenDay} />
       {data.sevenDayOpus && <UsageGauge label="7d opus" window={data.sevenDayOpus} />}
       {data.sevenDaySonnet && <UsageGauge label="7d sonnet" window={data.sevenDaySonnet} />}
       {extra?.isEnabled && (
-        <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
+        <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
           <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-            <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Extra usage</span>
+            <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Extra usage</span>
             <span style={{ flex: 1 }} />
             <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[usageTone(extraUtil)] }}>{Math.round(extraUtil)}%</span>
           </span>
           <Meter value={extraUtil} max={100} tone={usageTone(extraUtil)} width={110} />
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
             {extra.usedCredits ?? 0}/{extra.monthlyLimit ?? "—"} credits
           </span>
         </div>
@@ -190,7 +190,7 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   const kindLabel = (
     <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: tone[item.tone], whiteSpace: "nowrap" }}>{attentionKindLabel(item.kind)}</span>
   );
-  const textBase = { fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis" } as const;
+  const textBase = { fontFamily: font.mono, fontSize: fs.mono, color: color.text2, overflow: "hidden", textOverflow: "ellipsis" } as const;
   /* `title` (card ed0858dc): the row ellipsizes, and some kinds carry detail too long for one line
      (the isolation-gap `reason` strings run to a paragraph each) — so hover reveals `hoverText` when
      a kind supplies it, else the full untruncated `text`. `text` still has to stand alone: a reader
@@ -235,8 +235,8 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
     "data-session-id": item.sessionId ?? item.workerSessionId ?? "",
   };
   const frame = {
-    border: `1px solid ${color.border}`,
-    borderLeft: decision ? `3px solid ${color.cyan}` : `1px solid ${color.border}`,
+    border: `1px solid ${color.line}`,
+    borderLeft: decision ? `3px solid ${color.info}` : `1px solid ${color.line}`,
     borderRadius: radius.sm, padding: "6px 10px", marginBottom: 6,
   };
   // ── The BAND shape (card d0d430d4) ───────────────────────────────────────────────────────────
@@ -336,8 +336,8 @@ function SnoozeButton({ questionId }: { questionId: string }) {
         if (ms) snooze.mutate(ms);
         e.target.value = "";
       }}
-      style={{ fontFamily: font.mono, fontSize: fs.mono, background: color.panel, color: color.text,
-        border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "2px 4px", cursor: "pointer" }}>
+      style={{ fontFamily: font.mono, fontSize: fs.mono, background: color.surface, color: color.text,
+        border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "2px 4px", cursor: "pointer" }}>
       <option value="" disabled>Snooze…</option>
       <option value="1d">1 day</option>
       <option value="3d">3 days</option>
@@ -375,8 +375,8 @@ export function ContextUsage({ ctxInputTokens, model, unmeasured = null }: {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }} title={`${ctx.toLocaleString()} input tokens · ${Math.round((ctx / win) * 100)}% of the ${(win / 1000).toFixed(0)}k window`}>
       <Meter value={ctx} max={win} tone={hot ? "busy" : "accent"} width={60} />
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: hot ? color.amber : color.textMuted }}>{Math.round((ctx / win) * 100)}%</span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{(ctx / 1000).toFixed(1)}k</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: hot ? color.busy : color.text3 }}>{Math.round((ctx / win) * 100)}%</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{(ctx / 1000).toFixed(1)}k</span>
     </span>
   );
 }
@@ -389,7 +389,7 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
   const ctx = s.ctxInputTokens ?? 0;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 0", flexWrap: "wrap" }}>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: star ? color.phosphor : color.text, fontWeight: star ? 700 : 400 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: star ? color.live : color.text, fontWeight: star ? 700 : 400 }}>
         {star ? "★ " : ""}{star ? "mgr " : "w:"}{s.id.slice(0, 8)}
       </span>
       {/* Which vendor CLI this session actually runs — grouped with the id because it's an identity
@@ -405,8 +405,8 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
           straight to the answer page — derived from the SAME pending-decision signal as the inbox + bell. */}
       {decision && (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: font.mono, fontSize: fs.mono, color: color.cyan,
-            border: `1px solid ${color.cyan}`, borderRadius: radius.sm, padding: "1px 7px" }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: font.mono, fontSize: fs.mono, color: color.info,
+            border: `1px solid ${color.info}`, borderRadius: radius.sm, padding: "1px 7px" }}>
             <Dot tone="info" />{decision.count} decision{decision.count === 1 ? "" : "s"} · waiting on you
           </span>
           <Button variant="primary" style={{ padding: "1px 8px", fontSize: fs.sm }} onClick={() => openRequest(decision.questionId)}>Answer →</Button>
@@ -442,12 +442,12 @@ export function WaveConsumption({ sessions }: { sessions: SessionListItem[] }) {
   return (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono }}
       title={`${total.tokens.toLocaleString()} input tokens in context across ${total.reporting} reporting session${total.reporting === 1 ? "" : "s"} (subscription usage, not an API $ bill)`}>
-      <span style={{ color: color.textMuted }}>consumption</span>
+      <span style={{ color: color.text3 }}>consumption</span>
       <span style={{ color: color.text }}>{(total.tokens / 1000).toFixed(0)}k ctx</span>
-      <span style={{ color: color.textMuted }}>·</span>
-      <span style={{ color: color.textMuted }}>peak</span>
+      <span style={{ color: color.text3 }}>·</span>
+      <span style={{ color: color.text3 }}>peak</span>
       <Meter value={wc.ctx} max={wc.window || 1} tone={hot ? "busy" : "accent"} width={70} />
-      <span style={{ color: hot ? color.amber : color.textMuted }}>{wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}</span>
+      <span style={{ color: hot ? color.busy : color.text3 }}>{wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}</span>
     </span>
   );
 }
@@ -480,7 +480,7 @@ function CompBar({ buckets }: { buckets: ReturnType<typeof workerBuckets> }) {
   const segs = ([["busy", buckets.busy], ["idle", buckets.idle], ["rl", buckets.rl], ["offline", buckets.offline]] as const)
     .filter(([, n]) => n > 0);
   return (
-    <div style={{ display: "flex", height: 8, width: "100%", borderRadius: radius.sm, overflow: "hidden", background: color.border }}>
+    <div style={{ display: "flex", height: 8, width: "100%", borderRadius: radius.sm, overflow: "hidden", background: color.line }}>
       {segs.map(([key, n]) => (
         <div key={key} title={`${key} ${n}`} style={{ flexGrow: n, flexBasis: 0, background: toneFill[SEG_TONE[key]] }} />
       ))}
@@ -523,19 +523,19 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
 
   return (
     <Panel style={{ height: 206, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden",
-      ...(decision ? { borderLeft: `3px solid ${color.cyan}` } : null), ...(muted ? { opacity: 0.6 } : null) }}>
+      ...(decision ? { borderLeft: `3px solid ${color.info}` } : null), ...(muted ? { opacity: 0.6 } : null) }}>
       {/* header: roll-up dot + name + expand */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Dot tone={roll.tone} glow={roll.glow} />
-        <span style={{ fontFamily: font.head, fontSize: fs.body, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={name}>{name}</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={name}>{name}</span>
         <span style={{ flex: 1 }} />
         <Button variant="ghost" style={{ padding: "0 6px" }} title="Expand" onClick={onExpand}>⤢</Button>
       </div>
 
       {/* running / archived split — the "both-in-one" summary. Archived reads as clearly secondary. */}
-      <div style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, whiteSpace: "nowrap" }}>
+      <div style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, whiteSpace: "nowrap" }}>
         running {running.length}
-        {archived.length > 0 && <span style={{ color: color.textDim }}> · archived {archived.length}</span>}
+        {archived.length > 0 && <span style={{ color: color.text2 }}> · archived {archived.length}</span>}
       </div>
 
       {/* status + counts */}
@@ -551,28 +551,28 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
       {/* worker-state composition bar + legend */}
       <CompBar buckets={buckets} />
       <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: fs.xs }}>
-        <span style={{ color: color.amber }}>busy {buckets.busy}</span>
-        <span style={{ color: color.phosphor }}>idle {buckets.idle}</span>
-        {buckets.rl > 0 && <span style={{ color: color.red }}>rl {buckets.rl}</span>}
-        {buckets.offline > 0 && <span style={{ color: color.textMuted }}>off {buckets.offline}</span>}
-        {buckets.total === 0 && <span style={{ color: color.textMuted }}>no workers</span>}
+        <span style={{ color: color.busy }}>busy {buckets.busy}</span>
+        <span style={{ color: color.live }}>idle {buckets.idle}</span>
+        {buckets.rl > 0 && <span style={{ color: color.danger }}>rl {buckets.rl}</span>}
+        {buckets.offline > 0 && <span style={{ color: color.text3 }}>off {buckets.offline}</span>}
+        {buckets.total === 0 && <span style={{ color: color.text3 }}>no workers</span>}
       </div>
 
       {/* worst-case context pressure */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted, width: 28 }}>ctx</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3, width: 28 }}>ctx</span>
         <Meter value={wc.ctx} max={wc.window || 1} tone={ctxHot ? "busy" : "accent"} width={110} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: ctxHot ? color.amber : color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: ctxHot ? color.busy : color.text3 }}>
           {wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}
         </span>
       </div>
 
       {/* busiest / most-recent manager hint — a held decision takes over the footer with an Answer → jump */}
       <div style={{ marginTop: "auto", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-        <div style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <div style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: fs.mono, color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {topMgr && topSt
-            ? <>★ mgr {topMgr.id.slice(0, 8)} · <span style={{ color: decision ? color.cyan : tone[topSt.tone] }}>{decision ? "waiting on you" : topSt.label}</span></>
-            : <span style={{ color: color.textMuted }}>no live manager</span>}
+            ? <>★ mgr {topMgr.id.slice(0, 8)} · <span style={{ color: decision ? color.info : tone[topSt.tone] }}>{decision ? "waiting on you" : topSt.label}</span></>
+            : <span style={{ color: color.text3 }}>no live manager</span>}
         </div>
         {decision && (
           <Button variant="primary" style={{ padding: "1px 8px", fontSize: fs.sm, flexShrink: 0 }}
@@ -614,7 +614,7 @@ export function InactiveFleet({ projects, defaultOpen = false }: {
         data-testid="inactive-fleet"
         aria-expanded={open}
         title={open ? "Hide inactive projects" : "Show inactive projects"}
-        style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 6px" }}>
+        style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "2px 6px" }}>
         {open ? "▾" : "▸"} {projects.length} inactive project{projects.length === 1 ? "" : "s"}
       </Button>
       {open && (
@@ -625,7 +625,7 @@ export function InactiveFleet({ projects, defaultOpen = false }: {
               attention={0} onExpand={() => { /* no live sessions to expand into */ }} muted />
           ))}
           {overflow > 0 && (
-            <span style={{ alignSelf: "center", fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+            <span style={{ alignSelf: "center", fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
               +{overflow} more inactive
             </span>
           )}
@@ -648,23 +648,23 @@ export function EventRow({ e, projectName }: { e: OrchestrationEvent; projectNam
   const detail = `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)}` : ""}${e.taskId ? ` t:${e.taskId.slice(0, 8)}` : ""}`;
   return (
     <div data-testid="activity-event"
-      style={{ display: "flex", alignItems: "baseline", gap: 8, fontFamily: font.mono, fontSize: fs.sm, padding: "2px 0", borderBottom: `1px solid ${color.border}` }}>
-      <span data-testid="activity-event-time" style={{ color: color.textMuted, whiteSpace: "nowrap", flexShrink: 0 }}>
+      style={{ display: "flex", alignItems: "baseline", gap: 8, fontFamily: font.mono, fontSize: fs.sm, padding: "2px 0", borderBottom: `1px solid ${color.line}` }}>
+      <span data-testid="activity-event-time" style={{ color: color.text3, whiteSpace: "nowrap", flexShrink: 0 }}>
         {new Date(e.ts).toLocaleTimeString()}
       </span>
       {projectName && (
         <span title={projectName} data-testid="activity-event-project"
           style={{ flexShrink: 1000, minWidth: 0, maxWidth: 116, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            fontSize: fs.xs, color: color.textMuted, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "0 5px" }}>
+            fontSize: fs.xs, color: color.text3, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "0 5px" }}>
           {projectName}
         </span>
       )}
       <span title={e.kind} data-testid="activity-event-kind"
-        style={{ color: color.cyan, whiteSpace: "nowrap", flexShrink: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+        style={{ color: color.info, whiteSpace: "nowrap", flexShrink: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
         {e.kind}
       </span>
       <span title={detail || undefined} data-testid="activity-event-detail"
-        style={{ color: color.textDim, whiteSpace: "nowrap", flexShrink: 100000, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+        style={{ color: color.text2, whiteSpace: "nowrap", flexShrink: 100000, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
         {detail}
       </span>
     </div>

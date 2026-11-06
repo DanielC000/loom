@@ -93,15 +93,15 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
       <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={titleId} data-testid="attachment-viewer"
         data-viewer-kind={a.kind} onKeyDown={trapTab}
         style={{ width: "min(1180px, 100%)", height: "100%", maxHeight: "94vh", display: "flex", flexDirection: "column",
-          background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
+          background: color.surface, border: `1px solid ${color.lineStrong}`, borderRadius: radius.base,
           boxSizing: "border-box", overflow: "hidden" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px 10px 16px",
-          borderBottom: `1px solid ${color.border}`, flexWrap: "wrap" }}>
-          <span aria-hidden style={{ fontSize: fs.body, color: color.textDim, width: 16, textAlign: "center" }}>{ATTACHMENT_GLYPH[a.kind]}</span>
+          borderBottom: `1px solid ${color.line}`, flexWrap: "wrap" }}>
+          <span aria-hidden style={{ fontSize: fs.body, color: color.text2, width: 16, textAlign: "center" }}>{ATTACHMENT_GLYPH[a.kind]}</span>
           <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "baseline", gap: 10 }}>
             <h2 id={titleId} style={{ margin: 0, fontFamily: font.mono, fontSize: fs.body, fontWeight: 600, color: color.text,
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={a.label}>{a.label}</h2>
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, whiteSpace: "nowrap" }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, whiteSpace: "nowrap" }}>
               {kindWord} · {attachmentDetail(a)}
             </span>
           </div>
@@ -111,7 +111,7 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
         <div ref={bodyRef} tabIndex={0} data-testid="attachment-viewer-body" aria-label={`${a.label} contents`}
           style={{ flex: 1, minHeight: 0, overflow: "auto", outline: "none", background: color.bg }}>
           {load.state === "loading" && <ViewerNote>Loading {a.label}…</ViewerNote>}
-          {load.state === "error" && <ViewerNote tone={color.red}>Couldn’t load this file: {load.message}</ViewerNote>}
+          {load.state === "error" && <ViewerNote tone={color.danger}>Couldn’t load this file: {load.message}</ViewerNote>}
           {load.state === "too-large" && (
             <ViewerNote>
               Too large to preview. The viewer opens files up to {formatAttachmentSize(ATTACHMENT_VIEWER_MAX_BYTES)}
@@ -126,7 +126,7 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
           {load.state === "ready" && a.kind !== "markdown" && (
             <pre data-testid="attachment-viewer-text" style={{ margin: 0, padding: "16px 20px 32px", fontFamily: font.mono,
               fontSize: fs.mono, lineHeight: 1.6, color: color.text, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-              {load.text.length === 0 ? <span style={{ color: color.textMuted }}>(empty file)</span> : load.text}
+              {load.text.length === 0 ? <span style={{ color: color.text3 }}>(empty file)</span> : load.text}
             </pre>
           )}
         </div>
@@ -139,7 +139,7 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
 function ViewerNote({ children, tone }: { children: ReactNode; tone?: string }) {
   return (
     <div role="status" style={{ padding: "48px 24px", textAlign: "center", fontFamily: font.mono, fontSize: fs.mono,
-      lineHeight: 1.6, color: tone ?? color.textMuted }}>{children}</div>
+      lineHeight: 1.6, color: tone ?? color.text3 }}>{children}</div>
   );
 }
 

@@ -107,9 +107,9 @@ export function VaultImage({ projectId, path, alt, className, style }: {
 }) {
   const asset = useVaultAsset(projectId, path, "view");
   if (asset.status === "error") {
-    return <span className="md-broken" title={asset.message} style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>{alt || assetFileName(path)}</span>;
+    return <span className="md-broken" title={asset.message} style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>{alt || assetFileName(path)}</span>;
   }
-  if (asset.status === "loading") return <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>…</span>;
+  if (asset.status === "loading") return <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>…</span>;
   return <img className={className} src={asset.url} alt={alt} style={style} loading="lazy" />;
 }
 
@@ -182,7 +182,7 @@ export function VaultDownloadLink({ projectId, path, children, style }: {
           {children}
         </a>
       )}
-      {error && <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.red, wordBreak: "break-word" }}>{error}</div>}
+      {error && <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.danger, wordBreak: "break-word" }}>{error}</div>}
     </>
   );
 }

@@ -155,9 +155,7 @@ test("the main contrast pairs clear AA in both themes, read from live token valu
     ["danger label", "--loom-danger", "--loom-bg", 4.5],
     ["input / control border", "--loom-line-strong", "--loom-bg", 3],
     ["focus ring", "--loom-ring", "--loom-bg", 3],
-    // The legacy names every unmigrated call site still uses, through their aliases.
-    ["legacy muted text on a panel", "--loom-text-muted", "--loom-panel", 4.5],
-    ["legacy dim text on a panel", "--loom-text-dim", "--loom-panel", 4.5],
+    ["secondary text on a panel", "--loom-text-2", "--loom-surface", 4.5],
   ];
   await page.goto(loomDaemon.baseURL + "/settings");
   const bgByTheme: Record<string, [number, number, number]> = {};

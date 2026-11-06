@@ -22,7 +22,7 @@ function highlight(text: string, q: string): ReactNode {
     }
     if (idx > i) out.push(text.slice(i, idx));
     out.push(
-      <mark key={k++} style={{ background: color.phosphorDim, color: color.text, borderRadius: 2 }}>
+      <mark key={k++} style={{ background: color.liveSoft, color: color.text, borderRadius: 2 }}>
         {text.slice(idx, idx + q.length)}
       </mark>,
     );
@@ -74,7 +74,7 @@ export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRe
           alignItems: "center",
           gap: 8,
           padding: 8,
-          borderBottom: `1px solid ${color.border}`,
+          borderBottom: `1px solid ${color.line}`,
           flexShrink: 0,
         }}
       >
@@ -99,10 +99,10 @@ export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRe
 
       <div style={{ flex: 1, overflow: "auto", padding: 8, overscrollBehavior: "contain" }}>
         {turns?.length === 0 && (
-          <p style={{ color: color.textMuted }}>No transcript yet (engine session id not captured, or no turns).</p>
+          <p style={{ color: color.text3 }}>No transcript yet (engine session id not captured, or no turns).</p>
         )}
         {turns && turns.length > 0 && filtered.length === 0 && (
-          <p style={{ color: color.textMuted }}>No turns match.</p>
+          <p style={{ color: color.text3 }}>No turns match.</p>
         )}
         {filtered.map((turn, i) => (
           <Turn key={i} turn={turn} q={q} />
@@ -124,7 +124,7 @@ function RoleChip({ label, current, onPick }: { label: RoleFilter; current: Role
 // cyan/info (a system/instruction turn — e.g. codex's "developer" role, card 100c523f — is likewise not
 // a speaker, but it's live instruction content rather than inert tool output, so it gets the info tone
 // instead of tool_result's muted one).
-const ROLE_COLOR: Record<TranscriptTurn["role"], string> = { user: color.liveText, assistant: color.accentFg, tool_result: color.textMuted, system: color.cyan };
+const ROLE_COLOR: Record<TranscriptTurn["role"], string> = { user: color.liveText, assistant: color.accentFg, tool_result: color.text3, system: color.info };
 const ROLE_LABEL: Record<TranscriptTurn["role"], string> = { user: "user", assistant: "assistant", tool_result: "tool result", system: "system" };
 
 function Turn({ turn, q }: { turn: TranscriptTurn; q: string }) {

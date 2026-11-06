@@ -38,7 +38,7 @@ export function PriorityChip({ priority }: { priority: TaskPriority }) {
   const pop = priority === "p0" || priority === "p1";
   return (
     <span title={`Priority: ${m.label}`} style={{
-      flexShrink: 0, fontFamily: font.head, fontSize: fs.xs, fontWeight: pop ? 700 : 500,
+      flexShrink: 0, fontFamily: font.ui, fontSize: fs.xs, fontWeight: pop ? 700 : 500,
       letterSpacing: "0.06em", lineHeight: "13px", padding: "0 4px", borderRadius: radius.sm,
       color: pop ? color.bg : c, background: pop ? c : "transparent", border: `1px solid ${c}`,
       opacity: priority === "p2" ? 0.75 : 1,

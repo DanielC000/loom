@@ -180,8 +180,8 @@ test("the first-run welcome's muted 'Maybe later' hovers (App.tsx)", async ({ pa
   await expect(dialog).toBeVisible();
   const maybeLater = dialog.getByRole("button", { name: "Maybe later" });
   await expect(maybeLater).toBeVisible();
-  // Rest is unchanged: the same --loom-text-muted the inline `color` set.
-  await expect(maybeLater).toHaveCSS("color", await cssColor(page, "--loom-text-muted"));
+  // Rest is unchanged: the same --loom-text-3 the inline `color` set.
+  await expect(maybeLater).toHaveCSS("color", await cssColor(page, "--loom-text-3"));
   const ml = await restThenHover(page, maybeLater);
   expect(ml.hover.color).not.toBe(ml.rest.color);
 });
@@ -206,10 +206,10 @@ test("the column manager's 'key' toggle hovers in BOTH its muted and accented st
   await openKey.click();
   await expect(openKey).toHaveAttribute("aria-expanded", "true");
 
-  // CLOSED → `.loom-btn-muted`: rest is the --loom-text-muted the inline `color` set, and the modifier's
+  // CLOSED → `.loom-btn-muted`: rest is the --loom-text-3 the inline `color` set, and the modifier's
   // own hover rule lifts the label to --loom-text.
   await expect(closedKey).toHaveAttribute("aria-expanded", "false");
-  await expect(closedKey).toHaveCSS("color", await cssColor(page, "--loom-text-muted"));
+  await expect(closedKey).toHaveCSS("color", await cssColor(page, "--loom-text-3"));
   const closed = await restThenHover(page, closedKey);
   expect(closed.hover.color).not.toBe(closed.rest.color);
 
@@ -306,19 +306,19 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
 
   // ── PresetPrompts' IconButton, both forms. These are RAW `loom-btn loom-btn-<variant>` elements that
   // used to restate the variant's own `color` inline — identical value, total shadowing. Rest must be
-  // unchanged (--loom-text-dim / --loom-red, i.e. exactly what the variant class already sets).
+  // unchanged (--loom-text-2 / --loom-danger, i.e. exactly what the variant class already sets).
   // The pointer is already parked on the dialog's inert top-left copy — hoisted above the open-trigger
   // readings, which need it just as much since b6896a96 — so this first icon's rest reading is clean.
   const editIcon = dialog.getByRole("button", { name: `Edit ${LABEL}` });
   await expect(editIcon).toBeVisible();
-  await expect(editIcon).toHaveCSS("color", await cssColor(page, "--loom-text-dim"));
+  await expect(editIcon).toHaveCSS("color", await cssColor(page, "--loom-text-2"));
   expect(await isTopmostAtCentre(editIcon), "the edit icon should be pointer-reachable").toBe(true);
   const edit = await restThenHover(page, editIcon, { force: true });
   expect(edit.hover.color).not.toBe(edit.rest.color);
 
   const deleteIcon = dialog.getByRole("button", { name: `Delete ${LABEL}` });
   await expect(deleteIcon).toBeVisible();
-  await expect(deleteIcon).toHaveCSS("color", await cssColor(page, "--loom-red"));
+  await expect(deleteIcon).toHaveCSS("color", await cssColor(page, "--loom-danger"));
   expect(await isTopmostAtCentre(deleteIcon), "the delete icon should be pointer-reachable").toBe(true);
   const del = await restThenHover(page, deleteIcon, { force: true });
   expect(del.hover.background).not.toBe(del.rest.background);
@@ -328,9 +328,9 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
 
   // ── Card aac0de44, site 1: the preset ROW button, the residual `6cefdf25` measured and left open.
   // It is a RAW `loom-btn loom-btn-default` that stated `color: --loom-text` (the variant's own rest
-  // token, verbatim) AND `border: 1px solid --loom-border-strong` as a SHORTHAND. The shorthand is the
+  // token, verbatim) AND `border: 1px solid --loom-line-strong` as a SHORTHAND. The shorthand is the
   // live defect: it expands to `border-color`, so it shadowed `.loom-btn-default:not(:disabled):hover`'s
-  // `border-color: --loom-text-dim` and the row was measurably inert — rest and hover both
+  // `border-color: --loom-text-2` and the row was measurably inert — rest and hover both
   // `{ bg rgba(0,0,0,0), bc rgb(42,50,58), color rgb(230,234,237) }`. (A `borderStyle` LONGHAND does
   // NOT shadow it; "+ Add column" above is that control.) Both declarations are gone; the variant class
   // supplies the identical rest chrome, asserted below BEFORE the hover.
@@ -341,9 +341,9 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
   // assume it, and never read two states off the same element back to back.)
   const row = dialog.locator(`button.loom-btn-default[title="${PROMPT}"]`);
   await expect(row).toHaveCount(1);
-  // --loom-text and --loom-border-strong: the same tokens the deleted inline values named.
+  // --loom-text and --loom-line-strong: the same tokens the deleted inline values named.
   await expect(row).toHaveCSS("color", await cssColor(page, "--loom-text"));
-  await expect(row).toHaveCSS("border-top-color", await cssColor(page, "--loom-border-strong"));
+  await expect(row).toHaveCSS("border-top-color", await cssColor(page, "--loom-line-strong"));
   await expect(row).toHaveCSS("border-top-width", "1px");
   await expect(row).toHaveCSS("border-top-style", "solid");
   expect(await isTopmostAtCentre(row), "the preset row should be pointer-reachable").toBe(true);
@@ -371,7 +371,7 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
 // rule is `color: var(--loom-text)` — so each one shadowed it completely. They differ in what the inline
 // value WAS, which is why one fix is invisible at rest and the other is a deliberate design change:
 //
-//   Gates.tsx     `color: color.textDim` — ghost's own REST token, restated verbatim. Rest is unchanged by
+//   Gates.tsx     `color: color.text2` — ghost's own REST token, restated verbatim. Rest is unchanged by
 //                 the fix; only hover starts moving. (Its chevron `<span>` restated the same token one
 //                 level down, which would have left the glyph dim while its own label brightened, so that
 //                 one is gone too and the glyph now inherits.)
@@ -386,7 +386,7 @@ test("the composer's presets trigger and the popover's icon buttons hover (Compo
 //   Gates chevron span   `rgb(138, 146, 155)` WHILE its own button was hovered
 //   SpawnControls item   rest `rgb(230, 234, 237)` → settled hover `rgb(230, 234, 237)`
 //
-// Those readings were --loom-text-dim and --loom-text in the pre-Graphite palette. The assertions below
+// Those readings were --loom-text-2 and --loom-text in the pre-Graphite palette. The assertions below
 // resolve both from the live tokens (`cssColor`), so they hold in either theme.
 
 /**
@@ -445,7 +445,7 @@ test("the Gates batch-expand toggle hovers, and its chevron brightens with it (G
   // REST FIRST, and as an exact value: this fix is not allowed to restyle the rest state, so the token the
   // deleted inline `color` set must still be what the variant class now supplies. Asserting it before the
   // hover is what makes a revert's red land on the hover line — the mechanism — with rest green.
-  const textDim = await cssColor(page, "--loom-text-dim");
+  const textDim = await cssColor(page, "--loom-text-2");
   const text = await cssColor(page, "--loom-text");
   await expect(toggle).toHaveCSS("color", textDim);
   // On the SHARED daemon the project filter above the table grows with every earlier spec's project and
@@ -455,13 +455,13 @@ test("the Gates batch-expand toggle hovers, and its chevron brightens with it (G
   expect(await isTopmostAtCentre(toggle), "the batch toggle should be pointer-reachable").toBe(true);
 
   const t = await restThenSettledHover(page, toggle);
-  expect(t.rest.color, "rest is --loom-text-dim, exactly as the inline style set it").toBe(textDim);
+  expect(t.rest.color, "rest is --loom-text-2, exactly as the inline style set it").toBe(textDim);
   expect(t.hover.color, "ghost's hover rule lifts the label to --loom-text").toBe(text);
   // Ghost's hover also lays a --loom-hover fill under the label; the border stays put.
   expect(t.hover.background).toBe(await cssColor(page, "--loom-hover"));
   expect(t.hover.borderColor).toBe(t.rest.borderColor);
 
-  // The chevron glyph is a CHILD that restated the same --loom-text-dim one level down, so it would have
+  // The chevron glyph is a CHILD that restated the same --loom-text-2 one level down, so it would have
   // stayed dim while its own button's label brightened — a half-lit control. It now inherits. `BatchTag`
   // beside it deliberately keeps its phosphor chip colour: that is a distinct tone, not a restatement of
   // the variant's own rest token, so it must NOT move, and asserting both is what separates the two cases.
@@ -471,7 +471,7 @@ test("the Gates batch-expand toggle hovers, and its chevron brightens with it (G
   const chevron = toggle.locator("span[aria-hidden='true']");
   await expect(chevron).toHaveCount(1);
   await expect(chevron).toHaveCSS("color", text);
-  await expect(toggle.getByText("batch", { exact: true })).toHaveCSS("color", await cssColor(page, "--loom-phosphor"));
+  await expect(toggle.getByText("batch", { exact: true })).toHaveCSS("color", await cssColor(page, "--loom-live"));
 
   // The control still WORKS — a rest-and-hover reading alone would not prove the toggle does anything.
   await toggle.click();
@@ -515,7 +515,7 @@ test("the SpawnControls spawn-role menu items hover (SpawnControls.tsx)", async 
 
   // Every item is DIM at rest now. This is the design change the card made, and it is the assertion a full
   // revert (which pinned all three at --loom-text, ghost's own HOVER value) lands on first.
-  const textDim = await cssColor(page, "--loom-text-dim");
+  const textDim = await cssColor(page, "--loom-text-2");
   const text = await cssColor(page, "--loom-text");
   for (const label of ["From profile (default)", "Manager", "Plain"]) {
     await expect(items.filter({ hasText: label })).toHaveCSS("color", textDim);

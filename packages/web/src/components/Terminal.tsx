@@ -630,8 +630,8 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             position: "absolute", top: 0, left: 0, right: 0, pointerEvents: "none",
             display: "flex", alignItems: "center", gap: space(2),
             padding: `${space(1)} ${space(2)}`,
-            background: color.panel2, borderBottom: `1px solid ${color.border}`,
-            fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.textDim,
+            background: color.inset, borderBottom: `1px solid ${color.line}`,
+            fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text2,
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}
         >
@@ -655,8 +655,8 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             position: "absolute", bottom: 0, left: 0, right: 0, pointerEvents: "none",
             display: "flex", alignItems: "center", gap: space(2),
             padding: `${space(1)} ${space(2)}`,
-            background: color.panel2, borderTop: `1px solid ${color.border}`,
-            fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.textDim,
+            background: color.inset, borderTop: `1px solid ${color.line}`,
+            fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: color.text2,
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}
         >

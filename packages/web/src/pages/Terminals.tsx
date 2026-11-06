@@ -43,7 +43,7 @@ const COLUMN_LABELS: Record<GridColumns, string> = {
 // at weight 700, which is a louder voice than a field label beside its own field wants, and adopting
 // it here would also silently re-weight the filter label the classic shell has always drawn.
 const barLabelStyle: CSSProperties = {
-  fontFamily: font.head, fontSize: fs.sm, color: color.textDim,
+  fontFamily: font.ui, fontSize: fs.sm, color: color.text2,
 };
 
 // One rendered row of the Claude-sessions grid. A "manager" row = its manager tile first then the
@@ -250,7 +250,7 @@ export default function Terminals({ projectId, projectName, layoutKey }: {
           </div>
         )}
       </div>
-      {shown.length === 0 && <p style={{ color: color.textMuted }}>No running sessions.</p>}
+      {shown.length === 0 && <p style={{ color: color.text3 }}>No running sessions.</p>}
       {orderedRows.map((row) => {
         // The pinned manager occupies slot 0, so the first slot the reader may move is the one after
         // it. A row with fewer than two movable tiles gets NO controls at all rather than a pair of
@@ -313,10 +313,10 @@ function RowHeader({ row }: { row: SessionRow }) {
     return (
       <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatusPill tone={m.busy ? "busy" : "live"} glow={m.busy} label="manager" />
-        <span style={{ fontFamily: font.mono, textTransform: "none", letterSpacing: 0 }}>
+        <span style={{ fontFamily: font.mono }}>
           {m.projectName} · {m.agentName} · {m.id.slice(0, 8)}
         </span>
-        <span style={{ color: color.textMuted, fontWeight: 400 }}>({workers} worker{workers === 1 ? "" : "s"})</span>
+        <span style={{ color: color.text3, fontWeight: 400 }}>({workers} worker{workers === 1 ? "" : "s"})</span>
       </SectionLabel>
     );
   }
@@ -326,7 +326,7 @@ function RowHeader({ row }: { row: SessionRow }) {
   return (
     <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
       {label}
-      <span style={{ color: color.textMuted, fontWeight: 400 }}>({row.list.length})</span>
+      <span style={{ color: color.text3, fontWeight: 400 }}>({row.list.length})</span>
     </SectionLabel>
   );
 }
@@ -347,10 +347,10 @@ function ShellsSection() {
     <section style={{ marginBottom: 20 }}>
       <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
         Shells
-        <span style={{ color: color.textMuted, fontWeight: 400 }}>({live.length})</span>
+        <span style={{ color: color.text3, fontWeight: 400 }}>({live.length})</span>
         <Button variant="primary" style={{ padding: "0 8px", marginLeft: 4 }} onClick={() => setSpawning(true)}>+ Shell</Button>
       </SectionLabel>
-      {live.length === 0 && <p style={{ color: color.textMuted, marginTop: 0 }}>No shells. Open one in a project's repo with “+ Shell”.</p>}
+      {live.length === 0 && <p style={{ color: color.text3, marginTop: 0 }}>No shells. Open one in a project's repo with “+ Shell”.</p>}
       {live.length > 0 && (
         <div style={gridStyle}>
           {live.map((t) => <ShellTile key={t.id} t={t} onKill={() => kill.mutate(t.id)} killing={kill.isPending} />)}
@@ -375,7 +375,7 @@ function ShellTile({ t, onKill, killing }: { t: ShellTerminal; onKill: () => voi
   const [confirmKill, setConfirmKill] = useState(false);
   const killCluster = confirmKill ? (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>kill shell?</span>
+      <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>kill shell?</span>
       <Button variant="danger" style={{ padding: "0 8px" }} disabled={killing}
         onClick={(ev) => { ev.stopPropagation(); onKill(); }}>Confirm</Button>
       <Button style={{ padding: "0 8px" }}
@@ -395,7 +395,7 @@ function ShellTile({ t, onKill, killing }: { t: ShellTerminal; onKill: () => voi
       lifecycle="none"
       maximizable
       title={
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
           <StatusPill tone="live" label="shell" />
           <span title={`${t.command}\n${t.cwd}`}>{t.label} · {t.id.slice(0, 8)}</span>
         </span>
@@ -435,8 +435,8 @@ function SpawnShellModal({ onClose }: { onClose: () => void }) {
   });
 
   const overlay: CSSProperties = { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 };
-  const box: CSSProperties = { width: 520, maxWidth: "90vw", padding: 16, background: color.panel, border: `1px solid ${color.border}`, borderRadius: radius.sm };
-  const labelStyle: CSSProperties = { fontFamily: font.head, fontSize: fs.sm, color: color.textDim, display: "block", marginBottom: 4 };
+  const box: CSSProperties = { width: 520, maxWidth: "90vw", padding: 16, background: color.surface, border: `1px solid ${color.line}`, borderRadius: radius.sm };
+  const labelStyle: CSSProperties = { fontFamily: font.ui, fontSize: fs.sm, color: color.text2, display: "block", marginBottom: 4 };
 
   return (
     <div style={overlay} onClick={onClose}>
@@ -456,7 +456,7 @@ function SpawnShellModal({ onClose }: { onClose: () => void }) {
           <label style={labelStyle}>Args (optional, space-separated)</label>
           <Input value={argsText} onChange={(e) => setArgsText(e.target.value)} placeholder="-NoLogo" style={{ width: "100%" }} />
         </div>
-        {create.isError && <p style={{ color: color.red, fontSize: fs.sm }}>Failed to spawn — check the executable path.</p>}
+        {create.isError && <p style={{ color: color.danger, fontSize: fs.sm }}>Failed to spawn — check the executable path.</p>}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <Button onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!projectId || create.isPending} onClick={() => create.mutate()}>

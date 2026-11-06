@@ -101,9 +101,9 @@ test.describe("Workspace plan tile — both plan shapes (card 9ccad269)", () => 
     await gotoWorkspace(page, loomDaemon.baseURL, true);
     const tile = planTile(page);
 
-    // `toHaveText` retries, so the label assertion is also the settle: it cannot read "plan 5h"
-    // until the usage query has actually landed.
-    await expect(tile.locator(".loom-kpi-label")).toHaveText("plan 5h");
+    // `toHaveText` retries, so the label assertion is also the settle: it cannot read "Plan 5h"
+    // until the usage query has actually landed. (The deck sentence-cases the "plan 5h" source label.)
+    await expect(tile.locator(".loom-kpi-label")).toHaveText("Plan 5h");
     await expect(tile.locator(".loom-kpi-value")).toHaveText(`${Math.round(FIVE_HOUR_PCT)}%`);
     // The 5h countdown, not the weekly one — the two render different grammatical forms, so a
     // weekly reset ("in 3d 1h") cannot satisfy this.
@@ -126,7 +126,7 @@ test.describe("Workspace plan tile — both plan shapes (card 9ccad269)", () => 
 
     // All four of these are what the pre-fix tile got wrong: it read "plan 5h" / "—" / "loading…"
     // with no fill at all, forever, on a payload that was `available:true` the whole time.
-    await expect(tile.locator(".loom-kpi-label")).toHaveText("plan 7d");
+    await expect(tile.locator(".loom-kpi-label")).toHaveText("Plan 7d");
     await expect(tile.locator(".loom-kpi-value")).toHaveText(`${Math.round(SEVEN_DAY_PCT)}%`);
     await expect(tile.locator(".loom-kpi-sub")).toHaveText("resets in 3d 1h");
     // Asserted explicitly as well as implied by the line above: "loading…" was the actual symptom,

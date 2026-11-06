@@ -1,6 +1,5 @@
 /* Loom brand type (Graphite), SELF-HOSTED, no network. Imported by global.css; the two families
-   declared here are what `--loom-font-ui` / `--loom-font-mono` there name (`--loom-font-head` is an
-   alias of the UI face).
+   declared here are what `--loom-font-ui` / `--loom-font-mono` there name.
 
    The faces are @fontsource-variable/{instrument-sans,geist-mono}, both OFL-1.1, so shipping them
    inside our bundle is permitted. Vite resolves each `url()` through node_modules and emits the

@@ -54,22 +54,22 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
   const empty = saved.trim().length === 0;
 
   return (
-    <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+    <div style={{ borderTop: `1px solid ${color.line}`, paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
       <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
         title={open ? "Collapse the startup prompt" : "View / edit the startup prompt"}
         style={headerBtn}>
-        <span style={{ color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: fs.mono, width: 10 }}>{open ? "▾" : "▸"}</span>
-        <span style={{ fontFamily: font.head, fontSize: fs.sm, fontWeight: 700, color: color.textDim }}>
+        <span style={{ color: open ? color.live : color.text2, fontFamily: font.mono, fontSize: fs.mono, width: 10 }}>{open ? "▾" : "▸"}</span>
+        <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.text2 }}>
           Startup prompt
         </span>
-        {dirty && <span style={{ color: color.amber, fontFamily: font.mono, fontSize: fs.xs }}>● unsaved</span>}
-        {empty && !dirty && <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.xs }}>empty</span>}
+        {dirty && <span style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.xs }}>● unsaved</span>}
+        {empty && !dirty && <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.xs }}>empty</span>}
       </button>
 
       {!open && (
         // Collapsed: a quiet two-line preview of the persisted prompt (read-only).
         <span title={saved || undefined}
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: empty ? color.textMuted : color.textDim, lineHeight: 1.45,
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: empty ? color.text3 : color.text2, lineHeight: 1.45,
             display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", whiteSpace: "pre-wrap" }}>
           {empty ? "No startup prompt — this agent boots inert until told what to do." : saved}
         </span>
@@ -77,7 +77,7 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
 
       {open && (
         <>
-          <p style={{ color: color.textMuted, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <p style={{ color: color.text3, fontSize: fs.mono, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
             Injected as the first turn of this agent's NEXT new session (never on resume). Editing it does not
             touch a live session.
           </p>
@@ -94,13 +94,13 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
             <Button disabled={!dirty || save.isPending} onClick={() => setDraft(saved)}
               title="Discard unsaved edits">Revert</Button>
             {readOnly
-              ? <span style={{ color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono }}>read-only in this preview</span>
+              ? <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>read-only in this preview</span>
               : dirty
-                ? <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
-                : <span style={{ color: color.phosphor, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
+                ? <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>
+                : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
             <span style={{ flex: 1 }} />
             {save.isError && (
-              <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono, textAlign: "right" }}>
+              <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono, textAlign: "right" }}>
                 {errorText(save.error)}
               </span>
             )}
@@ -118,6 +118,6 @@ const headerBtn: CSSProperties = {
 
 const textareaStyle: CSSProperties = {
   width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5,
-  fontFamily: font.mono, fontSize: fs.mono, color: color.text, background: color.panel2,
-  border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "8px 10px",
+  fontFamily: font.mono, fontSize: fs.mono, color: color.text, background: color.inset,
+  border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "8px 10px",
 };

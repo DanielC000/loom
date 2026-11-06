@@ -30,11 +30,11 @@ export function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string
   const mine = (schedules.data ?? []).filter((s) => agentIds.has(s.agentId));
   if (mine.length === 0) {
     return (
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
-        <span style={{ color: color.textDim }}>Schedules</span>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+        <span style={{ color: color.text2 }}>Schedules</span>
         <span>· none —</span>
         <button onClick={() => navigate("/automation")} title="Create a schedule on the Automation page"
-          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.cyan, fontFamily: font.mono, fontSize: fs.mono }}>
+          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.info, fontFamily: font.mono, fontSize: fs.mono }}>
           add one on the Automation page →
         </button>
       </div>
@@ -52,13 +52,13 @@ export function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string
 
 function ScheduleRow({ s, agentName }: { s: Schedule; agentName: string }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.textDim,
-      border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 8px" }}>
-      <span style={{ color: color.cyan }}>{s.cron}</span>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.text2,
+      border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 8px" }}>
+      <span style={{ color: color.info }}>{s.cron}</span>
       <Chip label="agent" value={agentName} />
-      <span style={{ fontSize: fs.xs, color: s.kind === "auditor" ? color.phosphor : color.amber }}>kind:{s.kind}</span>
+      <span style={{ fontSize: fs.xs, color: s.kind === "auditor" ? color.live : color.busy }}>kind:{s.kind}</span>
       <span style={{ flex: 1 }}>next · {s.nextFireAt ? new Date(s.nextFireAt).toLocaleString() : "—"}</span>
-      <span style={{ fontSize: fs.xs, color: s.enabled ? color.phosphor : color.textMuted }}>{s.enabled ? "ON" : "OFF"}</span>
+      <span style={{ fontSize: fs.xs, color: s.enabled ? color.live : color.text3 }}>{s.enabled ? "ON" : "OFF"}</span>
     </div>
   );
 }

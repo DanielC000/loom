@@ -201,8 +201,8 @@ export default function Vault() {
 
   return (
     <div>
-      {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
-      {projectId && !hasVault && <p style={{ color: color.textMuted }}>This project has no vault bound — there's nothing to browse here.</p>}
+      {!projectId && <p style={{ color: color.text3 }}>No project selected.</p>}
+      {projectId && !hasVault && <p style={{ color: color.text3 }}>This project has no vault bound — there's nothing to browse here.</p>}
       {projectId && hasVault && (
         <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 12, marginTop: 12 }}>
           <Panel style={{ height: "74vh", overflow: "hidden", padding: 6, display: "flex", flexDirection: "column" }}>
@@ -212,13 +212,13 @@ export default function Vault() {
             />
             <div style={{ flex: 1, overflow: "auto", margin: "0 -2px" }}>
               {/* Card 4729d007: "empty" is a claim about a tree that LOADED — never about one that is pending or errored. */}
-              {tree.isPending && <p style={{ color: color.textMuted, padding: 8 }}>Loading…</p>}
-              {tree.isError && <p role="alert" style={{ color: color.textMuted, padding: 8 }}>Could not load the vault tree ({tree.error instanceof Error ? tree.error.message : "error"}).</p>}
-              {tree.isSuccess && nodes.length === 0 && <p style={{ color: color.textMuted, padding: 8 }}>Empty vault folder.</p>}
-              {nodes.length > 0 && visible && visible.size === 0 && <p style={{ color: color.textMuted, padding: 8 }}>No files match “{query.trim()}”.</p>}
+              {tree.isPending && <p style={{ color: color.text3, padding: 8 }}>Loading…</p>}
+              {tree.isError && <p role="alert" style={{ color: color.text3, padding: 8 }}>Could not load the vault tree ({tree.error instanceof Error ? tree.error.message : "error"}).</p>}
+              {tree.isSuccess && nodes.length === 0 && <p style={{ color: color.text3, padding: 8 }}>Empty vault folder.</p>}
+              {nodes.length > 0 && visible && visible.size === 0 && <p style={{ color: color.text3, padding: 8 }}>No files match “{query.trim()}”.</p>}
               <TreeView nodes={nodes} depth={0} expanded={expanded} visible={visible} active={file} onToggle={toggle} onSelect={openFile} />
             </div>
-            <div style={{ display: "flex", gap: 6, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${color.border}` }}>
+            <div style={{ display: "flex", gap: 6, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${color.line}` }}>
               <Input placeholder="folder/new-note.md" value={newName} onChange={(e) => setNewName(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && validNew && !create.isPending) create.mutate(newName); }} style={{ flex: 1, minWidth: 0 }} />
               <Button variant="primary" disabled={!validNew || create.isPending} onClick={() => create.mutate(newName)}>+ New</Button>
@@ -226,7 +226,7 @@ export default function Vault() {
           </Panel>
 
           <Panel style={{ height: "74vh", overflow: "hidden", display: "flex", flexDirection: "column" }}>
-            {!file && <p style={{ color: color.textMuted, padding: 12 }}>Select a file to view, or create a new one.</p>}
+            {!file && <p style={{ color: color.text3, padding: 12 }}>Select a file to view, or create a new one.</p>}
             {file && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
@@ -237,7 +237,7 @@ export default function Vault() {
                     // `role="status"` makes the state audible — `aria-busy` on the body only suppresses
                     // announcements, it never announces anything itself.
                     <span role="status" data-testid="vault-loading-indicator"
-                      style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono, minWidth: 0 }}>
+                      style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, minWidth: 0 }}>
                       Loading {baseName(file)}…
                     </span>
                   )}
@@ -254,7 +254,7 @@ export default function Vault() {
                     // `loaded`, never `content.data` — the fail-closed half of the gate above. A render
                     // where the two disagree is a file switch in flight, so it waits rather than seeding.
                     !loaded
-                      ? <p style={{ color: color.textMuted }}>…</p>
+                      ? <p style={{ color: color.text3 }}>…</p>
                       : <VaultEditor key={file} content={loaded.content}
                           onSave={(c) => save.mutate({ path: file, content: c })} saving={save.isPending}
                           onCancel={() => setEditing(false)} />
@@ -290,7 +290,7 @@ function TreeView({ nodes, depth, expanded, visible, active, onToggle, onSelect 
               <Row depth={depth} onClick={() => onToggle(node.path)}>
                 <Chevron open={open} />
                 <FolderIcon open={open} />
-                <span style={{ color: color.textDim }}>{node.name}</span>
+                <span style={{ color: color.text2 }}>{node.name}</span>
               </Row>
               {open && <TreeView nodes={node.children} depth={depth + 1} expanded={expanded} visible={visible} active={active} onToggle={onToggle} onSelect={onSelect} />}
             </div>
@@ -301,7 +301,7 @@ function TreeView({ nodes, depth, expanded, visible, active, onToggle, onSelect 
           <Row key={node.path} depth={depth} active={isActive} onClick={() => onSelect(node.path)}>
             <span style={{ width: 12, flexShrink: 0 }} />
             <FileIcon kind={classify(node.path)} />
-            <span style={{ color: isActive ? color.text : color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.name}</span>
+            <span style={{ color: isActive ? color.text : color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.name}</span>
           </Row>
         );
       })}
@@ -314,10 +314,10 @@ function Row({ depth, active, onClick, children }: { depth: number; active?: boo
     <button onClick={onClick} className="loom-tree-row" title=""
       style={{
         display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left",
-        background: active ? color.phosphorDim : "transparent", cursor: "pointer",
-        border: "none", borderLeft: `2px solid ${active ? color.phosphor : "transparent"}`,
+        background: active ? color.liveSoft : "transparent", cursor: "pointer",
+        border: "none", borderLeft: `2px solid ${active ? color.live : "transparent"}`,
         padding: "3px 8px", paddingLeft: 6 + depth * 14,
-        fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.4,
+        fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.4,
       }}>
       {children}
     </button>
@@ -327,21 +327,21 @@ function Row({ depth, active, onClick, children }: { depth: number; active?: boo
 // ── Icons (currentColor-friendly inline SVG, restrained) ────────────────────────
 function Chevron({ open }: { open: boolean }) {
   return (
-    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden style={{ flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 120ms ease", color: color.textMuted }}>
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden style={{ flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 120ms ease", color: color.text3 }}>
       <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
 function FolderIcon({ open }: { open: boolean }) {
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden style={{ flexShrink: 0, color: color.cyan }}>
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden style={{ flexShrink: 0, color: color.info }}>
       {open
         ? <path d="M2 4.5 a1 1 0 0 1 1-1 h3 l1.2 1.2 H13 a1 1 0 0 1 1 1 v.3 H4.2 L2.5 11 Z M2 5.8 L3.6 12 a1 1 0 0 0 1 .8 h8.4 a1 1 0 0 0 1-.8 L15 7 a.6 .6 0 0 0-.6-.7 H4.5 a1 1 0 0 0-1 .8 Z" fill="currentColor" opacity="0.85" />
         : <path d="M2 4 a1 1 0 0 1 1-1 h3 l1.2 1.2 H13 a1 1 0 0 1 1 1 V12 a1 1 0 0 1-1 1 H3 a1 1 0 0 1-1-1 Z" fill="currentColor" opacity="0.85" />}
     </svg>
   );
 }
-const KIND_TINT: Record<Kind, string> = { md: color.phosphor, image: color.cyan, pdf: color.red, text: color.textDim, binary: color.textMuted };
+const KIND_TINT: Record<Kind, string> = { md: color.live, image: color.info, pdf: color.danger, text: color.text2, binary: color.text3 };
 function FileIcon({ kind }: { kind: Kind }) {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden style={{ flexShrink: 0, color: KIND_TINT[kind] }}>
@@ -363,8 +363,8 @@ function Breadcrumb({ path, onDir }: { path: string; onDir: (dir: string) => voi
         return (
           <span key={dirPath} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
             <button onClick={() => onDir(dirPath)} className="loom-crumb"
-              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: color.textMuted, fontFamily: font.mono, fontSize: fs.body }}>{seg}</button>
-            <span style={{ color: color.textMuted }}>/</span>
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: color.text3, fontFamily: font.mono, fontSize: fs.body }}>{seg}</button>
+            <span style={{ color: color.text3 }}>/</span>
           </span>
         );
       })}
@@ -394,7 +394,7 @@ function ContentView({ projectId, path, kind, content, loading, stale, files, on
   if (kind === "image") {
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 8, overflow: "auto" }}>
-        <VaultImage projectId={projectId} path={path} alt={path} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: radius.base, border: `1px solid ${color.border}`, background: color.panel2 }} />
+        <VaultImage projectId={projectId} path={path} alt={path} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: radius.base, border: `1px solid ${color.line}`, background: color.inset }} />
       </div>
     );
   }
@@ -402,8 +402,8 @@ function ContentView({ projectId, path, kind, content, loading, stale, files, on
   if (kind === "binary") return <BinaryCard projectId={projectId} path={path} />;
 
   // md / text
-  if (loading && content === undefined) return <p style={{ color: color.textMuted }}>…</p>;
-  if (content === undefined) return <p style={{ color: color.textMuted }}>…</p>;
+  if (loading && content === undefined) return <p style={{ color: color.text3 }}>…</p>;
+  if (content === undefined) return <p style={{ color: color.text3 }}>…</p>;
   // `stale` means this body belongs to the PREVIOUSLY selected note (see Vault's `stalePreviousBody`) —
   // dim it so it reads as held-over context rather than as this note's text, and mark the region busy so
   // a screen reader doesn't narrate it as the answer. The dim is the opacity the board's own skeleton
@@ -439,7 +439,7 @@ function PdfView({ projectId, path }: { projectId: string; path: string }) {
   if (asset.status === "loading") return fallback;
   return (
     <object data={asset.url} type="application/pdf"
-      style={{ width: "100%", height: "100%", border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+      style={{ width: "100%", height: "100%", border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset }}>
       {fallback}
     </object>
   );
@@ -452,13 +452,13 @@ function BinaryCard({ projectId, path, note }: { projectId: string; path: string
   const ext = extOf(path);
   return (
     <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-      <div style={{ textAlign: "center", border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2, padding: "28px 36px", maxWidth: 420 }}>
-        <svg width="40" height="40" viewBox="0 0 16 16" aria-hidden style={{ color: color.textMuted, marginBottom: 10 }}>
+      <div style={{ textAlign: "center", border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset, padding: "28px 36px", maxWidth: 420 }}>
+        <svg width="40" height="40" viewBox="0 0 16 16" aria-hidden style={{ color: color.text3, marginBottom: 10 }}>
           <path d="M4 1.5 h5 L13 5.5 V14 a.5 .5 0 0 1-.5 .5 h-8 A.5 .5 0 0 1 4 14 Z" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
           <path d="M9 1.5 V5.5 H13" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
         </svg>
         <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, marginBottom: 4, wordBreak: "break-all" }}>{name}</div>
-        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, marginBottom: 16 }}>
+        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, marginBottom: 16 }}>
           {note ?? `Binary file${ext ? ` · .${ext}` : ""}`} · {head.isLoading ? "…" : humanSize(head.data?.size ?? null)}
         </div>
         <VaultDownloadLink projectId={projectId} path={path}>Download file</VaultDownloadLink>
@@ -475,15 +475,15 @@ function BinaryCard({ projectId, path, note }: { projectId: string; path: string
 function ReadError({ error, onRetry, retrying }: { error: unknown; onRetry: () => void; retrying: boolean }) {
   return (
     <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-      <div style={{ textAlign: "center", border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2, padding: "28px 36px", maxWidth: 420 }}>
-        <svg width="34" height="34" viewBox="0 0 16 16" aria-hidden style={{ color: color.red, marginBottom: 10, opacity: 0.8 }}>
+      <div style={{ textAlign: "center", border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset, padding: "28px 36px", maxWidth: 420 }}>
+        <svg width="34" height="34" viewBox="0 0 16 16" aria-hidden style={{ color: color.danger, marginBottom: 10, opacity: 0.8 }}>
           <circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" strokeWidth="1.1" />
           <path d="M8 4.8 V8.9" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
           <circle cx="8" cy="11.1" r="0.75" fill="currentColor" />
         </svg>
         <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, marginBottom: 6 }}>Unable to read this note</div>
-        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, marginBottom: 6, wordBreak: "break-word" }}>{errorText(error)}</div>
-        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, marginBottom: 16, lineHeight: 1.6 }}>
+        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, marginBottom: 6, wordBreak: "break-word" }}>{errorText(error)}</div>
+        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, marginBottom: 16, lineHeight: 1.6 }}>
           It may have been renamed, moved, or deleted since this tree was loaded.
         </div>
         <Button variant="primary" disabled={retrying} onClick={onRetry}>{retrying ? "Retrying…" : "Retry"}</Button>
@@ -499,7 +499,7 @@ function DeleteButton({ name, onDelete, deleting }: { name: string; onDelete: ()
   if (!confirm) return <Button variant="danger" onClick={() => setConfirm(true)}>Delete</Button>;
   return (
     <>
-      <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>delete?</span>
+      <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>delete?</span>
       <Button variant="danger" disabled={deleting} onClick={onDelete}>Confirm</Button>
       <Button onClick={() => setConfirm(false)}>Cancel</Button>
     </>
@@ -518,12 +518,12 @@ function VaultEditor({ content, onSave, saving, onCancel }:
         style={{
           flex: 1, minHeight: 320, width: "100%", boxSizing: "border-box", resize: "none",
           fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
-          background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 10,
+          background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 10,
         }} />
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave(text)}>{saving ? "Saving…" : "Save"}</Button>
         <Button onClick={onCancel}>Cancel</Button>
-        {dirty && <span style={{ color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>}
+        {dirty && <span style={{ color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>}
       </div>
     </div>
   );

@@ -55,13 +55,13 @@ export function PlatformFindings({ edition, projectId }: { edition: PlatformEdit
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           {edition.copy.findings.label}
-          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
+          <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
             {edition.copy.findings.hint}
           </span>
         </SectionLabel>
         {findings.length === 0 ? (
           <Panel style={{ padding: 12 }}>
-            <span style={{ color: color.textMuted, fontSize: fs.sm }}>{edition.copy.findings.empty}</span>
+            <span style={{ color: color.text3, fontSize: fs.sm }}>{edition.copy.findings.empty}</span>
           </Panel>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -80,7 +80,7 @@ export function PlatformFindings({ edition, projectId }: { edition: PlatformEdit
         <section>
           <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             Suggested presets
-            <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
+            <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
               preset prompts the Auditor proposed from prompts you repeat — adopting one adds it to every composer
             </span>
           </SectionLabel>
@@ -128,7 +128,7 @@ function FindingRow({ ts, runId, taskId, detail, onBoard, boardTitle }: {
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, flex: 1, minWidth: 180 }}>
         {title}
       </span>
-      <span title={`filed by run ${runId}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+      <span title={`filed by run ${runId}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
         {new Date(ts).toLocaleString()} · run {runId.slice(0, 8)}
       </span>
       {onBoard && taskId ? (
@@ -137,16 +137,16 @@ function FindingRow({ ts, runId, taskId, detail, onBoard, boardTitle }: {
         // its own board rather than the active project's — so one click lands on the card's dialog.
         <Link to={`/platform?tab=board&task=${encodeURIComponent(taskId)}`}
           title="Open this finding's card on the Platform board"
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan, textDecoration: "none",
-            border: `1px solid ${color.border}`, borderRadius: radius.base, padding: "2px 8px" }}>
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info, textDecoration: "none",
+            border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "2px 8px" }}>
           Open on the board →
         </Link>
       ) : (
         // A finding whose card was deleted stays listed rather than vanishing: the finding was still
         // filed, and silently dropping the row would misreport the auditor's own history.
         <span title="This finding's board card no longer exists"
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted,
-            border: `1px solid ${color.border}`, borderRadius: radius.base, padding: "2px 8px" }}>
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3,
+            border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "2px 8px" }}>
           card removed
         </span>
       )}

@@ -12,6 +12,7 @@ import type { UsageLimitsStatus } from "@loom/shared";
 import { Button, Panel, SectionLabel } from "./ui";
 import { useAtlasNodeHeadSlot } from "../lib/atlasNodeHead";
 import { useDismissable } from "../lib/useDismissable";
+import { sentenceCase } from "../lib/textCase";
 import type { BoardLane } from "../lib/atlasHome";
 import { color, columnTone, font, radius, tone, toneFill, type Tone } from "../theme";
 
@@ -352,7 +353,7 @@ function KpiTile({ item, open, align, onToggle, onClose }: {
   const popId = `atlas-kpi-pop-${item.key}`;
   const body = (
     <>
-      <span className="loom-kpi-label">{item.label}</span>
+      <span className="loom-kpi-label">{sentenceCase(item.label)}</span>
       <span className="loom-kpi-value" style={{ color: tone[t] }}>{item.value}</span>
       {item.sub !== undefined && <span className="loom-kpi-sub">{item.sub}</span>}
       {item.fill !== undefined && (
@@ -494,7 +495,7 @@ export function KpiPill({ value, label, tone: t = "live", title, testId }: {
   return (
     <span className="loom-kpipill" data-testid={testId} title={title}>
       <span className="loom-kpipill-v" style={{ color: tone[t] }}>{value}</span>
-      <span className="loom-kpipill-l">{label}</span>
+      <span className="loom-kpipill-l">{typeof label === "string" ? sentenceCase(label) : label}</span>
     </span>
   );
 }
@@ -645,7 +646,7 @@ export function SlotPanel({ slot, label, card, what, bar }: {
   return (
     <div className={`loom-bandpanel loom-bandslot${bar ? " is-bar" : ""}`} data-testid={`atlas-slot-${slot}`}>
       <div className="loom-bandhead">
-        <SectionLabel style={{ margin: 0, color: color.textMuted }}>{label}</SectionLabel>
+        <SectionLabel style={{ margin: 0, color: color.text3 }}>{label}</SectionLabel>
       </div>
       <div className="loom-bandbody">
         <p className="loom-slotnote">{what}</p>
@@ -673,10 +674,10 @@ export function LaneBar({ lanes, title }: { lanes: BoardLane[]; title?: string }
   return (
     <span className="loom-lanebar" title={title ?? lanes.map((l) => `${l.label} ${l.count}`).join(" · ")} aria-hidden>
       {total === 0
-        ? <span className="loom-laneseg" style={{ flex: 1, background: color.border }} />
+        ? <span className="loom-laneseg" style={{ flex: 1, background: color.line }} />
         : lanes.filter((l) => l.count > 0).map((l) => (
           <span key={l.key} className="loom-laneseg"
-            style={{ flex: l.count, background: l.accentColor ?? (columnTone(l) ? tone[columnTone(l)!] : color.borderStrong) }} />
+            style={{ flex: l.count, background: l.accentColor ?? (columnTone(l) ? tone[columnTone(l)!] : color.lineStrong) }} />
         ))}
     </span>
   );
@@ -722,7 +723,7 @@ export function DayBars({ series, label }: { series: { day: string; branches: nu
           <span style={{
             display: "block", width: "100%", borderRadius: 1,
             height: `${Math.max(2, (d.branches / max) * 100)}%`,
-            background: i === series.length - 1 ? color.phosphor : color.borderStrong,
+            background: i === series.length - 1 ? color.live : color.lineStrong,
           }} />
         </span>
       ))}

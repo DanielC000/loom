@@ -44,7 +44,7 @@ export function NewBuildNotice() {
   return (
     <div role="status" data-testid="new-build-notice"
       style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, padding: "7px 20px",
-        background: wash(color.info, 8), borderBottom: `1px solid ${color.cyan}`,
+        background: wash(color.info, 8), borderBottom: `1px solid ${color.info}`,
         fontFamily: font.mono, fontSize: fs.mono }}>
       <Dot tone="info" glow />
       {/* Flexes rather than sitting at its natural width so that at narrow widths it keeps the Dot
@@ -52,7 +52,7 @@ export function NewBuildNotice() {
           row and leaving the Dot stranded alone. */}
       <span style={{ color: color.text, flex: "1 1 200px", minWidth: 0 }}>
         A new version of Loom is available.{" "}
-        <span style={{ color: color.textDim }}>This tab is running an older build.</span>
+        <span style={{ color: color.text2 }}>This tab is running an older build.</span>
       </span>
       {/* The two controls wrap as ONE unit. Left as separate flex children they split at narrow widths,
           stranding the dismiss × alone on its own row away from the action it belongs to. */}
@@ -65,7 +65,7 @@ export function NewBuildNotice() {
         </Button>
         <button data-testid="new-build-notice-dismiss" onClick={() => { markDismissed(served); setDismissed(true); }}
           title="dismiss" aria-label="dismiss"
-          style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer",
+          style={{ background: "transparent", border: "none", color: color.text3, cursor: "pointer",
             fontFamily: font.mono, fontSize: fs.lg, lineHeight: 1, minWidth: 44, minHeight: 44 }}>
           ×
         </button>

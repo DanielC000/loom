@@ -37,10 +37,10 @@ import { errorText } from "../lib/loopbackCredential";
 // daemon (re)start (hot-reconfigure is a separate backend card); the UI states that plainly.
 
 const fieldLabel: CSSProperties = {
-  fontFamily: font.head, fontSize: fs.sm, fontWeight: 700, color: color.textDim,
+  fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.text2,
 };
-const hint: CSSProperties = { fontSize: fs.mono, color: color.textMuted, fontFamily: font.mono, lineHeight: 1.5 };
-const errStyle: CSSProperties = { color: color.red, fontSize: fs.mono, fontFamily: font.mono };
+const hint: CSSProperties = { fontSize: fs.mono, color: color.text3, fontFamily: font.mono, lineHeight: 1.5 };
+const errStyle: CSSProperties = { color: color.danger, fontSize: fs.mono, fontFamily: font.mono };
 
 // Danger/attention fill washes for the elevated lead-mode surfaces. Mixed from the danger/busy tokens, so
 // they follow the light/dark theme with the colour itself.
@@ -53,7 +53,7 @@ function Field({ label, sub, children }: { label: string; sub?: string; children
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={fieldLabel}>
         {label}
-        {sub && <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}> · {sub}</span>}
+        {sub && <span style={{ fontWeight: 400, color: color.text3 }}> · {sub}</span>}
       </span>
       {children}
     </label>
@@ -267,7 +267,7 @@ function ClassicCompanionLayout({
             )}
           </div>
         ) : (
-          <p style={{ color: color.textMuted, padding: 12 }}>Loading…</p>
+          <p style={{ color: color.text3, padding: 12 }}>Loading…</p>
         )}
       </Panel>
     </div>
@@ -322,7 +322,7 @@ function AtlasCompanionLayout({
           )}
         </>
       ) : (
-        <p style={{ color: color.textMuted }}>Loading…</p>
+        <p style={{ color: color.text3 }}>Loading…</p>
       )}
     </div>
   );
@@ -367,9 +367,9 @@ function CompanionSwitcher({ companions, alertingIds, selectedId, onSelect, onNe
                 className="loom-toggle"
                 style={{
                   display: "inline-flex", alignItems: "center", gap: 7,
-                  background: on ? color.phosphorDim : "transparent",
-                  color: on ? color.text : color.textDim,
-                  border: `1px solid ${on ? color.phosphor : color.border}`,
+                  background: on ? color.liveSoft : "transparent",
+                  color: on ? color.text : color.text2,
+                  border: `1px solid ${on ? color.live : color.line}`,
                   borderRadius: radius.base, padding: "5px 12px",
                   fontFamily: font.mono, fontSize: fs.mono, cursor: "pointer",
                 }}
@@ -378,7 +378,7 @@ function CompanionSwitcher({ companions, alertingIds, selectedId, onSelect, onNe
                     it out of the accessible name so that stays just the companion's name. */}
                 <Dot tone={stuck ? "danger" : enabled ? "live" : "muted"} />
                 <span>{named || COMPANION_DEFAULT_NAME}</span>
-                {!named && <span style={{ color: color.textMuted, fontSize: fs.sm }}>{c.sessionId.slice(0, 4)}</span>}
+                {!named && <span style={{ color: color.text3, fontSize: fs.sm }}>{c.sessionId.slice(0, 4)}</span>}
               </button>
             );
           })}
@@ -538,7 +538,7 @@ function CompanionCreate({ onCreate, pending, error, onCancel }: {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 460 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <strong style={{ fontFamily: font.head, color: color.text }}>New companion</strong>
+        <strong style={{ fontFamily: font.ui, color: color.text }}>New companion</strong>
         <p style={{ ...hint, margin: 0 }}>
           Give it a name and you're set — a personal assistant you can talk to right here, no setup. Connect
           Telegram later under <strong style={{ color: color.text }}>Manage</strong>.
@@ -600,7 +600,7 @@ function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault, b
       <Field label="Bot token" sub={mode === "edit" ? "write-only · leave blank to keep the stored token" : "from BotFather"}>
         {mode === "edit" && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-            <span style={{ ...hint, color: color.textDim }}>stored</span>
+            <span style={{ ...hint, color: color.text2 }}>stored</span>
             <code style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>{currentToken}</code>
           </div>
         )}
@@ -651,7 +651,7 @@ function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault, b
         <textarea value={form.heartbeatPrompt} onChange={(e) => set("heartbeatPrompt", e.target.value)}
           placeholder={heartbeatPromptDefault || "Check in — anything worth surfacing?"} rows={2} spellCheck={false}
           style={{
-            background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`,
+            background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`,
             borderRadius: radius.base, padding: "6px 8px", fontFamily: font.mono, fontSize: fs.body, resize: "vertical",
           }} />
       </Field>
@@ -719,7 +719,7 @@ function ModeToggle({ mode, onMode }: { mode: CompanionMode; onMode: (m: Compani
     { key: "chat", label: "Chat" }, { key: "manage", label: "Manage" }, { key: "terminal", label: "Terminal" },
   ];
   return (
-    <div role="tablist" aria-label="Companion view" style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden" }}>
+    <div role="tablist" aria-label="Companion view" style={{ display: "inline-flex", border: `1px solid ${color.line}`, borderRadius: radius.base, overflow: "hidden" }}>
       {opts.map((o) => {
         const on = o.key === mode;
         return (
@@ -734,8 +734,8 @@ function ModeToggle({ mode, onMode }: { mode: CompanionMode; onMode: (m: Compani
             // `.loom-toggle` ring sits at +2px, which this track's `overflow: hidden` clips away.
             className="loom-toggle loom-modetoggle"
             style={{
-              background: on ? color.phosphorDim : "transparent",
-              color: on ? color.text : color.textDim,
+              background: on ? color.liveSoft : "transparent",
+              color: on ? color.text : color.text2,
               border: "none", padding: "5px 14px", fontFamily: font.mono, fontSize: fs.mono, cursor: "pointer",
             }}
           >
@@ -757,7 +757,7 @@ function ModeToggle({ mode, onMode }: { mode: CompanionMode; onMode: (m: Compani
 function CompanionIdentity({ companion, label }: { companion: CompanionRow; label: string }) {
   return (
     <>
-      <strong style={{ fontFamily: font.head, color: color.text }}>{label}</strong>
+      <strong style={{ fontFamily: font.ui, color: color.text }}>{label}</strong>
       {companion.config
         ? <Badge tone={companion.config.enabled ? "live" : "muted"}>{companion.config.enabled ? "enabled" : "disabled"}</Badge>
         : companion.bindings.length > 0
@@ -1124,9 +1124,9 @@ function ChannelRow({ sessionId, binding, onChanged }: { sessionId: string; bind
   });
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <strong style={{ fontFamily: font.head, fontSize: fs.sm, color: color.text }}>
+        <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>
           {channelDisplayName(binding.channel)}
         </strong>
         <StatusPill tone={binding.scope === "group" ? "busy" : inApp ? "live" : "info"} label={inApp ? "default" : binding.scope} />
@@ -1198,9 +1198,9 @@ function ConnectTelegram({ companion, onChanged }: { companion: CompanionRow; on
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 12, border: `1px solid ${color.cyan}`, borderRadius: radius.base, background: color.panel2 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 12, border: `1px solid ${color.info}`, borderRadius: radius.base, background: color.inset }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <strong style={{ fontFamily: font.head, fontSize: fs.sm, color: color.text }}>Connect Telegram</strong>
+        <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>Connect Telegram</strong>
         <StatusPill tone="info" label="adds a channel" />
       </div>
       <ol style={{ ...hint, margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
@@ -1258,7 +1258,7 @@ function AdvancedAddBinding({ companion, onChanged }: { companion: CompanionRow;
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 10, border: `1px solid ${color.line}`, borderRadius: radius.base }}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 120px", gap: 10 }}>
         <Field label="Channel"><Input value={channel} onChange={(e) => setChannel(e.target.value)} placeholder="telegram" spellCheck={false} /></Field>
         <Field label="Chat id"><Input value={chatId} onChange={(e) => setChatId(e.target.value)} placeholder="e.g. -1001234" spellCheck={false} /></Field>
@@ -1305,13 +1305,13 @@ function AllowedSenders({ sessionId, channel }: { sessionId: string; channel: st
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.line}`, borderRadius: radius.base }}>
       <SectionLabel style={{ margin: 0 }}>Allowed senders</SectionLabel>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {(senders.data ?? []).map((s) => (
           <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Chip label="id" value={s.senderId} tone="info" />
-            {s.label && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>{s.label}</span>}
+            {s.label && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>{s.label}</span>}
             <span style={{ flex: 1 }} />
             <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate(s.id)}>Remove</Button>
           </div>
@@ -1334,8 +1334,8 @@ function ReadonlyBlock({ children, dim }: { children: ReactNode; dim?: boolean }
   return (
     <pre style={{
       margin: 0, maxHeight: 320, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word",
-      fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: dim ? color.textMuted : color.text,
-      background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base, padding: "10px 12px",
+      fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: dim ? color.text3 : color.text,
+      background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "10px 12px",
     }}>
       {children}
     </pre>
@@ -1391,11 +1391,11 @@ function PersonaSection({ sessionId }: { sessionId: string }) {
           <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={10} spellCheck={false}
             data-testid="companion-persona-input"
             style={{
-              background: color.panel2, color: color.text, border: `1px solid ${over ? color.red : color.borderStrong}`,
+              background: color.inset, color: color.text, border: `1px solid ${over ? color.danger : color.lineStrong}`,
               borderRadius: radius.base, padding: "8px 10px", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5, resize: "vertical",
             }} />
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ ...hint, color: over ? color.red : color.textMuted }}>
+            <span style={{ ...hint, color: over ? color.danger : color.text3 }}>
               {draft.length.toLocaleString()} / {COMPANION_PROMPT_MAX.toLocaleString()}
             </span>
             <span style={{ flex: 1 }} />
@@ -1414,7 +1414,7 @@ function PersonaSection({ sessionId }: { sessionId: string }) {
           </div>
           {showBrief && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <span style={{ ...hint, color: color.textDim }}>Loom's base brief — read-only, prepended to every companion.</span>
+              <span style={{ ...hint, color: color.text2 }}>Loom's base brief — read-only, prepended to every companion.</span>
               <ReadonlyBlock dim>{q.data?.baseBrief ?? ""}</ReadonlyBlock>
             </div>
           )}
@@ -1472,7 +1472,7 @@ function SkillRow({ sessionId, skill, onDelete, deleting }: { sessionId: string;
   const content = useQuery({ queryKey: ["companionSkill", sessionId, skill.name], queryFn: () => api.companionSkill(sessionId, skill.name), enabled: open });
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <code style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{skill.name}</code>
         {skill.description && <span style={{ ...hint, margin: 0 }}>{skill.description}</span>}
@@ -1546,7 +1546,7 @@ function MemoryRow({ sessionId, memory, onDelete, deleting }: { sessionId: strin
   const content = useQuery({ queryKey: ["companionMemory", sessionId, memory.name], queryFn: () => api.companionMemory(sessionId, memory.name), enabled: open });
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <code style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{memory.name}</code>
         {memory.pinned && <span title="pinned — always in this companion's context"><Badge tone="busy">pinned</Badge></span>}
@@ -1625,11 +1625,11 @@ function ReminderRow({ reminder, onDelete, deleting }: { reminder: CompanionRemi
   return (
     <div style={{
       display: "flex", flexDirection: "column", gap: 8, padding: 10,
-      border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2,
+      border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset,
       opacity: disabled ? 0.6 : 1,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <strong style={{ fontFamily: font.head, fontSize: fs.body, color: color.text }}>{reminderTitle(reminder)}</strong>
+        <strong style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>{reminderTitle(reminder)}</strong>
         <Badge tone={reminder.enabled ? "live" : "muted"}>{reminder.enabled ? "enabled" : "disabled"}</Badge>
         <span style={{ flex: 1 }} />
         {confirm ? (
@@ -1702,7 +1702,7 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
             onChange={(e) => save.mutate(e.target.checked)} style={{ marginTop: 3 }} data-testid="companion-restricted-tools" />
           <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <span style={{ ...fieldLabel, color: color.text }}>
-              Restricted tools <span style={{ fontWeight: 400, letterSpacing: 0, color: on ? color.phosphor : color.textMuted }}>· {on ? "on" : "off"}</span>
+              Restricted tools <span style={{ fontWeight: 400, letterSpacing: 0, color: on ? color.live : color.text3 }}>· {on ? "on" : "off"}</span>
             </span>
             <span style={{ ...hint, margin: 0 }}>
               Remove the dangerous native tools — shell (Bash), host writes (Edit / Write / NotebookEdit /
@@ -1760,7 +1760,7 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
 // the human-only GET/PUT /api/companion/:sessionId/lead-mode: turning ON requires the ack, turning OFF is a
 // bare toggle (instant revert). NO agent MCP path — an injection-exposed companion can never widen itself.
 // Inline expand-in-place confirm (NOT a modal — Loom's established destructive-action pattern).
-const leadRedBorder = `1px solid ${color.red}`;
+const leadRedBorder = `1px solid ${color.danger}`;
 
 function ShieldBolt() {
   return (
@@ -1772,9 +1772,9 @@ function ShieldBolt() {
 }
 // A grants/keeps disclosure row: a leading icon + rich text. `tone` tints the icon (red = a grant, amber = a keep).
 function DiscItem({ tone: t, children }: { tone: "danger" | "busy"; children: ReactNode }) {
-  const c = t === "danger" ? color.red : color.amber;
+  const c = t === "danger" ? color.danger : color.busy;
   return (
-    <li style={{ display: "flex", gap: 9, alignItems: "flex-start", fontSize: fs.sm, lineHeight: 1.55, color: color.textDim }}>
+    <li style={{ display: "flex", gap: 9, alignItems: "flex-start", fontSize: fs.sm, lineHeight: 1.55, color: color.text2 }}>
       <svg viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", marginTop: 2, width: 13, height: 13 }} aria-hidden>
         {t === "danger"
           ? <path d="M5 12h14M13 6l6 6-6 6" />
@@ -1815,8 +1815,8 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
         position: "relative", display: "flex", flexDirection: "column", gap: 14, padding: 16,
         border: leadRedBorder, borderRadius: radius.base,
         background: leadMode
-          ? `linear-gradient(180deg, ${RED_WASH_2}, transparent 55%), ${color.panel2}`
-          : `linear-gradient(180deg, ${RED_WASH}, transparent 60%), ${color.panel2}`,
+          ? `linear-gradient(180deg, ${RED_WASH_2}, transparent 55%), ${color.inset}`
+          : `linear-gradient(180deg, ${RED_WASH}, transparent 60%), ${color.inset}`,
         ...(leadMode ? { boxShadow: `inset 0 0 0 1px ${wash(color.danger, 28)}, 0 0 40px ${wash(color.danger, 5)}` } : null),
       }}
     >
@@ -1824,24 +1824,24 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
         <span style={{
           width: 34, height: 34, flex: "none", borderRadius: radius.base, border: leadRedBorder,
-          display: "grid", placeItems: "center", color: color.red, background: RED_WASH,
+          display: "grid", placeItems: "center", color: color.danger, background: RED_WASH,
         }} aria-hidden>
           <ShieldBolt />
         </span>
         <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0, flex: 1 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <span style={{ fontFamily: font.head, fontSize: fs.body, color: color.text }}>Lead mode</span>
+            <span style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>Lead mode</span>
             <Badge tone="danger">owner only</Badge>
             <StatusPill tone="danger" glow label={leadMode ? "no guardrails · live" : "no guardrails"} />
           </div>
-          <p style={{ fontSize: fs.sm, color: color.textDim, lineHeight: 1.55, margin: 0, maxWidth: 640 }}>
+          <p style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.55, margin: 0, maxWidth: 640 }}>
             One switch instead of per-project grants: full capability across{" "}
             <strong style={{ color: color.text }}>every project</strong>, current and future. Loom's most
             powerful setting — turn it on knowing exactly what it opens.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flex: "none" }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, minWidth: 26, color: leadMode ? color.red : color.textMuted }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, minWidth: 26, color: leadMode ? color.danger : color.text3 }}>
             {leadMode ? "on" : "off"}
           </span>
           <button
@@ -1855,14 +1855,14 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
             style={{
               position: "relative", width: 52, height: 28, borderRadius: radius.pill, padding: 0, flex: "none",
               cursor: setLead.isPending ? "wait" : "pointer",
-              border: `1px solid ${leadMode ? color.red : color.borderStrong}`,
-              background: leadMode ? wash(color.danger, 22) : color.panel,
+              border: `1px solid ${leadMode ? color.danger : color.lineStrong}`,
+              background: leadMode ? wash(color.danger, 22) : color.surface,
               transition: "background 120ms linear, border-color 120ms linear",
             }}
           >
             <span style={{
               position: "absolute", top: 3, left: 3, width: 20, height: 20, borderRadius: radius.pill,
-              background: leadMode ? color.red : color.textMuted,
+              background: leadMode ? color.danger : color.text3,
               transform: leadMode ? "translateX(24px)" : "translateX(0)",
               transition: "transform 140ms cubic-bezier(0.2,0.8,0.2,1), background 140ms linear",
               ...(leadMode ? { boxShadow: `0 0 8px ${wash(color.danger, 70)}` } : null),
@@ -1875,7 +1875,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
       {!leadMode && !enabling && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <Button variant="danger" data-testid="companion-lead-mode-enable" onClick={beginEnable}>Enable lead mode…</Button>
-          <span style={{ fontSize: fs.mono, color: color.textMuted, fontFamily: font.mono }}>Opens a full disclosure before anything changes.</span>
+          <span style={{ fontSize: fs.mono, color: color.text3, fontFamily: font.mono }}>Opens a full disclosure before anything changes.</span>
         </div>
       )}
 
@@ -1889,7 +1889,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <StatusPill tone="danger" glow label="Lead mode — fleet-wide" />
-            <span style={{ fontFamily: font.head, fontSize: fs.sm, color: color.text }}>Read this before you enable it</span>
+            <span style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>Read this before you enable it</span>
           </div>
           <p style={{ fontSize: fs.sm, color: color.text, lineHeight: 1.6, margin: 0 }}>
             You are about to give <strong>{companionName}</strong> full capability across your whole fleet with{" "}
@@ -1899,7 +1899,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
             <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: `1px solid ${wash(color.danger, 35)}`, background: wash(color.danger, 4) }}>
-              <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.red }}>What lead mode grants</span>
+              <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.danger }}>What lead mode grants</span>
               <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
                 <DiscItem tone="danger"><strong style={{ color: color.text }}>Full act-scope on every lever</strong>, in every project — including any project you create later.</DiscItem>
                 <DiscItem tone="danger"><strong style={{ color: color.text }}>Session control with no confirmation</strong> — message, stop, or resume <strong style={{ color: color.text }}>any</strong> session, of any role, in any project.</DiscItem>
@@ -1907,7 +1907,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
               </ul>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: `1px solid ${wash(color.busy, 35)}`, background: AMBER_WASH }}>
-              <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.amber }}>What still asks you first</span>
+              <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.busy }}>What still asks you first</span>
               <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
                 <DiscItem tone="busy"><strong style={{ color: color.text }}>Deploy &amp; irreversible decisions</strong> still require a fresh confirmation each time.</DiscItem>
                 <DiscItem tone="busy"><strong style={{ color: color.text }}>Spawning a session</strong> still asks every time — that step-up is untouched.</DiscItem>
@@ -1918,16 +1918,16 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
 
           <label
             data-testid="companion-lead-mode-ack-row"
-            style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "10px 12px", border: `1px dashed ${color.borderStrong}`, borderRadius: radius.base, background: color.panel2, cursor: "pointer" }}
+            style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "10px 12px", border: `1px dashed ${color.lineStrong}`, borderRadius: radius.base, background: color.inset, cursor: "pointer" }}
           >
             <input
               type="checkbox"
               checked={ack}
               onChange={(e) => setAck(e.target.checked)}
               data-testid="companion-lead-mode-ack"
-              style={{ marginTop: 2, width: 15, height: 15, accentColor: color.red, cursor: "pointer", flex: "none" }}
+              style={{ marginTop: 2, width: 15, height: 15, accentColor: color.danger, cursor: "pointer", flex: "none" }}
             />
-            <span style={{ fontSize: fs.sm, color: color.textDim, lineHeight: 1.5 }}>
+            <span style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.5 }}>
               I understand lead mode gives {companionName} <strong style={{ color: color.text }}>fleet-wide control with no guardrails</strong>, including Loom's own infrastructure sessions.
             </span>
           </label>
@@ -1950,7 +1950,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
           style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "10px 12px", border: leadRedBorder, borderRadius: radius.base, background: RED_WASH }}
         >
           <StatusPill tone="danger" glow label="Active · fleet-wide" />
-          <span style={{ flex: 1, minWidth: 200, fontSize: fs.sm, color: color.textDim, lineHeight: 1.5 }}>
+          <span style={{ flex: 1, minWidth: 200, fontSize: fs.sm, color: color.text2, lineHeight: 1.5 }}>
             <strong style={{ color: color.text }}>{companionName}</strong> has full act-scope across every
             project, no guardrails. Your per-project grants are shadowed below and return the moment you switch this off.
           </span>
@@ -2038,8 +2038,8 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
                 data-testid="companion-grants-superseded"
                 style={{
                   position: "absolute", top: 8, right: 8, zIndex: 5, display: "inline-flex", alignItems: "center", gap: 7,
-                  padding: "5px 10px", border: `1px solid ${color.red}`, borderRadius: radius.pill, background: wash(color.dangerSoft, 92),
-                  fontFamily: font.mono, fontSize: fs.xs, color: color.red,
+                  padding: "5px 10px", border: `1px solid ${color.danger}`, borderRadius: radius.pill, background: wash(color.dangerSoft, 92),
+                  fontFamily: font.mono, fontSize: fs.xs, color: color.danger,
                 }}
               >
                 <Dot tone="danger" /> Superseded by lead mode
@@ -2057,7 +2057,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
               data-testid="companion-grants-apply"
               style={{
                 display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "8px 10px",
-                border: `1px solid ${color.amber}`, borderRadius: radius.base, background: wash(color.busy, 6),
+                border: `1px solid ${color.busy}`, borderRadius: radius.base, background: wash(color.busy, 6),
               }}
             >
               <Badge tone="busy">restart to apply</Badge>
@@ -2087,12 +2087,12 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
               role="alert"
               style={{
                 display: "flex", flexDirection: "column", gap: 10, padding: "10px 12px",
-                border: `1px solid ${color.amber}`, borderRadius: radius.base, background: AMBER_WASH,
+                border: `1px solid ${color.busy}`, borderRadius: radius.base, background: AMBER_WASH,
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <Badge tone="busy">heads up</Badge>
-                <strong style={{ fontFamily: font.head, fontSize: fs.sm, color: color.text }}>
+                <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>
                   Risky capability combination
                 </strong>
               </div>
@@ -2101,7 +2101,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
               </p>
               {coGrantWarnings.map((w) => (
                 <div key={w.code} data-testid={`companion-cogrant-warning-${w.code}`} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                  <strong style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber }}>{w.title}</strong>
+                  <strong style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy }}>{w.title}</strong>
                   <p style={{ ...hint, margin: 0 }}>{w.detail}</p>
                 </div>
               ))}
@@ -2171,10 +2171,10 @@ function GrantsByProject({ rows, projects }: { rows: CompanionCapabilityGrant[];
   return (
     <div
       data-testid="companion-grants-by-project"
-      style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 12px", border: `1px solid ${color.border}`, borderRadius: radius.base, background: color.panel2 }}
+      style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 12px", border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.inset }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <strong style={{ fontFamily: font.head, fontSize: fs.sm, color: color.textDim }}>Grants by project</strong>
+        <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>Grants by project</strong>
         <span style={{ flex: 1 }} />
         <StatusPill tone="live" label={`${ordered.length} project${ordered.length === 1 ? "" : "s"}`} />
       </div>
@@ -2253,10 +2253,10 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
     : <Badge tone="info">read-only</Badge>;
 
   return (
-    <div data-testid={`companion-lever-${meta.slug}`} style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${meta.tier === "elevated" ? color.red : color.border}`, borderRadius: radius.base, background: color.panel2 }}>
+    <div data-testid={`companion-lever-${meta.slug}`} style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${meta.tier === "elevated" ? color.danger : color.line}`, borderRadius: radius.base, background: color.inset }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <strong style={{ fontFamily: font.head, fontSize: fs.sm, color: color.text }}>{meta.name}</strong>
-        <code style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{meta.slug}</code>
+        <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>{meta.name}</strong>
+        <code style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{meta.slug}</code>
         {tierFlag}
         {/* Tier-X honest label: an elevated lever that ALSO confirms every single use (session-spawn) is
             NOT friction-free like session-steer — surface that difference so the owner grants it knowingly. */}
@@ -2311,7 +2311,7 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
               role="alertdialog"
               aria-label={`Grant ${meta.name}`}
               data-testid={`companion-grant-confirm-${meta.slug}`}
-              style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${color.red}`, borderRadius: radius.base, background: RED_WASH }}
+              style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${color.danger}`, borderRadius: radius.base, background: RED_WASH }}
             >
               <StatusPill tone="danger" label="Elevated grant" glow />
               <span style={{ ...hint, margin: 0 }}>
@@ -2351,11 +2351,11 @@ function GrantScopeRow({ meta, grant, projectName, busy, onSetMode, onSetConfig,
   const isAct = grant.mode === "act";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 8, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 8, border: `1px solid ${color.line}`, borderRadius: radius.base }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <Chip label="project" value={projectName} tone="info" />
         {meta.modes.length > 1 ? (
-          <div role="group" aria-label="Grant mode" style={{ display: "inline-flex", border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden" }}>
+          <div role="group" aria-label="Grant mode" style={{ display: "inline-flex", border: `1px solid ${color.line}`, borderRadius: radius.base, overflow: "hidden" }}>
             {meta.modes.map((m) => {
               const on = grant.mode === m;
               const elevated = m === "act";
@@ -2368,8 +2368,8 @@ function GrantScopeRow({ meta, grant, projectName, busy, onSetMode, onSetConfig,
                   onClick={() => { if (!on) onSetMode(m); }}
                   className="loom-toggle"
                   style={{
-                    background: on ? (elevated ? RED_WASH_2 : color.phosphorDim) : "transparent",
-                    color: on ? (elevated ? color.red : color.text) : color.textDim,
+                    background: on ? (elevated ? RED_WASH_2 : color.liveSoft) : "transparent",
+                    color: on ? (elevated ? color.danger : color.text) : color.text2,
                     border: "none", padding: "3px 12px", fontFamily: font.mono, fontSize: fs.mono, cursor: busy ? "default" : "pointer",
                   }}
                 >
@@ -2509,9 +2509,9 @@ function ClassChipRow({ all, selected, disabled, onChange }: {
             onClick={() => onChange(on ? selected.filter((x) => x !== c) : [...selected, c])}
             className="loom-toggle"
             style={{
-              background: on ? color.phosphorDim : "transparent",
-              color: on ? color.text : color.textDim,
-              border: `1px solid ${on ? color.phosphor : color.border}`,
+              background: on ? color.liveSoft : "transparent",
+              color: on ? color.text : color.text2,
+              border: `1px solid ${on ? color.live : color.line}`,
               borderRadius: radius.base, padding: "3px 10px",
               fontFamily: font.mono, fontSize: fs.mono, cursor: disabled ? "default" : "pointer",
             }}
@@ -2541,10 +2541,10 @@ function StringListEditor({ items, placeholder, disabled, onChange }: {
       {items.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {items.map((it) => (
-            <span key={it} style={{ display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "2px 6px", fontFamily: font.mono, fontSize: fs.mono, color: color.text, maxWidth: "100%" }}>
+            <span key={it} style={{ display: "inline-flex", alignItems: "center", gap: 6, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "2px 6px", fontFamily: font.mono, fontSize: fs.mono, color: color.text, maxWidth: "100%" }}>
               <span style={{ overflowWrap: "anywhere", minWidth: 0 }}>{it}</span>
               <button type="button" aria-label={`Remove ${it}`} disabled={disabled} onClick={() => onChange(items.filter((x) => x !== it))}
-                style={{ background: "transparent", border: "none", color: color.red, cursor: disabled ? "default" : "pointer", fontSize: fs.sm, lineHeight: 1, padding: 0 }}>×</button>
+                style={{ background: "transparent", border: "none", color: color.danger, cursor: disabled ? "default" : "pointer", fontSize: fs.sm, lineHeight: 1, padding: 0 }}>×</button>
             </span>
           ))}
         </div>
@@ -2636,13 +2636,13 @@ function PairingCode({ code, expiresAt, onDismiss }: { code: string; expiresAt: 
         <span style={{ flex: 1 }} />
         <Button variant="ghost" onClick={onDismiss}>Dismiss</Button>
       </div>
-      <p style={{ margin: "0 0 8px", fontSize: fs.sm, color: color.amber }}>
+      <p style={{ margin: "0 0 8px", fontSize: fs.sm, color: color.busy }}>
         Shown once. Relay it now — it is single-use and expires {new Date(expiresAt).toLocaleTimeString()}.
       </p>
       <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
         <code style={{
-          flex: 1, fontFamily: font.mono, fontSize: fs.lg, color: color.text, background: color.panel2,
-          border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: "8px 10px", letterSpacing: "0.08em", userSelect: "all",
+          flex: 1, fontFamily: font.mono, fontSize: fs.lg, color: color.text, background: color.inset,
+          border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "8px 10px", letterSpacing: "0.08em", userSelect: "all",
         }}>{code}</code>
         <Button variant="primary" onClick={copy} style={{ whiteSpace: "nowrap" }}>{copied ? "Copied ✓" : "Copy"}</Button>
       </div>
@@ -2690,16 +2690,16 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
           data-testid="companion-delete-confirm"
           style={{
             display: "flex", flexDirection: "column", gap: 12, padding: 14,
-            border: `1px solid ${color.red}`, borderRadius: radius.base, background: color.panel2,
+            border: `1px solid ${color.danger}`, borderRadius: radius.base, background: color.inset,
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <StatusPill tone="danger" label="Destructive" glow />
-            <strong style={{ fontFamily: font.head, fontSize: fs.sm, color: color.text }}>
+            <strong style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text }}>
               Delete {label}?
             </strong>
           </div>
-          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.6 }}>
+          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.6 }}>
             This removes:
             <ul style={{ margin: "6px 0 0", paddingLeft: 18, display: "flex", flexDirection: "column", gap: 3 }}>
               <li>its run configuration and any stored bot token</li>
@@ -2734,11 +2734,11 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
 }
 
 function Callout({ tone, children, testId }: { tone: "busy"; children: ReactNode; testId?: string }) {
-  const c = tone === "busy" ? color.amber : color.cyan;
+  const c = tone === "busy" ? color.busy : color.info;
   return (
     <div data-testid={testId} style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: wash(color.busy, 6) }}>
       <span aria-hidden style={{ color: c }}>▲</span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.5 }}>{children}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5 }}>{children}</span>
     </div>
   );
 }

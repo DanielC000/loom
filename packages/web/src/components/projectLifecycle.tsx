@@ -21,7 +21,7 @@ import { color, font, fs, radius } from "../theme";
 
 // A field's visible label, same shape as the one pages/EventTriggers.tsx and pages/Profiles.tsx each
 // declare for their own forms (and mergeGate.tsx's `FieldLabel`) — no new type scale, no new tokens.
-const fieldLabel = { fontFamily: font.head as string, fontSize: fs.sm, fontWeight: 700, color: color.textDim };
+const fieldLabel = { fontFamily: font.ui as string, fontSize: fs.sm, fontWeight: 700, color: color.text2 };
 
 /**
  * The FOUR project lifecycle writes, wired once: the structural rename/vaultPath PATCH, the reversible
@@ -131,7 +131,7 @@ export function ProjectManage(
               value={vaultPath} onChange={(e) => setVault(e.target.value)} />
           </label>
           {isVaultOnly && vaultTrim === "" && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
               This project has no separate repo — its vault can't be unbound. Archive it instead.
             </span>
           )}
@@ -146,10 +146,10 @@ export function ProjectManage(
               already use. Archive and the permanent delete used to sit bare at the end of the fields
               column, which read as two more controls belonging to "Registered repos"; a destructive
               pair must not inherit a heading it has nothing to do with. */}
-          <div data-testid="project-retire" style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+          <div data-testid="project-retire" style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.line}`, paddingTop: 8 }}>
             <div>
               <SectionLabel style={{ margin: 0 }}>Retire</SectionLabel>
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>archive is reversible · delete is not</span>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>archive is reversible · delete is not</span>
             </div>
             <Button disabled={live || archiving} title={liveTitle}
               onClick={() => { if (window.confirm(`Archive "${project.name}"? It moves to the Archived section and can be restored later.`)) onArchive(); }}>
@@ -158,8 +158,8 @@ export function ProjectManage(
             {!showDelete
               ? <Button variant="danger" disabled={live} title={liveTitle} onClick={() => { setShowDelete(true); setConfirmText(""); }}>Delete permanently…</Button>
               : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${color.red}`, borderRadius: radius.sm, padding: 8 }}>
-                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${color.danger}`, borderRadius: radius.sm, padding: 8 }}>
+                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>
                     Permanently delete this project and ALL of it — agents, sessions, tasks, schedules, keys, runs, transcripts. Cannot be undone. Type <strong>{project.name}</strong> to confirm:
                   </span>
                   <Input autoFocus placeholder={project.name} value={confirmText} onChange={(e) => setConfirmText(e.target.value)} />
@@ -177,12 +177,12 @@ export function ProjectManage(
   );
   if (!collapsible) return body;
   return (
-    <div style={{ marginTop: 10, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+    <div style={{ marginTop: 10, borderTop: `1px solid ${color.line}`, paddingTop: 8 }}>
       <button onClick={() => setOpen((o) => !o)}
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: "2px 0",
-          fontFamily: font.head, fontSize: fs.sm, color: color.textDim }}>
-        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>Manage project
+          fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>
+        <span style={{ color: color.live }}>{open ? "▾" : "▸"}</span>Manage project
       </button>
       {body}
     </div>
@@ -226,10 +226,10 @@ export function ArchivedProjects(
   const body = open && (
     <div data-testid="archived-projects-list" style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
       {projects.length === 0 ? (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 0" }}>No archived projects.</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "2px 0" }}>No archived projects.</span>
       ) : projects.map((p) => (
         <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>{p.name}</span>
+          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>{p.name}</span>
           <Button onClick={() => onRestore(p.id)} aria-label={`Restore ${p.name}`}>Restore</Button>
           <Button variant="danger" onClick={() => confirmDelete(p)} aria-label={`Delete ${p.name} permanently`}>Delete</Button>
         </div>
@@ -238,12 +238,12 @@ export function ArchivedProjects(
   );
   if (!collapsible) return <>{body}</>;
   return (
-    <div style={{ marginTop: 2, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+    <div style={{ marginTop: 2, borderTop: `1px solid ${color.line}`, paddingTop: 8 }}>
       <button onClick={() => setOpen((o) => !o)}
         style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
           background: "transparent", border: "none", padding: "2px 0",
-          fontFamily: font.head, fontSize: fs.sm, color: color.textDim }}>
-        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>Archived · {projects.length}
+          fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>
+        <span style={{ color: color.live }}>{open ? "▾" : "▸"}</span>Archived · {projects.length}
       </button>
       {body}
     </div>
@@ -286,13 +286,13 @@ function ReferenceReposEditor({ project }: { project: Project }) {
   const add = () => { setError(null); setRepos((rs) => [...rs, ""]); };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.line}`, paddingTop: 8 }}>
       <div>
         <SectionLabel style={{ margin: 0 }}>Reference repos</SectionLabel>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>read-only sibling repos · absolute git paths</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>read-only sibling repos · absolute git paths</span>
       </div>
       {repos.length === 0 ? (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 0" }}>No reference repos.</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "2px 0" }}>No reference repos.</span>
       ) : (
         repos.map((r, i) => (
           <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -310,7 +310,7 @@ function ReferenceReposEditor({ project }: { project: Project }) {
         </Button>
       </div>
       {error && (
-        <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.5 }}>{error}</span>
+        <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.5 }}>{error}</span>
       )}
     </div>
   );
@@ -380,16 +380,16 @@ function RepoRegistryEditor({ project }: { project: Project }) {
   const add = () => { setError(null); setRepos((rs) => [...rs, { key: "", path: "" }]); };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.line}`, paddingTop: 8 }}>
       <div>
         <SectionLabel style={{ margin: 0 }}>Registered repos</SectionLabel>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>writable · a card targets one via its repo key</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>writable · a card targets one via its repo key</span>
       </div>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.5 }}>
-        This project's own repo is the <span style={{ color: color.cyan }}>primary</span> target — no entry needed.
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5 }}>
+        This project's own repo is the <span style={{ color: color.info }}>primary</span> target — no entry needed.
       </span>
       {repos.length === 0 ? (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "2px 0" }}>No registered repos.</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "2px 0" }}>No registered repos.</span>
       ) : (
         repos.map((r, i) => (
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -409,7 +409,7 @@ function RepoRegistryEditor({ project }: { project: Project }) {
                 aria-label={`Repo ${i + 1} ungated landing check command`} style={{ flex: "2 1 200px", minWidth: 0 }} />
             </div>
             {!!r.ungatedLandingCheckCommand?.trim() && !r.gateCommand?.trim() && (
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, lineHeight: 1.5, paddingLeft: 126 }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, lineHeight: 1.5, paddingLeft: 126 }}>
                 no gate command set on this repo — the check is nested inside the same gate-skip logic, so it will never run without one.
               </span>
             )}
@@ -420,8 +420,8 @@ function RepoRegistryEditor({ project }: { project: Project }) {
           project-level gate command by design: a gate that exits 0 for an unrelated reason would report a
           FALSE green on code it never tested. Missing is honest ("unverified"); wrong looks verified. */}
       {repos.length > 0 && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.5 }}>
-          A repo with no gate command merges as <span style={{ color: color.amber }}>unverified</span> — it does not fall back to this project's gate command.
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5 }}>
+          A repo with no gate command merges as <span style={{ color: color.busy }}>unverified</span> — it does not fall back to this project's gate command.
         </span>
       )}
       <div style={{ display: "flex", gap: 6 }}>
@@ -431,7 +431,7 @@ function RepoRegistryEditor({ project }: { project: Project }) {
         </Button>
       </div>
       {error && (
-        <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.5 }}>{error}</span>
+        <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.5 }}>{error}</span>
       )}
     </div>
   );

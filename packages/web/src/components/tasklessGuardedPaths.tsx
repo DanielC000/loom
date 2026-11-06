@@ -74,7 +74,7 @@ export function TasklessGuardedPathsEditor({ project }: { project: Project }) {
         value={text} onChange={(e) => { setJustSaved(false); setText(e.target.value); }}
         placeholder={"packages/daemon/src/git/**\n.github/**\n*.lock"}
         style={{ width: "100%", boxSizing: "border-box", resize: "vertical", minHeight: 96, fontFamily: font.mono, fontSize: fs.body,
-          lineHeight: 1.5, background: color.panel2, color: color.text, border: `1px solid ${draft.ok ? color.border : color.busy}`,
+          lineHeight: 1.5, background: color.inset, color: color.text, border: `1px solid ${draft.ok ? color.line : color.busy}`,
           borderRadius: radius.sm, padding: 8 }} />
       <ul style={{ margin: 0, paddingLeft: 18, fontFamily: font.ui, fontSize: fs.xs, color: color.text3, lineHeight: 1.6, maxWidth: "70ch" }}>
         <li>

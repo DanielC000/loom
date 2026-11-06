@@ -454,13 +454,13 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
         style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap" }}>
         {announcement}
       </div>
-      {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
+      {!projectId && <p style={{ color: color.text3 }}>No project selected.</p>}
       {/* First-load placeholder: lane shells so the layout settles in, not a blank flash. keepPreviousData
           keeps this from re-appearing on the 4s refetch — it shows only before the very first response. */}
       {projectId && !board.data && board.isLoading && <BoardSkeleton />}
       {/* First-load failure (retries under the hood): a calm line rather than a permanently empty page. */}
       {projectId && !board.data && board.isError && (
-        <div style={{ marginTop: 10, color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>
+        <div style={{ marginTop: 10, color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>
           couldn’t load the board — retrying…
         </div>
       )}
@@ -481,13 +481,13 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           {/* A failed policy-status read must not look like "nothing is blocking": say so, quietly (404 stays null = no badges). */}
           {policyStatus.isError && (
             <div data-testid="card-policy-status-unavailable" title="The unmet-requirement badges could not be loaded; open a card to see its policy."
-              style={{ marginTop: 10, color: color.textMuted, fontFamily: font.mono, fontSize: fs.xs }}>
+              style={{ marginTop: 10, color: color.text3, fontFamily: font.mono, fontSize: fs.xs }}>
               card policy status unavailable
             </div>
           )}
           {laneError && (
             <div role="alert" data-testid="lane-reorder-error"
-              style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: color.amber, fontFamily: font.mono, fontSize: fs.mono }}>
+              style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: color.busy, fontFamily: font.mono, fontSize: fs.mono }}>
               <span style={{ flex: 1 }}>Couldn’t move the lane: {laneError}</span>
               <Button variant="ghost" onClick={() => setLaneError(null)}>Dismiss</Button>
             </div>
@@ -539,7 +539,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           </div>
           {dragLane && (
             <div data-testid="lane-drag-hint" aria-hidden
-              style={{ marginTop: 8, color: color.textDim, fontFamily: font.mono, fontSize: fs.mono }}>
+              style={{ marginTop: 8, color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
               {(() => {
                 const cols = board.data.columns;
                 const from = cols.findIndex((c) => c.key === dragLane);
@@ -595,7 +595,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
 function columnAccent(col: KanbanColumn): string | null {
   if (col.accentColor) return col.accentColor;
   const t = columnTone(col);
-  if (t) return t === "muted" ? color.textDim : tone[t];
+  if (t) return t === "muted" ? color.text2 : tone[t];
   return null;
 }
 
@@ -616,12 +616,12 @@ function relLuminance(hex: string): number {
   return 0.2126 * lin(0) + 0.7152 * lin(2) + 0.0722 * lin(4);
 }
 function labelColorFor(accent: string | null, theme: ResolvedTheme): string {
-  if (!accent) return color.textDim;
+  if (!accent) return color.text2;
   if (accent.startsWith("#")) {
     const a = relLuminance(accent) + 0.05;
     const b = relLuminance(PANEL_HEX[theme]) + 0.05;
     const ratio = a > b ? a / b : b / a;
-    if (ratio < 4.5) return color.textDim;
+    if (ratio < 4.5) return color.text2;
   }
   return accent;
 }
@@ -648,7 +648,7 @@ function LaneDragPreview({ col }: { col: KanbanColumn | undefined }) {
       style={{ width: 220, background: color.laneBg, border: `1px solid ${color.lineStrong}`, borderRadius: radius.lg,
         boxShadow: shadow.pop, transform: "rotate(-1deg)", cursor: "grabbing" }}>
       <SectionLabel style={{ color: labelColorFor(accent, theme), margin: 0, padding: "12px 14px", display: "flex", alignItems: "center", gap: 8 }}>
-        <span aria-hidden style={{ color: color.textDim }}>⠿</span>
+        <span aria-hidden style={{ color: color.text2 }}>⠿</span>
         <LaneDot accent={accent} />
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{col.label}</span>
       </SectionLabel>
@@ -807,7 +807,7 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
         )}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
         {laneLength === 0 && filterActive && (
-          <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono, padding: "8px 2px" }}>no matches</div>
+          <div style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, padding: "8px 2px" }}>no matches</div>
         )}
         {/* Genuinely-empty lane (no filter): a calm placeholder that doubles as a drop-target hint, so an
             empty column reads as intentional rather than a broken blank — and lights up when dragged over. */}
@@ -825,7 +825,7 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
 }
 
 // ── Filter bar ─────────────────────────────────────────────────────────────────
-// Tiny uppercase group label (font.head) preceding a row of toggle chips. aria-hidden — each
+// Tiny uppercase group label (font.ui) preceding a row of toggle chips. aria-hidden — each
 // toggle carries its own descriptive aria-label, so the visual label would only be redundant noise
 // to a screen reader.
 const groupLabel = { fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: color.text2 } as const;
@@ -905,7 +905,7 @@ function FilterBar({ search, onSearch, counts, priFilter, onTogglePri, types, ty
       {/* Row 1: search + live result count + clear-all */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <div style={{ position: "relative", display: "flex", alignItems: "center", flex: "1 1 240px", maxWidth: 460 }}>
-          <span aria-hidden style={{ position: "absolute", left: 8, color: color.textMuted, fontSize: fs.body, pointerEvents: "none" }}>⌕</span>
+          <span aria-hidden style={{ position: "absolute", left: 8, color: color.text3, fontSize: fs.body, pointerEvents: "none" }}>⌕</span>
           <Input value={search} onChange={(e) => onSearch(e.target.value)}
             aria-label="Search tasks by id, title, or description" placeholder="search tasks by id or text…"
             onKeyDown={(e) => { if (e.key === "Escape" && search) { e.stopPropagation(); onSearch(""); } }}
@@ -913,7 +913,7 @@ function FilterBar({ search, onSearch, counts, priFilter, onTogglePri, types, ty
           {search && (
             <button type="button" aria-label="Clear search" title="Clear search" onClick={() => onSearch("")}
               className="loom-toggle" style={{ position: "absolute", right: 6, background: "transparent", border: "none",
-                color: color.textMuted, cursor: "pointer", fontSize: fs.body, lineHeight: 1, padding: 2, borderRadius: radius.sm }}>✕</button>
+                color: color.text3, cursor: "pointer", fontSize: fs.body, lineHeight: 1, padding: 2, borderRadius: radius.sm }}>✕</button>
           )}
         </div>
         <span aria-live="polite" style={{ fontFamily: font.mono, fontSize: fs.mono, whiteSpace: "nowrap",
@@ -1133,7 +1133,7 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
       <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
         {/* Drag is confined to this grip so a click on the card body opens the detail drawer instead. */}
         <span {...listeners} {...attributes} title="Drag to move"
-          style={{ cursor: "grab", color: color.textMuted, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
+          style={{ cursor: "grab", color: color.text3, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
         {/* The card's open target is a real control, not a clickable div (card a6d7a102): the detail
             dialog had no keyboard way in at all, and with nothing focused when it opened, Esc left a
             keyboard user at <body> with the whole page to re-Tab through. role=button + Enter/Space is
@@ -1168,8 +1168,8 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
             {multiRepo && task.repoKey && (
               <span title={`Targets the "${task.repoKey}" repo — this card's worktree, branch and gate all land there, not on the primary repo`}
                 style={{ flexShrink: 0, fontFamily: font.mono, fontSize: fs.xs, letterSpacing: "0.04em",
-                  color: color.textDim, background: "transparent", borderRadius: radius.sm, padding: "0 4px",
-                  border: `1px solid ${color.border}`, maxWidth: 110, overflow: "hidden",
+                  color: color.text2, background: "transparent", borderRadius: radius.sm, padding: "0 4px",
+                  border: `1px solid ${color.line}`, maxWidth: 110, overflow: "hidden",
                   textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 ⑂ {task.repoKey}
               </span>
@@ -1199,7 +1199,7 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
                 This gives specs the card's OWN title to filter on. */}
             <span data-testid="card-title" style={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "break-word",
               fontFamily: font.ui, fontSize: fs.body, fontWeight: 500, lineHeight: 1.4 }}>{task.title}</span>
-            {hasBody && <span title="has a description" style={{ color: color.textMuted, flexShrink: 0 }}>≣</span>}
+            {hasBody && <span title="has a description" style={{ color: color.text3, flexShrink: 0 }}>≣</span>}
             {/* Ship-state (card 1eebc46a) — a compact "landed" marker naming the sha; the REPO it landed on
                 (which may differ from the target-repo badge above, though it normally agrees) is in the
                 tooltip rather than crowding the card — the drawer's Shipped line spells it out in full.
@@ -1302,7 +1302,7 @@ function TaskDrawerPlaceholder({ onClose, children }: { onClose: () => void; chi
 function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
   return (
     <TaskDrawerPlaceholder onClose={onClose}>
-      <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>Loading task…</span>
+      <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>Loading task…</span>
     </TaskDrawerPlaceholder>
   );
 }
@@ -1313,7 +1313,7 @@ function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
 function TaskDrawerError({ onClose, onRetry }: { onClose: () => void; onRetry: () => void }) {
   return (
     <TaskDrawerPlaceholder onClose={onClose}>
-      <span style={{ color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>couldn’t load this task</span>
+      <span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>couldn’t load this task</span>
       {/* Kit Buttons, not bare <button>s (card 95eabed1): there is no `color-scheme: dark`, so an
           unstyled button renders the UA's light bevel — two white chips on the Panel. `primary` is the
           recovery action, `default` the dismissal, matching every other action/dismiss pair in the app.
@@ -1349,9 +1349,9 @@ function shipRepoLabel(mergedRepoKey: string | null | undefined, repos: RepoRegi
 // `null`/undefined (unknown — not yet computed, or a legacy row) reads the same as a confident tick: this
 // is the byte-identical default every pre-existing "✓ sha" render already had before this field existed.
 function shipVerificationStyle(verification: Task["mergedVerification"]): { color: string; suffix: string } {
-  if (verification === "trailer-only") return { color: color.textMuted, suffix: " (unverified content — pre-dates path-set verification)" };
-  if (verification === "ledger") return { color: color.phosphor, suffix: " (verified when Loom landed it; branch since deleted)" };
-  return { color: color.phosphor, suffix: "" };
+  if (verification === "trailer-only") return { color: color.text3, suffix: " (unverified content — pre-dates path-set verification)" };
+  if (verification === "ledger") return { color: color.live, suffix: " (verified when Loom landed it; branch since deleted)" };
+  return { color: color.live, suffix: "" };
 }
 
 // Centered modal detail dialog: view + edit a task's title and description (the `body` field that the
@@ -1535,7 +1535,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
     setFinals("");
     speech.start();
   };
-  const labelStyle = { fontFamily: font.head, fontSize: fs.xs, color: color.textDim } as const;
+  const labelStyle = { fontFamily: font.ui, fontSize: fs.xs, color: color.text2 } as const;
 
   // ── Connected requests (Dossier right rail, card 8c1f27f0) ──────────────────────────────────────
   // Every Request (pending/answered/consumed) connected to this card. Matches commit 9e5a733's
@@ -1597,7 +1597,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
               {columns.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
             </Select>
           )}
-          {moving && <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }} aria-live="polite">moving…</span>}
+          {moving && <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }} aria-live="polite">moving…</span>}
           <span style={{ flex: 1 }} />
           <Button onClick={requestClose} title="Close (Esc)">✕</Button>
         </div>
@@ -1627,7 +1627,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             @decision 230cb6e3 — a failed links read must say so rather than render silently; otherwise
             it's indistinguishable from a card that genuinely has no connections (a false zero). */}
         {linksUnavailable && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, color: color.textMuted,
+          <div style={{ display: "flex", alignItems: "center", gap: 6, color: color.text3,
             fontFamily: font.mono, fontSize: fs.mono }}>
             <Dot tone="busy" />
             <span>links unavailable — couldn’t read this card’s connections (retrying…)</span>
@@ -1657,8 +1657,8 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             return (
               <button key={p} type="button" onClick={() => setPriority(p)} title={m.label}
                 style={{
-                  flex: 1, cursor: "pointer", fontFamily: font.head, fontSize: fs.sm, padding: "5px 4px", borderRadius: radius.sm, color: active ? color.bg : c, background: active ? c : "transparent",
-                  border: `1px solid ${active ? c : color.border}`,
+                  flex: 1, cursor: "pointer", fontFamily: font.ui, fontSize: fs.sm, padding: "5px 4px", borderRadius: radius.sm, color: active ? color.bg : c, background: active ? c : "transparent",
+                  border: `1px solid ${active ? c : color.line}`,
                 }}>
                 {m.short} <span style={{ fontSize: fs.xs, opacity: 0.8 }}>{m.label}</span>
               </button>
@@ -1674,7 +1674,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             the dialog states the parent at all, so the summary row below is clickable like every chip. */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
           <span style={labelStyle}>Relations</span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
             same board only · staged until you save
           </span>
         </div>
@@ -1693,7 +1693,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: -4, minWidth: 0 }}>
               <span data-testid="parent-resolution" style={{ flex: 1, fontFamily: font.mono, fontSize: fs.mono, minWidth: 0,
                 overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                color: parentRes.state === "ok" ? color.cyan : parentRes.state === "empty" ? color.textMuted : color.amber }}
+                color: parentRes.state === "ok" ? color.info : parentRes.state === "empty" ? color.text3 : color.busy }}
                 title={parentRes.state === "ok" ? parentRes.title : undefined}>
                 {parentRes.state === "ok" ? `→ ${parentRes.title}`
                   : parentRes.state === "empty" ? "no parent"
@@ -1764,7 +1764,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             so a server refusal needs its own line here rather than the footer's generic one. */}
         {relationErr?.scope === "parent" && saveError && (
           <span role="alert" data-testid="parent-server-error"
-            style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.4, marginTop: -4 }}>
+            style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.4, marginTop: -4 }}>
             {saveError.message}
           </span>
         )}
@@ -1804,7 +1804,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
                 ellipsis, which removes the automatic min-height floor a flex item normally gets — so in
                 this overflowing flex column it was being crushed to ZERO height and the path never
                 rendered at all (caught by eyeballing it; the DOM node was present the whole time). */}
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, marginTop: -4, flexShrink: 0,
+            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, marginTop: -4, flexShrink: 0,
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
               title={repoKey ? (repos.find((r) => r.key === repoKey)?.path ?? "") : primaryRepoPath}>
               {repoKey ? (repos.find((r) => r.key === repoKey)?.path ?? "unknown repo — this key is no longer registered") : (primaryRepoPath || "the project's primary repo")}
@@ -1820,7 +1820,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             <span style={labelStyle}>Shipped</span>
             <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: shipVerificationStyle(task.mergedVerification).color }}
               title={`Landed on ${shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}${task.mergedDate ? ` — ${task.mergedDate}` : ""}${shipVerificationStyle(task.mergedVerification).suffix}`}>
-              ✓ {task.mergedSha} <span style={{ color: color.textMuted }}>on</span> {shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}
+              ✓ {task.mergedSha} <span style={{ color: color.text3 }}>on</span> {shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}
             </span>
           </>
         )}
@@ -1835,7 +1835,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           <>
             <span style={labelStyle}>Shipped</span>
             <span data-testid="ship-state-trailers-off" title={SHIP_STATE_TRAILERS_OFF.title}
-              style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+              style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
               {SHIP_STATE_TRAILERS_OFF.value}
             </span>
           </>
@@ -1851,14 +1851,14 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             : "Not held — click to hold this card so it won't be worked or nagged."}
           onClick={() => setHeld((h) => !h)}
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", textAlign: "left",
-            padding: "6px 8px", borderRadius: radius.sm, background: color.panel2,
-            border: `1px solid ${held ? color.amber : color.border}` }}>
+            padding: "6px 8px", borderRadius: radius.sm, background: color.inset,
+            border: `1px solid ${held ? color.busy : color.line}` }}>
           <span aria-hidden style={{ width: 30, height: 16, borderRadius: radius.pill, flexShrink: 0, position: "relative",
-            background: held ? color.amber : color.border, transition: "background 0.12s" }}>
+            background: held ? color.busy : color.line, transition: "background 0.12s" }}>
             <span style={{ position: "absolute", top: 2, left: held ? 16 : 2, width: 12, height: 12, borderRadius: radius.pill,
               background: color.bg, transition: "left 0.12s" }} />
           </span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: held ? color.amber : color.textDim }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: held ? color.busy : color.text2 }}>
             {held ? "Held — won't be worked or nagged" : "Not held"}
           </span>
         </button>
@@ -1872,14 +1872,14 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             : "Not deferred — click to defer this card as your own sequencing marker (not a brake)."}
           onClick={() => setDeferred((d) => !d)}
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", textAlign: "left",
-            padding: "6px 8px", borderRadius: radius.sm, background: color.panel2,
-            border: `1px solid ${deferred ? color.cyan : color.border}` }}>
+            padding: "6px 8px", borderRadius: radius.sm, background: color.inset,
+            border: `1px solid ${deferred ? color.info : color.line}` }}>
           <span aria-hidden style={{ width: 30, height: 16, borderRadius: radius.pill, flexShrink: 0, position: "relative",
-            background: deferred ? color.cyan : color.border, transition: "background 0.12s" }}>
+            background: deferred ? color.info : color.line, transition: "background 0.12s" }}>
             <span style={{ position: "absolute", top: 2, left: deferred ? 16 : 2, width: 12, height: 12, borderRadius: radius.pill,
               background: color.bg, transition: "left 0.12s" }} />
           </span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: deferred ? color.cyan : color.textDim }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: deferred ? color.info : color.text2 }}>
             {deferred ? "Deferred — sequencing marker, won't nag" : "Not deferred"}
           </span>
         </button>
@@ -1892,7 +1892,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           style={{
             flex: 1, minHeight: 200, width: "100%", boxSizing: "border-box", resize: "none",
             fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
-            background: color.panel2, color: color.text, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: 8,
+            background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 8,
           }} />
         {speech.supported && <DescriptionVoiceNote speech={speech} />}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1926,13 +1926,13 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
             ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); setParentDraft(null); setParentEditing(false); setRelationDraft(null); }}>Reset</Button>
-            : <span style={{ color: color.phosphor, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
+            : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
           {/* The catch-all failure line. A refusal the Relations section has already placed at the row
               (or section) it names is suppressed HERE rather than printed twice — one message, shown at
               the control the human has to go fix. `relationErrorTarget` returning null (anything it does
               not recognise) falls through to this line, so nothing is ever swallowed. */}
           {saveError && !saveConflict && !relationErr && (
-            <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError.message}</span>
+            <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError.message}</span>
           )}
           {/* Card 0b36702e's "detect-and-warn" remedy: a stale save doesn't clobber — it surfaces the fresh
               server row and lets the human choose. Reload adopts the fresh row (discarding local edits) and
@@ -1941,8 +1941,8 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
               before this card — see api.updateTask's own doc for why omitting it means "write blind"). */}
           {saveConflict && (
             <div role="alert" style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 100%",
-              padding: "6px 8px", borderRadius: radius.sm, background: color.panel2, border: `1px solid ${color.amber}` }}>
-              <span style={{ flex: 1, color: color.amber, fontSize: fs.mono, fontFamily: font.mono }}>
+              padding: "6px 8px", borderRadius: radius.sm, background: color.inset, border: `1px solid ${color.busy}` }}>
+              <span style={{ flex: 1, color: color.busy, fontSize: fs.mono, fontFamily: font.mono }}>
                 This card changed while you had it open — reload to see the latest, or overwrite anyway.
               </span>
               <Button onClick={() => {
@@ -1965,7 +1965,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
             {confirmingDelete ? (
               <>
-                <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>Delete?</span>
+                <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>Delete?</span>
                 <Button variant="danger" disabled={deleting} onClick={onDelete}>{deleting ? "Deleting…" : "Confirm"}</Button>
                 <Button disabled={deleting} onClick={() => setConfirmingDelete(false)}>Cancel</Button>
               </>
@@ -1975,7 +1975,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           </div>
         </div>
         {/* The server's live-session guard (or any failure) surfaces here rather than silently closing. */}
-        {deleteError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{deleteError}</span>}
+        {deleteError && <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{deleteError}</span>}
           </div>
           {/* RIGHT rail — the card's connected requests (card 8c1f27f0). Collapsed → a slim, clickable
               strip so the left editing column takes the full width; expanded → the full dossier rail. */}
@@ -2006,36 +2006,36 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
   return (
     <div data-testid="task-requests-rail"
       style={{ flex: "1 1 280px", minWidth: 240, maxWidth: "100%", display: "flex", flexDirection: "column",
-        minHeight: 0, background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
+        minHeight: 0, background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.base }}>
       {/* Header (pinned) — title + count + collapse control. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 10px 8px", borderBottom: `1px solid ${color.border}` }}>
-        <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.textDim }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 10px 8px", borderBottom: `1px solid ${color.line}` }}>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.text2 }}>
           Connected requests
         </span>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: linked.length > 0 ? color.cyan : color.textMuted }}>{linked.length}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: linked.length > 0 ? color.info : color.text3 }}>{linked.length}</span>
         <span style={{ flex: 1 }} />
         <button type="button" onClick={onCollapse} aria-expanded aria-label="Collapse connected requests"
           title="Collapse the requests rail" data-testid="task-requests-collapse" className="loom-toggle"
-          style={{ background: "transparent", border: "none", cursor: "pointer", color: color.textDim,
+          style={{ background: "transparent", border: "none", cursor: "pointer", color: color.text2,
             fontSize: fs.lg, lineHeight: 1, padding: "2px 4px", borderRadius: radius.sm }}>›</button>
       </div>
       {linked.length === 0 ? (
         // Empty state — reads as intentional, not broken. (A card with no requests defaults to collapsed,
         // but the user can still expand the empty rail.)
-        <div style={{ padding: "14px 10px", color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
+        <div style={{ padding: "14px 10px", color: color.text3, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
           No requests connected to this card yet. A manager links owner Requests to a card so the answer travels with the work.
         </div>
       ) : (
         <>
           {/* By-state summary line. */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", flexWrap: "wrap",
-            fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, borderBottom: `1px solid ${color.border}` }}>
-            <span style={{ color: pending > 0 ? color.cyan : color.textMuted }}>{pending} pending</span>
+            fontFamily: font.mono, fontSize: fs.mono, color: color.text3, borderBottom: `1px solid ${color.line}` }}>
+            <span style={{ color: pending > 0 ? color.info : color.text3 }}>{pending} pending</span>
             <span aria-hidden>·</span>
             <span>{answered} answered</span>
             <span aria-hidden>·</span>
             <span>{consumed} consumed</span>
-            {cancelled > 0 && <><span aria-hidden>·</span><span style={{ color: color.red }}>{cancelled} cancelled</span></>}
+            {cancelled > 0 && <><span aria-hidden>·</span><span style={{ color: color.danger }}>{cancelled} cancelled</span></>}
             {notices > 0 && <><span aria-hidden>·</span><span>{notices} notice{notices === 1 ? "" : "s"}</span></>}
           </div>
           {/* Signal rows — the lone scroll region so the header + summary stay pinned. */}
@@ -2065,7 +2065,7 @@ function ConnectedRequestRow({ q, now }: { q: QuestionInboxItem; now: number }) 
   const [open, setOpen] = useState(false);
   const edge = tone[REQUEST_TYPE_TONE[q.type]];
   return (
-    <div style={{ border: `1px solid ${color.border}`, borderLeft: `3px solid ${edge}`, borderRadius: radius.sm, background: color.panel }}>
+    <div style={{ border: `1px solid ${color.line}`, borderLeft: `3px solid ${edge}`, borderRadius: radius.sm, background: color.surface }}>
       <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
         title={open ? "Hide the answer" : "Show the answer"} className="loom-toggle"
         style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "transparent", border: "none",
@@ -2073,16 +2073,16 @@ function ConnectedRequestRow({ q, now }: { q: QuestionInboxItem; now: number }) 
         <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
           <RequestTypeTag type={q.type} />
           <DecisionStateChip q={q} now={now} />
-          <span aria-hidden style={{ marginLeft: "auto", color: color.textMuted, fontSize: fs.sm, flexShrink: 0,
+          <span aria-hidden style={{ marginLeft: "auto", color: color.text3, fontSize: fs.sm, flexShrink: 0,
             transition: "transform 120ms ease", transform: open ? "rotate(90deg)" : "none" }}>▸</span>
         </div>
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           <RequestProvenance q={q} compact /> · {relativeAge(q.state === "pending" ? q.createdAt : q.state === "cancelled" ? q.cancelledAt : q.answeredAt, now)}
         </span>
       </button>
       {open && (
-        <div style={{ borderTop: `1px solid ${color.border}`, padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ borderTop: `1px solid ${color.line}`, padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
           <ConnectedRequestAnswer q={q} />
           <Button variant="ghost" disabled={previewOnly} onClick={() => openRequest(q.id)}
             title={previewOnly ? PREVIEW_REQUEST_HELD_TITLE : "Open the full request"}
@@ -2100,7 +2100,7 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
   if (q.state === "pending") {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {q.body && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{q.body}</span>}
+        {q.body && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{q.body}</span>}
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone[REQUEST_TYPE_TONE[q.type]] }}>{requestHint(q)} · awaiting your answer</span>
       </div>
     );
@@ -2108,8 +2108,8 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
   if (q.state === "cancelled") {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red }}>cancelled · never answered</span>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, whiteSpace: "pre-wrap" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>cancelled · never answered</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, whiteSpace: "pre-wrap" }}>
           {q.cancelledReason ?? "no reason given"} · by {q.cancelledBy === "agent" ? "the asking agent" : "a human"}
         </span>
       </div>
@@ -2121,7 +2121,7 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
     // rendering below, which would show a misleading "—" (a notice never carries chosenOption/note).
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>FYI · no answer needed</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>FYI · no answer needed</span>
         {q.body && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, whiteSpace: "pre-wrap" }}>{q.body}</span>}
       </div>
     );
@@ -2129,10 +2129,10 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
   if (q.type === "credential") {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim }}>provided · encrypted, never shown</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>provided · encrypted, never shown</span>
         {q.credentialEnvVar && (
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
-            target env var: <span style={{ color: color.amber }}>{q.credentialEnvVar}</span>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+            target env var: <span style={{ color: color.busy }}>{q.credentialEnvVar}</span>
           </span>
         )}
       </div>
@@ -2142,17 +2142,17 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
     const authorized = q.chosenOption === "authorize";
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: authorized ? color.phosphor : color.red }}>{authorized ? "authorized" : "denied"}</span>
-        {q.note && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, whiteSpace: "pre-wrap" }}>{q.note}</span>}
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: authorized ? color.live : color.danger }}>{authorized ? "authorized" : "denied"}</span>
+        {q.note && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, whiteSpace: "pre-wrap" }}>{q.note}</span>}
       </div>
     );
   }
   // decision / input — chosen option + note (the note IS the answer for a note-only ask).
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      {q.chosenOption && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>chose <span style={{ color: color.cyan }}>{q.chosenOption}</span></span>}
-      {q.note && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, whiteSpace: "pre-wrap" }}>{q.note}</span>}
-      {!q.chosenOption && !q.note && <span style={{ color: color.textMuted, fontSize: fs.mono, fontFamily: font.mono }}>—</span>}
+      {q.chosenOption && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>chose <span style={{ color: color.info }}>{q.chosenOption}</span></span>}
+      {q.note && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, whiteSpace: "pre-wrap" }}>{q.note}</span>}
+      {!q.chosenOption && !q.note && <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>—</span>}
     </div>
   );
 }
@@ -2166,12 +2166,12 @@ function CollapsedRequestsStrip({ count, onExpand }: { count: number; onExpand: 
       title="Expand connected requests" data-testid="task-requests-collapsed"
       style={{ flex: "0 0 auto", alignSelf: "stretch", width: 36, display: "flex", flexDirection: "column",
         alignItems: "center", gap: 10, padding: "10px 0", cursor: "pointer",
-        background: color.panel2, border: `1px solid ${color.border}`, borderRadius: radius.base }}>
-      <span aria-hidden style={{ color: color.textDim, fontSize: fs.body, lineHeight: 1 }}>‹</span>
-      <span aria-hidden style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.textMuted, writingMode: "vertical-rl" }}>
+        background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.base }}>
+      <span aria-hidden style={{ color: color.text2, fontSize: fs.body, lineHeight: 1 }}>‹</span>
+      <span aria-hidden style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.text3, writingMode: "vertical-rl" }}>
         Inbox
       </span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: count > 0 ? color.cyan : color.textMuted }}>{count}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: count > 0 ? color.info : color.text3 }}>{count}</span>
     </button>
   );
 }
@@ -2205,7 +2205,7 @@ function DescriptionMic({ speech, dictating, onStart }:
       <span
         className={listening ? "loom-mic-pulse" : undefined}
         style={{ width: 7, height: 7, borderRadius: radius.base, display: "inline-block",
-          background: listening ? color.red : disabled ? color.textMuted : color.phosphor }}
+          background: listening ? color.danger : disabled ? color.text3 : color.live }}
       />
       {listening ? "Stop" : requesting ? "starting…" : "Dictate"}
     </Button>
@@ -2218,24 +2218,24 @@ function DescriptionMic({ speech, dictating, onStart }:
 function DescriptionVoiceNote({ speech }: { speech: SpeechRecognitionApi }) {
   const { status, interim, error, secure } = speech;
   let node: React.ReactNode = null;
-  if (!secure) node = <span style={{ color: color.amber }}>voice needs a secure context</span>;
-  else if (status === "requesting") node = <span style={{ color: color.textDim }}>requesting microphone…</span>;
+  if (!secure) node = <span style={{ color: color.busy }}>voice needs a secure context</span>;
+  else if (status === "requesting") node = <span style={{ color: color.text2 }}>requesting microphone…</span>;
   else if (status === "listening") node = (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
       <StatusPill tone="danger" label="rec" glow />
       {interim
-        ? <span style={{ color: color.textMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{interim}…</span>
-        : <span style={{ color: color.textDim }}>listening — speak, then Stop</span>}
+        ? <span style={{ color: color.text3, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{interim}…</span>
+        : <span style={{ color: color.text2 }}>listening — speak, then Stop</span>}
     </span>
   );
-  else if (status === "denied") node = <span style={{ color: color.red }}>mic permission denied — allow it in your browser site settings</span>;
-  else if (status === "error") node = <span style={{ color: color.red }}>{error ?? "voice error"} — click Dictate to retry</span>;
+  else if (status === "denied") node = <span style={{ color: color.danger }}>mic permission denied — allow it in your browser site settings</span>;
+  else if (status === "error") node = <span style={{ color: color.danger }}>{error ?? "voice error"} — click Dictate to retry</span>;
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 2,
       fontFamily: font.mono, fontSize: fs.xs, minHeight: 16 }}>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{node}</span>
       <span title="The browser Web Speech API is not on-device — Chrome streams audio to Google's speech service."
-        style={{ color: color.textMuted, whiteSpace: "nowrap" }}>dictation may send audio to your browser's speech service</span>
+        style={{ color: color.text3, whiteSpace: "nowrap" }}>dictation may send audio to your browser's speech service</span>
     </div>
   );
 }
@@ -2286,7 +2286,7 @@ function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCre
         </Button>
       </div>
       {error && (
-        <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.5 }}>{error}</span>
+        <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.5 }}>{error}</span>
       )}
     </div>
   );

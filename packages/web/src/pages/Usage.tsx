@@ -141,7 +141,7 @@ export default function Usage() {
           <WindowSelect value={span} onChange={setSpan} />
         </Field>
         <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
           Project filters all three sections. Window governs the two historical sections (Interactive
           sessions &amp; Agent&nbsp;Runs) — live occupancy is always now.
         </span>
@@ -167,15 +167,15 @@ export default function Usage() {
           <Stat label="est. ctx cost" value={fmtUsd(totalCost)} tone="live" />
           <Stat label="rate-limited" value={String(rateLimited.length)} tone={rateLimited.length ? "danger" : "muted"} />
           <span style={{ flex: 1 }} />
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
             "ctx in use" = current context size, not cumulative spend. Cost is an estimate of one input
             pass at list rates — relative gauge only.
           </span>
         </div>
 
-        {sessions.isLoading && <Panel><span style={{ color: color.textMuted }}>Loading sessions…</span></Panel>}
+        {sessions.isLoading && <Panel><span style={{ color: color.text3 }}>Loading sessions…</span></Panel>}
         {!sessions.isLoading && all.length === 0 && (
-          <Panel><span style={{ color: color.textMuted }}>No live sessions {scope === "all" ? "" : `in ${scopeName}`}.</span></Panel>
+          <Panel><span style={{ color: color.text3 }}>No live sessions {scope === "all" ? "" : `in ${scopeName}`}.</span></Panel>
         )}
 
         {/* Highest occupancy */}
@@ -200,12 +200,12 @@ export default function Usage() {
               return (
                 <Panel key={pn} style={{ marginBottom: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontFamily: font.head, color: color.text }}>{pn}</span>
+                    <span style={{ fontFamily: font.ui, color: color.text }}>{pn}</span>
                     <Chip label="ctx" value={fmtTokens(projCtx)} tone="info" />
                     <Chip label="est." value={fmtUsd(projCost)} />
                     {projLimited > 0 && <Badge tone="danger">{projLimited} rate-limited</Badge>}
                     <span style={{ flex: 1 }} />
-                    <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>{rows.length} session{rows.length === 1 ? "" : "s"}</span>
+                    <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{rows.length} session{rows.length === 1 ? "" : "s"}</span>
                   </div>
                   {rows.map((s) => <UsageRow key={s.id} s={s} />)}
                 </Panel>
@@ -239,10 +239,10 @@ function UsageRow({ s, showProject }: { s: SessionListItem; showProject?: boolea
   const cost = estContextCost(ctx, s.model);
   const limited = isRateLimited(s);
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.line}` }}>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, minWidth: 132 }}>
-        <span style={{ color: s.role === "manager" ? color.phosphor : color.textDim }}>{s.role === "manager" ? "★ " : ""}{s.role ?? "session"}</span>{" "}
-        <span style={{ color: color.textMuted }}>{s.id.slice(0, 8)}</span>
+        <span style={{ color: s.role === "manager" ? color.live : color.text2 }}>{s.role === "manager" ? "★ " : ""}{s.role ?? "session"}</span>{" "}
+        <span style={{ color: color.text3 }}>{s.id.slice(0, 8)}</span>
       </span>
       {showProject && <Chip value={s.projectName} tone="info" />}
       <Chip label="model" value={shortModel(s.model)} />
@@ -250,12 +250,12 @@ function UsageRow({ s, showProject }: { s: SessionListItem; showProject?: boolea
       {limited && <Badge tone="danger">rate-limited</Badge>}
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 96, textAlign: "right" }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, minWidth: 96, textAlign: "right" }}>
           {fmtTokens(ctx)} / {fmtTokens(win)}
         </span>
         <Meter value={ctx} max={win} tone={t} width={90} />
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone[t], minWidth: 36, textAlign: "right" }}>{pct}%{rawPct > 100 ? "+" : ""}</span>
-        {cost != null && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 52, textAlign: "right" }}>{fmtUsd(cost)} est.</span>}
+        {cost != null && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, minWidth: 52, textAlign: "right" }}>{fmtUsd(cost)} est.</span>}
       </span>
     </div>
   );
@@ -277,24 +277,24 @@ function HistorySection({
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <SectionHead title="Agent Runs" tag={window} tagTone="info" />
-      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, lineHeight: 1.5, marginTop: -8 }}>
         Cumulative BILLED token + cost totals from finished Agent Runs — not the live occupancy above, and
         not interactive-session usage. Cost meters relative spend; runs whose model had no recorded price
         count $0.
       </span>
 
-      {query.isLoading && <Panel><span style={{ color: color.textMuted }}>Loading run history…</span></Panel>}
+      {query.isLoading && <Panel><span style={{ color: color.text3 }}>Loading run history…</span></Panel>}
       {query.isError && (
-        <Panel><span style={{ color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>Couldn't load run history: {(query.error as Error)?.message ?? "unknown error"}</span></Panel>
+        <Panel><span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>Couldn't load run history: {(query.error as Error)?.message ?? "unknown error"}</span></Panel>
       )}
 
       {!query.isLoading && !query.isError && totals && (
         totals.runs === 0 ? (
           <Panel style={{ padding: 20 }}>
-            <div style={{ fontFamily: font.head, fontSize: fs.body, color: color.textDim, marginBottom: 6 }}>
+            <div style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text2, marginBottom: 6 }}>
               No agent runs in this window
             </div>
-            <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
+            <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.6, maxWidth: 560 }}>
               No Agent Runs recorded for {scopeName} in this window ({window}). Interactive Claude Code
               sessions aren't tracked here — only API-style Agent Runs persist usage history. Try a wider
               window, or this stays empty until a run completes.
@@ -337,7 +337,7 @@ function HistorySection({
               </div>
               <Panel>
                 {data!.byAgent.length === 0 && (
-                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No per-agent rows.</span>
+                  <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No per-agent rows.</span>
                 )}
                 {(() => {
                   const max = Math.max(...data!.byAgent.map(totalTokens), 1);
@@ -364,14 +364,14 @@ function HistorySection({
 function HistoryRow({ name, subtitle, row, max }: { name: string; subtitle?: string | null; row: UsageHistoryProject | UsageHistoryAgent; max?: number }) {
   const tok = totalTokens(row);
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.line}` }}>
       <RowName name={name} subtitle={subtitle} />
       <Chip label="runs" value={String(row.runs)} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
         {max != null && <Meter value={tok} max={max} tone="info" width={90} />}
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, minWidth: 64, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, minWidth: 64, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
       </span>
     </div>
   );
@@ -400,25 +400,25 @@ function SessionUsageSection({
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <SectionHead title="Interactive sessions" tag="est. consumption · over time" tagTone="busy" />
-      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.5, marginTop: -8 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, lineHeight: 1.5, marginTop: -8 }}>
         Your interactive-session usage over time — cumulative tokens + an ESTIMATE of what they'd cost on
         metered API, sampled token-free from session transcripts. On a flat Claude subscription this is what
         you're consuming, not a separate bill — distinct from the live occupancy snapshot below (current
         context size) and the Agent&nbsp;Runs plane further down; the page never sums across the three.
       </span>
 
-      {query.isLoading && <Panel><span style={{ color: color.textMuted }}>Loading interactive-session usage…</span></Panel>}
+      {query.isLoading && <Panel><span style={{ color: color.text3 }}>Loading interactive-session usage…</span></Panel>}
       {query.isError && (
-        <Panel><span style={{ color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>Couldn't load interactive-session usage: {(query.error as Error)?.message ?? "unknown error"}</span></Panel>
+        <Panel><span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>Couldn't load interactive-session usage: {(query.error as Error)?.message ?? "unknown error"}</span></Panel>
       )}
 
       {!query.isLoading && !query.isError && totals && (
         totals.samples === 0 ? (
           <Panel style={{ padding: 20 }}>
-            <div style={{ fontFamily: font.head, fontSize: fs.body, color: color.textDim, marginBottom: 6 }}>
+            <div style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text2, marginBottom: 6 }}>
               No interactive-session usage in this window
             </div>
-            <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, lineHeight: 1.6, maxWidth: 560 }}>
+            <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.6, maxWidth: 560 }}>
               No interactive-session usage recorded for {scopeName} in this window ({window}). Try a
               wider window, or this fills in as the owner's sessions run and the daemon samples them.
             </div>
@@ -434,7 +434,7 @@ function SessionUsageSection({
               <Stat label="cache hit" value={fmtRatio(totals.cacheHitRatio)} tone={ratioTone(totals.cacheHitRatio)} />
               <Stat label="samples" value={fmtTokens(totals.samples)} tone="muted" />
             </div>
-            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.5 }}>
+            <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, lineHeight: 1.5 }}>
               "cache hit" = cache_read / (cache_read + cache_creation + input) across this whole scope/window —
               a warm, byte-stable session startup prefix keeps this near 100%; a broken prefix (re-paying the
               prefix as cache_creation every turn) collapses it toward 0%. Blended across every sampled
@@ -470,7 +470,7 @@ function SessionUsageSection({
               </div>
               <Panel>
                 {data!.byAgent.length === 0 && (
-                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No per-agent rows.</span>
+                  <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No per-agent rows.</span>
                 )}
                 {(() => {
                   const max = Math.max(...data!.byAgent.map(sessionTotalTokens), 1);
@@ -494,7 +494,7 @@ function SessionUsageSection({
               <SectionLabel>By session · cache hit ratio</SectionLabel>
               <Panel>
                 {data!.bySession.length === 0 && (
-                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>No per-session rows.</span>
+                  <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No per-session rows.</span>
                 )}
                 {data!.bySession.map((s) => <SessionRatioRow key={s.sessionId} row={s} />)}
               </Panel>
@@ -512,14 +512,14 @@ function SessionUsageSection({
 function SessionHistoryRow({ name, subtitle, row, max }: { name: string; subtitle?: string | null; row: SessionUsageProject | SessionUsageAgent; max?: number }) {
   const tok = sessionTotalTokens(row);
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.line}` }}>
       <RowName name={name} subtitle={subtitle} />
       <Chip label="samples" value={fmtTokens(row.samples)} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
         {max != null && <Meter value={tok} max={max} tone="info" width={90} />}
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
       </span>
     </div>
   );
@@ -533,16 +533,16 @@ function SessionRatioRow({ row }: { row: SessionUsageSession }) {
   const tok = sessionTotalTokens(row);
   const isManager = row.role === "manager";
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.line}` }}>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, minWidth: 160, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        <span style={{ color: isManager ? color.phosphor : color.textDim }}>{isManager ? "★ " : ""}{row.role ?? "session"}</span>{" "}
-        <span style={{ color: color.textMuted }}>{row.sessionId.slice(0, 8)}</span>
+        <span style={{ color: isManager ? color.live : color.text2 }}>{isManager ? "★ " : ""}{row.role ?? "session"}</span>{" "}
+        <span style={{ color: color.text3 }}>{row.sessionId.slice(0, 8)}</span>
       </span>
       <RowName name={row.agentName ?? "(no agent)"} subtitle={row.projectName} />
       <Chip label="samples" value={fmtTokens(row.samples)} />
       <span style={{ flex: 1 }} />
       <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone[ratioTone(row.cacheHitRatio)], minWidth: 44, textAlign: "right", fontWeight: 700 }}>
           {fmtRatio(row.cacheHitRatio)}
         </span>
@@ -570,13 +570,13 @@ function ByDayChart({
   const dense = byDay.length > 60;
   const first = byDay[0]?.day;
   const last = byDay[byDay.length - 1]?.day;
-  const tColor = metric === "cost" ? color.amber : color.cyan;
+  const tColor = metric === "cost" ? color.busy : color.info;
 
   return (
     <div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 8 }}>
         <SectionLabel style={{ margin: 0 }}>By day</SectionLabel>
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
           {byDay.length} day{byDay.length === 1 ? "" : "s"} · peak {fmtVal(peak)}
         </span>
         <span style={{ flex: 1 }} />
@@ -586,7 +586,7 @@ function ByDayChart({
         <div
           role="img"
           aria-label={`Interactive-session ${metric === "cost" ? "estimated cost" : "total tokens"} per day, ${byDay.length} days, peak ${fmtVal(peak)}`}
-          style={{ display: "flex", alignItems: "flex-end", gap: dense ? 1 : 3, height: 88, borderBottom: `1px solid ${color.border}`, paddingBottom: 1 }}
+          style={{ display: "flex", alignItems: "flex-end", gap: dense ? 1 : 3, height: 88, borderBottom: `1px solid ${color.line}`, paddingBottom: 1 }}
         >
           {byDay.map((d) => {
             const v = valueOf(d);
@@ -597,19 +597,19 @@ function ByDayChart({
                 title={`${d.day} · ${fmtVal(v)}`}
                 style={{
                   flex: 1, minWidth: 1, height: Math.max(h, 1),
-                  background: v > 0 ? tColor : color.border,
+                  background: v > 0 ? tColor : color.line,
                   opacity: v > 0 ? 1 : 0.4, borderRadius: 1,
                 }}
               />
             );
           })}
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6, fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
           <span>{first ?? ""}</span>
           <span>{first && last && first !== last ? last : ""}</span>
         </div>
         {allTime && (
-          <div style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, lineHeight: 1.5, marginTop: 8 }}>
+          <div style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, lineHeight: 1.5, marginTop: 8 }}>
             Early points are coarse — one backfilled sample per session at its last activity — and get finer
             going forward as the daemon samples live sessions on an interval.
           </div>

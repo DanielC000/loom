@@ -25,7 +25,7 @@ import {
 const PICKER_LIMIT = 8;
 
 const sectionLabel: CSSProperties = {
-  fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.textDim,
+  fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.text2,
 };
 
 /**
@@ -36,7 +36,7 @@ const sectionLabel: CSSProperties = {
  * track on either side sizes from that side's own labels alone and the values stop lining up.
  *
  * Sized to clear the widest label this column ever carries (`EDIT_RELATION_LABEL` uppercased, plus
- * "Parent") with headroom for the fallback face that renders before the head face (`--loom-font-head`) loads. A label is
+ * "Parent") with headroom for the fallback face that renders before the head face (`--loom-font-ui`) loads. A label is
  * `nowrap`, so one wider than this overflows into the value column rather than wrapping;
  * `board-relations-grid-align.spec.ts` asserts none does, so a label that needs more room fails
  * there rather than colliding silently on screen.
@@ -105,7 +105,7 @@ export function TaskRelationsEditor({
           rather than to one row. Verbatim — the validator's own wording already says what to drop. */}
       {errorTarget?.scope === "graph" && saveErrorMessage && (
         <span role="alert" data-testid="relations-error-graph"
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.4 }}>
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.4 }}>
           {saveErrorMessage}
         </span>
       )}
@@ -129,7 +129,7 @@ export function TaskRelationsEditor({
                 ))}
                 {errorTarget?.scope === "kind" && errorTarget.kind === kind && saveErrorMessage && (
                   <span role="alert" data-testid={`relations-error-${kind}`}
-                    style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.red, lineHeight: 1.4 }}>
+                    style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.4 }}>
                     {saveErrorMessage}
                   </span>
                 )}
@@ -187,7 +187,7 @@ function RelationChip({ kind, ref_, columns, titleById, onOpenTask, onRemove }: 
           glyph={history ? "✓" : KIND_GLYPH[kind]}
           suffix={ref_.released ? "(released)" : ref_.resolved ? "(resolved)" : undefined}
           muted={history}
-          tone={!history && kind === "blockedBy" ? color.amber : undefined} />
+          tone={!history && kind === "blockedBy" ? color.busy : undefined} />
       </span>
       {onRemove && (
         <Button variant="ghost" style={{ flexShrink: 0, fontSize: fs.sm, padding: "1px 6px", lineHeight: 1.2 }}
@@ -228,7 +228,7 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
       // borderStrong, not border: this is a panel INSIDE a panel, and at the hairline weight the rest of
       // the dialog uses it read as loose rows rather than one popover with an edge (caught by eye).
       style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px", minWidth: 0,
-        background: color.panel2, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base }}>
+        background: color.inset, border: `1px solid ${color.lineStrong}`, borderRadius: radius.base }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
         <Select value={kind} aria-label="Relation kind" style={{ fontSize: fs.sm, padding: "3px 6px" }}
           onChange={(e) => onKindChange(e.target.value as EditableRelationKind)}>
@@ -236,7 +236,7 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
             <option key={k} value={k}>{EDIT_RELATION_LABEL[k]}</option>
           ))}
         </Select>
-        <span style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted,
+        <span style={{ flex: 1, minWidth: 0, fontFamily: font.mono, fontSize: fs.xs, color: color.text3,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {EDIT_RELATION_HINT[kind]}
         </span>
@@ -270,7 +270,7 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
       <div id={listId} role="listbox" aria-label={`Cards to link as ${EDIT_RELATION_LABEL[kind]}`}
         style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: 176, overflowY: "auto", minWidth: 0 }}>
         {matches.length === 0 ? (
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted }}>
+          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
             {total === 0 && query.trim() === ""
               ? "no other cards on this board yet"
               : "no card on this board matches that title or id"}
@@ -285,10 +285,10 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
               title={`Link card ${c.id.slice(0, 8)} — ${c.title}`}
               style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, textAlign: "left", cursor: "pointer",
                 fontFamily: font.mono, fontSize: fs.mono, padding: "3px 5px", borderRadius: radius.sm,
-                color: active ? color.text : color.textDim,
-                background: active ? color.panel : "transparent",
-                border: `1px solid ${active ? color.borderStrong : "transparent"}` }}>
-              <span style={{ flexShrink: 0, color: color.textMuted, fontSize: fs.xs }}>{c.id.slice(0, 8)}</span>
+                color: active ? color.text : color.text2,
+                background: active ? color.surface : "transparent",
+                border: `1px solid ${active ? color.lineStrong : "transparent"}` }}>
+              <span style={{ flexShrink: 0, color: color.text3, fontSize: fs.xs }}>{c.id.slice(0, 8)}</span>
               <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</span>
               {col && <Badge tone={columnTone(col) ?? "muted"} style={{ flexShrink: 0, fontSize: fs.xs, padding: "0 5px" }}>{col.label}</Badge>}
             </button>
@@ -297,7 +297,7 @@ function CardPicker({ kind, selfId, cards, columns, excludeIds, onPick, onKindCh
       </div>
       {/* Say so when the list is capped rather than letting 8 rows read as the whole board. */}
       {total > matches.length && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
           showing {matches.length} of {total} — keep typing to narrow
         </span>
       )}

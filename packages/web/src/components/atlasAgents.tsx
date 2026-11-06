@@ -188,14 +188,14 @@ export function AgentRosterCard({ entry, onEdit, dispatched = false, cron = [], 
   // Measured on the first eyeball of this card — the dashed edge, the muted rig surface and
   // `padding: 0` were all written as CSS, all three did nothing, and the card still looked close
   // enough to the mockup to pass a glance.
-  const edge = pill ? (pill.pending ? color.amber : color.phosphor) : color.borderStrong;
+  const edge = pill ? (pill.pending ? color.busy : color.live) : color.lineStrong;
   const classes = `loom-baycard${dispatched ? " is-dispatched" : ""}`;
   return (
     <Panel className={classes} data-testid={testId ?? `atlas-agent-card-${entry.agent.id}`}
       style={{
         padding: 0,
         borderLeft: `2px ${dispatched ? "dashed" : "solid"} ${edge}`,
-        ...(dispatched ? { background: color.panel2 } : null),
+        ...(dispatched ? { background: color.inset } : null),
       }}>
       <div className="loom-baycard-head">
         {/* The role's own sigil from the ONE presentation map, at a size you can read, in the role's
@@ -379,8 +379,8 @@ function AtlasAgentDialog({ testId, label, width, maxHeight, height, scrimPaddin
       style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
         alignItems: "flex-start", justifyContent: "center", padding: scrimPadding, overflowY: "auto" }}>
       <div onClick={(e) => e.stopPropagation()}
-        style={{ width, maxHeight, height, background: color.panel,
-          border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: 14,
+        style={{ width, maxHeight, height, background: color.surface,
+          border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: 14,
           display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
         {children}
       </div>

@@ -158,7 +158,7 @@ export default function Overview() {
   const archivedHidden = Math.max(0, archivedTotal - recentArchived.length);
   const hasAnySessions = all.length > 0 || archivedTotal > 0;
 
-  if (!projectId) return <p style={{ color: color.textMuted, fontFamily: font.mono }}>No project selected — pick a project in the header.</p>;
+  if (!projectId) return <p style={{ color: color.text3, fontFamily: font.mono }}>No project selected — pick a project in the header.</p>;
 
   const roleOf = (a: Agent) => profiles.data?.find((p) => p.id === a.profileId)?.role ?? null;
   // Worker-role agents are EXCLUDED from the spawn grid: workers are Loom-DRIVEN — a manager dispatches
@@ -183,7 +183,7 @@ export default function Overview() {
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Overview
           <Badge tone="info">{project?.name ?? "…"}</Badge>
-          <span style={{ color: color.textMuted, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
+          <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
             the active project at a glance · switch the project in the header to rescope
           </span>
         </SectionLabel>
@@ -195,9 +195,9 @@ export default function Overview() {
             <Stat label="attention" value={projAttention.length} tone={projAttention.length ? "busy" : "muted"} />
             <Stat label="archived" value={archived.data?.total ?? 0} tone="muted" />
           </div>
-          <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
+          <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
             <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-              <span style={{ fontFamily: font.head, fontSize: fs.xs, color: color.textMuted }}>Worst context</span>
+              <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Worst context</span>
               <span style={{ flex: 1 }} />
               <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[ctxPct >= 80 ? "busy" : "live"] }}>{wc.ctx > 0 ? `${ctxPct}%` : "—"}</span>
             </span>
@@ -218,7 +218,7 @@ export default function Overview() {
         <SectionLabel>Agents</SectionLabel>
         {projectAgents.length === 0 ? (
           <Panel style={{ padding: 12 }}>
-            <span style={{ color: color.amber, fontFamily: font.mono, fontSize: fs.mono }}>
+            <span style={{ color: color.busy, fontFamily: font.mono, fontSize: fs.mono }}>
               No manually-spawnable agents — workers are dispatched by a manager, not spawned here. Create one on the Projects page.
             </span>
           </Panel>
@@ -234,7 +234,7 @@ export default function Overview() {
              heading); every other alert keeps the compact AttentionRow. --- */}
       <section>
         <SectionLabel>Attention ({projAttention.length + gateAttention})</SectionLabel>
-        {projAttention.length + gateAttention === 0 && <Panel><span style={{ color: color.textMuted }}>Nothing in this project needs you right now.</span></Panel>}
+        {projAttention.length + gateAttention === 0 && <Panel><span style={{ color: color.text3 }}>Nothing in this project needs you right now.</span></Panel>}
         {/* A failed periodic merge gate escalates here as well as onto the strip above — first, because it
             is the only item in this list that says the default branch itself is unverified. */}
         <MergeGateAttention status={mergeGate.data} />
@@ -250,7 +250,7 @@ export default function Overview() {
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Terminals
-          <span style={{ color: color.textMuted, fontWeight: 400 }}>({all.filter((s) => s.processState === "live").length} live)</span>
+          <span style={{ color: color.text3, fontWeight: 400 }}>({all.filter((s) => s.processState === "live").length} live)</span>
         </SectionLabel>
         <ProjectTerminals sessions={all} />
       </section>
@@ -272,7 +272,7 @@ export default function Overview() {
           <Button variant="ghost" style={{ padding: "0 6px" }} title={fleetOpen ? "Collapse to summary" : "Expand to the full hierarchy"}
             onClick={() => setFleet(!fleetOpen)}>{fleetOpen ? "⤡" : "⤢"}</Button>
         </SectionLabel>
-        {!hasAnySessions && <Panel><span style={{ color: color.textMuted }}>No sessions in this project.</span></Panel>}
+        {!hasAnySessions && <Panel><span style={{ color: color.text3 }}>No sessions in this project.</span></Panel>}
         {hasAnySessions && !fleetOpen && (
           <div style={{ maxWidth: 280 }}>
             <FleetCard name={project?.name ?? projectId} managers={managers} workers={workers}
@@ -295,7 +295,7 @@ export default function Overview() {
       <section>
         <SectionLabel>Activity</SectionLabel>
         <Panel grid style={{ maxHeight: "60vh", overflow: "auto" }}>
-          {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: fs.sm }}>No events yet.</span>}
+          {allEvents.length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No events yet.</span>}
           {allEvents.slice(0, 100).map((e) => <EventRow key={e.id} e={e} />)}
         </Panel>
       </section>
@@ -395,7 +395,7 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
             onClick={() => stop.mutate(session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
       </div>
-      {spawn.isError && <span style={{ color: color.red, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
+      {spawn.isError && <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
     </Panel>
   );
 }
@@ -464,7 +464,7 @@ function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
   return (
     <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {rowCount > 0 && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
           {rowCount} session{rowCount === 1 ? "" : "s"}
         </span>
       )}
@@ -483,7 +483,7 @@ function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
           <FleetCockpitRow key={w.id} s={w} open={openId === w.id} onToggle={() => toggle(w.id)} actions={actionsFor(w)} />
         ))}
         {managers.length === 0 && looseWorkers.length === 0 && (
-          <span style={{ color: color.textMuted, fontSize: fs.sm }}>idle — no live manager</span>
+          <span style={{ color: color.text3, fontSize: fs.sm }}>idle — no live manager</span>
         )}
       </div>
       {/* The accordion folds in only the most-recent archived rows (ARCHIVED_FOLD_CAP); everything older
@@ -511,7 +511,7 @@ function FleetCockpitRow({ s, star, open, onToggle, actions }: {
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <button onClick={onToggle} title={open ? "Collapse this session" : "Expand to this session's cockpit"}
           style={{ background: "transparent", border: "none", cursor: "pointer", padding: "0 2px",
-            color: open ? color.phosphor : color.textDim, fontFamily: font.mono, fontSize: fs.mono }}>
+            color: open ? color.live : color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
           {open ? "▾" : "▸"}
         </button>
         <div style={{ flex: 1, minWidth: 0 }}><FleetRow s={s} star={star} /></div>
@@ -568,11 +568,11 @@ function WorkerDiffPanel({ workerId }: { workerId: string }) {
   const diff = useQuery({ ...workerDiffQuery(workerId), placeholderData: keepPreviousData });
   return (
     <Panel style={{ maxHeight: 440, overflow: "auto" }}>
-      {diff.isLoading && <span style={{ color: color.textMuted, fontSize: fs.sm }}>Loading diff…</span>}
-      {diff.isError && <span style={{ color: color.red, fontSize: fs.sm }}>No diff (worker has no branch, or it was merged/removed).</span>}
+      {diff.isLoading && <span style={{ color: color.text3, fontSize: fs.sm }}>Loading diff…</span>}
+      {diff.isError && <span style={{ color: color.danger, fontSize: fs.sm }}>No diff (worker has no branch, or it was merged/removed).</span>}
       {diff.data && (
         <>
-          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.cyan, marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.info, marginBottom: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <span>{diff.data.filesChanged} file(s) · +{diff.data.insertions} −{diff.data.deletions}</span>
             {diff.data.uncommitted && <Badge tone="busy">live · incl. uncommitted</Badge>}
             {diff.data.merged && <Badge tone="live">merged → landed diff</Badge>}
@@ -621,7 +621,7 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
     ro.observe(gridEl);
     return () => ro.disconnect();
   }, [hasLive]);
-  if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
+  if (live.length === 0) return <p style={{ color: color.text3, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
 
   // alignItems:"start" so each tile sizes to ITS OWN content — a bare card stays short instead of being
   // stretched to the tallest card in its row (which left dead space below its composer). Cards in a row may

@@ -55,7 +55,7 @@ export default function AgentsNode() {
   if (!projectId) {
     return (
       <Panel style={{ maxWidth: 560, padding: "18px 20px" }} data-testid="atlas-agents-no-project">
-        <p style={{ margin: 0, color: color.textDim, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.7 }}>
+        <p style={{ margin: 0, color: color.text2, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.7 }}>
           No project is active yet. Pick one in the entity tree — this node lists whichever project the
           tree has open.
         </p>

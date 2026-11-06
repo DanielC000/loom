@@ -7,11 +7,11 @@ import { Dot } from "./ui";
 // file headers. The classifier differs per caller (FileHunks: hunkLineKind, header-stripped content;
 // DiffView: rawPatchLineKind, raw patch with real headers) — this map does not.
 const KIND_COLOR: Record<DiffLineKind, string> = {
-  add: color.phosphor,
-  del: color.red,
-  hunk: color.cyan,
-  context: color.textDim,
-  meta: color.textMuted,
+  add: color.live,
+  del: color.danger,
+  hunk: color.info,
+  context: color.text2,
+  meta: color.text3,
 };
 
 // Unified diff with green additions / red deletions / cyan hunk headers. Kept for the fleet-card
@@ -31,13 +31,13 @@ export function DiffView({ patch }: { patch: string }) {
 // The hunks of ONE file, rendered with per-line coloring + a faint hunk-header band. Pulled out so
 // the collapsible FileDiffBlock can show/hide it without re-laying the lines.
 function FileHunks({ file }: { file: FileDiff }) {
-  if (file.binary) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "8px 10px" }}>Binary file — no text diff.</div>;
-  if (file.hunks.length === 0) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.textMuted, padding: "8px 10px" }}>No textual changes.</div>;
+  if (file.binary) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "8px 10px" }}>Binary file — no text diff.</div>;
+  if (file.hunks.length === 0) return <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, padding: "8px 10px" }}>No textual changes.</div>;
   return (
     <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, padding: "4px 10px 8px" }}>
       {file.hunks.map((h, hi) => (
         <div key={hi}>
-          <div style={{ color: color.cyan, background: wash(color.info, 6), margin: "4px -10px 2px", padding: "1px 10px" }}>{h.header}</div>
+          <div style={{ color: color.info, background: wash(color.info, 6), margin: "4px -10px 2px", padding: "1px 10px" }}>{h.header}</div>
           {h.lines.map((ln, i) => (
             <div key={i} style={{ color: KIND_COLOR[hunkLineKind(ln)] }}>{ln || " "}</div>
           ))}
@@ -54,25 +54,25 @@ function FileHunks({ file }: { file: FileDiff }) {
 export function FileDiffBlock({ file, open, onToggle, anchorId }: { file: FileDiff; open: boolean; onToggle: () => void; anchorId?: string }) {
   const t = riskTone(file.risk);
   return (
-    <div id={anchorId} style={{ border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden", scrollMarginTop: 12 }}>
+    <div id={anchorId} style={{ border: `1px solid ${color.line}`, borderRadius: radius.base, overflow: "hidden", scrollMarginTop: 12 }}>
       <button
         onClick={onToggle}
         className="loom-btn"
         style={{
           display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left",
-          background: color.panel2, border: "none", borderBottom: open ? `1px solid ${color.border}` : "none",
+          background: color.inset, border: "none", borderBottom: open ? `1px solid ${color.line}` : "none",
           padding: "6px 10px", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono,
         }}
         title={open ? "Collapse" : "Expand"}
       >
-        <span aria-hidden style={{ color: color.textMuted, width: 10, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
+        <span aria-hidden style={{ color: color.text3, width: 10, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
         <StatusGlyph status={file.status} />
         <Dot tone={t} glow={file.risk === "high"} title={`risk: ${file.risk}`} />
         <span style={{ color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}>
-          {file.oldPath ? <><span style={{ color: color.textMuted }}>{file.oldPath} → </span>{file.path}</> : file.path}
+          {file.oldPath ? <><span style={{ color: color.text3 }}>{file.oldPath} → </span>{file.path}</> : file.path}
         </span>
-        {file.insertions > 0 && <span style={{ color: color.phosphor, flexShrink: 0 }}>+{file.insertions}</span>}
-        {file.deletions > 0 && <span style={{ color: color.red, flexShrink: 0 }}>−{file.deletions}</span>}
+        {file.insertions > 0 && <span style={{ color: color.live, flexShrink: 0 }}>+{file.insertions}</span>}
+        {file.deletions > 0 && <span style={{ color: color.danger, flexShrink: 0 }}>−{file.deletions}</span>}
       </button>
       {open && <FileHunks file={file} />}
     </div>
@@ -81,7 +81,7 @@ export function FileDiffBlock({ file, open, onToggle, anchorId }: { file: FileDi
 
 // A/D/R/M status tag, tinted by meaning (added=phosphor, deleted=red, renamed=cyan, modified=dim).
 export function StatusGlyph({ status }: { status: FileDiff["status"] }) {
-  const c = status === "added" ? color.phosphor : status === "deleted" ? color.red : status === "renamed" ? color.cyan : color.textDim;
+  const c = status === "added" ? color.live : status === "deleted" ? color.danger : status === "renamed" ? color.info : color.text2;
   return (
     <span title={status} style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: c, width: 12, textAlign: "center", flexShrink: 0 }}>
       {statusGlyph(status)}
@@ -106,9 +106,9 @@ export function FileOverviewRow({ file, onJump }: { file: FileDiff; onJump: () =
     >
       <Dot tone={t} glow={file.risk === "high"} />
       <StatusGlyph status={file.status} />
-      <span style={{ color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{file.path}</span>
-      {file.insertions > 0 && <span style={{ color: color.phosphor, flexShrink: 0 }}>+{file.insertions}</span>}
-      {file.deletions > 0 && <span style={{ color: color.red, flexShrink: 0 }}>−{file.deletions}</span>}
+      <span style={{ color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{file.path}</span>
+      {file.insertions > 0 && <span style={{ color: color.live, flexShrink: 0 }}>+{file.insertions}</span>}
+      {file.deletions > 0 && <span style={{ color: color.danger, flexShrink: 0 }}>−{file.deletions}</span>}
       {file.risk !== "low" && (
         <span style={{ color: tone[t], fontSize: fs.xs, flexShrink: 0 }}>{file.risk}</span>
       )}

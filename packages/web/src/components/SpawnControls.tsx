@@ -41,9 +41,9 @@ export function SpawnControls({ profileRole, onSpawn, pending }:
         // `minWidth` is now only a floor for the two short labels.
         <div data-testid="spawn-role-menu"
           style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 20, minWidth: 170,
-            background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.sm, overflow: "hidden",
+            background: color.surface, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, overflow: "hidden",
             display: "flex", flexDirection: "column" }}>
-          {/* Each item states NO `color`: ghost supplies --loom-text-dim at rest and lifts it to
+          {/* Each item states NO `color`: ghost supplies --loom-text-2 at rest and lifts it to
               --loom-text on hover, and an inline colour here shadows that hover rule outright (this used
               to state ghost's own hover value, so every item sat permanently lit and none could hover).
               See the `.loom-btn-*` block in styles/global.css if an item needs a different tone. */}

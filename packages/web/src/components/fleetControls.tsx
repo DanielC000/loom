@@ -202,7 +202,7 @@ export function OrchestrationChip() {
               title="Close" onClick={() => setOpen(false)} style={{ padding: "0 6px", lineHeight: 1.2 }}>×</Button>
           </div>
           <div className="loom-kpi-popbody">
-            <SectionLabel style={{ margin: "0 0 6px", color: color.textMuted }}>Plan usage</SectionLabel>
+            <SectionLabel style={{ margin: "0 0 6px", color: color.text3 }}>Plan usage</SectionLabel>
             <PlanUsageDetail usage={usage} />
             <FleetControls variant="pop" />
             {/* The scope question the round-4 mockup explicitly left open, answered from the daemon:
@@ -210,8 +210,8 @@ export function OrchestrationChip() {
                 "global". Stated here because a destructive control that overstates its reach is
                 exactly as misleading as one that understates it. */}
             <BandFoot>
-              Clearing the hold drops the global <code style={{ color: color.cyan, fontFamily: font.mono }}>worker_spawn</code> latch
-              without touching a session. <b style={{ color: color.textDim }}>Kill all</b> hard-stops every live
+              Clearing the hold drops the global <code style={{ color: color.info, fontFamily: font.mono }}>worker_spawn</code> latch
+              without touching a session. <b style={{ color: color.text2 }}>Kill all</b> hard-stops every live
               WORKER across every project and pauses orchestration — a manager, the Platform Lead and a
               Companion are left running.
             </BandFoot>

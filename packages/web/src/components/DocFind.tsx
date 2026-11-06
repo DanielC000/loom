@@ -190,7 +190,7 @@ export default function DocFind({ containerRef, registry, docKey }: {
         }}
         style={{
           position: "absolute", top: 8, right: 8, display: "flex", alignItems: "center", gap: 6,
-          background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
+          background: color.surface, border: `1px solid ${color.lineStrong}`, borderRadius: radius.base,
           padding: "4px 6px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
         }}
       >
@@ -198,13 +198,13 @@ export default function DocFind({ containerRef, registry, docKey }: {
           ref={inputRef} value={query} onChange={(e) => setQuery(e.target.value)}
           placeholder="Find in document…" aria-label="Find in document"
           style={{
-            background: color.panel2, color: color.text, border: `1px solid ${color.border}`,
+            background: color.inset, color: color.text, border: `1px solid ${color.line}`,
             borderRadius: radius.sm, padding: "3px 8px", width: 200, fontFamily: font.mono, fontSize: fs.mono, outline: "none",
           }}
         />
         <span
           aria-live="polite"
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: matches.length ? color.textDim : color.textMuted, minWidth: 44, textAlign: "center", whiteSpace: "nowrap" }}
+          style={{ fontFamily: font.mono, fontSize: fs.mono, color: matches.length ? color.text2 : color.text3, minWidth: 44, textAlign: "center", whiteSpace: "nowrap" }}
         >
           {count}
         </span>
@@ -223,8 +223,8 @@ function IconButton({ label, icon, disabled, onClick }: { label: string; icon: "
       className="loom-btn"
       style={{
         display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22,
-        padding: 0, border: `1px solid ${color.border}`, borderRadius: radius.sm,
-        background: "transparent", color: color.textDim, cursor: disabled ? "not-allowed" : "pointer",
+        padding: 0, border: `1px solid ${color.line}`, borderRadius: radius.sm,
+        background: "transparent", color: color.text2, cursor: disabled ? "not-allowed" : "pointer",
       }}
     >
       <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden>

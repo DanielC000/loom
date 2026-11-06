@@ -566,7 +566,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           data-session-id={sessionId}
           role="alert"
         >
-          <span aria-hidden style={{ color: color.red }}>●</span>
+          <span aria-hidden style={{ color: color.danger }}>●</span>
           <span>
             <strong style={{ color: color.text }}>{name} has stopped replying.</strong>{" "}
             {stuck.turnsSinceLastReply} turns have completed with no answer — Loom flagged it at turn{" "}
@@ -588,7 +588,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           data-session-id={sessionId}
           role="alert"
         >
-          <span aria-hidden style={{ color: color.amber }}>▲</span>
+          <span aria-hidden style={{ color: color.busy }}>▲</span>
           <span>
             <strong style={{ color: color.text }}>{name}'s home route is refused.</strong>{" "}
             Proactive delivery (heartbeat/reminder/attention-push) can't reach it — fix the home under{" "}
@@ -599,7 +599,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
 
       {armed === false && (
         <div style={notice("busy")} role="status">
-          <span aria-hidden style={{ color: color.amber }}>▲</span>
+          <span aria-hidden style={{ color: color.busy }}>▲</span>
           <span>
             This companion has no in-app route yet, so a message won't reach it — bind one under{" "}
             <strong style={{ color: color.text }}>Manage</strong> first.
@@ -646,7 +646,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           aria-label="Message"
           style={{
             flex: 1, resize: "none", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
-            background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`,
+            background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`,
             borderRadius: radius.base, padding: "8px 12px",
           }}
         />
@@ -697,7 +697,7 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
       <Avatar label={initials(title)} />
       <span
         style={{
-          flex: 1, minWidth: 0, fontFamily: font.head, fontSize: fs.body, fontWeight: 600,
+          flex: 1, minWidth: 0, fontFamily: font.ui, fontSize: fs.body, fontWeight: 600,
           color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
         }}
       >
@@ -755,21 +755,21 @@ function MessageRow({ msg, title, grouped, groupEnd, time, delivery }: {
       <div style={{ display: "flex", flexDirection: "column", minWidth: 0, maxWidth: "78%", alignItems: you ? "flex-end" : "flex-start" }}>
         {!grouped && (
           <div style={{ display: "flex", alignItems: "baseline", gap: 8, margin: "0 4px 4px", maxWidth: "100%" }}>
-            <span style={{ fontFamily: font.head, fontSize: fs.sm, fontWeight: 700, color: color.textDim, whiteSpace: "nowrap" }}>
+            <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.text2, whiteSpace: "nowrap" }}>
               {you ? "You" : title}
             </span>
             {badge && (
-              <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.cyan, border: `1px solid ${wash(color.info, 30)}`, borderRadius: radius.sm, padding: "0 5px", background: wash(color.info, 10) }}>
+              <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.info, border: `1px solid ${wash(color.info, 30)}`, borderRadius: radius.sm, padding: "0 5px", background: wash(color.info, 10) }}>
                 {badge}
               </span>
             )}
-            {time && <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted, whiteSpace: "nowrap" }}>{time}</span>}
+            {time && <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, whiteSpace: "nowrap" }}>{time}</span>}
           </div>
         )}
         <Bubble msg={msg} you={you} groupEnd={groupEnd} />
         {you && groupEnd && delivery && (
-          <div style={{ display: "flex", flexDirection: "row-reverse", alignItems: "center", gap: 6, margin: "4px 5px 0", fontFamily: font.mono, fontSize: fs.xs, color: color.textMuted }}>
-            <span style={{ color: color.phosphor, letterSpacing: "-1px" }} aria-hidden>{delivery === "delivered" ? "✓✓" : "✓"}</span>
+          <div style={{ display: "flex", flexDirection: "row-reverse", alignItems: "center", gap: 6, margin: "4px 5px 0", fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
+            <span style={{ color: color.live, letterSpacing: "-1px" }} aria-hidden>{delivery === "delivered" ? "✓✓" : "✓"}</span>
             <span>{(badge ? `via ${badge}` : "in-app")} · {delivery}</span>
           </div>
         )}
@@ -786,8 +786,8 @@ function Bubble({ msg, you, groupEnd }: { msg: ChatMessage; you: boolean; groupE
       style={{
         maxWidth: "100%", padding: "9px 13px", borderRadius: radius.lg, fontFamily: font.mono, fontSize: fs.body,
         lineHeight: 1.6, whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: color.text,
-        background: you ? color.phosphorDim : color.panel2,
-        border: `1px solid ${you ? wash(color.live, 22) : color.border}`,
+        background: you ? color.liveSoft : color.inset,
+        border: `1px solid ${you ? wash(color.live, 22) : color.line}`,
         borderBottomRightRadius: you && groupEnd ? 4 : 12,
         borderBottomLeftRadius: !you && groupEnd ? 4 : 12,
       }}
@@ -838,14 +838,14 @@ function EventLine({ msg, time, title }: { msg: ChatMessage; time: string; title
         style={{
           display: "inline-flex", alignItems: "center", gap: 9, maxWidth: "82%", padding: "6px 12px",
           borderRadius: radius.pill, border: `1px solid ${wash(color.busy, 28)}`, background: wash(color.busy, 9),
-          fontFamily: font.mono, fontSize: fs.mono, color: color.textDim, lineHeight: 1.45,
+          fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.45,
         }}
       >
-        <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: color.amber, whiteSpace: "nowrap" }}>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.busy, whiteSpace: "nowrap" }}>
           ⟡ {title}
         </span>
         <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>{msg.text}</span>
-        {time && <span style={{ color: color.textMuted, fontSize: fs.xs, whiteSpace: "nowrap" }}>{time}</span>}
+        {time && <span style={{ color: color.text3, fontSize: fs.xs, whiteSpace: "nowrap" }}>{time}</span>}
       </span>
     </div>
   );
@@ -863,10 +863,10 @@ function JumpToLatest({ show, unread, onClick }: { show: boolean; unread: number
       tabIndex={show ? 0 : -1}
       className={`loom-chat-jump${show ? " is-shown" : ""}`}
     >
-      <span aria-hidden style={{ color: color.phosphor, fontSize: fs.body }}>↓</span>
+      <span aria-hidden style={{ color: color.live, fontSize: fs.body }}>↓</span>
       Jump to latest
       {unread > 0 && (
-        <span style={{ fontFamily: font.head, fontWeight: 700, fontSize: fs.xs, color: color.bg, background: color.phosphor, borderRadius: radius.pill, padding: "1px 7px", letterSpacing: "0.02em" }}>
+        <span style={{ fontFamily: font.ui, fontWeight: 700, fontSize: fs.xs, color: color.bg, background: color.live, borderRadius: radius.pill, padding: "1px 7px", letterSpacing: "0.02em" }}>
           {unread} new
         </span>
       )}
@@ -882,11 +882,11 @@ function Avatar({ label, blank, rowGap }: { label: string; blank?: boolean; rowG
       aria-hidden
       style={{
         width: 28, height: 28, borderRadius: radius.base, flexShrink: 0, ...(rowGap ? { marginTop: 20 } : null),
-        display: "grid", placeItems: "center", fontFamily: font.head, fontWeight: 700, fontSize: fs.sm,
+        display: "grid", placeItems: "center", fontFamily: font.ui, fontWeight: 700, fontSize: fs.sm,
         letterSpacing: "0.02em",
         ...(blank
           ? { background: "transparent", border: "1px solid transparent", color: "transparent" }
-          : { color: color.phosphor, background: color.phosphorDim, border: `1px solid ${wash(color.live, 35)}` }),
+          : { color: color.live, background: color.liveSoft, border: `1px solid ${wash(color.live, 35)}` }),
       }}
     >
       {blank ? "" : label}
@@ -917,7 +917,7 @@ function MediaAttachment({ media, spaced }: { media: InboundMedia; spaced: boole
         <img
           src={src}
           alt={media.fileName}
-          style={{ display: "block", maxWidth: "100%", maxHeight: 320, borderRadius: radius.base, border: `1px solid ${color.border}` }}
+          style={{ display: "block", maxWidth: "100%", maxHeight: 320, borderRadius: radius.base, border: `1px solid ${color.line}` }}
         />
       </a>
     );
@@ -928,7 +928,7 @@ function MediaAttachment({ media, spaced }: { media: InboundMedia; spaced: boole
       download={media.fileName}
       style={{
         display: "flex", alignItems: "center", gap: 8, marginTop, padding: "8px 10px", borderRadius: radius.base,
-        border: `1px solid ${color.border}`, background: color.panel2, color: color.text, textDecoration: "none",
+        border: `1px solid ${color.line}`, background: color.inset, color: color.text, textDecoration: "none",
         fontFamily: font.mono, fontSize: fs.mono,
       }}
     >
@@ -943,12 +943,12 @@ function TypingIndicator({ title }: { title: string }) {
   return (
     <div style={{ display: "flex", gap: 10, marginTop: 14, alignItems: "flex-start" }} aria-label={`${title} is replying`} role="status">
       <Avatar label={initials(title)} rowGap={false} />
-      <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "10px 13px", borderRadius: radius.lg, borderBottomLeftRadius: 4, background: color.panel2, border: `1px solid ${color.border}` }}>
+      <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "10px 13px", borderRadius: radius.lg, borderBottomLeftRadius: 4, background: color.inset, border: `1px solid ${color.line}` }}>
         {[0, 1, 2].map((i) => (
           <span
             key={i}
             className="loom-typing-dot"
-            style={{ width: 5, height: 5, borderRadius: radius.pill, background: color.textDim, animationDelay: `${i * 0.18}s` }}
+            style={{ width: 5, height: 5, borderRadius: radius.pill, background: color.text2, animationDelay: `${i * 0.18}s` }}
           />
         ))}
       </div>
@@ -959,9 +959,9 @@ function TypingIndicator({ title }: { title: string }) {
 // ── Empty state before the first message ──────────────────────────────────────────
 function EmptyState({ connected, title }: { connected: boolean; title: string }) {
   return (
-    <div style={{ margin: "auto", textAlign: "center", display: "flex", flexDirection: "column", gap: 10, alignItems: "center", color: color.textMuted, padding: 40, maxWidth: 340 }}>
-      <span aria-hidden style={{ width: 52, height: 52, borderRadius: radius.lg, display: "grid", placeItems: "center", fontSize: fs.h1, color: color.phosphor, background: color.phosphorDim, border: `1px solid ${wash(color.live, 30)}` }}>◇</span>
-      <span style={{ fontFamily: font.head, fontSize: fs.sm, color: color.textDim }}>
+    <div style={{ margin: "auto", textAlign: "center", display: "flex", flexDirection: "column", gap: 10, alignItems: "center", color: color.text3, padding: 40, maxWidth: 340 }}>
+      <span aria-hidden style={{ width: 52, height: 52, borderRadius: radius.lg, display: "grid", placeItems: "center", fontSize: fs.h1, color: color.live, background: color.liveSoft, border: `1px solid ${wash(color.live, 30)}` }}>◇</span>
+      <span style={{ fontFamily: font.ui, fontSize: fs.sm, color: color.text2 }}>
         Say hello
       </span>
       <span style={{ fontSize: fs.sm, lineHeight: 1.7 }}>
@@ -978,12 +978,12 @@ function EmptyState({ connected, title }: { connected: boolean; title: string })
 // The red tone is deliberately reserved for the zero-reply alert — if everything glowed amber the one
 // notice that means "this is actually broken" would read as the same weight as "you haven't bound a route".
 function notice(t: "busy" | "muted" | "danger"): CSSProperties {
-  const accent = t === "busy" ? color.amber : t === "danger" ? color.red : color.border;
+  const accent = t === "busy" ? color.busy : t === "danger" ? color.danger : color.line;
   return {
     display: "flex", gap: 8, alignItems: "center", padding: "8px 12px",
     border: `1px solid ${accent}`, borderRadius: radius.base,
-    background: t === "busy" ? wash(color.busy, 6) : t === "danger" ? wash(color.danger, 7) : color.panel2,
-    fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: t === "muted" ? color.textMuted : color.textDim,
+    background: t === "busy" ? wash(color.busy, 6) : t === "danger" ? wash(color.danger, 7) : color.inset,
+    fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5, color: t === "muted" ? color.text3 : color.text2,
   };
 }
 
@@ -1098,24 +1098,24 @@ function HistoryRow({ active, primary, secondary, count, live, onClick }: {
       className="loom-toggle"
       style={{
         textAlign: "left", display: "flex", flexDirection: "column", gap: 3, cursor: "pointer",
-        background: active ? color.phosphorDim : "transparent",
-        border: `1px solid ${active ? color.phosphor : color.border}`,
+        background: active ? color.liveSoft : "transparent",
+        border: `1px solid ${active ? color.live : color.line}`,
         borderRadius: radius.base, padding: "7px 9px", fontFamily: font.mono,
       }}
     >
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
         {live && <Dot tone="live" glow />}
-        <span style={{ fontFamily: font.head, fontSize: fs.xs, fontWeight: 700, color: active ? color.text : color.textDim }}>
+        <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: active ? color.text : color.text2 }}>
           {primary}
         </span>
         {count !== undefined && (
           <>
             <span style={{ flex: 1 }} />
-            <span style={{ fontSize: fs.xs, color: color.textMuted }}>{count} msg{count === 1 ? "" : "s"}</span>
+            <span style={{ fontSize: fs.xs, color: color.text3 }}>{count} msg{count === 1 ? "" : "s"}</span>
           </>
         )}
       </span>
-      <span style={{ fontSize: fs.sm, lineHeight: 1.4, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <span style={{ fontSize: fs.sm, lineHeight: 1.4, color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {secondary}
       </span>
     </button>
@@ -1140,7 +1140,7 @@ function PastConversationView({ sessionId, seq, title, onBack }: {
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <Button variant="ghost" onClick={onBack} style={{ padding: "4px 8px" }} title="Return to the live chat">← Live chat</Button>
-        <span style={{ flex: 1, minWidth: 0, fontFamily: font.head, fontSize: fs.sm, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ flex: 1, minWidth: 0, fontFamily: font.ui, fontSize: fs.sm, color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {q.data ? formatConversationTime(q.data.conversation.startedAt) : "Conversation"}
         </span>
         <StatusPill tone="info" label="read-only" />
@@ -1148,11 +1148,11 @@ function PastConversationView({ sessionId, seq, title, onBack }: {
 
       <div style={{ flex: 1, minHeight: 0, maxHeight: SCROLL_MAX_HEIGHT, overflowY: "auto", display: "flex", flexDirection: "column", padding: "6px 14px 10px" }}>
         {q.isLoading ? (
-          <div style={{ margin: "auto", color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>Loading…</div>
+          <div style={{ margin: "auto", color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>Loading…</div>
         ) : q.isError ? (
-          <div style={{ margin: "auto", color: color.red, fontFamily: font.mono, fontSize: fs.mono }}>{(q.error as Error).message}</div>
+          <div style={{ margin: "auto", color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>{(q.error as Error).message}</div>
         ) : timeline.length === 0 ? (
-          <div style={{ margin: "auto", color: color.textMuted, fontFamily: font.mono, fontSize: fs.mono }}>This conversation has no messages.</div>
+          <div style={{ margin: "auto", color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>This conversation has no messages.</div>
         ) : (
           <Timeline items={timeline} title={title} />
         )}
