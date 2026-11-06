@@ -5622,6 +5622,13 @@ function clearTokenFromPendingIndices(indices: number[], token: string, writeFai
         // eslint-disable-next-line no-console
         console.warn(`[merge-quarantine] a token-clear's own full lift also kept ${orphanNamed.length} orphan file reference(s) alive${orphanSweepResult.anyUnattributed ? " (plus at least one more, unattributed)" : ""} (no human route reaches this path — logging only)${orphanNamed.length > 0 ? `: ${orphanNamed.map((rp) => `'${rp}'`).join(", ")}` : ""}.`);
       }
+      // @decision 7aa9c406 — arm any foreign tmp residue collapsing onto a key this removal freed (the
+      // by-id branch's twin); log-only like the orphan sweep above — this route has no human return.
+      const tmpSweep = sweepTmpResidueForClearedPendingEntries([live], live.entry.tokens, excludeOwnIdentity);
+      if (tmpSweep.referencingRepoPaths.length > 0 || tmpSweep.contentKeptEntries.length > 0 || tmpSweep.anyUnattributed) {
+        // eslint-disable-next-line no-console
+        console.warn(`[merge-quarantine] a token-clear's own full lift also kept ${tmpSweep.keptEntries.length + tmpSweep.contentKeptEntries.length} foreign tmp residue(s) alive${tmpSweep.anyUnattributed ? " (plus at least one more, unattributed)" : ""} (no human route reaches this path — logging only).`);
+      }
       // @decision d2592cd5 (3rd fix round, card 3d4467cf) — DEFERRED past the whole public call now, not
       // just this batch — `nonFailureOk` is computed NOW; see `DeferredTombstoneJob`'s own doc.
       //
@@ -6637,7 +6644,10 @@ function canonicalKeyOrUndefined(repoPath: string): string | undefined {
  * once missed one; card 25d0d45b): `clearMergeQuarantineLatchFile`'s raw "no entry matches this id"
  * fallback AND its own matched-pending branch (card c0be9bf9/9cabd143), `deleteMergeQuarantineLatchByKey`'s
  * own legitimate-clear sweep, `writeMergeQuarantineLatch`'s `sweepOtherTmpsOnSuccess` path, and
- * `clearMergeQuarantineByToken`'s own partial-clear branch (round 4).
+ * `clearMergeQuarantineByToken`'s own partial-clear branch (round 4) — PLUS, since card 7aa9c406, three
+ * pending-tier clears reaching it through {@link sweepTmpResidueForClearedPendingEntries} (one call per
+ * distinct own-latch hash): `clearMergeQuarantineByKey`'s pending loop, `tryClearMergeQuarantineByOwnIdentity`'s
+ * pending branch and `clearTokenFromPendingIndices`' remove branch. Re-grep before trusting this list.
  *
  * @decision be79f4d5 (round 3) — call THIS at every site that sweeps a same-hash tmp, never an
  * unconditional-by-hash delete. RETRACTED: an earlier "leaves residue behind forever" rationale was
@@ -6875,6 +6885,72 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
     }
   }
   return { kept: referencingRepoPaths.size > 0 || contentKeptEntries.length > 0 || anyUnattributed, referencingRepoPaths: [...referencingRepoPaths], keptEntries, contentKeptEntries, anyUnattributed };
+}
+
+/**
+ * The canonical keys a clear of these (ALREADY-dropped) pending entries freed — the `freedKeys` argument of
+ * {@link sweepTmpResidueForHashIfUnreferenced}. Mirrors `findPendingIndicesFor`'s key tiers 3 and 4 exactly:
+ * a RESOLVABLE entry blocks its canonical key, and so does an unresolvable one with informative keys (its
+ * degraded walked-up key) — never its `resolvedKey(s)`, which no pending tier consults. Tiers 1/2 match the
+ * entry's OWN path identity, so no foreign key is freed for them.
+ *
+ * @decision cdcd55c2 — the rule itself; extracted by 7aa9c406 so every pending-tier clear shares ONE copy.
+ * @decision 7aa9c406 — do not re-inline this at a call site; do not compute it with a mutating lookup.
+ */
+function freedKeysForClearedPendingEntries(entries: ReadonlyArray<MergeQuarantineEntry>): Set<string> {
+  const freedKeys = new Set<string>();
+  for (const entry of entries) {
+    if (isRepoPathCurrentlyResolvable(entry.repoPath) || informativeKeysFor(entry).length > 0) {
+      const k = canonicalKeyOrUndefined(entry.repoPath);
+      if (k !== undefined) freedKeys.add(k);
+    }
+  }
+  return freedKeys;
+}
+
+/**
+ * The hash prefix (`<hash>.json.tmp-`) of a removed pending entry's OWN latch: its `sourceFile` stem (a final
+ * or a crash-left tmp residue of it), else the hash Loom would write for its canonical key. `undefined` when
+ * neither is derivable — never an invented hash.
+ */
+function ownLatchHashForClearedPending(p: PendingUnresolvedQuarantine): string | undefined {
+  const m = /^(.+?)\.json(?:\.tmp-.+)?$/.exec(path.basename(p.sourceFile));
+  if (m?.[1]) return m[1];
+  const key = canonicalKeyOrUndefined(p.entry.repoPath);
+  return key !== undefined ? quarantineHashForKey(key) : undefined;
+}
+
+/**
+ * The tmp-residue sweep for the pending-tier clears that have no clear-by-id `id` (by-path, by-recorded-path,
+ * token route): one {@link sweepTmpResidueForHashIfUnreferenced} per DISTINCT own-latch hash of the removed
+ * entries, each carrying the union of {@link freedKeysForClearedPendingEntries}, so a foreign tmp residue
+ * collapsing onto a freed key is armed in-process exactly as a reboot would. The sweep function's contract is
+ * unchanged. Call only AFTER the entries are dropped from `pendingUnresolvedQuarantines`.
+ *
+ * @decision 7aa9c406 — an entry with no derivable hash skips its pass (logged); never guess one.
+ */
+function sweepTmpResidueForClearedPendingEntries(removed: ReadonlyArray<PendingUnresolvedQuarantine>, candidateTokens: string[], excludeIdentities: ReadonlySet<string>): ReturnType<typeof sweepTmpResidueForHashIfUnreferenced> {
+  const agg = { kept: false, referencingRepoPaths: [] as string[], keptEntries: [] as Array<{ repoPath: string; sourceFile: string }>, contentKeptEntries: [] as Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>, anyUnattributed: false };
+  const freedKeys = freedKeysForClearedPendingEntries(removed.map((p) => p.entry));
+  const hashes = new Set<string>();
+  for (const p of removed) {
+    const h = ownLatchHashForClearedPending(p);
+    if (h === undefined) {
+      // eslint-disable-next-line no-console
+      console.warn(`[merge-quarantine] cannot derive an own-latch hash for the cleared pending entry of ${p.entry.repoPath} (${p.sourceFile}) — its tmp-residue pass is skipped; a reboot still derives any foreign residue it freed.`);
+      continue;
+    }
+    hashes.add(h);
+  }
+  for (const h of hashes) {
+    const r = sweepTmpResidueForHashIfUnreferenced(h, candidateTokens, undefined, false, [], excludeIdentities, freedKeys);
+    agg.kept = agg.kept || r.kept;
+    agg.anyUnattributed = agg.anyUnattributed || r.anyUnattributed;
+    for (const rp of r.referencingRepoPaths) if (!agg.referencingRepoPaths.includes(rp)) agg.referencingRepoPaths.push(rp);
+    agg.keptEntries.push(...r.keptEntries);
+    agg.contentKeptEntries.push(...r.contentKeptEntries);
+  }
+  return agg;
 }
 
 /**
@@ -7317,6 +7393,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 656fdf39 (CR 66fad7ed round 2) — paired with each pushed entry's OWN (already-reconciled)
   // tokens, so the sweep below can pass a real `candidateTokens` instead of none at all.
   const sourceFilesToSweep: Array<{ sourceFile: string; tokens: string[] }> = [];
+  const removedPendingForTmpSweep: PendingUnresolvedQuarantine[] = []; // @decision 7aa9c406 — wrappers actually dropped below
   // @decision 07e3ad30 — never reassign this array via `.filter(cb)` here: the "remove" branch's own
   // protect call can push a fresh entry onto it mid-callback, and `.filter`'s reassigned return value
   // silently drops anything pushed past its own length snapshot. See the decision record.
@@ -7444,6 +7521,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       if (r.writeFailed) anyWriteFailed = true;
     }
     sourceFilesToSweep.push({ sourceFile: p.sourceFile, tokens: p.entry.tokens });
+    removedPendingForTmpSweep.push(p);
     // @decision 07e3ad30 — resolve `p`'s own CURRENT index fresh, right now, never a precomputed one —
     // a push from the protect calls above lands at the tail and must never be disturbed by this splice.
     // See the decision record for why `p`'s own wrapper is never itself replaced-by-index by this.
@@ -7514,6 +7592,39 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   const relocatedKeys = new Set(relocatedCoOccupants.keys());
   reclassifyNonLiveReferencing(keptReferencingRepoPaths, keptContentRepoPaths, keptContentBlockedBy, relocatedKeys);
   reclassifyNonLiveReferencing(orphanReferencingRepoPaths, keptContentRepoPaths, keptContentBlockedBy, relocatedKeys);
+  // @decision d2592cd5 — durable echo, gated on BOTH every write above having succeeded (anyWriteFailed)
+  // AND nothing being kept/unattributed (the same expression this function's own `latchKept` already
+  // uses below) — a kept/unattributed file can itself still physically hold one of `candidateTokens`.
+  //
+  // @decision d2592cd5 (Follow-up, three-original-sites round) — ALSO re-verify (AE scenario) that no
+  // UNTRACKED on-disk sibling for this identity still carries any of `candidateTokens` — see
+  // `trackedBasenamesForIdentity`'s own doc for why it is derived fresh here, post-mutation.
+  //
+  // @decision d2592cd5 (3rd fix round, card 3d4467cf) — on the token path (`deferred` given), push a job
+  // (folding `anyWriteFailed` into the shared set too) instead of writing here — see
+  // `DeferredTombstoneJob`'s own doc. Every other caller keeps deciding and writing immediately.
+  //
+  // @decision 7aa9c406 — decided BEFORE the cross-hash tmp sweep below and never from its result: a
+  // foreign residue's disposition says nothing about this identity's own tokens (by-id's ordering).
+  const nonFailureOk = !anyWriteFailed && keptReferencingRepoPaths.size === 0 && orphanReferencingRepoPaths.size === 0 && !anyKeptUnattributed && keptContentRepoPaths.size === 0 && !identityHasAnyPhysicalRecordHoldingToken(identity, candidateTokens, trackedBasenamesForIdentity(identity));
+  if (deferred) {
+    if (anyWriteFailed) deferred.writeFailed.add(identity);
+    deferred.sink.push({ identity, tokens: candidateTokens, repoPath: identityRepoPath, nonFailureOk });
+  } else {
+    tombstoneDurablyIfConfirmed(nonFailureOk, candidateTokens, identityRepoPath);
+  }
+  // @decision 7aa9c406 — by-id's cross-hash tmp arming, AFTER the tombstone above: a foreign residue's
+  // keep must never feed this identity's own tombstone decision (by-id parity).
+  if (removedPendingForTmpSweep.length > 0) {
+    const tmpSweep = sweepTmpResidueForClearedPendingEntries(removedPendingForTmpSweep, removedPendingForTmpSweep.flatMap((p) => p.entry.tokens), new Set(removedPendingForTmpSweep.map((p) => directPathIdentity(p.entry.repoPath))));
+    for (const ke of tmpSweep.keptEntries) keptReferencingRepoPaths.set(ke.repoPath, ke.sourceFile);
+    for (const ke of tmpSweep.contentKeptEntries) { keptContentRepoPaths.set(ke.repoPath, ke.sourceFile); if (ke.blockedBy) keptContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
+    if (tmpSweep.anyUnattributed) anyKeptUnattributed = true;
+    for (const [rp, sourceFile] of [...keptContentRepoPaths]) {
+      if (!fs.existsSync(path.join(MERGE_QUARANTINE_DIR, sourceFile))) keptContentRepoPaths.delete(rp);
+    }
+    reclassifyNonLiveReferencing(keptReferencingRepoPaths, keptContentRepoPaths, keptContentBlockedBy, relocatedKeys);
+  }
   // @decision 4b6c8d24 (round 2) — ONE final re-resolve, after every mutation above, never a
   // pre-computed guess; `excludeRepoPaths` is the explicit never-in-both guard. See the decision record.
   const excludeRepoPaths = new Set<string>([
@@ -7538,24 +7649,6 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 182c01cc (round 2, finding 1) — a RELOCATED co-occupant alone must still produce a
   // non-void result naming it: `latchKept` stays absent, but `stillBlockedCoOccupants` never is.
   const anyReferencing = keptReferencingRepoPaths.size > 0 || orphanReferencingRepoPaths.size > 0;
-  // @decision d2592cd5 — durable echo, gated on BOTH every write above having succeeded (anyWriteFailed)
-  // AND nothing being kept/unattributed (the same expression this function's own `latchKept` already
-  // uses below) — a kept/unattributed file can itself still physically hold one of `candidateTokens`.
-  //
-  // @decision d2592cd5 (Follow-up, three-original-sites round) — ALSO re-verify (AE scenario) that no
-  // UNTRACKED on-disk sibling for this identity still carries any of `candidateTokens` — see
-  // `trackedBasenamesForIdentity`'s own doc for why it is derived fresh here, post-mutation.
-  //
-  // @decision d2592cd5 (3rd fix round, card 3d4467cf) — on the token path (`deferred` given), push a job
-  // (folding `anyWriteFailed` into the shared set too) instead of writing here — see
-  // `DeferredTombstoneJob`'s own doc. Every other caller keeps deciding and writing immediately.
-  const nonFailureOk = !anyWriteFailed && !anyReferencing && !anyKeptUnattributed && keptContentRepoPaths.size === 0 && !identityHasAnyPhysicalRecordHoldingToken(identity, candidateTokens, trackedBasenamesForIdentity(identity));
-  if (deferred) {
-    if (anyWriteFailed) deferred.writeFailed.add(identity);
-    deferred.sink.push({ identity, tokens: candidateTokens, repoPath: identityRepoPath, nonFailureOk });
-  } else {
-    tombstoneDurablyIfConfirmed(nonFailureOk, candidateTokens, identityRepoPath);
-  }
   // @decision d2592cd5 (fix round, card 3d4467cf) — `anyWriteFailed` surfaced on EVERY return path for a
   // caller's own backstop to AND in; never `anyReferencing`/`anyKeptUnattributed` (G1 overrides those).
   if (anyReferencing || anyKeptUnattributed || relocatedCoOccupants.size > 0 || keptContentRepoPaths.size > 0) {
@@ -8484,6 +8577,12 @@ function tryClearMergeQuarantineByOwnIdentity(
     // a fresh disk re-verification (never trust sweep tracking alone — see identityHasAnyPhysicalRecordOnDisk's
     // own doc for the wholly-separate-sibling gap it closes).
     tombstoneDurablyIfConfirmed(!pendingAnyKept && !identityHasAnyPhysicalRecordOnDisk(identity), pendingCandidateTokens, repoPath);
+    // @decision 7aa9c406 — by-id's cross-hash tmp arming, AFTER the tombstones above: a foreign residue's
+    // keep must never feed `pendingAnyKept` / this identity's own tombstone decision (by-id parity).
+    const tmpSweep = sweepTmpResidueForClearedPendingEntries(matchedPending, pendingCandidateTokens, new Set(matchedPending.map((p) => directPathIdentity(p.entry.repoPath))));
+    for (const ke of tmpSweep.keptEntries) keptReferencingRepoPaths.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile));
+    for (const ke of tmpSweep.contentKeptEntries) { keptContentRepoPaths.add(ke.repoPath); if (ke.blockedBy) keptContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
+    if (tmpSweep.anyUnattributed) anyKeptUnattributed = true;
   }
   // @decision 3b1944b6 — an EXPLICIT no-match signal, never an inferred one: `repoPath` has no
   // identity-matched record in EITHER tier. The caller decides what happens next (see this function's own
@@ -9698,13 +9797,8 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision cdcd55c2 — mirrors `findPendingIndicesFor`'s key tiers 3 and 4 exactly: a resolvable entry
     // blocks its canonical key, and so does an unresolvable one with informative keys (its degraded
     // walked-up key) — never its resolvedKey(s), which no pending tier consults.
-    const freedKeys = new Set<string>();
-    for (const p of matchedPending) {
-      if (isRepoPathCurrentlyResolvable(p.entry.repoPath) || informativeKeysFor(p.entry).length > 0) {
-        const k = canonicalKeyOrUndefined(p.entry.repoPath);
-        if (k !== undefined) freedKeys.add(k);
-      }
-    }
+    // @decision 7aa9c406 — the computation lives in `freedKeysForClearedPendingEntries`, shared by every pending-tier clear.
+    const freedKeys = freedKeysForClearedPendingEntries(matchedPending.map((p) => p.entry));
     const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, pendingCandidateTokens, undefined, false, [], matchedIdentities, freedKeys);
     // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — deliberately INLINE, never through
     // `foldOrphanSweepResult`: its multi-entry shape doesn't fit that helper's one-sourceFile-per-call form.

@@ -559,7 +559,10 @@ try {
     // Excludes the function's OWN declaration line (`function sweepTmpResidueForHashIfUnreferenced(`),
     // which also matches the bare name+paren pattern but is not a call site.
     const callSiteCount = (distSrc.match(/(?<!function )sweepTmpResidueForHashIfUnreferenced\(/g) ?? []).length;
-    check("(non-freeing) sweepTmpResidueForHashIfUnreferenced still has exactly 5 real call sites (never silently added/removed)", callSiteCount === 5);
+    // 7aa9c406: 5 -> 6. The one added site is inside `sweepTmpResidueForClearedPendingEntries`, the shared
+    // wrapper the by-key pending loop, the by-own-identity pending branch and the token route all call
+    // (each frees a key, so each passes freed keys through it) -- not three more raw call sites.
+    check("(non-freeing) sweepTmpResidueForHashIfUnreferenced still has exactly 6 real call sites (never silently added/removed)", callSiteCount === 6);
   }
 } finally {
   for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
