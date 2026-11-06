@@ -324,11 +324,12 @@ try {
   {
     const r = makeRepo("covtmp-r");
     const key = canonicalRepoLockKey(r);
-    const u = path.join(r, "ghost-subdir-covtmp"); // no own .git -- shares r's own key
+    // @decision 63569b55 — a branchless residue naming an ABSOLUTE path is now armed in-process (a placeholder),
+    // so this scenario's never-armed shape is a RELATIVE repoPath, which is never an identity.
+    const u = "relative-ghost-covtmp";
     const uToken = randomUUID();
     // No `branch` field -- deliberately non-armable.
     const nonArmableTmp = plantTmpResidue(key, u, undefined, "U's own real raise, never promoted (missing branch)", [uToken], "88891-cafed011");
-    fs.mkdirSync(u, { recursive: true }); // U "remounts" -- still no own .git, still resolvable
 
     enterMergeQuarantine(r, "loom/r-branch", "r's own real raise");
     const clearResult = mod.clearMergeQuarantine(r);
@@ -343,9 +344,8 @@ try {
       async (mutated) => {
         const r2 = makeRepo("covtmp-r2");
         const key2 = canonicalRepoLockKey(r2);
-        const u2 = path.join(r2, "ghost-subdir-covtmp2");
+        const u2 = "relative-ghost-covtmp2";
         const nonArmableTmp2 = plantTmpResidue(key2, u2, undefined, "U2's own real raise, never promoted (missing branch)", [randomUUID()], "88892-cafed012", mutated);
-        fs.mkdirSync(u2, { recursive: true });
         mutated.enterMergeQuarantine(r2, "loom/r2-branch", "r2's own real raise");
         const clearResult2 = mutated.clearMergeQuarantine(r2);
         check("*** RED PROOF (covTmp) *** with the gate mutated to always say 'blocked', U2 is WRONGLY reported in stillBlockedCoOccupants", !!clearResult2.stillBlockedCoOccupants?.some((c) => c.repoPath === u2));

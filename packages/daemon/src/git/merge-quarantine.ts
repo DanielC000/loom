@@ -6186,7 +6186,7 @@ function unlinkLatchFileConfirmed(filename: string): boolean {
 
 // @decision 21ec39e5 (round 2) — `readFailed` is the ONLY reliable read-failure signal; never infer it
 // from `!parsedRepoPath` alone (a readable record lacking a string `repoPath` also hits that case).
-function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]): { safe: boolean; parsedRepoPath?: string; readFailed?: true; armable?: MergeQuarantineEntry } {
+function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]): { safe: boolean; parsedRepoPath?: string; readFailed?: true; armable?: MergeQuarantineEntry; unarmablePlaceholder?: MergeQuarantineEntry } {
   let raw: string;
   try {
     raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, orphanFile), "utf8");
@@ -6236,7 +6236,16 @@ function orphanSweepSafeToDelete(orphanFile: string, candidateTokens: string[]):
   if (armableByPass1 && onDiskTokens.length === 0) return { safe: false, parsedRepoPath, armable }; // genuine, legacy-shaped, PASS 1 would re-arm it — never delete
   const accountedFor = new Set(candidateTokens);
   const safe = onDiskTokens.every((t) => accountedFor.has(t) || tokenTombstonedForIdentity(t, parsedRepoPath, identityMemo));
-  return { safe, parsedRepoPath, armable };
+  // @decision 63569b55 — the in-memory placeholder SALVAGES the file's own tokens (boot mints a fresh one);
+  // a fresh token could never cover the kept file, so clearing would reboot-split. No token ⇒ no placeholder.
+  const unarmablePlaceholder: MergeQuarantineEntry | undefined = !armableByPass1 && !safe && parsedRepoPath !== undefined && path.isAbsolute(parsedRepoPath) && surviving.length > 0
+    ? {
+        repoPath: parsedRepoPath, branch: PLACEHOLDER_BRANCH_CORRUPT,
+        reason: `a kept, UNARMABLE quarantine tmp residue (${orphanFile}) whose content names this repo — fail-closed in this process too, mirroring what the next boot arms from the same bytes (0f58a09a)`,
+        enteredAt: Date.now(), tokens: [...surviving], placeholder: true,
+      }
+    : undefined;
+  return { safe, parsedRepoPath, armable, ...(unarmablePlaceholder ? { unarmablePlaceholder } : {}) };
 }
 
 /**
@@ -6797,10 +6806,11 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
           // @decision 25d0d45b (Round 3) — deferred REGARDLESS of armable-ness; see
           // `deferredAttributedKept`'s own doc above for why.
           deferredAttributedKept.push({ repoPath: safety.parsedRepoPath, sourceFile: f });
-          if (safety.armable) {
+          const toArm = safety.armable ?? safety.unarmablePlaceholder;
+          if (toArm) {
             const bucket = armableByIdentity.get(identity);
-            if (bucket) { bucket.basenames.push(f); bucket.record = unionQuarantineEntries(bucket.record, safety.armable); }
-            else armableByIdentity.set(identity, { record: safety.armable, basenames: [f] });
+            if (bucket) { bucket.basenames.push(f); bucket.record = unionQuarantineEntries(bucket.record, toArm); }
+            else armableByIdentity.set(identity, { record: toArm, basenames: [f] });
           }
           // NIT (6): the final disposition (armed-and-blocked vs content-kept) isn't known until the arm
           // phase below runs — logged there, per file, instead of asserting "fail-closed" prematurely here.
@@ -6879,10 +6889,11 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
       }
       if (!safety.safe) {
         deferredAttributedKept.push({ repoPath: safety.parsedRepoPath, sourceFile: f });
-        if (safety.armable) {
+        const toArm = safety.armable ?? safety.unarmablePlaceholder;
+        if (toArm) {
           const bucket = armableByIdentity.get(identity);
-          if (bucket) { bucket.basenames.push(f); bucket.record = unionQuarantineEntries(bucket.record, safety.armable); }
-          else armableByIdentity.set(identity, { record: safety.armable, basenames: [f] });
+          if (bucket) { bucket.basenames.push(f); bucket.record = unionQuarantineEntries(bucket.record, toArm); }
+          else armableByIdentity.set(identity, { record: toArm, basenames: [f] });
         }
         continue;
       }

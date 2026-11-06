@@ -376,8 +376,8 @@ try {
     // dropping the report while still correctly leaving the file untouched (the subtle, easy-to-miss
     // failure mode: nothing crashes, nothing gets destroyed, the report is just silently absent).
     await withDistMutation(
-      "            if (owners.size > 0) {\n                for (const o of owners) {\n                    referencingRepoPaths.add(o);\n                    keptEntries.push({ repoPath: o, sourceFile: f });\n                }\n                continue;\n            }\n            const identity = directPathIdentity(safety.parsedRepoPath);\n            if (excludeIdentities?.has(identity)) {\n                contentKeptEntries.push({ repoPath: safety.parsedRepoPath, sourceFile: f });\n                continue;\n            }\n            if (!safety.safe) {\n                deferredAttributedKept.push({ repoPath: safety.parsedRepoPath, sourceFile: f });\n                if (safety.armable) {\n                    const bucket = armableByIdentity.get(identity);",
-      "            if (owners.size > 0) {\n                continue;\n            }\n            const identity = directPathIdentity(safety.parsedRepoPath);\n            if (excludeIdentities?.has(identity)) {\n                contentKeptEntries.push({ repoPath: safety.parsedRepoPath, sourceFile: f });\n                continue;\n            }\n            if (!safety.safe) {\n                deferredAttributedKept.push({ repoPath: safety.parsedRepoPath, sourceFile: f });\n                if (safety.armable) {\n                    const bucket = armableByIdentity.get(identity);",
+      "            if (owners.size > 0) {\n                for (const o of owners) {\n                    referencingRepoPaths.add(o);\n                    keptEntries.push({ repoPath: o, sourceFile: f });\n                }\n                continue;\n            }\n            const identity = directPathIdentity(safety.parsedRepoPath);\n            if (excludeIdentities?.has(identity)) {\n                contentKeptEntries.push({ repoPath: safety.parsedRepoPath, sourceFile: f });\n                continue;\n            }\n            if (!safety.safe) {\n                deferredAttributedKept.push({ repoPath: safety.parsedRepoPath, sourceFile: f });\n                const toArm = safety.armable ?? safety.unarmablePlaceholder;\n                if (toArm) {\n                    const bucket = armableByIdentity.get(identity);",
+      "            if (owners.size > 0) {\n                continue;\n            }\n            const identity = directPathIdentity(safety.parsedRepoPath);\n            if (excludeIdentities?.has(identity)) {\n                contentKeptEntries.push({ repoPath: safety.parsedRepoPath, sourceFile: f });\n                continue;\n            }\n            if (!safety.safe) {\n                deferredAttributedKept.push({ repoPath: safety.parsedRepoPath, sourceFile: f });\n                const toArm = safety.armable ?? safety.unarmablePlaceholder;\n                if (toArm) {\n                    const bucket = armableByIdentity.get(identity);",
       async (mutated) => {
         const y2 = makeRepo("owned-mut-y");
         const r2 = makeRepo("owned-mut-r");
@@ -435,9 +435,9 @@ try {
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // (UNARMABLE-NEG) -- a cross-hash residue that DOES match the freed key, but is genuinely UNARMABLE
-  // (content missing `branch`) must stay content-kept FOREVER in-process -- never armed, never deleted. A
-  // REBOOT, however, now attributes it by CONTENT (0f58a09a) and arms a placeholder for X: a deliberate
-  // in-process content-kept / reboot-armed split, in the safe direction (follow-up card 63569b55).
+  // (content missing `branch`) is never deleted. A REBOOT attributes it by CONTENT (0f58a09a) and arms a
+  // placeholder for X; since 63569b55 the in-process clear arms the SAME placeholder (salvaging the file's
+  // own tokens), so the two sides agree. This scenario used to pin the in-process-open / reboot-closed split.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
     const y = makeRepo("unarm-y");
@@ -455,7 +455,9 @@ try {
 
     const clearResult = mod.clearMergeQuarantine(y);
     check("(unarm-neg) X's own unarmable residue SURVIVES, untouched, on disk", fs.existsSync(xTmpAtRsHash));
-    check("*** THE FIX (unarm-neg) *** X stays contentKept in-process (a reboot arms it, 0f58a09a), never a routed co-occupant", !!clearResult.contentKeptRepoPaths?.includes(x) && !clearResult.stillBlockedCoOccupants?.some((c) => c.repoPath === x));
+    // @decision 63569b55 — in-process now arms X's placeholder too (salvaging the file's own tokens), so X is a
+    // routed still-blocked co-occupant and no longer content-kept; the tmp itself is left untouched on disk.
+    check("*** THE FIX (unarm-neg) *** X is armed in-process (63569b55): a still-blocked co-occupant, not content-kept", !clearResult.contentKeptRepoPaths?.includes(x) && !!clearResult.stillBlockedCoOccupants?.some((c) => c.repoPath === x));
 
     // @decision f8e11853 (round 2) — snapshot right after the clear's own mutations land, BEFORE any
     // further in-process verdict query — MAIN's own ordering (see snapshotDir's own doc above). The prior
@@ -463,9 +465,9 @@ try {
     const dirSnapshot = snapshotDir(mod.MERGE_QUARANTINE_DIR);
 
     const inProcessX = mod.assertRepoNotQuarantined(x);
-    check("(unarm-neg) X is NOT armed in-process (genuinely unarmable, nothing enforces it)", inProcessX.ok === true);
+    check("(unarm-neg) X IS blocked in-process (63569b55), agreeing with the reboot below", inProcessX.ok === false);
     const inProcessEntry = mod.stillBlockedEntryFor(x);
-    check("(unarm-neg) stillBlockedEntryFor(X) finds nothing in-process either (genuinely unarmable)", inProcessEntry === undefined);
+    check("(unarm-neg) stillBlockedEntryFor(X) is X's placeholder in-process", inProcessEntry?.repoPath === x && inProcessEntry.placeholder === true);
 
     restoreDirSnapshot(mod.MERGE_QUARANTINE_DIR, dirSnapshot);
     const fresh = await freshBootModule();
@@ -476,6 +478,7 @@ try {
     // fail-CLOSES X with a placeholder (previously it blocked the filename-hash claimant R and left X open).
     // This is a deliberate in-process-open / reboot-closed split on X, in the SAFE direction; R stays open.
     check("(unarm-neg) post-reboot X is fail-closed by CONTENT attribution (0f58a09a), not left open", rebootX.ok === false && rebootEntry?.repoPath === x);
+    check("*** THE GOVERNING INVARIANT (unarm-neg) *** in-process and reboot agree on X", inProcessX.ok === rebootX.ok);
     check("*** THE GOVERNING INVARIANT (unarm-neg) *** the reboot never blocks the innocent filename claimant R", fresh.stillBlockedEntryFor(r) === undefined);
     // X is a ghost SUBDIR of Y (same canonical key), so the reboot's X placeholder re-blocks Y via key(Y);
     // one clear(y) lifts both, because they share that key.
