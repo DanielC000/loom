@@ -462,7 +462,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
       {projectId && !board.data && board.isLoading && <BoardSkeleton />}
       {/* First-load failure (retries under the hood): a calm line rather than a permanently empty page. */}
       {projectId && !board.data && board.isError && (
-        <div style={{ marginTop: 10, color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>
+        <div style={{ marginTop: 10, color: color.danger, fontSize: fs.sm }}>
           couldn’t load the board — retrying…
         </div>
       )}
@@ -483,13 +483,13 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           {/* A failed policy-status read must not look like "nothing is blocking": say so, quietly (404 stays null = no badges). */}
           {policyStatus.isError && (
             <div data-testid="card-policy-status-unavailable" title="The unmet-requirement badges could not be loaded; open a card to see its policy."
-              style={{ marginTop: 10, color: color.text3, fontFamily: font.mono, fontSize: fs.xs }}>
+              style={{ marginTop: 10, color: color.text3, fontSize: fs.sm }}>
               card policy status unavailable
             </div>
           )}
           {laneError && (
             <div role="alert" data-testid="lane-reorder-error"
-              style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: color.attnText, fontFamily: font.mono, fontSize: fs.mono }}>
+              style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: color.attnText, fontSize: fs.sm }}>
               <span style={{ flex: 1 }}>Couldn’t move the lane: {laneError}</span>
               <Button variant="ghost" onClick={() => setLaneError(null)}>Dismiss</Button>
             </div>
@@ -541,7 +541,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           </div>
           {dragLane && (
             <div data-testid="lane-drag-hint" aria-hidden
-              style={{ marginTop: 8, color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
+              style={{ marginTop: 8, color: color.text2, fontSize: fs.sm }}>
               {(() => {
                 const cols = board.data.columns;
                 const from = cols.findIndex((c) => c.key === dragLane);
@@ -809,7 +809,7 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
         )}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
         {laneLength === 0 && filterActive && (
-          <div style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, padding: "8px 2px" }}>no matches</div>
+          <div style={{ color: color.text3, fontSize: fs.sm, padding: "8px 2px" }}>no matches</div>
         )}
         {/* Genuinely-empty lane (no filter): a calm placeholder that doubles as a drop-target hint, so an
             empty column reads as intentional rather than a broken blank — and lights up when dragged over. */}
@@ -918,7 +918,7 @@ function FilterBar({ search, onSearch, counts, priFilter, onTogglePri, types, ty
                 color: color.text3, cursor: "pointer", fontSize: fs.body, lineHeight: 1, padding: 2, borderRadius: radius.sm }}>✕</button>
           )}
         </div>
-        <span aria-live="polite" style={{ fontFamily: font.mono, fontSize: fs.mono, whiteSpace: "nowrap",
+        <span aria-live="polite" style={{ fontSize: fs.sm, whiteSpace: "nowrap",
           color: active ? color.accentFg : color.text3 }}>
           {shown} of {total} shown
         </span>
@@ -1135,12 +1135,14 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
         boxShadow: shadow.card, padding: "8px 10px", marginBottom: 8, background: color.cardBg,
         opacity: isDragging ? 0.5 : 1,
         transform: transform ? `translate(${transform.x}px, ${transform.y}px)` : undefined,
-        fontFamily: font.mono, fontSize: fs.mono, color: color.text,
+        fontSize: fs.sm, color: color.text,
       }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
-        {/* Drag is confined to this grip so a click on the card body opens the detail drawer instead. */}
+        {/* Drag is confined to this grip so a click on the card body opens the detail drawer instead.
+            The grip keeps the mono face: the sans has no braille glyph, and the fallback face draws ⠿
+            wider, which pushes a reflowed title off the card's left edge on a tight lane. */}
         <span {...listeners} {...attributes} title="Drag to move"
-          style={{ cursor: "grab", color: color.text3, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
+          style={{ cursor: "grab", color: color.text3, fontFamily: font.mono, fontSize: fs.mono, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
         {/* The card's open target is a real control, not a clickable div (card a6d7a102): the detail
             dialog had no keyboard way in at all, and with nothing focused when it opened, Esc left a
             keyboard user at <body> with the whole page to re-Tab through. role=button + Enter/Space is
@@ -1309,7 +1311,7 @@ function TaskDrawerPlaceholder({ onClose, children }: { onClose: () => void; chi
 function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
   return (
     <TaskDrawerPlaceholder onClose={onClose}>
-      <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>Loading task…</span>
+      <span style={{ color: color.text3, fontSize: fs.sm }}>Loading task…</span>
     </TaskDrawerPlaceholder>
   );
 }
@@ -1320,11 +1322,11 @@ function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
 function TaskDrawerError({ onClose, onRetry }: { onClose: () => void; onRetry: () => void }) {
   return (
     <TaskDrawerPlaceholder onClose={onClose}>
-      <span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>couldn’t load this task</span>
+      <span style={{ color: color.danger, fontSize: fs.sm }}>couldn’t load this task</span>
       {/* Kit Buttons, not bare <button>s (card 95eabed1): there is no `color-scheme: dark`, so an
           unstyled button renders the UA's light bevel — two white chips on the Panel. `primary` is the
           recovery action, `default` the dismissal, matching every other action/dismiss pair in the app.
-          Both carry the kit's own font.mono/12, so no inline type overrides remain. */}
+          Both carry the kit's own type, so no inline type overrides remain. */}
       <div style={{ display: "flex", gap: 8 }}>
         <Button variant="primary" onClick={onRetry}>retry</Button>
         <Button onClick={onClose}>close</Button>
@@ -1604,7 +1606,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
               {columns.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
             </Select>
           )}
-          {moving && <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }} aria-live="polite">moving…</span>}
+          {moving && <span style={{ color: color.text3, fontSize: fs.sm }} aria-live="polite">moving…</span>}
           <span style={{ flex: 1 }} />
           <Button onClick={requestClose} title="Close (Esc)">✕</Button>
         </div>
@@ -1635,7 +1637,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             it's indistinguishable from a card that genuinely has no connections (a false zero). */}
         {linksUnavailable && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, color: color.text3,
-            fontFamily: font.mono, fontSize: fs.mono }}>
+            fontSize: fs.sm }}>
             <Dot tone="attn" />
             <span>links unavailable — couldn’t read this card’s connections (retrying…)</span>
           </div>
@@ -1681,7 +1683,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             the dialog states the parent at all, so the summary row below is clickable like every chip. */}
         <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
           <span style={labelStyle}>Relations</span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
+          <span style={{ fontSize: fs.sm, color: color.text3 }}>
             same board only · staged until you save
           </span>
         </div>
@@ -1698,7 +1700,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
               autoFocus aria-label="Parent card id" placeholder="card id or 8-char prefix — empty for no parent"
               style={{ width: "100%", boxSizing: "border-box" }} />
             <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: -4, minWidth: 0 }}>
-              <span data-testid="parent-resolution" style={{ flex: 1, fontFamily: font.mono, fontSize: fs.mono, minWidth: 0,
+              <span data-testid="parent-resolution" style={{ flex: 1, fontSize: fs.sm, minWidth: 0,
                 overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                 color: parentRes.state === "ok" ? color.text2 : parentRes.state === "empty" ? color.text3 : color.attnText }}
                 title={parentRes.state === "ok" ? parentRes.title : undefined}>
@@ -1771,7 +1773,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             so a server refusal needs its own line here rather than the footer's generic one. */}
         {relationErr?.scope === "parent" && saveError && (
           <span role="alert" data-testid="parent-server-error"
-            style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.4, marginTop: -4 }}>
+            style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.4, marginTop: -4 }}>
             {saveError.message}
           </span>
         )}
@@ -1842,7 +1844,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           <>
             <span style={labelStyle}>Shipped</span>
             <span data-testid="ship-state-trailers-off" title={SHIP_STATE_TRAILERS_OFF.title}
-              style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+              style={{ fontSize: fs.sm, color: color.text3 }}>
               {SHIP_STATE_TRAILERS_OFF.value}
             </span>
           </>
@@ -1865,7 +1867,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             <span style={{ position: "absolute", top: 2, left: held ? 16 : 2, width: 12, height: 12, borderRadius: radius.pill,
               background: color.bg, transition: "left 0.12s" }} />
           </span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: held ? color.text : color.text2 }}>
+          <span style={{ fontSize: fs.sm, color: held ? color.text : color.text2 }}>
             {held ? "⏸ Held — won't be worked or nagged" : "Not held"}
           </span>
         </button>
@@ -1886,7 +1888,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
             <span style={{ position: "absolute", top: 2, left: deferred ? 16 : 2, width: 12, height: 12, borderRadius: radius.pill,
               background: color.bg, transition: "left 0.12s" }} />
           </span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: deferred ? color.text : color.text2 }}>
+          <span style={{ fontSize: fs.sm, color: deferred ? color.text : color.text2 }}>
             {deferred ? "Deferred — sequencing marker, won't nag" : "Not deferred"}
           </span>
         </button>
@@ -1898,7 +1900,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           placeholder="No description yet — agents fill this in via the task tools, or write one here."
           style={{
             flex: 1, minHeight: 200, width: "100%", boxSizing: "border-box", resize: "none",
-            fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
+            fontSize: fs.body, lineHeight: 1.5,
             background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 8,
           }} />
         {speech.supported && <DescriptionVoiceNote speech={speech} />}
@@ -1933,13 +1935,13 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
             ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); setParentDraft(null); setParentEditing(false); setRelationDraft(null); }}>Reset</Button>
-            : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
+            : <span style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
           {/* The catch-all failure line. A refusal the Relations section has already placed at the row
               (or section) it names is suppressed HERE rather than printed twice — one message, shown at
               the control the human has to go fix. `relationErrorTarget` returning null (anything it does
               not recognise) falls through to this line, so nothing is ever swallowed. */}
           {saveError && !saveConflict && !relationErr && (
-            <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError.message}</span>
+            <span role="alert" style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError.message}</span>
           )}
           {/* Card 0b36702e's "detect-and-warn" remedy: a stale save doesn't clobber — it surfaces the fresh
               server row and lets the human choose. Reload adopts the fresh row (discarding local edits) and
@@ -1949,7 +1951,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           {saveConflict && (
             <div role="alert" style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 100%",
               padding: "6px 8px", borderRadius: radius.sm, background: color.inset, border: `1px solid ${color.attn}` }}>
-              <span style={{ flex: 1, color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>
+              <span style={{ flex: 1, color: color.attnText, fontSize: fs.sm }}>
                 This card changed while you had it open — reload to see the latest, or overwrite anyway.
               </span>
               <Button onClick={() => {
@@ -1972,7 +1974,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
             {confirmingDelete ? (
               <>
-                <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>Delete?</span>
+                <span style={{ color: color.danger, fontSize: fs.sm }}>Delete?</span>
                 <Button variant="danger" disabled={deleting} onClick={onDelete}>{deleting ? "Deleting…" : "Confirm"}</Button>
                 <Button disabled={deleting} onClick={() => setConfirmingDelete(false)}>Cancel</Button>
               </>
@@ -1982,7 +1984,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           </div>
         </div>
         {/* The server's live-session guard (or any failure) surfaces here rather than silently closing. */}
-        {deleteError && <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{deleteError}</span>}
+        {deleteError && <span style={{ color: color.danger, fontSize: fs.sm }}>{deleteError}</span>}
           </div>
           {/* RIGHT rail — the card's connected requests (card 8c1f27f0). Collapsed → a slim, clickable
               strip so the left editing column takes the full width; expanded → the full dossier rail. */}
@@ -2029,14 +2031,14 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
       {linked.length === 0 ? (
         // Empty state — reads as intentional, not broken. (A card with no requests defaults to collapsed,
         // but the user can still expand the empty rail.)
-        <div style={{ padding: "14px 10px", color: color.text3, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
+        <div style={{ padding: "14px 10px", color: color.text3, fontSize: fs.sm, lineHeight: 1.5 }}>
           No requests connected to this card yet. A manager links owner Requests to a card so the answer travels with the work.
         </div>
       ) : (
         <>
           {/* By-state summary line. */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", flexWrap: "wrap",
-            fontFamily: font.mono, fontSize: fs.mono, color: color.text3, borderBottom: `1px solid ${color.line}` }}>
+            fontSize: fs.sm, color: color.text3, borderBottom: `1px solid ${color.line}` }}>
             <span style={{ color: pending > 0 ? color.attnText : color.text3 }}>{pending} pending</span>
             <span aria-hidden>·</span>
             <span>{answered} answered</span>
@@ -2083,8 +2085,8 @@ function ConnectedRequestRow({ q, now }: { q: QuestionInboxItem; now: number }) 
           <span aria-hidden style={{ marginLeft: "auto", color: color.text3, fontSize: fs.sm, flexShrink: 0,
             transition: "transform 120ms ease", transform: open ? "rotate(90deg)" : "none" }}>▸</span>
         </div>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: fs.sm, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
+        <span style={{ fontSize: fs.sm, color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           <RequestProvenance q={q} compact /> · {relativeAge(q.state === "pending" ? q.createdAt : q.state === "cancelled" ? q.cancelledAt : q.answeredAt, now)}
         </span>
       </button>
@@ -2107,16 +2109,16 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
   if (q.state === "pending") {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {q.body && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{q.body}</span>}
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: tone[REQUEST_TYPE_TONE[q.type]] }}>{requestHint(q)} · awaiting your answer</span>
+        {q.body && <span style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{q.body}</span>}
+        <span style={{ fontSize: fs.sm, color: tone[REQUEST_TYPE_TONE[q.type]] }}>{requestHint(q)} · awaiting your answer</span>
       </div>
     );
   }
   if (q.state === "cancelled") {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger }}>cancelled · never answered</span>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, whiteSpace: "pre-wrap" }}>
+        <span style={{ fontSize: fs.sm, color: color.danger }}>cancelled · never answered</span>
+        <span style={{ fontSize: fs.sm, color: color.text2, whiteSpace: "pre-wrap" }}>
           {q.cancelledReason ?? "no reason given"} · by {q.cancelledBy === "agent" ? "the asking agent" : "a human"}
         </span>
       </div>
@@ -2128,18 +2130,18 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
     // rendering below, which would show a misleading "—" (a notice never carries chosenOption/note).
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>FYI · no answer needed</span>
-        {q.body && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, whiteSpace: "pre-wrap" }}>{q.body}</span>}
+        <span style={{ fontSize: fs.sm, color: color.text2 }}>FYI · no answer needed</span>
+        {q.body && <span style={{ fontSize: fs.sm, color: color.text, whiteSpace: "pre-wrap" }}>{q.body}</span>}
       </div>
     );
   }
   if (q.type === "credential") {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>provided · encrypted, never shown</span>
+        <span style={{ fontSize: fs.sm, color: color.text2 }}>provided · encrypted, never shown</span>
         {q.credentialEnvVar && (
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
-            target env var: <span style={{ color: color.text2 }}>{q.credentialEnvVar}</span>
+          <span style={{ fontSize: fs.sm, color: color.text3 }}>
+            target env var: <span style={{ color: color.text2, fontFamily: font.mono }}>{q.credentialEnvVar}</span>
           </span>
         )}
       </div>
@@ -2149,17 +2151,17 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
     const authorized = q.chosenOption === "authorize";
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: authorized ? color.live : color.danger }}>{authorized ? "authorized" : "denied"}</span>
-        {q.note && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, whiteSpace: "pre-wrap" }}>{q.note}</span>}
+        <span style={{ fontSize: fs.sm, color: authorized ? color.live : color.danger }}>{authorized ? "authorized" : "denied"}</span>
+        {q.note && <span style={{ fontSize: fs.sm, color: color.text2, whiteSpace: "pre-wrap" }}>{q.note}</span>}
       </div>
     );
   }
   // decision / input — chosen option + note (the note IS the answer for a note-only ask).
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      {q.chosenOption && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>chose <span style={{ color: color.text2 }}>{q.chosenOption}</span></span>}
-      {q.note && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, whiteSpace: "pre-wrap" }}>{q.note}</span>}
-      {!q.chosenOption && !q.note && <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>—</span>}
+      {q.chosenOption && <span style={{ fontSize: fs.sm, color: color.text }}>chose <span style={{ color: color.text2 }}>{q.chosenOption}</span></span>}
+      {q.note && <span style={{ fontSize: fs.sm, color: color.text2, whiteSpace: "pre-wrap" }}>{q.note}</span>}
+      {!q.chosenOption && !q.note && <span style={{ color: color.text3, fontSize: fs.sm }}>—</span>}
     </div>
   );
 }
@@ -2239,7 +2241,7 @@ function DescriptionVoiceNote({ speech }: { speech: SpeechRecognitionApi }) {
   else if (status === "error") node = <span style={{ color: color.danger }}>{error ?? "voice error"} — click Dictate to retry</span>;
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 2,
-      fontFamily: font.mono, fontSize: fs.xs, minHeight: 16 }}>
+      fontSize: fs.sm, minHeight: 16 }}>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{node}</span>
       <span title="The browser Web Speech API is not on-device — Chrome streams audio to Google's speech service."
         style={{ color: color.text3, whiteSpace: "nowrap" }}>dictation may send audio to your browser's speech service</span>
@@ -2293,7 +2295,7 @@ function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCre
         </Button>
       </div>
       {error && (
-        <span role="alert" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, lineHeight: 1.5 }}>{error}</span>
+        <span role="alert" style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.5 }}>{error}</span>
       )}
     </div>
   );

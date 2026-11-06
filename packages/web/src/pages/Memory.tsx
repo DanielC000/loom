@@ -133,7 +133,7 @@ function PinCard({ entry, max, selected, onOpen }: { entry: ProjectMemoryEntry; 
         <Meter value={entry.retrievalCount} max={max} tone={magTone(entry.retrievalCount, max)} width={64} />
         <span style={{ flex: 1 }} />
         <span title="Injected into every agent kickoff"
-          style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text2, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "1px 5px", whiteSpace: "nowrap" }}>always</span>
+          style={{ fontSize: fs.xs, color: color.text2, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: "1px 5px", whiteSpace: "nowrap" }}>always</span>
       </div>
     </div>
   );
@@ -217,7 +217,7 @@ function NoteDetail({ entry, max, onClose, onOpenKey }: { entry: ProjectMemoryEn
           <span style={{ fontFamily: font.ui, fontWeight: 700, fontSize: fs.lg, color: color.text, flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>{entry.title || entry.key}</span>
           {entry.pinned && <Badge tone="muted">★ Pinned</Badge>}
           <button onClick={onClose} title="Close" aria-label="Close entry"
-            style={{ background: "transparent", border: `1px solid ${color.lineStrong}`, color: color.text2, borderRadius: radius.base, cursor: "pointer", padding: "2px 8px", fontFamily: font.mono, fontSize: fs.body, flexShrink: 0 }}>✕</button>
+            style={{ background: "transparent", border: `1px solid ${color.lineStrong}`, color: color.text2, borderRadius: radius.base, cursor: "pointer", padding: "2px 8px", fontSize: fs.body, flexShrink: 0 }}>✕</button>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
           <Chip label="key" value={entry.key} tone="muted" />
@@ -312,7 +312,7 @@ export default function Memory() {
           <span aria-hidden style={{ position: "absolute", left: 10, color: color.text3, fontSize: fs.body, pointerEvents: "none" }}>⌕</span>
           <input value={search} onChange={(e) => setSearch(e.target.value)} className="loom-field"
             placeholder="Search titles & content…" aria-label="Search Memory"
-            style={{ background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "7px 10px 7px 30px", fontFamily: font.mono, fontSize: fs.body, width: 260 }} />
+            style={{ background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "7px 10px 7px 30px", fontSize: fs.body, width: 260 }} />
         </div>
       )}
     </div>
@@ -354,7 +354,7 @@ export default function Memory() {
             <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "4px 0 12px" }}>
               <SectionLabel style={{ margin: 0, display: "inline-flex", alignItems: "center", gap: 8 }}>
                 <span aria-hidden style={{ color: color.text2, fontSize: fs.sm }}>★</span> Pinned
-                <span style={{ fontFamily: font.mono, fontWeight: 400, letterSpacing: "0.02em",color: color.text3, fontSize: fs.mono }}>always in agent context</span>
+                <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.sm }}>always in agent context</span>
               </SectionLabel>
             </div>
             <div className="memory-pinned-row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 10, marginBottom: 26 }}>

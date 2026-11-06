@@ -34,7 +34,7 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
   return (
     <button onClick={onClick}
       style={{ background: active ? color.inset : "transparent", border: `1px solid ${active ? color.accentEdge : color.line}`,
-        borderRadius: radius.sm, padding: "4px 12px", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono,
+        borderRadius: radius.sm, padding: "4px 12px", cursor: "pointer", fontSize: fs.sm,
         color: active ? color.accentFg : color.text2 }}>
       {label}
     </button>

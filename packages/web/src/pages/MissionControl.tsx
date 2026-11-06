@@ -335,7 +335,7 @@ export default function MissionControl() {
           <span style={{ color: color.text3 }}>{replayOpen ? "▾" : "▸"}</span>
           Wave replay
           {!replayOpen && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 400, color: color.text3 }}>
+            <span style={{ fontSize: fs.sm, fontWeight: 400, color: color.text3 }}>
               scrub &amp; compare wave audit timelines
             </span>
           )}

@@ -161,7 +161,7 @@ export default function Overview() {
   const archivedHidden = Math.max(0, archivedTotal - recentArchived.length);
   const hasAnySessions = all.length > 0 || archivedTotal > 0;
 
-  if (!projectId) return <p style={{ color: color.text3, fontFamily: font.mono }}>No project selected — pick a project in the header.</p>;
+  if (!projectId) return <p style={{ color: color.text3 }}>No project selected — pick a project in the header.</p>;
 
   const roleOf = (a: Agent) => profiles.data?.find((p) => p.id === a.profileId)?.role ?? null;
   // Worker-role agents are EXCLUDED from the spawn grid: workers are Loom-DRIVEN — a manager dispatches
@@ -186,7 +186,7 @@ export default function Overview() {
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
           Overview
           <Badge tone="muted">{project?.name ?? "…"}</Badge>
-          <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
+          <span style={{ color: color.text3, fontWeight: 400, fontSize: fs.sm }}>
             the active project at a glance · switch the project in the header to rescope
           </span>
         </SectionLabel>
@@ -221,7 +221,7 @@ export default function Overview() {
         <SectionLabel>Agents</SectionLabel>
         {projectAgents.length === 0 ? (
           <Panel style={{ padding: 12 }}>
-            <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>
+            <span style={{ color: color.text3, fontSize: fs.sm }}>
               No manually-spawnable agents — workers are dispatched by a manager, not spawned here. Create one on the Projects page.
             </span>
           </Panel>
@@ -340,7 +340,7 @@ function OtherAttentionList({ items }: { items: AttentionItem[] }) {
         <div style={{ marginTop: 2 }}>
           <Button variant="ghost" onClick={() => setExpanded((v) => !v)}
             title={expanded ? "Collapse to the first few alerts" : "Show every alert in this project"}
-            style={{ padding: "2px 8px", fontFamily: font.mono, fontSize: fs.mono }}>
+            style={{ padding: "2px 8px", fontSize: fs.sm }}>
             {expanded ? "Collapse" : `Show ${overflow} more`}
           </Button>
         </div>
@@ -382,7 +382,7 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
       data-testid={`agent-control-${agent.id}`}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <RoleBadge role={role} />
-        <strong style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>{agent.name}</strong>
+        <strong style={{ fontSize: fs.body, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
         {live && pill && <StatusPill tone={pill.pending ? "work" : "live"} glow={pill.pending} label={pill.label} />}
       </div>
@@ -398,7 +398,7 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
             onClick={() => stop.mutate(session!.id)}>{stop.isPending ? "Stopping…" : "Stop"}</Button>
         )}
       </div>
-      {spawn.isError && <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{errorText(spawn.error)}</span>}
+      {spawn.isError && <span style={{ color: color.danger, fontSize: fs.sm }}>{errorText(spawn.error)}</span>}
     </Panel>
   );
 }
@@ -467,7 +467,7 @@ function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
   return (
     <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {rowCount > 0 && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
+        <span style={{ fontSize: fs.sm, color: color.text3 }}>
           {rowCount} session{rowCount === 1 ? "" : "s"}
         </span>
       )}
@@ -494,7 +494,7 @@ function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
       {archivedHidden > 0 && (
         <Button variant="ghost" onClick={() => navigate("/archive")}
           title="Browse this project's full archive"
-          style={{ alignSelf: "flex-start", padding: "2px 8px", fontFamily: font.mono, fontSize: fs.mono }}>
+          style={{ alignSelf: "flex-start", padding: "2px 8px", fontSize: fs.sm }}>
           {archivedHidden} more archived → Archive
         </Button>
       )}
@@ -514,7 +514,7 @@ function FleetCockpitRow({ s, star, open, onToggle, actions }: {
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <button onClick={onToggle} title={open ? "Collapse this session" : "Expand to this session's cockpit"}
           style={{ background: "transparent", border: "none", cursor: "pointer", padding: "0 2px",
-            color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
+            color: color.text2, fontSize: fs.sm }}>
           {open ? "▾" : "▸"}
         </button>
         <div style={{ flex: 1, minWidth: 0 }}><FleetRow s={s} star={star} /></div>

@@ -103,7 +103,7 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
             <button key={o.key} onClick={() => onChange(o.key)} aria-pressed={active}
               title={o.key === "developer" ? "The dev Loom Platform surface" : "Preview the shipping end-user surface (client-side only)"}
               style={{
-                fontFamily: font.mono, fontSize: fs.mono, padding: "4px 14px", cursor: "pointer", border: "none",
+                fontSize: fs.sm, padding: "4px 14px", cursor: "pointer", border: "none",
                 background: active ? color.accent : "transparent",
                 color: active ? color.onAccent : color.text2,
                 fontWeight: active ? 700 : 400,
@@ -113,7 +113,7 @@ function ViewAsToggle({ value, onChange }: { value: ViewAs; onChange: (v: ViewAs
           );
         })}
       </div>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+      <span style={{ fontSize: fs.sm, color: color.text3 }}>
         client-side preview — your real platform capability is unchanged
       </span>
     </div>

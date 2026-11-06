@@ -55,7 +55,7 @@ export function PlatformFindings({ edition, projectId }: { edition: PlatformEdit
       <section>
         <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           {edition.copy.findings.label}
-          <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
+          <span style={{ color: color.text3, fontWeight: 400, fontSize: fs.sm }}>
             {edition.copy.findings.hint}
           </span>
         </SectionLabel>
@@ -80,7 +80,7 @@ export function PlatformFindings({ edition, projectId }: { edition: PlatformEdit
         <section>
           <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             Suggested presets
-            <span style={{ color: color.text3, fontWeight: 400, fontFamily: font.mono, fontSize: fs.mono }}>
+            <span style={{ color: color.text3, fontWeight: 400, fontSize: fs.sm }}>
               preset prompts the Auditor proposed from prompts you repeat — adopting one adds it to every composer
             </span>
           </SectionLabel>
@@ -125,7 +125,7 @@ function FindingRow({ ts, runId, taskId, detail, onBoard, boardTitle }: {
       {severity
         ? <Badge tone={tone}>{severity}</Badge>
         : <Badge tone="muted">filed</Badge>}
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, flex: 1, minWidth: 180 }}>
+      <span style={{ fontSize: fs.sm, color: color.text, flex: 1, minWidth: 180 }}>
         {title}
       </span>
       <span title={`filed by run ${runId}`} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
@@ -137,7 +137,7 @@ function FindingRow({ ts, runId, taskId, detail, onBoard, boardTitle }: {
         // its own board rather than the active project's — so one click lands on the card's dialog.
         <Link to={`/platform?tab=board&task=${encodeURIComponent(taskId)}`}
           title="Open this finding's card on the Platform board"
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.accentFg, textDecoration: "none",
+          style={{ fontSize: fs.sm, color: color.accentFg, textDecoration: "none",
             border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "2px 8px" }}>
           Open on the board →
         </Link>
@@ -145,7 +145,7 @@ function FindingRow({ ts, runId, taskId, detail, onBoard, boardTitle }: {
         // A finding whose card was deleted stays listed rather than vanishing: the finding was still
         // filed, and silently dropping the row would misreport the auditor's own history.
         <span title="This finding's board card no longer exists"
-          style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3,
+          style={{ fontSize: fs.sm, color: color.text3,
             border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "2px 8px" }}>
           card removed
         </span>

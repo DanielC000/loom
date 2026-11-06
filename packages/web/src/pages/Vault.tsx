@@ -237,7 +237,7 @@ export default function Vault() {
                     // `role="status"` makes the state audible — `aria-busy` on the body only suppresses
                     // announcements, it never announces anything itself.
                     <span role="status" data-testid="vault-loading-indicator"
-                      style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, minWidth: 0 }}>
+                      style={{ color: color.text3, fontSize: fs.sm, minWidth: 0 }}>
                       Loading {baseName(file)}…
                     </span>
                   )}
@@ -317,7 +317,7 @@ function Row({ depth, active, onClick, children }: { depth: number; active?: boo
         background: active ? color.selected : "transparent", cursor: "pointer",
         border: "none", borderLeft: `2px solid ${active ? color.accentEdge : "transparent"}`,
         padding: "3px 8px", paddingLeft: 6 + depth * 14,
-        fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.4,
+        fontSize: fs.sm, color: color.text2, lineHeight: 1.4,
       }}>
       {children}
     </button>
@@ -458,7 +458,7 @@ function BinaryCard({ projectId, path, note }: { projectId: string; path: string
           <path d="M9 1.5 V5.5 H13" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
         </svg>
         <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, marginBottom: 4, wordBreak: "break-all" }}>{name}</div>
-        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, marginBottom: 16 }}>
+        <div style={{ fontSize: fs.sm, color: color.text3, marginBottom: 16 }}>
           {note ?? `Binary file${ext ? ` · .${ext}` : ""}`} · {head.isLoading ? "…" : humanSize(head.data?.size ?? null)}
         </div>
         <VaultDownloadLink projectId={projectId} path={path}>Download file</VaultDownloadLink>
@@ -481,9 +481,9 @@ function ReadError({ error, onRetry, retrying }: { error: unknown; onRetry: () =
           <path d="M8 4.8 V8.9" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
           <circle cx="8" cy="11.1" r="0.75" fill="currentColor" />
         </svg>
-        <div style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text, marginBottom: 6 }}>Unable to read this note</div>
-        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, marginBottom: 6, wordBreak: "break-word" }}>{errorText(error)}</div>
-        <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, marginBottom: 16, lineHeight: 1.6 }}>
+        <div style={{ fontSize: fs.body, color: color.text, marginBottom: 6 }}>Unable to read this note</div>
+        <div style={{ fontSize: fs.sm, color: color.danger, marginBottom: 6, wordBreak: "break-word" }}>{errorText(error)}</div>
+        <div style={{ fontSize: fs.sm, color: color.text3, marginBottom: 16, lineHeight: 1.6 }}>
           It may have been renamed, moved, or deleted since this tree was loaded.
         </div>
         <Button variant="primary" disabled={retrying} onClick={onRetry}>{retrying ? "Retrying…" : "Retry"}</Button>
@@ -499,7 +499,7 @@ function DeleteButton({ name, onDelete, deleting }: { name: string; onDelete: ()
   if (!confirm) return <Button variant="danger" onClick={() => setConfirm(true)}>Delete</Button>;
   return (
     <>
-      <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>delete?</span>
+      <span style={{ color: color.danger, fontSize: fs.sm }}>delete?</span>
       <Button variant="danger" disabled={deleting} onClick={onDelete}>Confirm</Button>
       <Button onClick={() => setConfirm(false)}>Cancel</Button>
     </>
@@ -523,7 +523,7 @@ function VaultEditor({ content, onSave, saving, onCancel }:
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave(text)}>{saving ? "Saving…" : "Save"}</Button>
         <Button onClick={onCancel}>Cancel</Button>
-        {dirty && <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>unsaved changes</span>}
+        {dirty && <span style={{ color: color.attnText, fontSize: fs.sm }}>unsaved changes</span>}
       </div>
     </div>
   );

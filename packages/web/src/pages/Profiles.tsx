@@ -114,7 +114,7 @@ export default function Profiles() {
       <div className="loom-actor-split">
         <Panel style={{ alignSelf: "start" }}>
           <SectionLabel>Profiles</SectionLabel>
-          <p style={{ color: color.text3, fontSize: fs.mono, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
+          <p style={{ color: color.text3, fontSize: fs.sm, margin: "0 0 10px", lineHeight: 1.5 }}>
             Reusable, cross-project rig — role, model, permission deltas, skill subset, icon, plus a
             description blurb. An agent runs under one to drive how its sessions spawn; the injected
             prompt comes from the agent. Human-managed only; edits apply on the next spawn.
@@ -132,7 +132,7 @@ export default function Profiles() {
                     row would be noise, not signal. */}
                 <HarnessTag harness={harnessOf(p.harness)} title={`${p.name} spawns the codex CLI, not claude`} />
                 <StatusDots customized={!!p.customized} updateAvailable={!!p.updateAvailable} />
-                <span style={{ fontSize: fs.xs, color: roleColor(p.role), fontFamily: font.mono }}>{roleDisplay(p.role).short}</span>
+                <span style={{ fontSize: fs.sm, color: roleColor(p.role) }}>{roleDisplay(p.role).short}</span>
               </Button>
             ))}
             {agentProfiles(profiles.data ?? []).length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No profiles yet.</span>}
@@ -174,7 +174,7 @@ function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reac
         <span style={{ flex: 1 }} />
         <Button onClick={onDismiss}>Dismiss</Button>
       </div>
-      <p style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
+      <p style={{ margin: 0, fontSize: fs.sm, lineHeight: 1.6, color: color.text }}>
         The deleted profile granted <strong style={{ color: color.attnText }}>{grantKeyList(reach.addedKeys)}</strong>.
         {" "}Agents bound to it now fall back to the plain default, so{" "}
         <strong style={{ color: color.attnText }} data-testid="delete-grant-reach-count">
@@ -183,7 +183,7 @@ function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reac
         {reach.agentCount === 1 ? "picks" : "pick"} this up on their next session.
       </p>
       {reach.roleChange && (
-        <p data-testid="delete-grant-reach-role-change" style={{ margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.6, color: color.text }}>
+        <p data-testid="delete-grant-reach-role-change" style={{ margin: 0, fontSize: fs.sm, lineHeight: 1.6, color: color.text }}>
           Role changes from <strong style={{ color: color.attnText }}>{reach.roleChange.from ?? "none"}</strong>
           {" "}to <strong style={{ color: color.attnText }}>{reach.roleChange.to ?? "none"}</strong>.
         </p>
@@ -194,7 +194,7 @@ function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reac
           <ul data-testid="delete-grant-reach-agents"
             style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 2 }}>
             {reach.agents.map((a) => (
-              <li key={a.id} style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text }}>
+              <li key={a.id} style={{ fontSize: fs.sm, color: color.text }}>
                 <span style={{ color: color.text2 }}>{a.projectName}</span>
                 <span style={{ color: color.text3 }}> / </span>
                 {a.name}
@@ -202,7 +202,7 @@ function DeleteGrantReachNotice({ name, reach, onDismiss }: { name: string; reac
             ))}
           </ul>
           {reach.truncated && (
-            <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>+more (truncated)</span>
+            <span style={{ fontSize: fs.sm, color: color.text3 }}>+more (truncated)</span>
           )}
         </div>
       )}
@@ -262,7 +262,7 @@ function CapabilityProvisioningRow({ capability }: { capability: CapabilitySumma
   // stay neutral so the row reads as ambient status, not an alert.
   const borderColor = state === "failed" || state === "installing" ? accent : color.line;
   const reasonText = provisionReasonText(s?.reason, kind);
-  const labelStyle = { fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.5 };
+  const labelStyle = { fontSize: fs.sm, color: color.text3, lineHeight: 1.5 };
 
   return (
     <div data-testid={`capability-provisioning-${slug}`} style={{ border: `1px solid ${borderColor}`, borderRadius: radius.base,
@@ -277,7 +277,7 @@ function CapabilityProvisioningRow({ capability }: { capability: CapabilitySumma
           <span style={{ ...labelStyle, color: color.danger }}>couldn't read status</span>
         ) : meta ? (
           <span data-testid={`provisioning-state-${slug}`} style={{ display: "inline-flex", alignItems: "center", gap: 6,
-            fontFamily: font.mono, fontSize: fs.mono, color: accent }}>
+            fontSize: fs.sm, color: accent }}>
             <span aria-hidden style={{ width: 8, height: 8, borderRadius: radius.base, background: accent, display: "inline-block",
               ...(state === "installing" ? { boxShadow: `0 0 6px ${accent}` } : null) }} />
             {meta.label}
@@ -300,7 +300,7 @@ function CapabilityProvisioningRow({ capability }: { capability: CapabilitySumma
 
       {/* Ready: name the resolved binary so the user can confirm WHICH install is actually live. */}
       {state === "ready" && s?.binary && (
-        <span style={{ ...labelStyle, wordBreak: "break-all" }}>{s.binary}</span>
+        <span style={{ ...labelStyle, fontFamily: font.mono, wordBreak: "break-all" }}>{s.binary}</span>
       )}
       {/* Idle: say it provisions lazily, so the state word doesn't read as something to act on. Kept to ONE
           short line because it repeats per granted capability — the long form was the least informative
@@ -518,7 +518,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
 
   const fieldLabel = { fontFamily: font.ui as string, fontSize: fs.sm, fontWeight: 700, color: color.text2 };
   const ta = {
-    width: "100%", boxSizing: "border-box" as const, resize: "vertical" as const, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
+    width: "100%", boxSizing: "border-box" as const, resize: "vertical" as const, fontSize: fs.body, lineHeight: 1.5,
     background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 8,
   };
 
@@ -642,7 +642,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         <span style={{ flex: 1 }} />
         {confirmDel ? (
           <>
-            <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>delete {profile.name}?</span>
+            <span style={{ color: color.danger, fontSize: fs.sm }}>delete {profile.name}?</span>
             <Button variant="danger" disabled={deleting} onClick={onDelete}>Confirm</Button>
             <Button onClick={() => setConfirmDel(false)}>Cancel</Button>
           </>
@@ -700,14 +700,14 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         <span style={fieldLabel}>Allow delta <span style={{ fontWeight: 400, color: color.text3 }}>· one permission glob per line, layered onto the resolved allowlist</span></span>
         <textarea value={allowText} onChange={(e) => setAllowText(e.target.value)} spellCheck={false}
           disabled={!!dropStyle(harness, "allowDelta")}
-          style={{ ...ta, minHeight: 80, ...dropStyle(harness, "allowDelta") }} placeholder={"Bash(pnpm *)\nRead(*)"} />
+          style={{ ...ta, fontFamily: font.mono, minHeight: 80, ...dropStyle(harness, "allowDelta") }} placeholder={"Bash(pnpm *)\nRead(*)"} />
         <HarnessFieldDrop harness={harness} field="allowDelta" />
       </label>
 
       {/* The two BUILTIN capabilities (browser testing / document conversion) — profile-level booleans, human-set
           here only. Registry capabilities and connections are granted per AGENT (card afe1bc90): see the note below. */}
       <label style={fieldLabel}>Capabilities</label>
-      <div data-testid="profile-credential-grants-moved" style={{ fontSize: fs.mono, color: color.text3, fontFamily: font.mono, lineHeight: 1.5, marginBottom: 6 }}>
+      <div data-testid="profile-credential-grants-moved" style={{ fontSize: fs.sm, color: color.text3, lineHeight: 1.5, marginBottom: 6 }}>
         Connections and registry capabilities are granted per AGENT, not per profile. Open the agent in the agent editor
         (Agents) to grant them.
       </div>
@@ -739,7 +739,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
                     <Badge tone="muted" data-testid={`capability-network-${c.slug}`} title="Provisioning downloads over the network: pip, a GitHub release, or npm. An offline or proxied host can keep this from mounting.">network</Badge>
                   )}
                 </span>
-                <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+                <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.sm, lineHeight: 1.5 }}>
                   {c.description}
                 </span>
               </span>
@@ -747,7 +747,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
           );
         })}
         {availableCapabilities.length === 0 && (
-          <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>Loading capability catalog…</span>
+          <span style={{ color: color.text3, fontSize: fs.sm }}>Loading capability catalog…</span>
         )}
       </div>
 
@@ -771,7 +771,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
           onChange={(e) => setVaultWrite(e.target.checked)} style={{ marginTop: 2 }} />
         <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           <span style={fieldLabel}>Vault write</span>
-          <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.sm, lineHeight: 1.5 }}>
             Let a session under this rig write notes into its OWN project's vault — the vault_write tool
             may create a new file or overwrite an existing one, and nothing else: there is no delete, and
             no path outside that project's vault root. Off by default; the tool is hidden entirely, not
@@ -793,7 +793,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
               nothing read as safely deactivated — the opposite of true. It stays at full contrast so it
               stands out AMONG the dimmed ones, which is the whole point of triaging by failure direction. */}
           <span style={fieldLabel}>Restricted tools</span>
-          <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.sm, lineHeight: 1.5 }}>
             Lock down blast radius: remove the dangerous native tools (Bash / Edit / Write / NotebookEdit /
             MultiEdit, subagent delegation Task / Agent, and network egress WebFetch / WebSearch) from this
             rig's tool list — so it can't run a shell, write host files, spawn a subagent that re-acquires
@@ -813,7 +813,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         <input type="checkbox" checked={noCommit} onChange={(e) => setNoCommit(e.target.checked)} style={{ marginTop: 2 }} />
         <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           <span style={fieldLabel}>No-commit role</span>
-          <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.mono, fontFamily: font.mono, lineHeight: 1.5 }}>
+          <span style={{ fontWeight: 400, color: color.text3, fontSize: fs.sm, lineHeight: 1.5 }}>
             Mark this rig a READ-ONLY / no-commit worker (e.g. a code reviewer) whose correct contract is 0
             files changed. A worker under it that reports done with no commit is auto-retired — its
             concurrency slot freed with no manual stop — and the "forgot to commit" warning is suppressed.
@@ -850,17 +850,17 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
               </button>
             );
           })}
-          {available.length === 0 && <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono }}>No skills in the store yet.</span>}
+          {available.length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No skills in the store yet.</span>}
         </div>
-        {skills.length > 0 && !dropStyle(harness, "skills") && <button type="button" onClick={() => setSkills([])} style={{ alignSelf: "flex-start", cursor: "pointer", fontFamily: font.mono, fontSize: fs.mono, padding: "2px 8px", borderRadius: radius.base, border: `1px solid ${color.line}`, background: "transparent", color: color.text3 }}>clear → deliver all</button>}
+        {skills.length > 0 && !dropStyle(harness, "skills") && <button type="button" onClick={() => setSkills([])} style={{ alignSelf: "flex-start", cursor: "pointer", fontSize: fs.sm, padding: "2px 8px", borderRadius: radius.base, border: `1px solid ${color.line}`, background: "transparent", color: color.text3 }}>clear → deliver all</button>}
         {/* A subset name no longer in the store (e.g. a deleted skill) — surfaced so it can be cleared. */}
         {skills.filter((n) => !available.includes(n)).length > 0 && (
-          <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>
+          <span style={{ color: color.attnText, fontSize: fs.sm }}>
             not in store (will be ignored at spawn): {skills.filter((n) => !available.includes(n)).join(", ")}
           </span>
         )}
       </div>
-      {harness !== "codex" && <span style={{ color: color.text3, fontSize: fs.mono, fontFamily: font.mono, marginTop: -6 }}>Model + skills apply on the next spawn. Skills delivery is per-session — sessions sharing a repo see the union of their subsets, never each other stripped.</span>}
+      {harness !== "codex" && <span style={{ color: color.text3, fontSize: fs.sm, marginTop: -6 }}>Model + skills apply on the next spawn. Skills delivery is per-session — sessions sharing a repo see the union of their subsets, never each other stripped.</span>}
 
       <span style={{ flex: 1 }} />
       {/* Card 65aa951c. An UNTOUCHED field silently adopts whatever landed while this editor was open —
@@ -868,7 +868,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
           editing cannot be adopted, so Save will overwrite the other write: that one is named here, with
           the two real options, rather than left to be discovered afterwards. */}
       {liveConflicts.length > 0 && (
-        <span data-testid="profile-conflict-notice" style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
+        <span data-testid="profile-conflict-notice" style={{ color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
           Changed elsewhere since you opened this: {liveConflicts.map(fieldDisplayName).join(", ")}.
           Saving replaces {liveConflicts.length === 1 ? "it" : "them"} with your version — Reset takes theirs.
         </span>
@@ -888,7 +888,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
       {awaitingAgents && (
         <div data-testid="grant-reach-checking" role="status"
           style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
+          <span style={{ color: color.text2, fontSize: fs.sm, lineHeight: 1.5 }}>
             {GRANT_REACH_CHECKING} Your save lands as soon as that is known.
           </span>
           <Button data-testid="grant-reach-checking-cancel" onClick={() => setAwaitingAgents(false)}>Cancel</Button>
@@ -904,11 +904,11 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         </Button>
         {dirty
           ? <Button onClick={reset}>Reset</Button>
-          : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
+          : <span style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
         <span style={{ flex: 1 }} />
         {bundled && (confirmRevert ? (
           <>
-            <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>discard edits & restore shipped?</span>
+            <span style={{ color: color.attnText, fontSize: fs.sm }}>discard edits & restore shipped?</span>
             <Button variant="danger" disabled={reverting} onClick={onRevert}>Revert</Button>
             <Button onClick={() => setConfirmRevert(false)}>Cancel</Button>
           </>
@@ -923,7 +923,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
           — without it the MutationCache would stack a blocking modal on top of this line. */}
       {saveError && (
         <span data-testid="profile-save-error" role="alert"
-          style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
+          style={{ color: color.danger, fontSize: fs.sm, lineHeight: 1.5 }}>
           {errorText(saveError)}
         </span>
       )}
@@ -949,7 +949,7 @@ function UpdateBanner({ id, onAdopt, adoptBusy, error }: { id: string; onAdopt: 
     <div style={{ border: `1px solid ${color.attn}`, borderRadius: radius.base, padding: "8px 10px",
       background: color.inset, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.attnText, fontSize: fs.sm }}>
           Loom shipped an update to this profile.
         </span>
         <span style={{ flex: 1 }} />
@@ -958,7 +958,7 @@ function UpdateBanner({ id, onAdopt, adoptBusy, error }: { id: string; onAdopt: 
           {adoptBusy ? "Adopting…" : "Adopt update"}
         </Button>
       </div>
-      {error && <span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>{errorText(error)}</span>}
+      {error && <span style={{ color: color.danger, fontSize: fs.sm }}>{errorText(error)}</span>}
       {showDiff && (
         diff.isLoading ? <span style={{ color: color.text3, fontSize: fs.sm }}>Loading diff…</span>
         : diff.data ? <FieldDiff changed={diff.data.changed} />
@@ -973,7 +973,7 @@ function UpdateBanner({ id, onAdopt, adoptBusy, error }: { id: string; onAdopt: 
 // a compact grid reads better than a line diff.
 function FieldDiff({ changed }: { changed: ProfileFieldMerge[] }) {
   if (changed.length === 0) {
-    return <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No field changed.</span>;
+    return <span style={{ color: color.text3, fontSize: fs.sm }}>No field changed.</span>;
   }
   return (
     <div style={{ display: "grid", gridTemplateColumns: "auto 1fr auto 1fr", gap: "6px 10px", alignItems: "start",
@@ -1026,7 +1026,7 @@ function ConflictResolver({
               const choice = choices[c.field] ?? "mine";
               return (
                 <div key={c.field} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>{fieldDisplayName(c.field)}</span>
+                  <span style={{ fontSize: fs.sm, color: color.text2 }}>{fieldDisplayName(c.field)}</span>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <FieldSide label="Your version" tone="muted" active={choice === "mine"} value={formatFieldValue(c.field, c.mine)}
                       onPick={() => setChoices((m) => ({ ...m, [c.field]: "mine" }))} />
@@ -1039,7 +1039,7 @@ function ConflictResolver({
           </div>
 
           <div style={{ borderTop: `1px solid ${color.line}`, padding: "10px 14px", display: "flex", alignItems: "center", gap: 8 }}>
-            {error && <span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>{errorText(error)}</span>}
+            {error && <span style={{ color: color.danger, fontSize: fs.sm }}>{errorText(error)}</span>}
             <span style={{ flex: 1 }} />
             <Button variant="primary" disabled={applying} onClick={() => onApply(choices)}>
               {applying ? "Adopting…" : "Adopt resolved"}
@@ -1063,7 +1063,7 @@ function FieldSide({ label, tone: t, active, value, onPick }: { label: string; t
         boxShadow: active ? `inset 0 0 0 1px ${color.lineStrong}` : undefined }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
         <span style={{ width: 7, height: 7, borderRadius: radius.base, background: accent, display: "inline-block" }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: active ? color.accentFg : color.text2 }}>
+        <span style={{ fontSize: fs.sm, color: active ? color.accentFg : color.text2 }}>
           {label}{active ? " ✓" : ""}
         </span>
       </div>

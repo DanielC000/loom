@@ -132,7 +132,7 @@ function BatchTag() {
 function BatchIdentity({ landed, branches, style }: { landed: number | null; branches: string[] | null; style?: CSSProperties }) {
   return (
     <div
-      style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: fs.mono, color: color.text2, fontFamily: font.mono, ...style }}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, fontFamily: font.ui, fontSize: fs.sm, color: color.text2, ...style }}
       title={branches && branches.length > 0 ? `Branches in this batch:\n${branches.join("\n")}` : undefined}
     >
       <BatchTag />
@@ -452,9 +452,7 @@ function ProjectFilter({
             className="loom-btn"
             style={{
               cursor: "pointer",
-              fontFamily: font.mono,
-              fontSize: fs.mono,
-              letterSpacing: "0.04em",
+              fontSize: fs.sm,
               padding: "3px 10px",
               borderRadius: radius.base,
               border: `1px solid ${on ? color.accentEdge : color.line}`,

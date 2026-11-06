@@ -7,7 +7,7 @@ import { AgentEditDialog, AgentRosterCard, RosterEmpty } from "../components/atl
 import { ProjectSchedules } from "../components/projectSchedules";
 import { Button, Panel, SectionLabel } from "../components/ui";
 import { api } from "../lib/api";
-import { color, font, fs } from "../theme";
+import { color, fs } from "../theme";
 
 // THE AGENTS NODE — card c6160c7d (Atlas P2-2), the project tier's roster at full size.
 //
@@ -55,7 +55,7 @@ export default function AgentsNode() {
   if (!projectId) {
     return (
       <Panel style={{ maxWidth: 560, padding: "18px 20px" }} data-testid="atlas-agents-no-project">
-        <p style={{ margin: 0, color: color.text2, fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.7 }}>
+        <p style={{ margin: 0, color: color.text2, fontSize: fs.body, lineHeight: 1.7 }}>
           No project is active yet. Pick one in the entity tree — this node lists whichever project the
           tree has open.
         </p>

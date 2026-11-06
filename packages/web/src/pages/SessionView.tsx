@@ -55,8 +55,8 @@ export default function SessionView() {
       <Button onClick={() => navigate(-1)}>← back</Button>
       <span style={{ fontFamily: font.ui, fontSize: fs.lg, fontWeight: 600, letterSpacing: "-0.01em", color: color.text }}>{label}</span>
       {session && (
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
-          {session.projectName} · {session.agentName}{session.role ? ` · ${session.role}` : ""} · {session.id.slice(0, 8)}
+        <span style={{ fontSize: fs.sm, color: color.text2 }}>
+          {session.projectName} · {session.agentName}{session.role ? ` · ${session.role}` : ""} · <span style={{ fontFamily: font.mono, fontSize: fs.mono }}>{session.id.slice(0, 8)}</span>
         </span>
       )}
     </div>
@@ -115,7 +115,7 @@ export default function SessionView() {
       <Panel style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <StatusPill tone="muted" label={session.processState} />
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+          <span style={{ fontSize: fs.sm, color: color.text2 }}>
             last active {new Date(session.lastActivity).toLocaleString()}
           </span>
         </div>
@@ -128,7 +128,7 @@ export default function SessionView() {
             </pre>
           </div>
         ) : (
-          <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No error recorded — the session exited cleanly.</span>
+          <span style={{ color: color.text3, fontSize: fs.sm }}>No error recorded — the session exited cleanly.</span>
         )}
         <div>
           <Button variant="primary" onClick={openArchive}>View transcript in Archive →</Button>

@@ -184,7 +184,7 @@ function RunRow({ run, selected, agentName, onSelect, onCancel, cancelling }:
         {run.endedAt && <Chip label="ended" value={ts(run.endedAt)} />}
       </div>
       {p && (
-        <div style={{ marginTop: 8, fontFamily: font.mono, fontSize: fs.mono, color: run.error ? color.danger : color.text2,
+        <div style={{ marginTop: 8, fontSize: fs.sm, color: run.error ? color.danger : color.text2,
           whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={p}>
           {run.error ? "✗ " : "↳ "}{p}
         </div>

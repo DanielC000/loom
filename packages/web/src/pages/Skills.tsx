@@ -102,7 +102,7 @@ export default function Skills() {
     <div className="loom-actor-split">
       <Panel style={{ alignSelf: "start" }}>
         <SectionLabel>Skills</SectionLabel>
-        <p style={{ color: color.text3, fontSize: fs.mono, margin: "0 0 10px", fontFamily: font.mono, lineHeight: 1.5 }}>
+        <p style={{ color: color.text3, fontSize: fs.sm, margin: "0 0 10px", lineHeight: 1.5 }}>
           Loom's own skills, injected into every session as project-local — your personal
           <code> ~/.claude/skills</code> is untouched and takes precedence, so Loom's names are chosen
           not to collide. Edits apply on the next spawn.
@@ -219,14 +219,14 @@ function PermissionWideningBanner({ vectors }: { vectors: SkillPermissionVector[
     <div data-testid="skill-permission-warning"
       style={{ border: `1px solid ${color.danger}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
         background: color.inset, display: "flex", flexDirection: "column", gap: 6 }}>
-      <span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>
+      <span style={{ color: color.danger, fontSize: fs.sm }}>
         This skill widens what a session can do.
       </span>
       <ul style={{ margin: 0, paddingLeft: 16, display: "flex", flexDirection: "column", gap: 4 }}>
         {vectors.map((v) => (
           <li key={v} data-testid={`skill-permission-vector-${v}`}
-            style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.55 }}>
-            <code style={{ color: color.text }}>{PERMISSION_VECTORS[v].code}</code>{" "}
+            style={{ color: color.text2, fontSize: fs.sm, lineHeight: 1.55 }}>
+            <code style={{ color: color.text, fontFamily: font.mono }}>{PERMISSION_VECTORS[v].code}</code>{" "}
             {PERMISSION_VECTORS[v].where} — {PERMISSION_VECTORS[v].does}.
           </li>
         ))}
@@ -234,7 +234,7 @@ function PermissionWideningBanner({ vectors }: { vectors: SkillPermissionVector[
       {/* Separated by a hairline, not by a dimmer tone: `color.text3` measures 3.14:1 on this panel,
           under the 4.5:1 floor for text this size — and this is the line that tells the reader nothing is
           broken, so it must not be the least readable thing in the banner. */}
-      <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.55,
+      <span style={{ color: color.text2, fontSize: fs.sm, lineHeight: 1.55,
         borderTop: `1px solid ${color.line}`, paddingTop: 6 }}>
         Loom does not remove these. If you wrote or installed this skill on purpose, nothing is wrong —
         edit the SKILL.md above to drop them if you didn't mean to.
@@ -298,7 +298,7 @@ function SkillEditor({
         <span style={{ flex: 1 }} />
         {confirmDel ? (
           <>
-            <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>delete {name}?</span>
+            <span style={{ color: color.danger, fontSize: fs.sm }}>delete {name}?</span>
             <Button variant="danger" disabled={deleting} onClick={onDelete}>Confirm</Button>
             <Button onClick={() => setConfirmDel(false)}>Cancel</Button>
           </>
@@ -349,7 +349,7 @@ function SkillEditor({
         <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave(text)}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
           ? <Button onClick={() => setText(content)}>Discard changes</Button>
-          : <span style={{ color: color.live, fontSize: fs.mono, fontFamily: font.mono }}>saved</span>}
+          : <span style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
         {/* Re-save WITHOUT an edit, purely to re-stamp "human" — the ordinary Save button above is
             disabled with nothing dirty, so without this a skill with no pending edit has no way to earn
             the "human" stamp it needs to reach a locked role. Hidden while dirty: Save already covers it. */}
@@ -361,14 +361,14 @@ function SkillEditor({
         <span style={{ flex: 1 }} />
         {bundled && canPublish && (confirmPublish ? (
           <>
-            <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>write store edits into the repo asset?</span>
+            <span style={{ color: color.attnText, fontSize: fs.sm }}>write store edits into the repo asset?</span>
             <Button variant="primary" disabled={publishing} onClick={() => { onPublish(); setConfirmPublish(false); }}>Publish</Button>
             <Button onClick={() => setConfirmPublish(false)}>Cancel</Button>
           </>
         ) : <Button onClick={() => setConfirmPublish(true)} title="Write this skill's store edits back into the repo's bundled asset (you commit it)">Publish to repo</Button>)}
         {bundled && (confirmReset ? (
           <>
-            <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>discard edits & restore shipped?</span>
+            <span style={{ color: color.attnText, fontSize: fs.sm }}>discard edits & restore shipped?</span>
             <Button variant="danger" disabled={resetting} onClick={onReset}>Reset</Button>
             <Button onClick={() => setConfirmReset(false)}>Cancel</Button>
           </>
@@ -396,7 +396,7 @@ function UpdateBanner({ name, onAdopt, adoptBusy, error }: { name: string; onAdo
     <div style={{ border: `1px solid ${color.attn}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
       background: color.inset, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ color: color.attnText, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.attnText, fontSize: fs.sm }}>
           Loom shipped an update to this skill.
         </span>
         <span style={{ flex: 1 }} />
@@ -405,7 +405,7 @@ function UpdateBanner({ name, onAdopt, adoptBusy, error }: { name: string; onAdo
           {adoptBusy ? "Adopting…" : "Adopt update"}
         </Button>
       </div>
-      {error && <span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>{errorText(error)}</span>}
+      {error && <span style={{ color: color.danger, fontSize: fs.sm }}>{errorText(error)}</span>}
       {showDiff && (
         diff.isLoading ? <span style={{ color: color.text3, fontSize: fs.sm }}>Loading diff…</span>
         : diff.data ? <FileDiffList name={name} files={diff.data.files} />
@@ -433,7 +433,7 @@ function FilesDivergedBanner({ name }: { name: string }) {
     <div style={{ border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
       background: color.inset, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.text2, fontSize: fs.sm }}>
           {diverged.length} supporting {diverged.length === 1 ? "file differs" : "files differ"} from the shipped version.
         </span>
         <span style={{ flex: 1 }} />
@@ -452,7 +452,7 @@ function FileDiffList({ name, files }: {
 }) {
   const diverged = files.filter((f) => f.customized || f.updateAvailable);
   if (!diverged.length) {
-    return <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>No file differs from the shipped version.</span>;
+    return <span style={{ color: color.text3, fontSize: fs.sm }}>No file differs from the shipped version.</span>;
   }
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -503,7 +503,7 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
       <button onClick={() => setOpen((v) => !v)} title={open ? `Hide ${file.path}` : `Show what differs in ${file.path}`}
         style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "transparent", border: "none",
           padding: "6px 8px", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
+        <span style={{ color: color.text3, fontSize: fs.sm, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
         <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text, flexShrink: 0 }}>{file.path}</span>
         {file.customized && <Badge tone="muted">customized</Badge>}
         {file.updateAvailable && <Badge tone="attn">update available</Badge>}
@@ -528,7 +528,7 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
           )}
 
           {resolve.error && (
-            <span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>{errorText(resolve.error)}</span>
+            <span style={{ color: color.danger, fontSize: fs.sm }}>{errorText(resolve.error)}</span>
           )}
 
           {resolvable && d && file.customized && (
@@ -542,7 +542,7 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
               <span style={{ flex: 1 }} />
               {confirmTake ? (
                 <>
-                  <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>discard your edits to this file?</span>
+                  <span style={{ color: color.attnText, fontSize: fs.sm }}>discard your edits to this file?</span>
                   <Button variant="danger" disabled={resolve.isPending} onClick={() => resolve.mutate("shipped")}>Take shipped</Button>
                   <Button onClick={() => setConfirmTake(false)}>Cancel</Button>
                 </>
@@ -554,7 +554,7 @@ function FileDiffRow({ name, file }: { name: string; file: SkillFileState }) {
             </div>
           )}
           {resolvable && file.updateAvailable && !file.customized && (
-            <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>
+            <span style={{ color: color.text3, fontSize: fs.sm }}>
               You haven't edited this file — adopting the update syncs it automatically.
             </span>
           )}
@@ -573,7 +573,7 @@ function DiffBlock({ kind, label, tone, children }: { kind: "mine" | "shipped"; 
   const accent = toneFill[tone];
   return (
     <div data-diff-kind={kind} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono,
+      <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: fs.sm,
         color: color.text2 }}>
         <span style={{ width: 7, height: 7, borderRadius: radius.base, background: accent, display: "inline-block", flexShrink: 0 }} />
         {label}
@@ -603,14 +603,14 @@ function DivergedBanner({ name, mine, onSync, syncing }: { name: string; mine: s
     <div style={{ border: `1px solid ${color.lineStrong}`, borderRadius: radius.base, padding: "8px 10px", marginBottom: 8,
       background: color.inset, display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>
+        <span style={{ color: color.text2, fontSize: fs.sm }}>
           Your saved copy differs from the current shipped version.
         </span>
         <span style={{ flex: 1 }} />
         <Button onClick={() => setShowDiff((v) => !v)}>{showDiff ? "Hide differences" : "Compare with shipped"}</Button>
         {confirmSync ? (
           <>
-            <span style={{ color: color.attnText, fontSize: fs.mono, fontFamily: font.mono }}>discard your copy & sync?</span>
+            <span style={{ color: color.attnText, fontSize: fs.sm }}>discard your copy & sync?</span>
             <Button variant="danger" disabled={syncing} onClick={onSync}>Sync</Button>
             <Button onClick={() => setConfirmSync(false)}>Cancel</Button>
           </>
@@ -668,7 +668,7 @@ function ConflictResolver({
               const choice = choices[idx];
               return (
                 <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>Conflict {idx + 1}</span>
+                  <span style={{ fontSize: fs.sm, color: color.text2 }}>Conflict {idx + 1}</span>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <HunkSide label="Your version" tone="muted" active={choice === "mine"} lines={p.mine}
                       onPick={() => setChoices((c) => c.map((v, k) => (k === idx ? "mine" : v)))} />
@@ -690,7 +690,7 @@ function ConflictResolver({
             )}
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <Button onClick={() => setShowPreview((v) => !v)}>{showPreview ? "Hide result" : "Preview result"}</Button>
-              {error && <span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>{errorText(error)}</span>}
+              {error && <span style={{ color: color.danger, fontSize: fs.sm }}>{errorText(error)}</span>}
               <span style={{ flex: 1 }} />
               <Button variant="primary" disabled={applying} onClick={() => onApply(resolved)}>
                 {applying ? "Adopting…" : "Adopt resolved"}
@@ -715,7 +715,7 @@ function HunkSide({ label, tone, active, lines, onPick }: { label: string; tone:
         boxShadow: active ? `inset 0 0 0 1px ${color.lineStrong}` : undefined }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
         <span style={{ width: 7, height: 7, borderRadius: radius.base, background: accent, display: "inline-block" }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: active ? color.accentFg : color.text2 }}>
+        <span style={{ fontSize: fs.sm, color: active ? color.accentFg : color.text2 }}>
           {label}{active ? " ✓" : ""}
         </span>
       </div>

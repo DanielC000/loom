@@ -94,7 +94,7 @@ export default function ProjectUsage() {
 
       {usageQ.isLoading && <Panel><span style={{ color: color.text3 }}>Loading usage…</span></Panel>}
       {usageQ.isError && (
-        <Panel><span style={{ color: color.danger, fontFamily: font.mono, fontSize: fs.mono }}>
+        <Panel><span style={{ color: color.danger, fontSize: fs.sm }}>
           Couldn't load usage: {(usageQ.error as Error)?.message ?? "unknown error"}
         </span></Panel>
       )}
@@ -105,7 +105,7 @@ export default function ProjectUsage() {
             <div style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text2, marginBottom: 6 }}>
               No usage recorded in this window
             </div>
-            <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, lineHeight: 1.6, maxWidth: 560 }}>
+            <div style={{ fontSize: fs.sm, color: color.text3, lineHeight: 1.6, maxWidth: 560 }}>
               No interactive-session usage recorded for {project?.name ?? "this project"} in this window
               ({spanMeta.window}). Try a wider window, or this fills in as this project's sessions run and
               the daemon samples them.
@@ -125,7 +125,7 @@ export default function ProjectUsage() {
               <SectionLabel>By task</SectionLabel>
               <Panel data-testid="project-usage-tasks">
                 {roots.length === 0 && (
-                  <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>
+                  <span style={{ color: color.text3, fontSize: fs.sm }}>
                     No usage in this window resolved to a task.
                   </span>
                 )}
@@ -148,7 +148,7 @@ export default function ProjectUsage() {
                   row={part.unattributed} peak={peak} />
                 {!part.balanced && (
                   <div data-testid="project-usage-residual"
-                    style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.danger, paddingTop: 6 }}>
+                    style={{ fontSize: fs.sm, color: color.danger, paddingTop: 6 }}>
                     {fmtUsd(part.residual.costUsd)} / {fmtTokens(taskTotalTokens(part.residual))} tok of
                     this window's total is in none of the rows above — the breakdown is incomplete.
                   </div>
@@ -211,7 +211,7 @@ function TaskRow({ node, depth, peak, expanded, onToggle }: {
         title={expanded ? `Collapse ${title}` : `Expand ${title}`}
         style={{
           background: "transparent", border: "none", cursor: "pointer", padding: "0 2px",
-          marginLeft: depth * 14, fontFamily: font.mono, fontSize: fs.mono,
+          marginLeft: depth * 14, fontSize: fs.sm,
           color: color.text2, minWidth: 14, textAlign: "left",
         }}>
         {expanded ? "▾" : "▸"}
@@ -272,7 +272,7 @@ function RelationRows({ taskId, rolled }: { taskId: string; rolled: Map<string, 
   return (
     <>
       <div data-testid={`project-usage-relations-${taskId.slice(0, 8)}`}
-        style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, padding: "6px 0 2px", paddingLeft: 28, letterSpacing: "0.04em" }}>
+        style={{ fontSize: fs.xs, color: color.text3, padding: "6px 0 2px", paddingLeft: 28, letterSpacing: "0.04em" }}>
         RELATED CARDS — counted on their own rows, never added to the figure above
       </div>
       {rows.map((r) => <RelationRow key={`${r.kind}:${r.ref.id}`} kind={r.kind} ref_={r.ref} totals={r.totals} />)}
@@ -329,7 +329,7 @@ function BucketRow({ label, hint, row, peak, testId }: {
 
 function Note({ children, indent = 0, tone: t }: { children: ReactNode; indent?: number; tone?: "danger" }) {
   return (
-    <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: t === "danger" ? color.danger : color.text3, padding: "4px 0", paddingLeft: indent }}>
+    <div style={{ fontSize: fs.sm, color: t === "danger" ? color.danger : color.text3, padding: "4px 0", paddingLeft: indent }}>
       {children}
     </div>
   );
@@ -343,7 +343,7 @@ function Note({ children, indent = 0, tone: t }: { children: ReactNode; indent?:
 function UsageDisclosure({ balanced, present }: { balanced: boolean; present: boolean }) {
   return (
     <div data-testid="project-usage-disclosure"
-      style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, lineHeight: 1.6, maxWidth: 720 }}>
+      style={{ fontSize: fs.sm, color: color.text3, lineHeight: 1.6, maxWidth: 720 }}>
       Cost is an ESTIMATE of what these tokens would cost on metered API, not a bill — on a flat
       subscription it meters what you consumed. A review-only worker's usage lands in Unattributed if
       its spawn carried no task. A manager works many cards over one session, so its usage is never

@@ -39,8 +39,8 @@ import { errorText } from "../lib/loopbackCredential";
 const fieldLabel: CSSProperties = {
   fontFamily: font.ui, fontSize: fs.sm, fontWeight: 700, color: color.text2,
 };
-const hint: CSSProperties = { fontSize: fs.mono, color: color.text3, fontFamily: font.mono, lineHeight: 1.5 };
-const errStyle: CSSProperties = { color: color.danger, fontSize: fs.mono, fontFamily: font.mono };
+const hint: CSSProperties = { fontSize: fs.sm, color: color.text3, lineHeight: 1.5 };
+const errStyle: CSSProperties = { color: color.danger, fontSize: fs.sm };
 
 // Danger/attention fill washes for the elevated lead-mode surfaces. Mixed from the danger/attn tokens, so
 // they follow the light/dark theme with the colour itself.
@@ -371,7 +371,7 @@ function CompanionSwitcher({ companions, alertingIds, selectedId, onSelect, onNe
                   color: on ? color.text : color.text2,
                   border: `1px solid ${on ? color.accentEdge : color.line}`,
                   borderRadius: radius.base, padding: "5px 12px",
-                  fontFamily: font.mono, fontSize: fs.mono, cursor: "pointer",
+                  fontSize: fs.sm, cursor: "pointer",
                 }}
               >
                 {/* Decorative — the dot's meaning is also spelled out in the button's title tooltip; keep
@@ -652,11 +652,11 @@ function ConfigFields({ form, set, mode, currentToken, heartbeatPromptDefault, b
           placeholder={heartbeatPromptDefault || "Check in — anything worth surfacing?"} rows={2} spellCheck={false}
           style={{
             background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`,
-            borderRadius: radius.base, padding: "6px 8px", fontFamily: font.mono, fontSize: fs.body, resize: "vertical",
+            borderRadius: radius.base, padding: "6px 8px", fontSize: fs.body, resize: "vertical",
           }} />
       </Field>
 
-      <label style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.body, color: color.text, cursor: "pointer" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: fs.body, color: color.text, cursor: "pointer" }}>
         <input type="checkbox" checked={form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
         Enabled
       </label>
@@ -736,7 +736,7 @@ function ModeToggle({ mode, onMode }: { mode: CompanionMode; onMode: (m: Compani
             style={{
               background: on ? color.selected : "transparent",
               color: on ? color.text : color.text2,
-              border: "none", padding: "5px 14px", fontFamily: font.mono, fontSize: fs.mono, cursor: "pointer",
+              border: "none", padding: "5px 14px", fontSize: fs.sm, cursor: "pointer",
             }}
           >
             {o.label}
@@ -1351,7 +1351,7 @@ function AllowedSenders({ sessionId, channel }: { sessionId: string; channel: st
         {(senders.data ?? []).map((s) => (
           <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Chip label="id" value={s.senderId} tone="muted" />
-            {s.label && <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>{s.label}</span>}
+            {s.label && <span style={{ fontSize: fs.sm, color: color.text2 }}>{s.label}</span>}
             <span style={{ flex: 1 }} />
             <Button variant="danger" disabled={remove.isPending} onClick={() => remove.mutate(s.id)}>Remove</Button>
           </div>
@@ -1432,7 +1432,7 @@ function PersonaSection({ sessionId }: { sessionId: string }) {
             data-testid="companion-persona-input"
             style={{
               background: color.inset, color: color.text, border: `1px solid ${over ? color.danger : color.lineStrong}`,
-              borderRadius: radius.base, padding: "8px 10px", fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5, resize: "vertical",
+              borderRadius: radius.base, padding: "8px 10px", fontSize: fs.body, lineHeight: 1.5, resize: "vertical",
             }} />
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ ...hint, color: over ? color.danger : color.text3 }}>
@@ -1881,7 +1881,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flex: "none" }}>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, minWidth: 26, color: leadMode ? color.danger : color.text3 }}>
+          <span style={{ fontSize: fs.sm, minWidth: 26, color: leadMode ? color.danger : color.text3 }}>
             {leadMode ? "on" : "off"}
           </span>
           <button
@@ -1915,7 +1915,7 @@ function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: strin
       {!leadMode && !enabling && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <Button variant="danger" data-testid="companion-lead-mode-enable" onClick={beginEnable}>Enable lead mode…</Button>
-          <span style={{ fontSize: fs.mono, color: color.text3, fontFamily: font.mono }}>Opens a full disclosure before anything changes.</span>
+          <span style={{ fontSize: fs.sm, color: color.text3 }}>Opens a full disclosure before anything changes.</span>
         </div>
       )}
 
@@ -2079,7 +2079,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
                 style={{
                   position: "absolute", top: 8, right: 8, zIndex: 5, display: "inline-flex", alignItems: "center", gap: 7,
                   padding: "5px 10px", border: `1px solid ${color.danger}`, borderRadius: radius.pill, background: wash(color.dangerSoft, 92),
-                  fontFamily: font.mono, fontSize: fs.xs, color: color.danger,
+                  fontSize: fs.sm, color: color.danger,
                 }}
               >
                 <Dot tone="danger" /> Superseded by lead mode
@@ -2141,7 +2141,7 @@ function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: stri
               </p>
               {coGrantWarnings.map((w) => (
                 <div key={w.code} data-testid={`companion-cogrant-warning-${w.code}`} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                  <strong style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.attnText }}>{w.title}</strong>
+                  <strong style={{ fontSize: fs.sm, color: color.attnText }}>{w.title}</strong>
                   <p style={{ ...hint, margin: 0 }}>{w.detail}</p>
                 </div>
               ))}
@@ -2410,7 +2410,7 @@ function GrantScopeRow({ meta, grant, projectName, busy, onSetMode, onSetConfig,
                   style={{
                     background: on ? (elevated ? RED_WASH_2 : color.selected) : "transparent",
                     color: on ? (elevated ? color.danger : color.text) : color.text2,
-                    border: "none", padding: "3px 12px", fontFamily: font.mono, fontSize: fs.mono, cursor: busy ? "default" : "pointer",
+                    border: "none", padding: "3px 12px", fontSize: fs.sm, cursor: busy ? "default" : "pointer",
                   }}
                 >
                   {m}
@@ -2553,7 +2553,7 @@ function ClassChipRow({ all, selected, disabled, onChange }: {
               color: on ? color.text : color.text2,
               border: `1px solid ${on ? color.accentEdge : color.line}`,
               borderRadius: radius.base, padding: "3px 10px",
-              fontFamily: font.mono, fontSize: fs.mono, cursor: disabled ? "default" : "pointer",
+              fontSize: fs.sm, cursor: disabled ? "default" : "pointer",
             }}
           >
             {c}
@@ -2739,7 +2739,7 @@ function DeleteCompanionSection({ companion, label, onDeleted }: { companion: Co
               Delete {label}?
             </strong>
           </div>
-          <div style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.6 }}>
+          <div style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.6 }}>
             This removes:
             <ul style={{ margin: "6px 0 0", paddingLeft: 18, display: "flex", flexDirection: "column", gap: 3 }}>
               <li>its run configuration and any stored bot token</li>
@@ -2778,7 +2778,7 @@ function Callout({ tone, children, testId }: { tone: "attn"; children: ReactNode
   return (
     <div data-testid={testId} style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: wash(color.attn, 6) }}>
       <span aria-hidden style={{ color: c }}>▲</span>
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, lineHeight: 1.5 }}>{children}</span>
+      <span style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.5 }}>{children}</span>
     </div>
   );
 }

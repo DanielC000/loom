@@ -207,7 +207,7 @@ function TreeNodeView({ node, forceOpen, sessionId, onSelect, onRestore, restori
             style={{
               display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2,
               width: 26, flexShrink: 0, cursor: "pointer", padding: 0,
-              background: "transparent", border: "none", color: color.text3, fontFamily: font.mono,
+              background: "transparent", border: "none", color: color.text3,
             }}>
             <span style={{ fontSize: fs.sm }}>{open ? "▾" : "▸"}</span>
             <span style={{ fontSize: fs.sm, color: color.text2 }}>{node.children.length}</span>

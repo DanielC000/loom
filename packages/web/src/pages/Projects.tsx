@@ -161,7 +161,7 @@ export default function Projects() {
       {ownIdentity && (
         <div data-testid="page-identity" style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
           <SectionLabel style={{ margin: 0 }}>Projects</SectionLabel>
-          <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>
+          <span style={{ color: color.text3, fontSize: fs.sm }}>
             create and manage projects and their agents · live sessions live on Terminals and Overview
           </span>
         </div>
@@ -187,7 +187,7 @@ export default function Projects() {
                 onClick={() => pickProject(p.id)} />
             ))}
             {filteredProjects.length === 0 && (
-              <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, padding: "6px 2px" }}>
+              <span style={{ color: color.text3, fontSize: fs.sm, padding: "6px 2px" }}>
                 {projects.data?.length ? "No projects match the filter." : "No projects yet."}
               </span>
             )}
@@ -242,7 +242,7 @@ export default function Projects() {
                   );
                 })}
                 {(agents.data?.length ?? 0) === 0 && (
-                  <span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, padding: "6px 2px" }}>
+                  <span style={{ color: color.text3, fontSize: fs.sm, padding: "6px 2px" }}>
                     No agents yet — ＋ New agent to define one.
                   </span>
                 )}
@@ -250,7 +250,7 @@ export default function Projects() {
             </Panel>
           </div>
         ) : (
-          <Panel><span style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono }}>Select a project on the left to manage its agents.</span></Panel>
+          <Panel><span style={{ color: color.text3, fontSize: fs.sm }}>Select a project on the left to manage its agents.</span></Panel>
         )}
 
         {/* ── Editor pane: create forms (roomy) ⇄ the selected agent's prompt editor ⇄ empty state ── */}
@@ -306,7 +306,7 @@ function ListRow(
         background: selected || hover ? color.inset : "transparent",
         border: "none", borderLeft: `2px solid ${selected ? color.accentEdge : "transparent"}`,
         borderRadius: radius.sm, padding: "6px 8px",
-        color: selected ? color.accentFg : color.text2, fontFamily: font.mono, fontSize: fs.body,
+        color: selected ? color.accentFg : color.text2, fontSize: fs.body,
       }}>
       {children}
     </button>
@@ -345,7 +345,7 @@ function AgentRow(
       {live > 0 && <span title={`${live} live session${live === 1 ? "" : "s"}`}><Dot tone="live" glow /></span>}
       {icon && <span aria-hidden>{icon}</span>}
       {role && (
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: fs.xs, color: bindsPlain ? color.text3 : roleColor(roleKey), fontFamily: font.mono }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: fs.sm, color: bindsPlain ? color.text3 : roleColor(roleKey) }}>
           {bindsPlain && <span data-testid="agent-row-plain-bind" aria-hidden style={{ color: color.attnText }}>△</span>}
           {roleDisplay(roleKey).short}
         </span>
@@ -366,7 +366,7 @@ function EditorFrame({ title, subtitle, children, fill = false }: { title: strin
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, padding: 8, gap: 12 }}>
       <div>
         <div style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>{title}</div>
-        <div style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, marginTop: 3 }}>{subtitle}</div>
+        <div style={{ color: color.text3, fontSize: fs.sm, marginTop: 3 }}>{subtitle}</div>
       </div>
       <div style={fill
         ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", maxWidth: 760 }
@@ -383,7 +383,7 @@ function EmptyPane({ project }: { project: boolean }) {
       <div style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text2 }}>
         {project ? "No agent selected" : "No project selected"}
       </div>
-      <div style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, maxWidth: 360, lineHeight: 1.6 }}>
+      <div style={{ color: color.text3, fontSize: fs.sm, maxWidth: 360, lineHeight: 1.6 }}>
         {project
           ? "Select an agent to view and edit its startup prompt, or ＋ New agent to define one."
           : "Select a project on the left to manage its agents, or ＋ New project to create one."}
@@ -404,7 +404,7 @@ function ProjectForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: st
       <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
       <Input mono placeholder="repo path" value={repoPath} onChange={(e) => setRepo(e.target.value)} />
       <Input mono placeholder="vault path (optional)" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
-      <label style={{ display: "flex", flexDirection: "column", gap: 4, fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+      <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: fs.sm, color: color.text2 }}>
         board preset
         <Select value={presetId} onChange={(e) => setPreset(e.target.value)} aria-label="Board preset">
           {COLUMN_PRESETS.map((p) => (
@@ -417,7 +417,7 @@ function ProjectForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: st
           <span>{preset.description} · {preset.columns.map((c) => c.label).join(" → ")}</span>
         </span>
       </label>
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: fs.sm, color: color.text2 }}>
         <input type="checkbox" checked={seedAgents} onChange={(e) => setSeed(e.target.checked)} />
         seed starter agents (Orchestrator · Planning · Dev · Bugfix · Content)
       </label>

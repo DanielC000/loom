@@ -313,8 +313,8 @@ function RowHeader({ row }: { row: SessionRow }) {
     return (
       <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatusPill tone={m.busy ? "work" : "live"} glow={m.busy} label="manager" />
-        <span style={{ fontFamily: font.mono }}>
-          {m.projectName} · {m.agentName} · {m.id.slice(0, 8)}
+        <span>
+          {m.projectName} · {m.agentName} · <span style={{ fontFamily: font.mono }}>{m.id.slice(0, 8)}</span>
         </span>
         <span style={{ color: color.text3, fontWeight: 400 }}>({workers} worker{workers === 1 ? "" : "s"})</span>
       </SectionLabel>
@@ -375,7 +375,7 @@ function ShellTile({ t, onKill, killing }: { t: ShellTerminal; onKill: () => voi
   const [confirmKill, setConfirmKill] = useState(false);
   const killCluster = confirmKill ? (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-      <span style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>kill shell?</span>
+      <span style={{ color: color.danger, fontSize: fs.sm }}>kill shell?</span>
       <Button variant="danger" style={{ padding: "0 8px" }} disabled={killing}
         onClick={(ev) => { ev.stopPropagation(); onKill(); }}>Confirm</Button>
       <Button style={{ padding: "0 8px" }}
@@ -395,9 +395,9 @@ function ShellTile({ t, onKill, killing }: { t: ShellTerminal; onKill: () => voi
       lifecycle="none"
       maximizable
       title={
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: fs.sm, color: color.text2 }}>
           <StatusPill tone="live" label="shell" />
-          <span title={`${t.command}\n${t.cwd}`}>{t.label} · {t.id.slice(0, 8)}</span>
+          <span title={`${t.command}\n${t.cwd}`}>{t.label} · <span style={{ fontFamily: font.mono, fontSize: fs.mono }}>{t.id.slice(0, 8)}</span></span>
         </span>
       }
       actionsExtra={killCluster}
