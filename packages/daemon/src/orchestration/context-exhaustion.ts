@@ -1,6 +1,6 @@
 import { openSync, fstatSync, readSync, closeSync } from "node:fs";
 import { resolveTranscriptFile, type TranscriptHarness } from "../sessions/transcript.js";
-import { detectContextExhaustionInTail, type ContextExhaustionMatch } from "../pty/claude-transcript.js";
+import { detectContextExhaustionInTail, hasRecoveryEvidenceInTail, type ContextExhaustionMatch } from "../pty/claude-transcript.js";
 
 /**
  * Card 66ff7321 (part C of 8c7dfc65) — a small, INDEPENDENT, stateless tail-reader for the
@@ -51,4 +51,17 @@ export function checkContextExhaustion(
   const tail = readTailBytes(file, CONTEXT_EXHAUSTION_TAIL_BYTES);
   if (!tail) return null;
   return detectContextExhaustionInTail(tail, notBeforeMs);
+}
+
+/**
+ * Bounded tail-read + POSITIVE recovery check (see `hasRecoveryEvidenceInTail`): true only when a readable,
+ * non-empty tail shows real post-exhaustion output. A missing, unreadable or empty transcript is false.
+ */
+export function checkRecoveryEvidence(cwd: string, engineSessionId: string | null | undefined, harness?: TranscriptHarness): boolean {
+  if (!engineSessionId) return false;
+  const file = resolveTranscriptFile(cwd, engineSessionId, harness);
+  if (!file) return false;
+  const tail = readTailBytes(file, CONTEXT_EXHAUSTION_TAIL_BYTES);
+  if (!tail) return false;
+  return hasRecoveryEvidenceInTail(tail);
 }

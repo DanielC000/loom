@@ -3,7 +3,7 @@ import { resolveConfig, contextWindowForModel } from "@loom/shared";
 import type { OrchestrationConfig, Session } from "@loom/shared";
 import type { Db } from "../db.js";
 import { contextTelemetryFor } from "../pty/adapter.js";
-import { checkContextExhaustion } from "./context-exhaustion.js";
+import { checkContextExhaustion, checkRecoveryEvidence } from "./context-exhaustion.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface ContextPty {
@@ -55,6 +55,13 @@ export interface ContextWatcherDeps {
    * contract as `emergencyInterrupt`.
    */
   workerContextInterrupt?: (workerSessionId: string, text: string) => EmergencyInterruptOutcome;
+  /**
+   * Loom-authored owner chat message for an exhausted Companion (index.ts wraps
+   * `CompanionController.notifyOwnerContextExhausted`). Called at most once per exhaustion episode (deduped
+   * durably in app_meta by the inbox notice id). Optional: omitted ⇒ no chat message, inbox notice only.
+   * Must not throw; a rejection is recorded as a send-failed event and never retried.
+   */
+  notifyCompanionOwner?: (companionSessionId: string) => Promise<{ outcome: "sent" | "no-binding" | "send-failed"; channel?: string; reason?: string }>;
 }
 
 /**
@@ -298,7 +305,11 @@ export class ContextWatcher {
       if (this.checkAssistantContextExhaustion(db, pty, a, nowIso)) continue;
       // Already marked on an earlier tick: re-assert the notice by its deterministic id. No-op when it exists
       // (covers every later tick AND a daemon restart); heals a crash between the mark and the notice insert.
-      if (a.contextExhaustedAt != null) this.ensureAssistantExhaustionNotice(db, a, a.contextExhaustedAt);
+      if (a.contextExhaustedAt != null) {
+        this.maybeNotifyAssistantOwnerChat(db, a, this.ensureAssistantExhaustionNotice(db, a, a.contextExhaustedAt));
+      } else {
+        this.endAssistantEpisodeIfRecovered(db, a);
+      }
     }
 
     // WORKER CONTEXT (Triggers C/D, card dacc6d9e) — a third, separate loop (workers are a structurally
@@ -432,8 +443,90 @@ export class ContextWatcher {
       });
       // eslint-disable-next-line no-console
       console.log(`[context-watcher] companion ${a.id} CONTEXT-EXHAUSTED (${exhaustion.error ?? "unknown error"}) — busy cleared, queue held, owner notice filed`);
+      this.maybeNotifyAssistantOwnerChat(db, a, noticeId);
     }
     return true;
+  }
+
+  /**
+   * End an exhaustion episode whose Companion healed WITHOUT a recycle (e.g. a human-composer /compact: the
+   * rising edge cleared the DB mark and the notice was left open, because `retireAssistantExhaustionNotice
+   * OnRecovery` fires only on a completed turn). Signal: an episode claim exists for this Companion, the mark
+   * is clear, the session is idle (a retry in flight is busy, so a restart's clear-then-fail transient is NOT
+   * mistaken for recovery) and its transcript shows POSITIVE recovery evidence (`hasRecoveryEvidenceInTail`:
+   * a non-synthetic assistant record, summary or compact_boundary after the marker — a user record alone, or
+   * a missing/unreadable/empty transcript, means keep watching). Then (1) clear the claim FIRST, so a failed
+   * dismiss below can never silence the next episode (the next exhaustion would reuse the still-open notice
+   * id, and an empty claim differs from it), and (2) dismiss the open notice, best-effort — retried on later
+   * ticks while an open notice remains (keyed on the open notice, not the claim). Cost: one meta read and
+   * one questions read per tick; the transcript is read only when a claim or an open notice exists.
+   */
+  private endAssistantEpisodeIfRecovered(db: Db, a: Session): void {
+    if (!this.deps.notifyCompanionOwner || a.busy || a.harness === "codex" || !a.engineSessionId) return;
+    const key = `${ASSISTANT_EXHAUSTION_CHAT_META_PREFIX}${a.id}`;
+    let open: string[];
+    try {
+      const claimed = !!db.getMeta(key);
+      open = db.listQuestionsForSession(a.id)
+        .filter((q) => q.type === "notice" && q.dismissedAt == null && q.title.endsWith(ASSISTANT_EXHAUSTION_TITLE_SUFFIX))
+        .map((q) => q.id);
+      // Nothing to end and nothing to retire: the transcript is not even read.
+      if (!claimed && open.length === 0) return;
+      // POSITIVE evidence only: a missing/unreadable/empty transcript, or a user record alone, is "keep watching".
+      if (!checkRecoveryEvidence(a.cwd, a.engineSessionId, a.harness)) return;
+      if (claimed) db.setMeta(key, "");
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[context-watcher] could not end the exhaustion episode for companion ${a.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    // Retried on later ticks while an open notice remains (keyed on the open notice, not the claim).
+    try {
+      if (open.length > 0) db.dismissNotices(open, new Date().toISOString());
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[context-watcher] could not dismiss the recovered exhaustion notice for companion ${a.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Send the owner ONE plain chat message for this exhaustion episode, at most once. The episode key is the
+   * inbox notice id in force (see ensureAssistantExhaustionNotice); it is CLAIMED in app_meta BEFORE the
+   * send, so the guarantee is at-most-once (a crash between claim and send loses the message, never
+   * duplicates it — the inbox notice stays the durable path). A new episode files a new notice id, so it
+   * sends again. No retry on any outcome. Logs/events carry the outcome + channel name only, never text.
+   */
+  private maybeNotifyAssistantOwnerChat(db: Db, a: Session, noticeId: string | null): void {
+    const notify = this.deps.notifyCompanionOwner;
+    if (!notify || !noticeId) return;
+    const key = `${ASSISTANT_EXHAUSTION_CHAT_META_PREFIX}${a.id}`;
+    try {
+      if (!db.claimMeta(key, noticeId)) return;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[context-watcher] could not claim the exhaustion chat notice for companion ${a.id}: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    const record = (detail: { outcome: string; channel?: string; reason?: string }): void => {
+      try {
+        db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: a.id,
+          kind: "assistant_exhaustion_chat_notice", detail: { ...detail, noticeId },
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[context-watcher] could not record the exhaustion chat notice outcome for companion ${a.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    let p: ReturnType<NonNullable<ContextWatcherDeps["notifyCompanionOwner"]>>;
+    try { p = notify(a.id); } catch (err) {
+      record({ outcome: "send-failed", reason: err instanceof Error ? err.name : "error" });
+      return;
+    }
+    void p.then(
+      (r) => record({ outcome: r.outcome, ...(r.channel ? { channel: r.channel } : {}), ...(r.reason ? { reason: r.reason } : {}) }),
+      (err) => record({ outcome: "send-failed", reason: err instanceof Error ? err.name : "error" }),
+    );
   }
 
   /**
@@ -710,6 +803,9 @@ export class ContextWatcher {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 }
+
+/** app_meta key prefix of the per-Companion "owner already messaged for this episode" claim; value = notice id. */
+export const ASSISTANT_EXHAUSTION_CHAT_META_PREFIX = "companion_exhaustion_chat_sent:";
 
 export const ASSISTANT_EXHAUSTION_TITLE_SUFFIX = " has run out of context and cannot reply";
 

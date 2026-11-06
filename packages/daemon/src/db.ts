@@ -5341,6 +5341,17 @@ export class Db {
     const r = this.db.prepare("SELECT value FROM app_meta WHERE key = ?").get(key) as Row | undefined;
     return r ? (r.value as string) : undefined;
   }
+  /** ATOMIC compare-and-set claim on a meta key: one conditional upsert that writes `value` only when the
+   *  key is absent or holds a DIFFERENT value. Returns true iff this call changed the row (i.e. the caller
+   *  won the claim); false when the row already held `value`. */
+  claimMeta(key: string, value: string): boolean {
+    const r = this.db.prepare(
+      `INSERT INTO app_meta (key, value, updated_at) VALUES (@key, @value, @updatedAt)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+       WHERE app_meta.value <> excluded.value`,
+    ).run({ key, value, updatedAt: new Date().toISOString() });
+    return r.changes > 0;
+  }
   /** Upsert a daemon-global meta value (stamps updated_at). Used for fire-exactly-once boot markers. */
   setMeta(key: string, value: string): void {
     this.db.prepare(
@@ -12173,6 +12184,14 @@ export class Db {
   listCompanionMessages(sessionId: string, channel: string): CompanionMessage[] {
     return (this.db.prepare("SELECT * FROM companion_messages WHERE session_id = ? AND channel = ? ORDER BY created_at, rowid")
       .all(sessionId, channel) as Row[]).map(toCompanionMessage);
+  }
+  /** Timestamp of the owner's most recent INBOUND (author 'user') chat row for one (session, channel), or
+   *  null when there is none. Metadata only — never reads the message text. Used to pick which bound
+   *  channel the owner most recently messaged from (the exhaustion chat notice's single-target choice). */
+  latestCompanionUserMessageAt(sessionId: string, channel: string): string | null {
+    const r = this.db.prepare("SELECT MAX(created_at) AS t FROM companion_messages WHERE session_id = ? AND channel = ? AND author = 'user'")
+      .get(sessionId, channel) as Row | undefined;
+    return (r?.t as string | null | undefined) ?? null;
   }
   /** A session's stored chat history across EVERY channel AND EVERY conversation, chronological (unified
    *  cross-channel chat, card 7d63e200) — an audit/test utility spanning the session's full lifetime.

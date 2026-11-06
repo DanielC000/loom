@@ -292,6 +292,13 @@ export interface CompanionControllerDeps {
   resolveEffective?: (db: Db, env: NodeJS.ProcessEnv, keyPath?: string) => CompanionConfig[];
 }
 
+/** The ONE fixed, content-free chat message Loom sends the owner when a Companion's context is exhausted
+ *  (`notifyOwnerContextExhausted`). A constant string: no session text, ids or names ever enter it. */
+export const COMPANION_EXHAUSTED_OWNER_MESSAGE =
+  "⚠️ I've stopped responding because my context is full. Open Loom, go to the Companion page and press " +
+  "\"Recycle onto a fresh session\" (then \"Confirm recycle\") to bring me back. Messages you send meanwhile " +
+  "are kept and delivered once I'm recycled, unless Loom restarts first.";
+
 export class CompanionController implements CompanionControl {
   /** ONE gateway/heartbeat/reminder-watcher/config PER live companion session — the diff source for a
    *  reconcile. A session present here is "live"; absent ⇒ OFF for that session. */
@@ -547,6 +554,37 @@ export class CompanionController implements CompanionControl {
           // eslint-disable-next-line no-console
           console.error(`[companion] web-chat mirror to ${b.channel} failed: ${err instanceof Error ? err.message : String(err)}`);
         });
+    }
+  }
+
+  /**
+   * Loom-authored, ONE-shot owner message for an exhausted Companion (the Companion cannot take a turn, so
+   * this never goes through submitTurn). Picks exactly ONE eligible binding: scope "dm", not flagged
+   * non-private, not the in-app channel (the cockpit already shows the inbox notice + recycle control).
+   * When several qualify, prefers the channel the owner most recently messaged from (newest inbound chat
+   * row, `latestCompanionUserMessageAt`), else the first by (channel, chatId). Sends through the gateway's
+   * `sendToChannel` (same per-chunk suppression + timeout as chat_reply). Never throws; never retries.
+   */
+  async notifyOwnerContextExhausted(sessionId: string): Promise<{ outcome: "sent" | "no-binding" | "send-failed"; channel?: string; reason?: string }> {
+    const gateway = this.gateways.get(sessionId);
+    if (!gateway) return { outcome: "no-binding", reason: "no-gateway" };
+    const eligible = gateway.bindingsForSession(sessionId)
+      .filter((b) => b.scope === "dm" && b.flaggedNonPrivate !== true && b.channel !== IN_APP_CHANNEL)
+      .sort((a, b) => (a.channel < b.channel ? -1 : a.channel > b.channel ? 1 : a.chatId < b.chatId ? -1 : a.chatId > b.chatId ? 1 : 0));
+    if (eligible.length === 0) return { outcome: "no-binding" };
+    let target = eligible[0]!;
+    let best: string | null = null;
+    for (const b of eligible) {
+      let t: string | null = null;
+      try { t = this.deps.db.latestCompanionUserMessageAt(sessionId, b.channel); } catch { t = null; }
+      if (t != null && (best == null || t > best)) { best = t; target = b; }
+    }
+    try {
+      const result = await gateway.sendToChannel(sessionId, target.channel, target.chatId, COMPANION_EXHAUSTED_OWNER_MESSAGE);
+      if (result.delivered) return { outcome: "sent", channel: target.channel };
+      return { outcome: "send-failed", channel: target.channel, reason: result.reason };
+    } catch (err) {
+      return { outcome: "send-failed", channel: target.channel, reason: err instanceof Error ? err.name : "error" };
     }
   }
 

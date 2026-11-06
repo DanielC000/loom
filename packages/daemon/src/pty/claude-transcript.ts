@@ -440,3 +440,29 @@ export function detectContextExhaustionInTail(tailText: string, notBeforeMs?: nu
   }
   return latest;
 }
+
+/**
+ * POSITIVE recovery evidence in `tailText` (a byte-bounded transcript suffix): true ONLY when, after the
+ * latest context-exhaustion marker (or anywhere in the tail if no marker is in it), the tail holds a
+ * non-synthetic ASSISTANT record, a `summary`, or a `system`/`compact_boundary`. A user record never counts
+ * (it is the first step of every failing retry, including a failed `/compact` slash-command record); an
+ * empty or unparseable tail is false ("keep watching"), never "recovered". Distinct from
+ * {@link detectContextExhaustionInTail}'s null, which also reads null for a user record after the marker.
+ */
+export function hasRecoveryEvidenceInTail(tailText: string): boolean {
+  let evidence = false;
+  for (const rawLine of tailText.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let rec: Record<string, unknown>;
+    try { rec = JSON.parse(line); } catch { continue; }
+    if (rec.type === "assistant") {
+      const message = rec.message as { model?: unknown; content?: unknown } | undefined;
+      const synthetic = message?.model === "<synthetic>" || rec.isApiErrorMessage === true;
+      evidence = !synthetic;
+    } else if (rec.type === "summary" || (rec.type === "system" && rec.subtype === "compact_boundary")) {
+      evidence = true;
+    }
+  }
+  return evidence;
+}
