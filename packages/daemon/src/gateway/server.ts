@@ -2850,6 +2850,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const created = createConnection(deps.db, { name: b.name, host: b.host, authScheme: b.authScheme, secret: b.secret, projectId: scope.projectId, allowPlainHttp: b.allowPlainHttp as boolean | undefined });
       return reply.code(201).send(created);
     } catch (err) {
+      if (err instanceof ConnectionInputError) return reply.code(err.status).send({ error: err.message });
       return reply.code(400).send({ error: (err as Error).message });
     }
   });
@@ -2901,6 +2902,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // logged server-side — never its message (which can carry a path) and never any request/key material.
   const sendSshConnectionError = (reply: FastifyReply, err: unknown, op: "create" | "update") => {
     if (err instanceof SshConnectionInputError) return reply.code(400).send({ error: err.message });
+    if (err instanceof ConnectionInputError) return reply.code(err.status).send({ error: err.message });
     console.error(`[gateway] ssh connection ${op} failed (server fault): ${err instanceof Error ? err.name : typeof err}`);
     return reply.code(500).send({ error: "could not save the connection" });
   };
@@ -3032,6 +3034,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       });
       return reply.code(201).send(created);
     } catch (err) {
+      if (err instanceof ConnectionInputError) return reply.code(err.status).send({ error: err.message });
       return reply.code(400).send({ error: (err as Error).message });
     }
   });

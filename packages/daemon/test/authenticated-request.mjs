@@ -218,7 +218,9 @@ try {
     {
       let fetchCalled = false;
       const dup1 = createConnection(db, { name: "Dup", host: "dup1.example", authScheme: "bearer", secret: PLAINTEXT });
-      const dup2 = createConnection(db, { name: "Dup", host: "dup2.example", authScheme: "bearer", secret: PLAINTEXT });
+      const dup2 = createConnection(db, { name: "Dup-second", host: "dup2.example", authScheme: "bearer", secret: PLAINTEXT });
+      // A legacy duplicate (made before create refused one): the rename is applied out-of-band on the fixture DB.
+      db.db.prepare("UPDATE connections SET name = ? WHERE id = ?").run("Dup", dup2.id);
       const fetchImpl = async () => { fetchCalled = true; return new Response("ok", { status: 200 }); };
       const r = await performAuthenticatedRequest({ db, fetchImpl }, [dup1.id, dup2.id], GUARD, { connection: "Dup", path: "/x" });
       check("1m ambiguous name: refused", r.ok === false);

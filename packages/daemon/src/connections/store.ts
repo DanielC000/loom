@@ -375,6 +375,7 @@ export function createConnection(
 ): ConnectionMetadata {
   const v = validateConnectionInput(input, daemonReservedPorts(db));
   if (!v.ok) throw new Error(v.error);
+  assertNameFree(db, null, input.name.trim());
   const row = db.createConnection({
     name: input.name.trim(),
     host: input.host.trim(),
@@ -413,6 +414,7 @@ export function createSshConnection(
   if (!v.ok) throw new SshConnectionInputError(v.error);
   const stripped = stripSshKeyPassphrase(input.privateKey, input.passphrase);
   if (!stripped.ok) throw new SshConnectionInputError(stripped.error);
+  assertNameFree(db, null, input.name.trim());
   const row = db.createConnection({
     name: input.name.trim(),
     host: input.host.trim(),
@@ -466,7 +468,7 @@ function editedName(v: unknown): string {
 
 /** A rename must not collide with ANY other row: `provisionConnection` and `getConnectionByName` resolve by
  *  exact name (card 193de09e), so a duplicate would make the by-name lookup ambiguous. */
-function assertNameFree(db: ConnectionsDbStore, id: string, name: string): void {
+function assertNameFree(db: ConnectionsDbStore, id: string | null, name: string): void {
   const other = db.getConnectionByName(name);
   if (other && other.id !== id) throw new ConnectionInputError("a connection with that name already exists", 409);
 }
@@ -972,6 +974,7 @@ export function createOAuthConnection(
     throw new Error("scopes must be an array of non-empty strings");
   }
 
+  assertNameFree(db, null, input.name.trim());
   const bundle: OAuthTokenBundle = { clientSecret: input.clientSecret.trim(), accessToken: null, refreshToken: null, expiresAt: null };
   const row = db.createConnection({
     name: input.name.trim(), host: input.host.trim(), authScheme: "oauth2",

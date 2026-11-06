@@ -95,7 +95,7 @@ try {
   const db = new Db(path.join(tmpHome, "t.db"));
   const stub = {};
   const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub });
-  const post = (privateKey) => app.inject({ method: "POST", url: "/api/connections/ssh", payload: { name: "n", host: "h.example", user: "u", privateKey, hostKeyFingerprint: FINGERPRINT } });
+  const post = (privateKey, name = "n") => app.inject({ method: "POST", url: "/api/connections/ssh", payload: { name, host: "h.example", user: "u", privateKey, hostKeyFingerprint: FINGERPRINT } });
 
   // Positive control: a real private key still creates (the refusal didn't break the happy path).
   const okRes = await post(ed.private);
@@ -189,7 +189,7 @@ try {
   fs.writeFileSync(SECRET_KEY_PATH, Buffer.alloc(5, 1)); // wrong length -> envelope throws "envelope key at <path> has unexpected length"
   const origErr = console.error; const logged = []; console.error = (...a) => { logged.push(a.join(" ")); };
   let faultRes;
-  try { faultRes = await post(ed.private); } finally { console.error = origErr; if (goodKeyBytes) fs.writeFileSync(SECRET_KEY_PATH, goodKeyBytes); }
+  try { faultRes = await post(ed.private, "n-fault"); } finally { console.error = origErr; if (goodKeyBytes) fs.writeFileSync(SECRET_KEY_PATH, goodKeyBytes); }
   console.log(`  [observed] envelope fault: status=${faultRes.statusCode} body=${faultRes.payload}`);
   check("envelope-key fault -> 500", faultRes.statusCode === 500);
   check("envelope-key fault -> fixed text", JSON.parse(faultRes.payload).error === "could not save the connection");

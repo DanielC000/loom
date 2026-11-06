@@ -2384,6 +2384,10 @@ function ConnectionsPanel() {
   });
 
   const rows = data ?? [];
+  // Names shared by 2+ rows (exact match, the daemon's by-name identity). Such rows predate the create-time
+  // refusal; they are flagged here, never auto-renamed.
+  const nameCounts = new Map<string, number>();
+  for (const r of rows) nameCounts.set(r.name, (nameCounts.get(r.name) ?? 0) + 1);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -2438,6 +2442,9 @@ function ConnectionsPanel() {
                 {/* A stored host the current validator refuses (e.g. a scheme/port/path pasted into it): this
                     connection can never resolve, so say so instead of letting it read as bound-and-fine. */}
                 {c.invalidHost && <Badge tone="busy" title={c.invalidHostReason} data-testid="connection-invalid-host">Invalid host</Badge>}
+                {(nameCounts.get(c.name) ?? 0) > 1 && (
+                  <Badge tone="busy" title="Another connection has this name; rename one" data-testid="connection-duplicate-name">Duplicate name</Badge>
+                )}
                 {/* The owner opted this connection into unencrypted http for a private/LAN host: say so on the row. */}
                 {c.allowPlainHttp && <Badge tone="busy" title="The secret is sent unencrypted on your local network" data-testid="connection-plain-http">HTTP (LAN)</Badge>}
                 {/* Bound/unbound (api-key/bearer ALLOWLIST, matching the server's RAW_SECRET_AUTH_SCHEMES
