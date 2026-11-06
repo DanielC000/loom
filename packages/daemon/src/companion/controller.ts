@@ -158,6 +158,15 @@ export interface CompanionControl {
    * so a slow upgrade briefly blocks every OTHER live companion's reconcile too, not just this session's.
    */
   upgrade(sessionId: string): Promise<{ ok: true; session: Session } | { ok: false; error: string }>;
+  /**
+   * Recycle a Companion onto a FRESH engine session under the SAME session id (human/REST only,
+   * `POST /api/companion/:sessionId/recycle`; no MCP path). Serialized on the reconcile chain like
+   * {@link upgrade}, and closes the session's in-memory trust state (Trust Window, confirm proposals,
+   * inline authored-content grant) on success.
+   *
+   * @decision 79e030d9 — never route this through teardown.
+   */
+  recycle(sessionId: string): Promise<{ ok: true; session: Session } | { ok: false; error: string }>;
 }
 
 /** The mutable chat_reply gate the OrchestrationMcpRouter reads per MCP request. The controller adds/removes
@@ -246,6 +255,9 @@ export interface CompanionControllerDeps {
    *  {@link CompanionControl.upgrade} resolves `{ok:false}` for every session (test seams that don't
    *  exercise the upgrade path stay byte-identical). */
   upgradeCompanionSession?: (sessionId: string) => Promise<Session>;
+  /** FRESH-engine recycle primitive (card 79e030d9) — the daemon injects `(sid) => sessions.recycleCompanion(sid)`.
+   *  Optional: absent ⇒ {@link CompanionControl.recycle} resolves `{ok:false}`. */
+  recycleCompanionSession?: (sessionId: string, hooks?: { onPointOfNoReturn?: () => void }) => Promise<Session>;
   /**
    * AUTO-UPGRADE-ON-ENABLE signal (card dbba993f) — true when `sessionId` already had a captured engine
    * session id BEFORE this enable (i.e. it was already live — its own `tools/list` already ran once,
@@ -362,6 +374,36 @@ export class CompanionController implements CompanionControl {
       if (!this.deps.upgradeCompanionSession) return { ok: false, error: "companion live-upgrade is not wired on this daemon" };
       try {
         const session = await this.deps.upgradeCompanionSession(sessionId);
+        return { ok: true, session };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
+  }
+
+  /** See {@link CompanionControl.recycle}. */
+  recycle(sessionId: string): Promise<{ ok: true; session: Session } | { ok: false; error: string }> {
+    return this.enqueueResult(async () => {
+      if (!this.deps.recycleCompanionSession) return { ok: false, error: "companion recycle is not wired on this daemon" };
+      try {
+        // Trust is closed by the service at the POINT OF NO RETURN (old pty confirmed dead, before the spawn),
+        // so it fails closed on any later throw; a refused/aborted recycle (never reached it) keeps the warm window.
+        const session = await this.deps.recycleCompanionSession(sessionId, {
+          onPointOfNoReturn: () => this.deps.closeTrustWindow?.(sessionId),
+        });
+        // Q3: a recycle of an already-DEAD companion follows onSessionExit's teardown (gateway, heartbeat,
+        // reminders, chat_reply gate) — re-arm so the fresh engine can reply.
+        // @decision 134368ac — call applyDesired directly (we are already inside the chain), never reconcile()/enqueue().
+        if (!this.cfgs.has(sessionId)) {
+          try {
+            const resolve = this.deps.resolveEffective ?? resolveAllEnabledConfigs;
+            // N2: skipAutoUpgrade is explicit — the fresh engine already has chat_reply; startOne's
+            // wasAlreadyLive read would otherwise be true here and respawn (kill) it.
+            await this.applyDesired(resolve(this.deps.db, this.deps.env, this.deps.keyPath), sessionId, { skipAutoUpgrade: true });
+          } catch (err) {
+            console.warn(`[companion] recycle ${sessionId}: re-arming the companion wiring failed (the fresh engine is live; retry via reconcile): ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         return { ok: true, session };
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -570,7 +612,7 @@ export class CompanionController implements CompanionControl {
    * to that one session, leaving every other live session's map entry untouched (the fix for the cross-companion
    * rearm-all bug); omitted (boot / no known origin) ⇒ every live+desired session is visited, as before.
    */
-  private async applyDesired(desired: CompanionConfig[], onlySessionId?: string): Promise<void> {
+  private async applyDesired(desired: CompanionConfig[], onlySessionId?: string, opts: { skipAutoUpgrade?: boolean } = {}): Promise<void> {
     const desiredBySid = new Map(desired.map((c) => [c.sessionId, c]));
     const liveIds = onlySessionId ? (this.cfgs.has(onlySessionId) ? [onlySessionId] : []) : [...this.cfgs.keys()];
     // STOP first: any live session (in scope) no longer in the enabled set.
@@ -582,7 +624,7 @@ export class CompanionController implements CompanionControl {
     for (const cfg of desiredInScope) {
       const current = this.cfgs.get(cfg.sessionId);
       if (!current) {
-        await this.startOne(cfg);
+        await this.startOne(cfg, opts);
       } else {
         await this.updateOne(current, cfg);
       }
@@ -598,9 +640,11 @@ export class CompanionController implements CompanionControl {
    * The "was it already live" read goes through the injected `deps.wasSessionAlreadyLive` — see that
    * field's own doc for why this is NOT a direct `deps.db.getSession(...)` call.
    */
-  private async startOne(desired: CompanionConfig): Promise<void> {
+  private async startOne(desired: CompanionConfig, opts: { skipAutoUpgrade?: boolean } = {}): Promise<void> {
     // Snapshot BEFORE any side effect below — read once, up front, so nothing here can change the answer.
-    const wasAlreadyLive = this.deps.wasSessionAlreadyLive?.(desired.sessionId) ?? false;
+    // `skipAutoUpgrade` (recycle re-arm): the fresh engine was just spawned WITH chat_reply, so an
+    // auto-upgrade would needlessly kill it — an explicit flag, not a "no await since spawn" timing accident.
+    const wasAlreadyLive = !opts.skipAutoUpgrade && (this.deps.wasSessionAlreadyLive?.(desired.sessionId) ?? false);
     await this.stopGatewayFor(desired.sessionId); // defensive (invariant: no gateway when not in cfgs) — never stack
     this.startGatewayFor(desired);
     this.rearmHeartbeatFor(desired);

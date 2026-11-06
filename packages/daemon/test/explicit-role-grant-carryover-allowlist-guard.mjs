@@ -174,7 +174,7 @@ const SPAWN_HUMAN_AUTHORIZED_ALLOWLIST = [
 ];
 runAllowlistedScan({ label: "(A) spawnHumanAuthorized", re: SPAWN_HUMAN_AUTHORIZED_RE, allowlist: SPAWN_HUMAN_AUTHORIZED_ALLOWLIST, expectedCount: 6 });
 
-// ── (B) opts.skipGrantCarryoverCheck: true — every carry-forward caller, nine sites ──────────────────
+// ── (B) opts.skipGrantCarryoverCheck: true — every carry-forward caller, ten sites ──────────────────
 const SKIP_CHECK_RE = /\bskipGrantCarryoverCheck\s*:\s*true\b/;
 const SKIP_CHECK_ALLOWLIST = [
   // harnessDrainStatus's dry-run read (no spawn effect at all).
@@ -195,6 +195,10 @@ const SKIP_CHECK_ALLOWLIST = [
   { file: "sessions/service.ts", mustContain: "config, session.role ?? undefined, false, undefined", method: "resolveRepinSurface" },
   // forkSession — carries the SOURCE row's already-pinned role forward.
   { file: "sessions/service.ts", mustContain: "forkAgent, config, src.role", method: "forkSession" },
+  // recycleCompanion (card 79e030d9) — HUMAN-authorized REST route (POST /api/companion/:id/recycle, no MCP
+  // path), the same bypass class as upgradeCompanionCapabilities above; the role is the literal "assistant"
+  // the method has already asserted of THIS session's own row, never a caller-supplied value.
+  { file: "sessions/service.ts", mustContain: 'this.effectiveForcePlain(session, agent), companionName', method: "recycleCompanion" },
   // startRun — every forbidden-key field is hardcoded false/absent on the spawned run session regardless.
   { file: "sessions/service.ts", mustContain: '"run", false, undefined', method: "startRun" },
   // recycleWorker/recycleManager/recyclePlatformLead — recycle carries every field from the OLD row.
@@ -206,7 +210,7 @@ const SKIP_CHECK_ALLOWLIST = [
   { file: "sessions/service.ts", mustContain: '"manager", false, undefined', method: "recycleManager" },
   { file: "sessions/service.ts", mustContain: '"platform", false, undefined', method: "recyclePlatformLead" },
 ];
-const skipHits = runAllowlistedScan({ label: "(B) skipGrantCarryoverCheck", re: SKIP_CHECK_RE, allowlist: SKIP_CHECK_ALLOWLIST, expectedCount: 9 });
+const skipHits = runAllowlistedScan({ label: "(B) skipGrantCarryoverCheck", re: SKIP_CHECK_RE, allowlist: SKIP_CHECK_ALLOWLIST, expectedCount: 10 });
 
 // ── MINOR 1 regression proof (card acd3c688 round 3): the method anchor on the three recycle entries is
 // LOAD-BEARING, not decorative. Simulate the exact swap the review flagged — a skipGrantCarryoverCheck
@@ -305,7 +309,7 @@ check("the forwarding sites in sessions/service.ts are NOT counted as an (A) gra
     check("negative control (A): an illegal extra spawnHumanAuthorized site (outside gateway/server.ts) IS caught",
       fixtureHitsA.length === 1 && fixtureHitsA[0].file === "mcp/sneaky.ts");
     const fixtureHitsB = scanFor(fixtureRoot, SKIP_CHECK_RE);
-    check("negative control (B): an illegal extra skipGrantCarryoverCheck site (outside the 9 allowlisted) IS caught",
+    check("negative control (B): an illegal extra skipGrantCarryoverCheck site (outside the 10 allowlisted) IS caught",
       fixtureHitsB.length === 1 && fixtureHitsB[0].file === "mcp/sneaky.ts");
     fs.writeFileSync(path.join(fixtureRoot, "mcp", "commented.ts"),
       "// const x = fn(db, {}, { spawnHumanAuthorized: true, skipGrantCarryoverCheck: true });\n");
@@ -318,10 +322,10 @@ check("the forwarding sites in sessions/service.ts are NOT counted as an (A) gra
   }
 }
 
-check("(B) setup: nine distinct skipGrantCarryoverCheck sites were actually found (not fewer, collapsed by a shared mustContain)",
-  new Set(skipHits.map((h) => h.line)).size === 9);
+check("(B) setup: ten distinct skipGrantCarryoverCheck sites were actually found (not fewer, collapsed by a shared mustContain)",
+  new Set(skipHits.map((h) => h.line)).size === 10);
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every LITERAL spawnHumanAuthorized:true grant resolves to the six human-REST start* calls, every LITERAL skipGrantCarryoverCheck:true grant resolves to the nine carry-forward/recycle call sites, the Scheduler's own computed (non-literal) site is named and still wired to scheduleCreatedByIsHuman, forwarding sites are correctly not counted as grants, and a synthetic extra site (or a comment-only mention) of either flag is correctly caught / correctly ignored. This proves the LITERAL-site surface only — see the header for what it cannot see."
+  ? "\n✅ ALL PASS — every LITERAL spawnHumanAuthorized:true grant resolves to the six human-REST start* calls, every LITERAL skipGrantCarryoverCheck:true grant resolves to the ten carry-forward/recycle call sites, the Scheduler's own computed (non-literal) site is named and still wired to scheduleCreatedByIsHuman, forwarding sites are correctly not counted as grants, and a synthetic extra site (or a comment-only mention) of either flag is correctly caught / correctly ignored. This proves the LITERAL-site surface only — see the header for what it cannot see."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

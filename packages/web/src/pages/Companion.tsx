@@ -766,7 +766,47 @@ function CompanionIdentity({ companion, label }: { companion: CompanionRow; labe
           : <Badge tone="busy">not provisioned</Badge>}
       {companion.config?.envPinned && <Badge tone="busy">pinned by env</Badge>}
       {companion.config && companion.bindings.length === 0 && <Badge tone="busy">not reachable — no binding</Badge>}
+      <RecycleExhaustedControl sessionId={companion.sessionId} label={label} />
     </>
+  );
+}
+
+// Card 79e030d9: a Companion whose context is exhausted answers nothing and nothing else cures it. This
+// control (visible ONLY while the session is flagged exhausted) restarts it on a fresh engine session —
+// same session id, so bindings, memory, grants and chat history stay; queued alerts are delivered; its
+// trust window is closed. Human-only (loopback REST), behind an explicit confirm.
+function RecycleExhaustedControl({ sessionId, label }: { sessionId: string; label: string }) {
+  const qc = useQueryClient();
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const [confirming, setConfirming] = useState(false);
+  const recycle = useMutation({
+    meta: { inlineError: true },
+    mutationFn: () => api.recycleCompanionSession(sessionId),
+    onSuccess: () => {
+      setConfirming(false);
+      qc.invalidateQueries({ queryKey: ["allSessions"] });
+    },
+  });
+  const s = (sessions.data ?? []).find((x) => x.id === sessionId);
+  if (!s || !s.contextExhaustedAt) return null;
+  return (
+    <span data-testid="companion-recycle" data-session-id={sessionId} style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <Badge tone="danger">out of context</Badge>
+      {confirming ? (
+        <>
+          <span style={errStyle}>Restart {label} with a clean context? Chat bindings, memory and grants are kept.</span>
+          <Button variant="danger" disabled={recycle.isPending} onClick={() => recycle.mutate()} data-testid="companion-recycle-go">
+            {recycle.isPending ? "Recycling…" : "Confirm recycle"}
+          </Button>
+          <Button variant="ghost" disabled={recycle.isPending} onClick={() => setConfirming(false)}>Cancel</Button>
+        </>
+      ) : (
+        <Button variant="primary" onClick={() => setConfirming(true)} data-testid="companion-recycle-start">
+          Recycle onto a fresh session
+        </Button>
+      )}
+      {recycle.error && <span style={errStyle}>{errorText(recycle.error)}</span>}
+    </span>
   );
 }
 

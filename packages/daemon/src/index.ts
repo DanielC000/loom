@@ -1061,6 +1061,8 @@ async function main(): Promise<void> {
     // conversation thread. Human/REST-triggered only (POST /api/companion/:sessionId/upgrade) — see
     // sessions/service.ts's upgradeCompanionCapabilities for the full mechanism.
     upgradeCompanionSession: (sid) => sessions.upgradeCompanionCapabilities(sid),
+    // FRESH-engine recycle (card 79e030d9): human/REST-only POST /api/companion/:sessionId/recycle.
+    recycleCompanionSession: (sid, hooks) => sessions.recycleCompanion(sid, hooks),
     // AUTO-UPGRADE-ON-ENABLE signal (card dbba993f) — see CompanionControllerDeps.wasSessionAlreadyLive's
     // own doc for why this is injected rather than the controller reaching into `db` itself.
     wasSessionAlreadyLive: (sid) => db.getSession(sid)?.engineSessionId != null,

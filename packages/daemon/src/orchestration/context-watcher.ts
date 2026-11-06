@@ -464,8 +464,9 @@ export class ContextWatcher {
         body:
           `${name} (session ${a.id.slice(0, 8)}) hit its context limit: the engine rejected the next prompt as too ` +
           `long, so it will not answer any more messages or alerts.\n\n` +
-          `What you can do now: open the session in Loom to review it, or start a fresh Companion. ` +
-          `There is no automatic recycle for a Companion yet.`,
+          `What you can do now: open this Companion's page in Loom and press "Recycle onto a fresh session". ` +
+          `It keeps its chat bindings, memory and grants, restarts with a clean context, and delivers anything ` +
+          `queued meanwhile. (Its trust window and any inline authored-content grant are closed.)`,
         options: null, recommendation: null, taskId: null,
         permissionAction: null, permissionScopeHint: null, permissionExpiresAt: null,
         decidedScope: null, decidedExpiresAt: null,
@@ -710,7 +711,7 @@ export class ContextWatcher {
   }
 }
 
-const ASSISTANT_EXHAUSTION_TITLE_SUFFIX = " has run out of context and cannot reply";
+export const ASSISTANT_EXHAUSTION_TITLE_SUFFIX = " has run out of context and cannot reply";
 
 /** Deterministic v4-SHAPED UUID of (session, episode stamp): every question id is a v4 UUID (QUESTION_ID_RE). */
 export function assistantExhaustionNoticeId(sessionId: string, episodeStamp: string): string {

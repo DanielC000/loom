@@ -82,7 +82,7 @@ import { recordUndeliveredReport, isCrashRecoveryEligible, willRecoverAutomatica
 import { waitForMergeDangerWindowsToClear, listActiveMergeDangerWindows, MERGE_DANGER_SHUTDOWN_GRACE_MS } from "../git/merge-danger-window.js";
 import { assertRepoNotQuarantined } from "../git/merge-quarantine.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, checkCanonicalIndexLockNotPresent, literalRepoPathKey } from "../git/repo-lock.js";
-import { CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS, WORKER_CONTEXT_INTERRUPT_TAG } from "../orchestration/context-watcher.js";
+import { ASSISTANT_EXHAUSTION_TITLE_SUFFIX, CONTEXT_RECYCLE_NUDGE_PREFIX, CONTEXT_EMERGENCY_REDIRECT_TAG, RECYCLE_WIND_DOWN_INSTRUCTIONS, WORKER_CONTEXT_INTERRUPT_TAG } from "../orchestration/context-watcher.js";
 import { isSupersededByRecycle, currentHaltedSuccessor, isSanctionedHaltedPartner, retiredCallerMessage, latestMatchingUnresolvedSettleEvent, openUnresolvedRecycleFleetAlert, type CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
 import { deriveAwaitingReview } from "../orchestration/report-resolution.js";
 import { classifyWorktreeIntegrity } from "../orchestration/worktree-vanished-watcher.js";
@@ -2318,6 +2318,13 @@ const RUN_WEBHOOK_ATTEMPTS = 2;
  * tool-result cap does, so Loom controls the spill format instead of the client's own broken one-line spill.
  */
 const MERGE_PATCH_INLINE_CAP = 40_000;
+
+/** Fixed, deterministic (no transcript content) preamble `recycleCompanion` leads the fresh startup prompt with. */
+const COMPANION_RECYCLE_PREAMBLE =
+  "[loom:companion-recycled] Your previous conversation ran out of context, so Loom restarted you as a FRESH session. " +
+  "You do not remember that conversation. Your durable memory notes and persona follow; the owner's chat history is " +
+  "preserved in the app. Any alerts or messages that arrived while you were down are delivered right after this. " +
+  "Re-orient from your memory, then carry on.";
 
 /** Bounded wait `upgradeCompanionCapabilities` gives a BUSY companion turn to finish naturally before
  *  force-interrupting it (card d88163b7). NOT a free knob (CR round 2 correction of an earlier "the wait
@@ -5492,6 +5499,184 @@ export class SessionService {
       });
     }
     return resumed;
+  }
+
+  /**
+   * Recycle a Companion onto a FRESH engine session under the SAME Loom session id; human/REST only.
+   *
+   * @decision 79e030d9 — never mint a successor row here, never skip nulling the engine id before the spawn.
+   */
+  async recycleCompanion(sessionId: string, hooks: { onPointOfNoReturn?: () => void } = {}): Promise<Session> {
+    const session = this.db.getSession(sessionId);
+    if (!session) throw new Error("session not found");
+    if (session.role !== "assistant") throw new Error("only a companion (assistant-role) session can be recycled");
+    if (session.harness === "codex") throw new Error("recycling a codex-harness companion is not supported — only claude companions can be recycled onto a fresh session");
+    // Exhausted-recovery only (owner decision): a healthy companion is never wiped, and a second click /
+    // double-POST after a successful recycle (mark already cleared) cannot kill the fresh engine.
+    if (!session.contextExhaustedAt) throw new Error("this companion's context is not exhausted — recycle is only available to recover an exhausted companion (nothing was changed)");
+    const project = this.db.getProject(session.projectId);
+    if (!project) throw new Error("project not found");
+    const agent = this.db.getAgent(session.agentId);
+    if (!agent) throw new Error("agent not found");
+    if (sessionCwdMissing(session.cwd)) throw new Error("session cwd is missing — cannot spawn a fresh session there");
+    const config = resolveConfig(project.config);
+    const carried: QueuedMessage[] = [];
+    const drain = (): void => { carried.push(...this.pty.flushPending(sessionId)); };
+    if (this.pty.isAlive(sessionId)) {
+      this.pty.holdDrain(sessionId);
+      try {
+        drain();
+        this.pty.stop(sessionId, "graceful");
+        let died = false;
+        for (let i = 0; i < 80 && !died; i++) {
+          if (!this.pty.isAlive(sessionId)) { died = true; break; }
+          drain();
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        drain();
+        if (!died) {
+          // eslint-disable-next-line no-console
+          console.warn(`[companion] recycle ${sessionId}: still alive ~8s after a graceful stop — forcing a hard stop before the fresh spawn`);
+          this.pty.stop(sessionId, "hard");
+          for (let i = 0; i < 20 && !died; i++) {
+            if (!this.pty.isAlive(sessionId)) { died = true; break; }
+            drain();
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          drain();
+        }
+        if (!died) {
+          for (const msg of carried) {
+            this.pty.requeueQueuedMessage(sessionId, msg, {
+              giveUpHeldUntil: msg.giveUpHeldUntil, onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
+              mintedAtGen: msg.mintedAtGen, mintedAtWallClock: msg.mintedAtWallClock,
+            });
+          }
+          // Honest because the capability repin below runs only AFTER a confirmed stop: nothing is persisted yet.
+          throw new Error("companion process did not stop in time — recycle aborted (nothing was changed)");
+        }
+      } finally {
+        this.pty.releaseDrain(sessionId);
+      }
+    }
+    // POINT OF NO RETURN: the old pty is confirmed dead (or never was alive). Close the in-memory trust
+    // (Trust Window + authored-content grant) NOW, before anything below can throw — fail closed: a failure
+    // from here on can never leave a warm window open for a conversation that no longer exists.
+    hooks.onPointOfNoReturn?.();
+    // Repin AFTER the confirmed stop (a stop-timeout refusal must not have persisted anything).
+    const { skillsDropped } = this.repinCapabilitySurface(session, agent, config);
+    this.recordSkillsDropped(session, sessionId, skillsDropped);
+    // Fresh startup prompt: persona + name + memory recall (the SAME composition a brand-new Companion gets),
+    // led by a short fixed preamble. Everything is re-read from the agent's CURRENT row.
+    const companionName = this.db.getCompanionConfig(sessionId)?.name || undefined;
+    const spawn = this.resolveAgentSpawn(agent, config, "assistant", this.effectiveForcePlain(session, agent), companionName, { skipGrantCarryoverCheck: true });
+    const recallFramed = buildFramedMemoryRecall(listCompanionMemories(sessionId), (name) => readCompanionMemory(sessionId, name));
+    this.stampCompanionMemoryDigest(sessionId, recallFramed);
+    const base = spawn.startupPrompt ? appendMemoryRecallToStartupPrompt(spawn.startupPrompt, recallFramed) : (recallFramed ?? "");
+    const projectRecall = retrieveProjectMemoryForKickoff(this.db, project.id, spawn.startupPrompt ?? "");
+    this.stampProjectMemoryDigest(sessionId, this.db.listPinnedProjectMemory(project.id));
+    const withProject = projectRecall ? appendMemoryRecallToStartupPrompt(base, projectRecall) : base;
+    const startupPrompt = `${COMPANION_RECYCLE_PREAMBLE}\n\n${withProject}`.trim();
+    // B1: `session` is a PRE-STOP snapshot — the old pty's onExit runs `archiveOnExit` (assistant role ⇒
+    // archives) synchronously during the stop loop, so its archivedAt is stale. Re-read the row now; the
+    // fresh engine must never run on an archived row. `preArchivedAt` (snapshot) is the PRE-RECYCLE value a
+    // failed spawn restores verbatim (null = was on the live rail; never a restamped timestamp).
+    const afterStop = this.db.getSession(sessionId) ?? session;
+    const previousEngineId = afterStop.engineSessionId;
+    const previousResumability = afterStop.resumability;
+    const preArchivedAt = session.archivedAt ?? null;
+    const archivedNow = afterStop.archivedAt != null;
+    // @decision 547d5fc4 — spawn from the row the repin JUST wrote (the pinned capability surface), never the
+    // freshly re-resolved `spawn.*` values; `spawn` supplies only the permission/model/startup prompt.
+    const pinned = this.db.getSession(sessionId) ?? session;
+    const { skills: pinnedSkills } = sessionSkillsForRole(pinned.role, spawn.profileRole ?? null, pinned.skills);
+    // Order matters: flip live first (a fast-failing spawn's onExit must win), detach the abandoned
+    // transcript so the context watcher cannot re-read it and re-flag exhaustion before the new
+    // SessionStart lands, then spawn. A throw restores the engine id (and its prior resumability and
+    // archive state) so a later resume still has something.
+    this.db.setProcessState(sessionId, "live");
+    this.db.clearEngineSessionId(sessionId);
+    try {
+      if (archivedNow) this.db.restoreSession(sessionId);
+      this.pty.spawn({
+        sessionId,
+        cwd: session.cwd,
+        permission: spawn.permission,
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined,
+        docLint: config.docLint,
+        codescapeEnabled: resolveCodescapeConfig(project.config).enabled,
+        projectId: project.id,
+        repoPath: project.repoPath,
+        startupPrompt,
+        role: "assistant",
+        browserTesting: pinned.browserTesting ?? false,
+        documentConversion: pinned.documentConversion ?? false,
+        capabilities: pinned.capabilities ?? [],
+        restrictedTools: pinned.restrictedTools ?? false,
+        model: spawn.model,
+        skills: pinnedSkills,
+        sessionName: composeRoleSessionName("assistant", project.name),
+        harness: spawn.harness,
+      });
+    } catch (e) {
+      this.reconcileFailedSpawn(sessionId, e);
+      if (previousEngineId) {
+        try { this.db.setEngineSessionId(sessionId, previousEngineId); this.db.setResumability(sessionId, previousResumability ?? "unknown"); } catch { /* best-effort — never mask the spawn failure */ }
+      }
+      // Restore the PRE-RECYCLE archive state verbatim (original timestamp, or null for a previously-live row).
+      try {
+        if (preArchivedAt != null) this.db.archiveSession(sessionId, preArchivedAt);
+        else if (this.db.getSession(sessionId)?.archivedAt != null) this.db.restoreSession(sessionId);
+      } catch { /* best-effort — never mask the spawn failure */ }
+      // S-b: the old pty is dead, so non-durable carried alerts can only be re-queued if a live pty exists
+      // (reconcileFailedSpawn/the failed spawn may have left none). With none they are DROPPED (durable
+      // entries are re-driven from the DB on the next resume; the non-durable ones have no other home).
+      if (this.pty.isAlive(sessionId)) {
+        for (const msg of carried) {
+          if (msg.onDeliver) continue;
+          try {
+            this.pty.requeueQueuedMessage(sessionId, msg, {
+              onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
+              mintedAtGen: undefined, mintedAtWallClock: msg.mintedAtWallClock, ownerTextSeq: null,
+            });
+          } catch { /* best-effort */ }
+        }
+      }
+      throw e;
+    }
+    // @decision 2fd55955 — the successor is LIVE from here: every step below is best-effort bookkeeping and
+    // must never turn a live successor into a reported failure (the owner would retry and kill it).
+    // The exhaustion mark is cleared FIRST so the recycle button cannot linger over a live engine.
+    this.bestEffortPostSpawn("clearing the exhaustion mark", sessionId, () => this.db.setContextExhausted(sessionId, null, null));
+    this.bestEffortPostSpawn("clearing busy", sessionId, () => this.db.setBusy(sessionId, false));
+    // Queued alerts: a FRESH successor delivers immediately — giveUpHeldUntil is deliberately NOT carried.
+    // @decision f25bf3bf — "Do not (2)": a fresh successor gets no give-up hold. A rank / generation count is only valid within one Live, so
+    // mintedAtGen is omitted and ownerTextSeq nulled. A durable (onDeliver) entry is skipped here and
+    // re-driven exactly once below. Per-message, so one failing requeue cannot drop the rest.
+    for (const msg of carried) {
+      if (msg.onDeliver) continue;
+      this.bestEffortPostSpawn("requeueing a carried alert", sessionId, () => {
+        this.pty.requeueQueuedMessage(sessionId, msg, {
+          onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
+          mintedAtGen: undefined,
+          mintedAtWallClock: msg.mintedAtWallClock,
+          ownerTextSeq: null,
+        });
+      });
+    }
+    this.bestEffortPostSpawn("re-driving undelivered durable messages", sessionId, () => this.redriveUndeliveredMessagesForRecipient(sessionId));
+    // The exhaustion notice told the owner this session was dead; it no longer is. Dismiss every open one.
+    this.bestEffortPostSpawn("dismissing the exhaustion notice", sessionId, () => {
+      const open = this.db.listQuestionsForSession(sessionId)
+        .filter((q) => q.type === "notice" && q.dismissedAt == null && q.title.endsWith(ASSISTANT_EXHAUSTION_TITLE_SUFFIX))
+        .map((q) => q.id);
+      this.db.dismissNotices(open, new Date().toISOString());
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[companion] recycled ${sessionId} onto a fresh engine session (carried ${carried.length} queued message(s))`);
+    return { ...this.db.getSession(sessionId)!, processState: "live", busy: false };
   }
 
   // @decision 6745e4bc — HUMAN-ONLY (REST, never an MCP tool anywhere) re-pin of a manager/worker/

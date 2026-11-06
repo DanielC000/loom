@@ -116,7 +116,7 @@ const noticesFor = (e, id) => e.db.listOpenQuestions().filter((q) => q.sessionId
   check("(1) exactly ONE inbox notice row for the Companion", notices.length === 1);
   const n = notices[0];
   check("(1) the notice is a type:notice in state 'notice', unread/undismissed", n?.type === "notice" && n?.state === "notice" && n?.dismissedAt == null);
-  check("(1) the notice names the Companion's display name and what the owner can do", /Juno/.test(n?.title ?? "") && /open the session|fresh Companion/i.test(n?.body ?? ""));
+  check("(1) the notice names the Companion's display name and what the owner can do", /Juno/.test(n?.title ?? "") && /Recycle onto a fresh session/i.test(n?.body ?? ""));
   check("(1) the notice carries NO transcript content (the exhaustion record's text is absent)", !/Prompt is too long|invalid_request/.test(`${n?.title}${n?.body}`));
   check("(1) the inbox read lists it while the filer session is exhausted (agentName joined via the filer, session still routed)", n?.agentName === "Juno" && n?.sessionLive === true && n?.sessionOrphaned === false);
   check("(1) the event records the notice id", events[0]?.detail?.noticeId === n?.id);

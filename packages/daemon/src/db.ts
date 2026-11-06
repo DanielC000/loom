@@ -7718,8 +7718,8 @@ export class Db {
     ).all(projectId, limit) as Row[]).map(toSession);
   }
   /** Soft-archive a session (stamp archived_at) — hidden from the rail/god-eye lists; row retained. */
-  archiveSession(id: string): void {
-    this.db.prepare("UPDATE sessions SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+  archiveSession(id: string, at: string = new Date().toISOString()): void {
+    this.db.prepare("UPDATE sessions SET archived_at = ? WHERE id = ?").run(at, id);
     this.purgeBoardReadSnapshots(id); // card 15bdb031 — a retired session's board-read snapshot(s) never outlive it
     this.notifySessionChanged(id);
   }
@@ -7905,6 +7905,17 @@ export class Db {
     this.db.prepare("UPDATE sessions SET engine_session_id = ?, resumability = 'resumable', last_activity = ? WHERE id = ?")
       .run(engineId, new Date().toISOString(), id);
     if (prior !== "resumable") this.notifyQuestionsIfSessionHasOpen(id); // card 55de3b68: resumability is JOINed into the inbox row
+    this.notifySessionChanged(id);
+  }
+  /**
+   * Detach a session row from its engine transcript (companion recycle onto a fresh engine session): NULLs
+   * `engine_session_id` so nothing keeps reading the abandoned transcript — notably the context watcher's
+   * exhaustion check, which no-ops without an engine id — until the new SessionStart hook persists the fresh
+   * one via {@link setEngineSessionId}. Resumability is reset to "unknown" (nothing to resume until then).
+   */
+  clearEngineSessionId(id: string): void {
+    this.db.prepare("UPDATE sessions SET engine_session_id = NULL, resumability = 'unknown', last_activity = ? WHERE id = ?")
+      .run(new Date().toISOString(), id);
     this.notifySessionChanged(id);
   }
   /** @decision 08c81809 — durable counterpart to `PtyHost.markReady`'s in-memory latch.

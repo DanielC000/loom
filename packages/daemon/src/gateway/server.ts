@@ -2691,6 +2691,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { sessionId, session: result.session };
   });
 
+  // Recycle onto a FRESH engine session (card 79e030d9): human-only loopback REST, no MCP path (an injection-
+  // exposed companion must never trigger its own context wipe). Serialized on the controller chain.
+  app.post("/api/companion/:sessionId/recycle", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    if (!deps.companion) return reply.code(503).send({ error: "companion runtime is not available on this daemon" });
+    const result = await deps.companion.recycle(sessionId);
+    if (!result.ok) return reply.code(409).send({ error: result.error });
+    return { sessionId, session: result.session };
+  });
+
   // --- Companion CHAT HISTORY (bug 0f01f234 — the "reload loses the whole conversation" fix; UNIFIED
   // CROSS-CHANNEL CHAT, card 7d63e200; CONVERSATION HISTORY, card 85f62475): a READ-ONLY view over the
   // durable `companion_messages` rows the inbound/outbound record hooks write (controller.ts / in-app.ts /
@@ -3754,6 +3766,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         archiveSessions?: string[];
         companionSessions?: {
           id?: string; projectId: string; agentId: string; title?: string;
+          // (card 79e030d9) Stamp the row's terminal context-exhaustion mark (the SAME db writer the context
+          // watcher uses), so an e2e spec can reach the recycle control without a real exhausted transcript.
+          contextExhausted?: boolean;
           // (card e2af6ad7) A LIVE companion session with a canned, no-process pty — the only way an e2e
           // spec can prove the Companion Terminal's watch-only guarantee from the Companion page itself.
           // The default `exited`/`dead` row below leaves the terminal's `/ws/term` attach closed, and
@@ -3954,6 +3969,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           busy: false, createdAt: now, lastActivity: now, lastError: null, role: "assistant",
         };
         deps.db.insertSession(row);
+        if (s.contextExhausted) deps.db.setContextExhausted(id, now, "Context exhausted — seeded by the e2e fixture.");
         if (canned) {
           deps.pty.seedCanned({
             id, cwd: project.repoPath,

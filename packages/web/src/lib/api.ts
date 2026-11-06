@@ -1499,6 +1499,11 @@ export const api = {
   // concurrent lifecycle op is in flight.
   upgradeCompanionSession: (sessionId: string) =>
     postErr<{ sessionId: string; session: Session }>(`/api/companion/${encodeURIComponent(sessionId)}/upgrade`),
+  // Recycle an exhausted Companion onto a FRESH engine session under the SAME session id (bindings, memory
+  // and durable grants kept; queued alerts delivered; in-memory trust closed). Human-only loopback, no MCP
+  // path. 409 with a reason (e.g. codex harness, not stopping in time).
+  recycleCompanionSession: (sessionId: string) =>
+    postErr<{ sessionId: string; session: Session }>(`/api/companion/${encodeURIComponent(sessionId)}/recycle`),
 
   // --- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). HUMAN-only
   // loopback REST — INTENTIONALLY NO agent MCP path (same trust posture as the companion/vault/git

@@ -297,6 +297,8 @@ export interface LoomDaemon {
      */
     ptyGeometry?: { cols: number; rows: number };
     ptyBytes?: string;
+    /** (card 79e030d9) Stamp the session's context-exhaustion mark so the recycle control renders. */
+    contextExhausted?: boolean;
   }) => Promise<SeededCompanion>;
   /**
    * Seed browsable companion conversation HISTORY (card 59e8e0c9: the conversation-history browser e2e) via
@@ -774,6 +776,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       await apiPost(baseURL, "/internal/test/seed", {
         companionSessions: [{
           id: sessionId, projectId: project.id, agentId: agent.id,
+          ...(opts.contextExhausted ? { contextExhausted: true } : {}),
           ...(opts.ptyGeometry ? { ptyGeometry: opts.ptyGeometry } : {}),
           ...(typeof opts.ptyBytes === "string" ? { ptyBytes: opts.ptyBytes } : {}),
         }],
