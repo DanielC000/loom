@@ -7,12 +7,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type TranscriptTurn } from "../lib/api";
 import { fetchTranscriptIncremental } from "../lib/transcriptTail";
 import {
-  applyFilter, emptyFilter, filterActive, groupByTurn, linksOf, mcpPollInterval, parseMcpCalls, sentenceOf, tally,
-  SUBSYSTEMS, type McpCall, type McpFilter, type McpOutcome, type McpSubsystem,
+  applyFilter, emptyFilter, filterActive, groupByTurn, isUnclassified, linksOf, mcpPollInterval, parseMcpCalls, sentenceOf,
+  tally, REFUSED_HINT, SUBSYSTEMS, UNCLASSIFIED_HINT, type McpCall, type McpFilter, type McpOutcome, type McpSubsystem,
 } from "../lib/mcpActivity";
 
-const OUTCOME_MARK: Record<McpOutcome, string> = { ok: "✓", error: "✕", pending: "…" };
-const OUTCOME_LABEL: Record<McpOutcome, string> = { ok: "ok", error: "error", pending: "no answer yet" };
+const OUTCOME_MARK: Record<McpOutcome, string> = { ok: "✓", refused: "!", error: "✕", pending: "…" };
+const OUTCOME_LABEL: Record<McpOutcome, string> = { ok: "ok", refused: "refused", error: "error", pending: "no answer yet" };
 const LINK_LABEL = { card: "card", worker: "worker", gate: "gate op", note: "note", request: "request" } as const;
 const MAX_BEADS = 12;
 const TOP_TOOLS = 6;
@@ -23,7 +23,8 @@ function Glyph({ sub }: { sub: McpSubsystem }) {
 
 function Mark({ outcome }: { outcome: McpOutcome }) {
   return (
-    <span className={`loom-mcp-ocx ${outcome}`} role="img" aria-label={OUTCOME_LABEL[outcome]}>
+    <span className={`loom-mcp-ocx ${outcome}`} role="img" aria-label={OUTCOME_LABEL[outcome]}
+      title={outcome === "refused" ? `refused · ${REFUSED_HINT}` : undefined}>
       {OUTCOME_MARK[outcome]}
     </span>
   );
@@ -91,6 +92,7 @@ export function McpActivity({ sessionId, harness, busy = false }: {
   const latest = calls[calls.length - 1]!;
   const turnCalls = calls.filter((c) => c.turn === latest.turn);
   const errors = calls.filter((c) => c.outcome === "error").length;
+  const refused = calls.filter((c) => c.outcome === "refused").length;
   const beads = turnCalls.slice(-MAX_BEADS);
 
   return (
@@ -127,6 +129,9 @@ export function McpActivity({ sessionId, harness, busy = false }: {
           <span>
             <span data-testid="mcp-activity-count">{calls.length}</span>
             {calls.length === 1 ? " call" : " calls"}
+            {refused > 0 && (
+              <span className="loom-mcp-refn" data-testid="mcp-activity-refused-count" title={REFUSED_HINT}> · {refused} refused</span>
+            )}
             {errors > 0 && <span className="loom-mcp-errn"> · {plural(errors, "error")}</span>}
           </span>
           <span className="loom-mcp-chev" aria-hidden="true">▾</span>
@@ -144,10 +149,10 @@ function Expanded({ id, calls }: { id: string; calls: McpCall[] }) {
   const groups = useMemo(() => groupByTurn(shown), [shown]);
   // A turn header counts the WHOLE turn, not the filtered slice, so a filter never misstates the turn.
   const turnTotals = useMemo(() => {
-    const m = new Map<number, { n: number; err: number; calls: McpCall[] }>();
+    const m = new Map<number, { n: number; err: number; ref: number; calls: McpCall[] }>();
     for (const c of calls) {
-      const e = m.get(c.turn) ?? { n: 0, err: 0, calls: [] };
-      e.n++; if (c.outcome === "error") e.err++; e.calls.push(c);
+      const e = m.get(c.turn) ?? { n: 0, err: 0, ref: 0, calls: [] };
+      e.n++; if (c.outcome === "error") e.err++; if (c.outcome === "refused") e.ref++; e.calls.push(c);
       m.set(c.turn, e);
     }
     return m;
@@ -171,7 +176,7 @@ function Expanded({ id, calls }: { id: string; calls: McpCall[] }) {
             <div key={g.turn} role="listitem" className="loom-mcp-turn" data-testid={`mcp-turn-${g.turn}`}>
               <div className="loom-mcp-turnh">
                 <span className="loom-mcp-tn">Turn {g.turn}</span>
-                <span>{plural(tot.n, "call")}{tot.err > 0 && <span className="loom-mcp-errn"> · {plural(tot.err, "error")}</span>}</span>
+                <span>{plural(tot.n, "call")}{tot.ref > 0 && <span className="loom-mcp-refn"> · {tot.ref} refused</span>}{tot.err > 0 &&<span className="loom-mcp-errn"> · {plural(tot.err, "error")}</span>}</span>
                 <span className="loom-mcp-stack" aria-hidden="true">
                   {tot.calls.map((c) => <i key={c.seq} className={`${c.subsystem} ${c.outcome}`} />)}
                 </span>
@@ -222,6 +227,8 @@ function Entry({ call, open, onToggle }: { call: McpCall; open: boolean; onToggl
             <pre className={`loom-mcp-blk ${call.outcome}`} data-testid={`mcp-call-${call.seq}-answer`}>
               {call.result ?? "No answer yet."}
             </pre>
+            {call.outcome === "refused" && <p className="loom-mcp-hint refused">Read as refused. {REFUSED_HINT}</p>}
+            {isUnclassified(call) && <p className="loom-mcp-hint">{UNCLASSIFIED_HINT}</p>}
           </div>
           <div className="loom-mcp-links">
             <span className="loom-mcp-subh">Touched</span>
@@ -263,7 +270,8 @@ function Facets({ calls, filter, setFilter }: { calls: McpCall[]; filter: McpFil
     if (next.has(v)) next.delete(v); else next.add(v);
     return next;
   };
-  const outcomeKeys: McpOutcome[] = outcomes.has("pending") ? ["ok", "error", "pending"] : ["ok", "error"];
+  const outcomeKeys: McpOutcome[] = outcomes.has("pending") ? ["ok", "refused", "error", "pending"] : ["ok", "refused", "error"];
+  const unclassified = calls.filter(isUnclassified).length;
 
   return (
     <aside className="loom-mcp-facets" aria-label="Filter calls">
@@ -298,6 +306,14 @@ function Facets({ calls, filter, setFilter }: { calls: McpCall[]; filter: McpFil
             n={outcomes.get(o) ?? 0} max={calls.length} pressed={filter.outcomes.has(o)} barClass={`oc ${o}`}
             onClick={() => setFilter({ ...filter, outcomes: toggleIn(filter.outcomes, o) })} />
         ))}
+        <p className="loom-mcp-legend" data-testid="mcp-refused-legend">
+          <span className="loom-mcp-ocx refused" aria-hidden="true">!</span> refused is a guess: the answer carried an error field.
+          {unclassified > 0 && (
+            <span data-testid="mcp-unclassified-count" title={UNCLASSIFIED_HINT}>
+              {" "}<b>{unclassified}</b> {unclassified === 1 ? "answer" : "answers"} too long to check.
+            </span>
+          )}
+        </p>
       </div>
       <div>
         <div className="loom-mcp-fh"><span>Most called</span></div>

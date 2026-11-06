@@ -4,7 +4,7 @@ Card `a9a7140c`. Owner picked direction **B · Ledger** (request `4d8faae3`). Mo
 
 ## What was built
 
-A strip under the composer on the Atlas session node (`components/McpActivity.tsx`, mounted from `TerminalCard.tsx`'s below-terminal strip). Compact, it states the latest Loom MCP call as a sentence ("Moved card a9a7140c to Review"). Expanded, it shows every call grouped by agent turn, a facet rail (where it went, how it went, most called, router, free-text find), and an inline "Asked Loom / Loom answered" block per call.
+A strip under the composer on the Atlas session node (`components/McpActivity.tsx`, mounted from `TerminalCard.tsx`'s below-terminal strip). Compact, it states the latest Loom MCP call as a sentence ("Moved card a9a7140c to Review"). Expanded, it shows every call grouped by agent turn, a facet rail (where it went, how it went, most called, router, free-text find), and an inline "Asked Loom / Loom answered" block per call. Card `825e38da` added the amber `!` refused outcome (see Do not).
 
 ## Where the data comes from
 
@@ -23,7 +23,8 @@ This couples the web parser to `extractText`'s marker format. `test/mcp-activity
 
 ## Do not
 
-- Do not show a call time, a duration, a latency, "refused" or a turn cause in this strip. The transcript carries none of them (the parser drops each JSONL line's `timestamp`; a refusal arrives as a successful result). The only outcome facts are `ok`, `error` (the engine's `is_error`) and `pending` (no result yet). Each needs its own plumbing card first.
+- Do not show a call time, a duration, a latency or a turn cause in this strip. The transcript carries none of them (the parser drops each JSONL line's `timestamp`). Each needs its own plumbing card first. The only outcome FACTS are `ok`, `error` (the engine's `is_error`) and `pending` (no result yet).
+- `refused` (card `825e38da`) is a HEURISTIC, not a fact, and the UI must keep saying so (the rail's legend line, the marker's tooltip, the detail's "Read as refused" note). `classifyResult` marks a successful result refused only when the WHOLE capped body parses as a JSON object with a non-null top-level `error`; an array, a string, plain text, a nested `error`, or a body cut at the 2 KB cap stays `ok` (a cut body is counted as "too long to check", `isUnclassified`). Do not fold refused into `error`: `isError` keeps its own red "failed" state and wins over any body. Do not loosen the parse to a prefix or regex match on a truncated body; a guessed refusal on a cut answer is worse than an honest ok.
 - Do not render arguments or result bodies as HTML. They are agent- and tool-authored text; React text nodes only.
 - Do not move argument text into the daemon log to feed this strip (`@decision 16c93a50`). The transcript route is human-only loopback REST, the same exposure the Transcript tab already has.
 - Do not give the strip its own query key for the same transcript URL. Two keys mean two independent interval timers on one multi-hundred-KB response (measured: 4 fetches in 11s instead of 2). The route now serves a tail (`?offset=`, card 79057de9), but the strip keeps the shared key: its queryFn merges the tail into the cached full array, so the Transcript tab reading that key still sees the whole transcript.

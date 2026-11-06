@@ -2404,7 +2404,8 @@ button.loom-atlas-node.is-branch.is-open {
 
 /* ── Session Loom MCP activity strip (card a9a7140c, direction B · Ledger) ────────────────────
    Shape AND colour per subsystem, so nothing is read off colour alone. No time or duration column:
-   the transcript carries neither (lib/mcpActivity.ts). */
+   the transcript carries neither (lib/mcpActivity.ts). Outcome: ok phosphor, refused amber (a body
+   heuristic), error red (transport isError), pending dashed. */
 .loom-mcp {
   container-type: inline-size;
   container-name: mcp;
@@ -2467,6 +2468,8 @@ button.loom-atlas-node.is-branch.is-open {
 }
 .loom-mcp-bead.error { border-color: var(--loom-danger); background: color-mix(in oklab, var(--loom-danger) 18%, transparent); }
 .loom-mcp-bead.pending { border-color: var(--loom-text-3); border-style: dashed; }
+/* Refused (card 825e38da) is amber: a heuristic, not the transport's red error. */
+.loom-mcp-bead.refused { border-color: var(--loom-attn); background: color-mix(in oklab, var(--loom-attn) 18%, transparent); }
 .loom-mcp-bead .loom-mcp-gl { transform: scale(0.75); }
 .loom-mcp-bead .loom-mcp-gl.gate { transform: rotate(45deg) scale(0.62); }
 .loom-mcp-l2 {
@@ -2499,6 +2502,7 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-ocx.ok { color: var(--loom-live); }
 .loom-mcp-ocx.error { color: var(--loom-danger); }
 .loom-mcp-ocx.pending { color: var(--loom-text-3); }
+.loom-mcp-ocx.refused { color: var(--loom-attn); cursor: help; }
 .loom-mcp-right {
   grid-column: 2;
   grid-row: 1 / span 2;
@@ -2511,6 +2515,7 @@ button.loom-atlas-node.is-branch.is-open {
   font-variant-numeric: tabular-nums;
 }
 .loom-mcp-errn { color: var(--loom-danger); }
+.loom-mcp-refn { color: var(--loom-attn); }
 .loom-mcp-chev {
   display: inline-block;
   margin-left: 8px;
@@ -2613,6 +2618,16 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-bar3 i.self, .loom-mcp-stack i.self { background: var(--loom-text-2); }
 .loom-mcp-bar3 i.error, .loom-mcp-stack i.error { background: var(--loom-danger); }
 .loom-mcp-bar3 i.pending { background: var(--loom-text-3); }
+.loom-mcp-bar3 i.refused, .loom-mcp-stack i.refused { background: var(--loom-attn); }
+.loom-mcp-legend {
+  margin: 6px 0 0;
+  font-family: var(--loom-font-ui);
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--loom-text-3);
+}
+.loom-mcp-legend .loom-mcp-ocx { font-size: 10.5px; margin-right: 2px; cursor: default; }
+.loom-mcp-legend b { font-family: var(--loom-font-mono); font-weight: 500; color: var(--loom-text-2); }
 .loom-mcp-stack i.pending { background: none; outline: 1px dashed var(--loom-text-3); outline-offset: -1px; }
 
 .loom-mcp-log { min-width: 0; max-height: 520px; overflow: auto; padding-bottom: 6px; }
@@ -2654,6 +2669,7 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-ent:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
 .loom-mcp-ent.error { box-shadow: inset 2px 0 0 var(--loom-danger); }
 .loom-mcp-ent.error .loom-mcp-s { color: color-mix(in oklab, var(--loom-danger) 55%, var(--loom-text)); }
+.loom-mcp-ent.refused { box-shadow: inset 2px 0 0 var(--loom-attn); }
 .loom-mcp-s {
   font-family: var(--loom-font-ui);
   font-size: 13px;
@@ -2705,6 +2721,9 @@ button.loom-atlas-node.is-branch.is-open {
 }
 .loom-mcp-blk.error { color: var(--loom-danger); border-color: color-mix(in oklab, var(--loom-danger) 40%, var(--loom-line)); }
 .loom-mcp-blk.pending { color: var(--loom-text-3); }
+.loom-mcp-blk.refused { color: var(--loom-attn); border-color: color-mix(in oklab, var(--loom-attn) 40%, var(--loom-line)); }
+.loom-mcp-hint { margin: 5px 0 0; font-family: var(--loom-font-ui); font-size: 11px; color: var(--loom-text-3); }
+.loom-mcp-hint.refused { color: color-mix(in oklab, var(--loom-attn) 70%, var(--loom-text-2)); }
 .loom-mcp-links { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11px; }
 .loom-mcp-links .loom-mcp-subh { margin: 0; }
 .loom-mcp-lk {

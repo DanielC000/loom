@@ -3,12 +3,13 @@
 //   [tool] {<tag>} mcp__loom-<router>__<tool>(<JSON args>)   and   -> tool result {<tag>} (error): <body>
 // Pure functions of the transcript, pinned by test/mcp-activity.mjs.
 //
-// @decision a9a7140c — never show a call time, duration, or "refused": the transcript carries none of
-// them, so only `ok` / `error` (the transport's isError) / `pending` (no result yet) are facts here.
+// @decision a9a7140c — never show a call time or duration: the transcript carries neither. `ok` /
+// `error` (the transport's isError) / `pending` (no result yet) are facts; `refused` is a labelled
+// heuristic read from the result body (classifyResult, card 825e38da), never a fact.
 import type { TranscriptTurn } from "./api";
 
 export type McpSubsystem = "board" | "fleet" | "gate" | "memory" | "inbox" | "self";
-export type McpOutcome = "ok" | "error" | "pending";
+export type McpOutcome = "ok" | "refused" | "error" | "pending";
 
 export interface McpLink { kind: "card" | "worker" | "gate" | "note" | "request"; id: string }
 
@@ -70,13 +71,43 @@ export function parseMcpCalls(turns: readonly TranscriptTurn[]): McpCall[] {
         const call = seg.tag ? openByTag.get(seg.tag) : undefined;
         if (!call) continue; // a non-Loom tool's result, or an untagged one we cannot pair
         openByTag.delete(seg.tag!);
-        call.outcome = seg.error ? "error" : "ok";
+        call.outcome = classifyResult(seg.body, seg.error);
         call.result = seg.body;
       }
     }
   }
   return calls;
 }
+
+// ── Refused: a heuristic over the result body ───────────────────────────────────────────────────
+// Many Loom refusals (concurrency cap, stale memory baseVersion, guard refusals) come back as a
+// SUCCESSFUL result whose body is `{"error": …}`. Only isError is a transport fact, so "refused" is a
+// guess from the body and the UI labels it as one (REFUSED_HINT).
+
+/** The daemon's cap marker on a tool result body (pty/claude-transcript.ts, TOOL_RESULT_BODY_CAP). */
+const TRUNCATED_TAIL = /\.\.\. \[\+\d+ chars truncated\]$/;
+
+export const REFUSED_HINT = "A guess, not a fact: the call succeeded, but its answer carried a top-level error field.";
+export const UNCLASSIFIED_HINT = "Answer cut at 2 KB, so it could not be read for an error field. Shown as ok.";
+
+/**
+ * A result's outcome. isError → "error" (the transport said so). Otherwise "refused" only when the
+ * WHOLE body parses as a JSON object with a non-null top-level `error`; anything else (an array, a
+ * string, plain text, a body cut at the cap) stays "ok".
+ */
+export function classifyResult(body: string | null, isError: boolean): McpOutcome {
+  if (isError) return "error";
+  if (body == null) return "ok";
+  let v: unknown;
+  try { v = JSON.parse(body); } catch { return "ok"; }
+  if (!v || typeof v !== "object" || Array.isArray(v)) return "ok";
+  const err = (v as Record<string, unknown>).error;
+  return err != null && err !== false ? "refused" : "ok";
+}
+
+/** An ok call whose body was cut at the cap: we could not look for an error field, so it is a guess too. */
+export const isUnclassified = (call: McpCall): boolean =>
+  call.outcome === "ok" && call.result != null && TRUNCATED_TAIL.test(call.result);
 
 /** One tool_result turn can hold several results; each starts on its own "-> tool result" line. */
 function splitResults(text: string): Array<{ tag: string | null; error: boolean; body: string }> {
@@ -229,10 +260,10 @@ function phrase(call: McpCall): Phrase {
   }
 }
 
-/** The call as a sentence. An error reads "Tried to …", an unanswered call "Asking Loom to …". */
+/** The call as a sentence. An error or a refusal reads "Tried to …", an unanswered call "Asking Loom to …". */
 export function sentenceOf(call: McpCall): McpSentence {
   const [past, inf, object, tail] = phrase(call);
-  const lead = call.outcome === "error" ? `Tried to ${inf}`
+  const lead = call.outcome === "error" || call.outcome === "refused" ? `Tried to ${inf}`
     : call.outcome === "pending" ? `Asking Loom to ${inf}`
     : past;
   return { lead, object, tail };

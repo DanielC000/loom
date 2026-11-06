@@ -41,7 +41,24 @@ const TRANSCRIPT = [
   { role: "tool_result", text: "-> tool result {tag00005}: {\"version\":2}\n-> tool result {tag00006}: {\"columnKey\":\"review\",\"version\":5}" },
 ];
 
-async function openSession(page: Page, loomDaemon: LoomDaemon) {
+/** Card 825e38da: one refused call (a successful result with an {error} body), one ok call, and one ok
+ *  call whose answer was cut at the daemon's 2 KB cap (unclassified: never read as refused). */
+const CUT = `{"error":"x","pad":"${"y".repeat(2100)}`.slice(0, 2048) + "... [+77 chars truncated]";
+const REFUSAL_TRANSCRIPT = [
+  { role: "user", text: "Kick off: dispatch card 7e2a90b4." },
+  { role: "assistant", text: [
+    call("ref00001", "mcp__loom-tasks__tasks_get", { id: "7e2a90b4" }),
+    call("ref00002", "mcp__loom-orchestration__worker_spawn", { taskId: "7e2a90b4", agentId: "web-designer" }),
+    call("ref00003", "mcp__loom-tasks__memory_list", {}),
+  ].join("\n") },
+  { role: "tool_result", text: [
+    "-> tool result {ref00001}: {\"id\":\"7e2a90b4\",\"columnKey\":\"todo\"}",
+    "-> tool result {ref00002}: {\"error\":\"concurrency cap reached: 3 of 3 live workers.\",\"capacity\":{\"live\":3,\"max\":3}}",
+    `-> tool result {ref00003}: ${CUT}`,
+  ].join("\n") },
+];
+
+async function openSession(page: Page, loomDaemon: LoomDaemon, transcript: ReadonlyArray<{ role: string; text: string }> = TRANSCRIPT) {
   const mgr = await loomDaemon.seedLiveSession({
     role: "manager", agentName: "McpLead", id: `e2e-mcp-${Date.now()}`,
     ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
@@ -49,9 +66,9 @@ async function openSession(page: Page, loomDaemon: LoomDaemon) {
   // The strip fetches the whole transcript first, then `?offset=N` tails: serve both shapes.
   await page.route(new RegExp(`/api/sessions/${mgr.sessionId}/transcript(\\?.*)?$`), (route) => {
     const offset = new URL(route.request().url()).searchParams.get("offset");
-    if (offset === null) return route.fulfill({ json: TRANSCRIPT });
-    const start = Math.min(Number(offset), TRANSCRIPT.length);
-    return route.fulfill({ json: { turns: TRANSCRIPT.slice(start), totalTurns: TRANSCRIPT.length, offset: start, returned: TRANSCRIPT.length - start, nextOffset: null } });
+    if (offset === null) return route.fulfill({ json: transcript });
+    const start = Math.min(Number(offset), transcript.length);
+    return route.fulfill({ json: { turns: transcript.slice(start), totalTurns: transcript.length, offset: start, returned: transcript.length - start, nextOffset: null } });
   });
   await seedAtlasOn(page, mgr.projectId);
   await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
@@ -137,6 +154,62 @@ test.describe("session Loom MCP activity strip", () => {
     // Collapse.
     await page.getByTestId("mcp-activity-bar").click();
     await expect(page.getByTestId("mcp-activity-log")).toHaveCount(0);
+  });
+
+  test("a refused call (error field in a successful answer) is amber, counted, and filterable apart from ok and error", async ({ page, loomDaemon }) => {
+    test.setTimeout(120_000);
+    await openSession(page, loomDaemon, REFUSAL_TRANSCRIPT);
+
+    // Compact: the count names the refusal; the turn's bead for it is amber; there is no error.
+    const bar = page.getByTestId("mcp-activity-bar");
+    await expect(page.getByTestId("mcp-activity-count")).toHaveText("3");
+    await expect(page.getByTestId("mcp-activity-refused-count")).toHaveText("· 1 refused");
+    await expect(page.getByTestId("mcp-activity-refused-count")).toHaveAttribute("title", /error field/);
+    await expect(bar).not.toContainText("error");
+    const amber = await cssColor(page, "--loom-attn");
+    await expect(bar.locator(".loom-mcp-bead.refused")).toHaveCount(1);
+    await expect(bar.locator(".loom-mcp-bead.refused")).toHaveCSS("border-top-color", amber);
+
+    await bar.click();
+    const log = page.getByTestId("mcp-activity-log");
+    const refusedRow = page.getByTestId("mcp-call-2");
+    await expect(refusedRow).toHaveAttribute("data-outcome", "refused");
+    await expect(refusedRow).toContainText("Tried to spawn a worker for card 7e2a90b4");
+    const mark = refusedRow.getByRole("img", { name: "refused" });
+    await expect(mark).toHaveText("!");
+    await expect(mark).toHaveCSS("color", amber);
+    // The plain ok call and the call whose answer was cut at 2 KB both stay ok.
+    await expect(page.getByTestId("mcp-call-1")).toHaveAttribute("data-outcome", "ok");
+    await expect(page.getByTestId("mcp-call-3")).toHaveAttribute("data-outcome", "ok");
+    await expect(page.getByTestId("mcp-turn-1")).toContainText("3 calls · 1 refused");
+
+    // The rail labels the heuristic, and counts the answer it could not read.
+    await expect(page.getByTestId("mcp-refused-legend")).toContainText("refused is a guess: the answer carried an error field.");
+    await expect(page.getByTestId("mcp-unclassified-count")).toContainText("1 answer too long to check.");
+    await expect(page.getByTestId("mcp-facet-outcome-refused")).toContainText("1");
+    await expect(page.getByTestId("mcp-facet-outcome-error")).toContainText("0");
+
+    // Exercise the refused facet: the list narrows to the refusal, then widens back.
+    const rows = () => log.locator(".loom-mcp-ent").evaluateAll((els) => els.map((e) => e.getAttribute("data-testid")));
+    expect(await rows()).toEqual(["mcp-call-3", "mcp-call-2", "mcp-call-1"]);
+    const facet = page.getByTestId("mcp-facet-outcome-refused");
+    await expect(facet).toHaveAttribute("aria-pressed", "false");
+    await facet.click();
+    await expect(facet).toHaveAttribute("aria-pressed", "true");
+    await expect(log.locator(".loom-mcp-ent")).toHaveCount(1);
+    expect(await rows()).toEqual(["mcp-call-2"]);
+    // ok and refused are separate facets: ok alone excludes the refusal.
+    await facet.click();
+    await page.getByTestId("mcp-facet-outcome-ok").click();
+    expect(await rows()).toEqual(["mcp-call-3", "mcp-call-1"]);
+    await page.getByTestId("mcp-filter-clear").click();
+    await expect(log.locator(".loom-mcp-ent")).toHaveCount(3);
+
+    // The answer is the refusal body, in amber, with the heuristic stated beside it.
+    await refusedRow.click();
+    await expect(page.getByTestId("mcp-call-2-answer")).toContainText("concurrency cap reached");
+    await expect(page.getByTestId("mcp-call-2-answer")).toHaveCSS("color", amber);
+    await expect(page.getByTestId("mcp-call-2-detail")).toContainText("Read as refused.");
   });
 
   // The transcript route has no tail, so every poll is the whole transcript. Counts real requests.

@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 const {
   parseMcpCalls, groupByTurn, sentenceOf, sentenceText, linksOf, applyFilter, emptyFilter, filterActive,
   tally, subsystemOf, columnLabel, mcpPollInterval, MCP_POLL_ACTIVE_MS, MCP_POLL_IDLE_MS,
+  classifyResult, isUnclassified, REFUSED_HINT,
 } = await import("../src/lib/mcpActivity.ts");
 
 // Poll policy. A poll can still be a whole transcript (first load, rotation fallback): the strip
@@ -120,6 +121,53 @@ assert.equal(filterActive({ ...f, query: "x" }), true);
 
 // Tallies, most frequent first.
 assert.deepEqual(tally(calls, "router"), [["loom-tasks", 3], ["loom-orchestration", 1]]);
+
+// Refused (card 825e38da): a heuristic over a SUCCESSFUL result's body, kept distinct from isError.
+{
+  // The five shapes the card names, against the classifier directly.
+  assert.equal(classifyResult('{"error":"concurrency cap reached: 3 of 3 live workers.","capacity":{"live":3,"max":3}}', false), "refused");
+  assert.equal(classifyResult('{\n  "error": "conflict: baseVersion 3 is stale",\n  "conflict": true\n}', false), "refused"); // pretty-printed
+  assert.equal(classifyResult('{"ok":true,"id":"a9a7140c"}', false), "ok");
+  assert.equal(classifyResult('{"error":"cap reached"}', true), "error"); // isError wins: refused ≠ failed
+  assert.equal(classifyResult("MCP error -32602: session is not live", true), "error");
+  assert.equal(classifyResult('[{"error":"x"}]', false), "ok"); // an array body is not an object
+  assert.equal(classifyResult('"error"', false), "ok"); // a JSON string
+  assert.equal(classifyResult("error: plain text that mentions error", false), "ok");
+  assert.equal(classifyResult('{"result":{"error":"nested"}}', false), "ok"); // top level only
+  assert.equal(classifyResult('{"error":null}', false), "ok");
+  assert.equal(classifyResult(null, false), "ok");
+  const cut = `{"error":"cap reached","detail":"${"x".repeat(2100)}`.slice(0, 2048) + "... [+120 chars truncated]";
+  assert.equal(classifyResult(cut, false), "ok"); // truncated + unparseable: never refused
+
+  // End to end through the parser: the outcome lands on the call, beside a real ok and a real error.
+  const R = parseMcpCalls([
+    { role: "user", text: "go" },
+    {
+      role: "assistant",
+      text: [
+        call("cccc0001", "mcp__loom-orchestration__worker_spawn", { taskId: "7e2a90b4" }),
+        call("cccc0002", "mcp__loom-tasks__tasks_get", { id: "7e2a90b4" }),
+        call("cccc0003", "mcp__loom-tasks__memory_read", { key: "k" }),
+        call("cccc0004", "mcp__loom-orchestration__worker_stop", { sessionId: "s1" }),
+      ].join("\n"),
+    },
+    {
+      role: "tool_result",
+      text: [
+        '-> tool result {cccc0001}: {"error":"concurrency cap reached","capacity":{"live":3,"max":3}}',
+        '-> tool result {cccc0002}: {"id":"7e2a90b4","title":"x"}',
+        `-> tool result {cccc0003}: ${cut}`,
+        '-> tool result {cccc0004} (error): {"error":"not your worker"}',
+      ].join("\n"),
+    },
+  ]);
+  assert.deepEqual(R.map((c) => c.outcome), ["refused", "ok", "ok", "error"]);
+  assert.deepEqual(R.map(isUnclassified), [false, false, true, false]);
+  assert.equal(sentenceText(R[0]), "Tried to spawn a worker for card 7e2a90b4");
+  assert.deepEqual(applyFilter(R, { ...emptyFilter(), outcomes: new Set(["refused"]) }).map((c) => c.seq), [1]);
+  assert.deepEqual(applyFilter(R, { ...emptyFilter(), outcomes: new Set(["error"]) }).map((c) => c.seq), [4]);
+  assert.ok(REFUSED_HINT.includes("error field"));
+}
 
 // A transcript with no Loom calls (e.g. a codex session's different markers) parses to nothing.
 assert.deepEqual(parseMcpCalls([{ role: "assistant", text: "ran `tasks_update` via the codex tool shape" }]), []);
