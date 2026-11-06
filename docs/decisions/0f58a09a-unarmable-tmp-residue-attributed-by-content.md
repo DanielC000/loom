@@ -61,13 +61,36 @@ unparsable file there is overwhelmingly a torn write of that repo's own latch. F
 losing a real quarantine; failing closed costs a recoverable human clear. Residual (not closed): a misfiled
 AND wholly unparsable file still blocks the claimant; nothing in it can say otherwise.
 
-## Known siblings, deliberately NOT changed here
+## Known siblings: investigated (card `ac6427d5`), NOT fixed — tampering-only
 
 Same parse-then-throw shape, same filename-hash fallback: PASS 1's final `.json` read (`latch JSON is
 missing repoPath/branch/reason`) and the safety-tmp recovery loop (`safety-tmp latch JSON is missing ...`).
-Left alone: both are Loom-keyed writes (a final is written at its own key's hash; a safety-tmp is written by
-Loom for a specific key), so misfiling is far less plausible than for a pid-suffixed tmp. A follow-up card is
-the place to decide them.
+
+**RED when hand-planted.** X's branchless record `{repoPath: X, reason, tokens}` planted at R's hash, then
+`reenterMergeQuarantinesAtBoot([R, X])` (repro: `C:\Users\danie\.loom-projects\c36e8691-44d8-44ae-91ed-1bae3c632b33\ac6427d5\repro-ac6427d5.mjs`,
+run once per shape; the ordinary-tmp control shows the fixed PASS 1b behaviour):
+
+| planted as | R | X | file |
+|---|---|---|---|
+| final `<Rhash>.json` | blocked | OPEN | survives |
+| safety-tmp `<Rhash>.json.tmp-safety-…` | blocked | OPEN | **unlinked (X's only copy lost)** |
+| ordinary tmp (control, fixed) | open | blocked | unlinked after X armed |
+
+So at the safety-tmp site this is not purely fail-closed: X fails open and its record is destroyed.
+
+**Why it is not reachable by Loom itself.** Hitting it needs a record that parses but lacks `branch` or
+`reason`. Both fields have been required on `MergeQuarantineEntry` since the file's first commit
+(`484e68f14`), every writer (`writeMergeQuarantineLatch`, `writeSafetyTmpResidueAtHash`) persists the full
+entry, and a torn write is unparsable (no content identity under either rule). Getting there takes manual
+tampering with `LOOM_HOME` (dropping a field AND moving the file).
+
+**Unproven corner.** Every `writeSafetyTmpResidueAtHash` caller's hash derivation was not enumerated. A
+misfile by that route would be a COMPLETE record, which parses and is already attributed by `parsed.repoPath`
+on the armable path, so it does not reach this throw.
+
+**Verdict:** not fixed. Accepted residual, tampering-only. If a Loom writer is ever found to emit a
+field-missing record, apply this card's rule at both sites with the same controls (absolute `repoPath` only,
+filename-claimant fallback otherwise, unlink only after the content owner is durably armed).
 
 ## Not done
 
