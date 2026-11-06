@@ -615,6 +615,16 @@ packages/daemon/test/merge-quarantine-migrate-source-owner-durable.mjs` (default
 failures), GREEN restored (every scenario in both files, including the pre-existing ones, passes), tree
 confirmed byte-identical after. `pnpm --filter @loom/daemon build` clean throughout.
 
+## x1 resurrection after a refused reduce-write: by design (card `64e01545`)
+
+Shape: a stale-named repo Y source migrates into the key Ky of a degraded ghost X (X's repoPath never resolves; its file sits at the Ky basename with a trusted `resolvedKey`). Boot yields one in-memory union holding Y's tokens plus X's token `x1`; X's file is never written (the refusal this record is about).
+
+If a human clears `x1` while any of Y's tokens are still outstanding, the partial clear's reduce-write at Ky is refused (`clearActiveEntryTokenAtKey` logs "could not durably persist the reduced token set"), the identity lands in the call's write-failed set, and `d2592cd5`'s confirmed-write gating withholds the durable tombstone. `x1` then survives only in X's own file and re-arms on every boot until the last other token is cleared and the full lift deletes both files. It is fail-closed (an over-block, never a false lift) and the log message states that intent; do not "fix" it by tombstoning on an unconfirmed write.
+
+Recovery routes: clear `x1` LAST (after Y's tokens; the final clear is a full lift, verified clean across reboot-sims), or clear by path, which drops the shared union durably.
+
+Related, not a defect: right after any boot of this shape, before the first query or clear, `assertQuarantineIdentityInvariantTestOnly` reports two non-reference-equal objects for Y (the degraded X record and the union both carry `x1`, so the active+pending disjoint-token allowance does not apply). It is present at boot with no clear performed, is healed by the first query or clear, and no no-query clear sequence over-blocked or lost a token because of it.
+
 ## Do not
 
 - Do not name a safety-tmp residue the same way an ordinary torn-write tmp is named — the two MUST be
