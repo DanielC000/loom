@@ -3782,17 +3782,71 @@ function routeWithFollowableId(repoPath: string, id: string | undefined): Blocke
 }
 
 function followableIdOrUndefined(id: string | undefined): string | undefined {
-  return id === undefined || latchIdIsAmbiguousActiveVsPending(id) ? undefined : id;
+  return id === undefined || routeIdWouldBeRefused(id) ? undefined : id;
 }
 
-function latchIdIsAmbiguousActiveVsPending(id: string): boolean {
-  let activeRepoPath: string | undefined;
-  for (const [key, entry] of activeQuarantines) {
-    if (quarantineHashForKey(key) === id) { activeRepoPath = entry.repoPath; break; }
+/** What the by-id clear sees for one id: its first ACTIVE match and EVERY pending entry sharing it. */
+interface ByIdClearView { activeMatch: { key: string; entry: MergeQuarantineEntry } | undefined; matchedPending: PendingUnresolvedQuarantine[] }
+
+type ByIdClearRefusal =
+  | { kind: "ambiguous-active"; ambiguousIdentities: AmbiguousIdentities; ambiguousCount: number }
+  | { kind: "active-vs-different-pending"; differentRepoPending: PendingUnresolvedQuarantine[] }
+  | { kind: "pending-contributor-or-unknown"; pendingContributors: string[]; pendingUnknownProvenance: boolean };
+
+/**
+ * THE one decision of whether {@link clearMergeQuarantineLatchFile} refuses `id` outright, as a PURE
+ * function of the entries passed in (`view`) and the live pending list: it mutates nothing (it may read the
+ * filesystem, e.g. `canonicalSiblingsFor`/`directPathIdentity`).
+ * The clear calls it on its live, already-re-ingested state and only WORDS the result; every route-id
+ * builder calls it through {@link routeIdWouldBeRefused}, so refusal text and action cannot disagree.
+ * It reads no entry by reference identity, so it is safe on a purely computed reconciled copy; the
+ * reference-identity helpers (`selfClearRefusesForStaleKeyContributors`, `liveArmedKeysOf`,
+ * `entryGenuinelyOwnsALiveArmedKeyOfItsOwn`) appear only in the clear's reason TEXT, never here.
+ *
+ * Deliberately NOT here (not a static refusal): `preClearForeignKeyStamp` — see {@link foreignKeyStampNeeded}.
+ *
+ * @decision 8e8bc0be — a route id is handed out ONLY if the clear would follow it; the converse (every
+ * followable id is handed out) is deliberately NOT guaranteed. Never re-copy this logic into a builder.
+ */
+function byIdClearRefusalFor(view: ByIdClearView): ByIdClearRefusal | undefined {
+  const { activeMatch, matchedPending } = view;
+  if (activeMatch) {
+    const ambiguousIdentities = ambiguousIdentitiesFor(activeMatch.key, activeMatch.entry);
+    const ambiguousCount = totalAmbiguousCount(ambiguousIdentities);
+    if (ambiguousCount > 0) return { kind: "ambiguous-active", ambiguousIdentities, ambiguousCount };
+    const activeIdentity = directPathIdentity(activeMatch.entry.repoPath);
+    const differentRepoPending = matchedPending.filter((p) => directPathIdentity(p.entry.repoPath) !== activeIdentity);
+    return differentRepoPending.length > 0 ? { kind: "active-vs-different-pending", differentRepoPending } : undefined;
   }
-  if (activeRepoPath === undefined) return false;
-  const activeIdentity = directPathIdentity(activeRepoPath);
-  return pendingUnresolvedQuarantines.some((p) => pendingLatchIdFor(p.sourceFile) === id && directPathIdentity(p.entry.repoPath) !== activeIdentity);
+  if (matchedPending.length === 0) return undefined;
+  const pendingContributors = [...new Set(matchedPending.flatMap((p) => p.entry.contributorRepoPaths ?? []))];
+  const pendingUnknownProvenance = matchedPending.some((p) => p.entry.provenanceUnknown);
+  return pendingContributors.length > 0 || pendingUnknownProvenance ? { kind: "pending-contributor-or-unknown", pendingContributors, pendingUnknownProvenance } : undefined;
+}
+
+/**
+ * True when the by-id clear would refuse `id` NOW, or would refuse it after its own re-ingest of a bare
+ * placeholder. The re-ingest is computed PURELY ({@link reconcileClearedEntryIfPlaceholder} returns a
+ * new object and touches no map) and evaluated against the LIVE pending list, no shadow state: a
+ * placeholder's `directPathIdentity` cannot change through re-ingest (it returns the entry unchanged
+ * otherwise), but its contributors / `provenanceUnknown` can, so both views are asked and EITHER refusing
+ * omits the id (conservative: at worst a followable id goes unoffered, never a dead one is offered).
+ *
+ * Named residual, not modelled: the clear's `preClearForeignKeyStamp` durable write can fail at runtime
+ * (`refusedBeforeClear`, lifts nothing) — unforeseeable by any predicate.
+ */
+function routeIdWouldBeRefused(id: string): boolean {
+  let activeMatch: ByIdClearView["activeMatch"];
+  for (const [key, entry] of activeQuarantines) {
+    if (quarantineHashForKey(key) === id) { activeMatch = { key, entry }; break; }
+  }
+  const matchedPending = pendingUnresolvedQuarantines.filter((p) => pendingLatchIdFor(p.sourceFile) === id);
+  if (byIdClearRefusalFor({ activeMatch, matchedPending }) !== undefined) return true;
+  const reconciledActive = activeMatch
+    ? { key: activeMatch.key, entry: reconcileClearedEntryIfPlaceholder(activeMatch.entry, quarantinePathForKey(activeMatch.key)) }
+    : undefined;
+  const reconciledPending = matchedPending.map((p) => ({ sourceFile: p.sourceFile, entry: reconcileClearedEntryIfPlaceholder(p.entry, path.join(MERGE_QUARANTINE_DIR, p.sourceFile)) }));
+  return byIdClearRefusalFor({ activeMatch: reconciledActive, matchedPending: reconciledPending }) !== undefined;
 }
 
 /**
@@ -3973,6 +4027,15 @@ function relocatedCoOccupantsReason(coOccupants: BlockedCoOccupant[]): string {
 
 /** Test seam for {@link relocatedCoOccupantsReason} (pure string builder). */
 export function relocatedCoOccupantsReasonTestOnly(coOccupants: BlockedCoOccupant[]): string { return relocatedCoOccupantsReason(coOccupants); }
+
+/** Test seams (card 8e8bc0be) over the route-id builders, so a fixture can drive them against real module
+ *  state built through the other `*TestOnly` seams. Never imported by `index.ts` (the `TestOnly` suffix is
+ *  load-bearing for `no-src-testonly-import-guard.mjs`). */
+export function routeIdWouldBeRefusedTestOnly(id: string): boolean { return routeIdWouldBeRefused(id); }
+export function classifyKeptRepoPathTestOnly(repoPath: string, sourceFile: string): ReturnType<typeof classifyKeptRepoPath> { return classifyKeptRepoPath(repoPath, sourceFile); }
+export function blockedCoOccupantBothRoutesTestOnly(repoPath: string, relocatedSourceFile: string, keptSourceFile: string): BlockedCoOccupant { return blockedCoOccupantBothRoutes(repoPath, relocatedSourceFile, keptSourceFile); }
+export function blockedCoOccupantTestOnly(repoPath: string, sourceFile: string): BlockedCoOccupant { return blockedCoOccupant(repoPath, sourceFile); }
+export function mergeKeptAndRelocatedCoOccupantTestOnly(relocatedCo: BlockedCoOccupant, keptCo: BlockedCoOccupant): BlockedCoOccupant { return mergeKeptAndRelocatedCoOccupant(relocatedCo, keptCo); }
 
 /** Appends {@link relocatedCoOccupantsReason}'s own clause onto an existing (possibly absent) base
  *  reason — never silently drops the relocation just because there was nothing else to say. */
@@ -8056,20 +8119,30 @@ function markIdentityAsReducedOnForeignKey(entry: MergeQuarantineEntry, identity
  * coarse default. `identityHasOwnRecordAnywhere` below is the named helper for callers needing it.
  */
 function preClearForeignKeyStamp(repoPath: string, ownRecordBeingCleared: boolean): { ok: true } | { ok: false; reason: string } {
-  if (!isRepoPathCurrentlyResolvable(repoPath)) return { ok: true };
+  const freshEntry = foreignKeyStampNeeded(repoPath, ownRecordBeingCleared);
+  if (!freshEntry) return { ok: true };
+  const identity = directPathIdentity(repoPath);
+  if (!markIdentityAsReducedOnForeignKey(freshEntry, identity)) {
+    return {
+      ok: false,
+      reason: `could not durably mark '${identity}' as reduced on '${freshEntry.repoPath}'s own quarantine before clearing it — refusing to clear '${repoPath}' to avoid losing track of it; retry, or clear '${freshEntry.repoPath}'s own quarantine instead.`,
+    };
+  }
+  return { ok: true };
+}
+
+/** The decision half of {@link preClearForeignKeyStamp}: the foreign fresh-key occupant that must be stamped
+ *  before clearing `repoPath`'s own record, or `undefined` when no stamp is needed. Mutates nothing (it does
+ *  read the filesystem via `canonicalRepoLockKey`/`directPathIdentity`).
+ *  @decision 8e8bc0be — split out so "is a stamp needed" has one definition; the stamp WRITE can still fail
+ *  at runtime (`refusedBeforeClear`), which no predicate can foresee. */
+function foreignKeyStampNeeded(repoPath: string, ownRecordBeingCleared: boolean): MergeQuarantineEntry | undefined {
+  if (!isRepoPathCurrentlyResolvable(repoPath)) return undefined;
   const freshKey = canonicalRepoLockKey(repoPath);
   const identity = directPathIdentity(repoPath);
   const freshEntry = activeQuarantines.get(freshKey);
   const freshIsForeign = freshKey !== identity && !!freshEntry && directPathIdentity(freshEntry.repoPath) !== identity;
-  if (!freshIsForeign) return { ok: true };
-  if (!ownRecordBeingCleared) return { ok: true };
-  if (!markIdentityAsReducedOnForeignKey(freshEntry!, identity)) {
-    return {
-      ok: false,
-      reason: `could not durably mark '${identity}' as reduced on '${freshEntry!.repoPath}'s own quarantine before clearing it — refusing to clear '${repoPath}' to avoid losing track of it; retry, or clear '${freshEntry!.repoPath}'s own quarantine instead.`,
-    };
-  }
-  return { ok: true };
+  return freshIsForeign && ownRecordBeingCleared ? freshEntry : undefined;
 }
 
 /**
@@ -9154,7 +9227,8 @@ function stillQuarantinedReason(after: MergeQuarantineEntry, queriedRepoPath: st
   if (selfClearRefusesForStaleKeyContributors(after)) {
     return `${reason} — clearing by ${JSON.stringify({ repoPath: after.repoPath })} directly would itself refuse right now (a separately-raised contributor is still folded in): ${remediationTextFor([after.repoPath], ambiguousIdentities, false, entryGenuinelyOwnsALiveArmedKeyOfItsOwn(after), broadUnionTargetFor(after.repoPath).accepts)}.`;
   }
-  const clearByIdSuggestion = totalAmbiguousCount(ambiguousIdentities) > 0 ? "" : ` or ${JSON.stringify({ id: latchId })}`;
+  // @decision 8e8bc0be — name `{id}` only when the by-id clear would follow it (the shared core), never on the ambiguity count alone.
+  const clearByIdSuggestion = totalAmbiguousCount(ambiguousIdentities) > 0 || latchId === undefined || routeIdWouldBeRefused(latchId) ? "" : ` or ${JSON.stringify({ id: latchId })}`;
   return `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })}${clearByIdSuggestion} to clear it directly.`;
 }
 
@@ -9365,6 +9439,10 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     const reconciled = reconcileClearedEntryIfPlaceholder(p.entry, path.join(MERGE_QUARANTINE_DIR, p.sourceFile));
     if (reconciled !== p.entry) { replaceEntryEverywhere(activeQuarantines, p.entry, reconciled); p.entry = reconciled; }
   }
+  // @decision 8e8bc0be — the refusal DECISION is the one shared pure core, evaluated here on the live,
+  // already-re-ingested state; every route-id builder asks the same core (see routeIdWouldBeRefused). The
+  // blocks below only word the refusal the core returned, so text and action cannot disagree.
+  const refusal = byIdClearRefusalFor({ activeMatch, matchedPending });
   if (activeMatch) {
     // @decision 9a55fb90 — a bare id cannot tell "clear the entry armed here" apart from "clear by the
     // id a DIFFERENT, currently-resolvable canonical owner's own refusal happened to name" — both
@@ -9372,9 +9450,8 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision 82032b5c — widened to ALSO cover a RUNTIME union (contributorRepoPaths): canonicalSiblingsFor
     // alone never sees a sibling absorbed directly into this ACTIVE entry via enterMergeQuarantine's own
     // `existing` branch, which is exactly the 9a55fb90 "known residual" this card closes.
-    const ambiguousIdentities = ambiguousIdentitiesFor(activeMatch.key, activeMatch.entry);
-    const ambiguousCount = totalAmbiguousCount(ambiguousIdentities);
-    if (ambiguousCount > 0) {
+    if (refusal?.kind === "ambiguous-active") {
+      const { ambiguousIdentities, ambiguousCount } = refusal;
       const namedIdentities = [...ambiguousIdentities.siblingRepoPaths, ...ambiguousIdentities.contributorRepoPaths];
       // @decision db0a9db0 — count only what this clause NAMES (`namedIdentities.length`, never
       // `ambiguousCount`, which now also counts `unknownProvenance`); see the decision record.
@@ -9396,9 +9473,8 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
           `whichever one you're actually trying to resolve. Nothing was cleared. ${remediationTextFor([activeMatch.entry.repoPath], ambiguousIdentities, !selfClearRefusesForStaleKeyContributors(activeMatch.entry), entryGenuinelyOwnsALiveArmedKeyOfItsOwn(activeMatch.entry), broadUnionTargetFor(activeMatch.entry.repoPath).accepts)}.`,
       };
     }
-    const activeIdentity = directPathIdentity(activeMatch.entry.repoPath);
-    const differentRepoPending = matchedPending.filter((p) => directPathIdentity(p.entry.repoPath) !== activeIdentity);
-    if (differentRepoPending.length > 0) {
+    if (refusal?.kind === "active-vs-different-pending") {
+      const { differentRepoPending } = refusal;
       const candidates = [activeMatch.entry.repoPath, ...differentRepoPending.map((p) => p.entry.repoPath)];
       return {
         ok: false,
@@ -9466,12 +9542,10 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision 82032b5c (round 2 CR, Minor 5) — a PENDING entry can ALSO carry `contributorRepoPaths`
     // (e.g. carried forward by `protectDegradedOccupantBeforeDelete`) — fail closed here too, on the SAME
     // basis the active-match branch above already does (9a55fb90: text and action must never disagree).
-    const pendingContributors = [...new Set(matchedPending.flatMap((p) => p.entry.contributorRepoPaths ?? []))];
-    // @decision db0a9db0 — a pending entry can carry `provenanceUnknown` too (the 883e29bc twin shares
-    // the SAME object, by reference, as whatever PASS 1/1b/safety-tmp recovery marks) — same fail-closed
-    // basis as `pendingContributors` above.
-    const pendingUnknownProvenance = matchedPending.some((p) => p.entry.provenanceUnknown);
-    if (pendingContributors.length > 0 || pendingUnknownProvenance) {
+    // (the decision itself — contributors / `provenanceUnknown` incl. the 883e29bc twin's shared-by-reference
+    // marks — now lives in {@link byIdClearRefusalFor}; this block only words it.)
+    if (refusal?.kind === "pending-contributor-or-unknown") {
+      const { pendingContributors, pendingUnknownProvenance } = refusal;
       const matchedRepoPaths = [...new Set(matchedPending.map((p) => p.entry.repoPath))];
       // @decision db0a9db0 (Follow-up 150aed7b) — union EVERY flagged pending entry's own keys, never
       // just the first match's scalar; routinely `[]` for a protect-copy whitelist (strips both fields).
@@ -9790,7 +9864,8 @@ export function assertRepoNotQuarantined(repoPath: string): { ok: true } | { ok:
       const ownKeyOwnership = entryGenuinelyOwnsALiveArmedKeyOfItsOwn(q);
       return `a human clears it: this latch id is ambiguous right now (${collisionClause}), so ${remediationTextFor([q.repoPath], ambiguousIdentities, ownPathViable, ownKeyOwnership, broadUnionTargetFor(q.repoPath).accepts)}`;
     })()
-    : `a human clears it: POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })} or ${JSON.stringify({ id: latchId })} ` +
+    // @decision 8e8bc0be — `{id}` only when the by-id clear would follow it (the shared core).
+    : `a human clears it: POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })}${latchId === undefined || routeIdWouldBeRefused(latchId) ? "" : ` or ${JSON.stringify({ id: latchId })}`} ` +
       `(the project-resolved POST /internal/merge-quarantine/clear works only if a registered project's repo resolves to this entry)`;
   // Round 5 MAJOR (blocking) — q.reason is embedded verbatim below, and every real unconfirmed-kill raise
   // builds it via unconfirmedKillReason(), which unconditionally names the single-identity `/clear` route.

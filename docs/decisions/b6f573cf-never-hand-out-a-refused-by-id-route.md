@@ -18,8 +18,8 @@ while the active/pending collision stands, the pending sharer Y/a included.
 ## Fix
 
 Ids are built at several sites, not one. `routeWithFollowableId` / `followableIdOrUndefined` omit `id` when
-`latchIdIsAmbiguousActiveVsPending(id)` — the same check `clearMergeQuarantineLatchFile` makes (first active
-match by hash, pending of a different `directPathIdentity`). Through them now:
+`routeIdWouldBeRefused(id)` — which asks the clear's own shared refusal decision, `byIdClearRefusalFor` (this
+card first shipped a partial hand copy of it; card `8e8bc0be` replaced the copy, see its record). Through them now:
 
 - `blockedCoOccupant` (every bare pending-id route) and the own-entry branch of `blockedCoOccupantForReferencer`.
 - `classifyKeptRepoPath`'s rebuilt own-entry route and its `blockedBy.id` disclosure.
