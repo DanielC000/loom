@@ -158,16 +158,18 @@ export function LaneMenu({ col, index, count, disabled, onMove, onCollapse }: {
     else if (e.key === "ArrowUp") { e.preventDefault(); focusItem(cur - 1); }
     else if (e.key === "Home") { e.preventDefault(); focusItem(0); }
     else if (e.key === "End") { e.preventDefault(); focusItem(-1); }
-    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setOpen(false); btnRef.current?.focus(); }
-    else if (e.key === "Tab") setOpen(false);
+    // Tab closes like Escape and returns focus to the ⋯ trigger: the menu is portalled to the end of <body>,
+    // so letting Tab through would move focus past the whole page instead of to the next lane control.
+    else if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); e.stopPropagation(); setOpen(false); btnRef.current?.focus(); }
   };
   const menuId = `lane-menu-${col.key}`;
+  // One counter assigns every focusable item's slot in itemRefs, in render order.
   let i = 0;
+  const slot = () => { const n = i++; return (el: HTMLElement | null) => { itemRefs.current[n] = el; }; };
   const item = (label: string, hint: string | null, enabled: boolean, onSelect: () => void, testId: string) => {
-    const n = i++;
     return (
       <button type="button" role="menuitem" tabIndex={-1} key={testId} data-testid={testId}
-        ref={(el) => { itemRefs.current[n] = el; }}
+        ref={slot()}
         aria-disabled={enabled ? undefined : true}
         className="loom-lane-menu-item"
         onClick={() => { if (enabled) act(onSelect); }}>
@@ -196,7 +198,7 @@ export function LaneMenu({ col, index, count, disabled, onMove, onCollapse }: {
           {item("Collapse lane", null, true, onCollapse, `lane-collapse-${col.key}`)}
           <div className="loom-lane-menu-sep" role="separator" />
           <Link to="/settings" role="menuitem" tabIndex={-1} className="loom-lane-menu-item is-quiet"
-            ref={(el) => { itemRefs.current[3] = el; }} onClick={() => setOpen(false)}
+            ref={slot()} onClick={() => setOpen(false)}
             data-testid={`lane-edit-columns-${col.key}`}>
             <span>Edit columns in Settings</span>
             <span className="loom-lane-menu-hint" aria-hidden>↗</span>

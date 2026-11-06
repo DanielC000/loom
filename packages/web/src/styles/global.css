@@ -283,6 +283,8 @@ body {
    header so a resting board stays quiet. The ⋯ menu button is always present (dim at rest) because it is
    the keyboard path, and a control that only appears on hover is unreachable to a keyboard user. */
 .loom-lane-handle { cursor: grab; }
+/* While a lane reorder is saving, the header drag is off (no overlapping reorders), so it stops looking grabbable. */
+.loom-lane-handle[data-drag-disabled="true"] { cursor: progress; }
 .loom-lane-grip { width: 10px; color: var(--loom-text-3); opacity: 0; transition: opacity 120ms ease; }
 .loom-lane-head:hover .loom-lane-grip,
 .loom-lane-head:focus-within .loom-lane-grip { opacity: 1; }

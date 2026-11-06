@@ -24,6 +24,15 @@ async function serverBoard(baseURL: string, projectId: string) {
   return (await r.json()) as { columns: { key: string; label: string }[]; tasks: { id: string; columnKey: string }[] };
 }
 const serverOrder = async (baseURL: string, projectId: string) => (await serverBoard(baseURL, projectId)).columns.map((c) => c.key);
+/** Press on a lane's header handle and move far enough to activate a lane drag (the pointer stays down). */
+async function pressAndNudgeHandle(page: Page, key: string) {
+  const handle = page.getByTestId(`lane-handle-${key}`);
+  await handle.scrollIntoViewIfNeeded();
+  const h = (await handle.boundingBox())!;
+  await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(h.x + h.width / 2 - 20, h.y + h.height / 2, { steps: 4 });
+}
 
 for (const surface of ["/overview", "/board"] as const) {
   test.describe(`board lane controls on ${surface}`, () => {
@@ -126,6 +135,141 @@ for (const surface of ["/overview", "/board"] as const) {
       await expect(page.getByTestId("lane-waiting")).not.toHaveAttribute("data-collapsed", "");
       await expect(page.getByTestId("lane-waiting").getByText(title, { exact: true })).toBeVisible();
       await expect(page.getByTestId("lane-menu-button-waiting")).toBeFocused();
+    });
+
+    // Card 4f6b9988 — the lane menu's dismissal paths and focus, and the pending-reorder drag guard.
+    test("the lane menu closes on an outside click", async ({ page, loomDaemon }) => {
+      const project = await loomDaemon.createProject(`lane-outside-${Date.now()}`);
+      await pin(page, project.id);
+      await page.goto(`${loomDaemon.baseURL}${surface}`);
+      await expect.poll(() => renderedOrder(page)).toEqual(DEFAULT_KEYS);
+
+      await page.getByTestId("lane-menu-button-todo").click();
+      await expect(page.getByTestId("lane-menu-todo")).toBeVisible();
+      // A click inside the menu's own separator area is NOT outside: the menu stays.
+      await page.getByTestId("lane-menu-todo").locator("[role=separator]").first().click({ force: true });
+      await expect(page.getByTestId("lane-menu-todo")).toBeVisible();
+      // A press anywhere else on the page closes it, and changes nothing on the server.
+      const inbox = (await page.getByTestId("lane-inbox").boundingBox())!;
+      await page.mouse.click(inbox.x + inbox.width / 2, inbox.y + 120);
+      await expect(page.getByTestId("lane-menu-todo")).toHaveCount(0);
+      await expect(page.getByTestId("lane-menu-button-todo")).toHaveAttribute("aria-expanded", "false");
+      expect(await serverOrder(loomDaemon.baseURL, project.id)).toEqual(DEFAULT_KEYS);
+    });
+
+    test("Tab and Shift+Tab inside the lane menu close it and return focus to its ⋯ button", async ({ page, loomDaemon }) => {
+      const project = await loomDaemon.createProject(`lane-tab-${Date.now()}`);
+      await pin(page, project.id);
+      await page.goto(`${loomDaemon.baseURL}${surface}`);
+      await expect.poll(() => renderedOrder(page)).toEqual(DEFAULT_KEYS);
+
+      const more = page.getByTestId("lane-menu-button-todo");
+      for (const key of ["Tab", "Shift+Tab"]) {
+        await more.focus();
+        await page.keyboard.press("Enter");
+        await expect(page.getByTestId("lane-move-left-todo")).toBeFocused();
+        await page.keyboard.press("ArrowDown"); // focus is on an item mid-menu, not the first one
+        await expect(page.getByTestId("lane-move-right-todo")).toBeFocused();
+        await page.keyboard.press(key);
+        await expect(page.getByTestId("lane-menu-todo")).toHaveCount(0);
+        // Read the live document.activeElement, not just Playwright's focus matcher on the locator.
+        await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.testid ?? null))
+          .toBe("lane-menu-button-todo");
+      }
+      expect(await serverOrder(loomDaemon.baseURL, project.id)).toEqual(DEFAULT_KEYS);
+    });
+
+    test("a lane header drag is off while a reorder is still saving", async ({ page, loomDaemon }) => {
+      const project = await loomDaemon.createProject(`lane-pending-${Date.now()}`);
+      await pin(page, project.id);
+      await page.goto(`${loomDaemon.baseURL}${surface}`);
+      await expect.poll(() => renderedOrder(page)).toEqual(DEFAULT_KEYS);
+
+      // Hold the reorder write open so the mutation stays pending for as long as the test needs.
+      let release!: () => void;
+      const held = new Promise<void>((r) => { release = r; });
+      let seen!: () => void;
+      const intercepted = new Promise<void>((r) => { seen = r; });
+      await page.route(`**/api/projects/${project.id}/columns/order`, async (route) => {
+        seen();
+        await held;
+        await route.continue();
+      });
+
+      await page.getByTestId("lane-menu-button-review").focus();
+      await page.keyboard.press("Alt+ArrowLeft");
+      await intercepted;
+      const leftOnce = ["inbox", "backlog", "todo", "in_progress", "review", "waiting", "done"];
+      await expect.poll(() => renderedOrder(page)).toEqual(leftOnce); // the optimistic move is on screen
+      await expect(page.getByTestId("lane-handle-inbox")).toHaveAttribute("data-drag-disabled", "true");
+
+      // The same gesture that starts a drag (see the first test) starts nothing while the save is pending.
+      await pressAndNudgeHandle(page, "inbox");
+      await expect(page.getByTestId("lane-drag-preview")).toHaveCount(0);
+      await page.mouse.up();
+
+      release();
+      await expect.poll(() => serverOrder(loomDaemon.baseURL, project.id)).toEqual(leftOnce);
+      await expect(page.getByTestId("lane-handle-inbox")).not.toHaveAttribute("data-drag-disabled", "true");
+      // Control: once the save settles, the identical gesture does start a lane drag.
+      await pressAndNudgeHandle(page, "inbox");
+      await expect(page.getByTestId("lane-drag-preview")).toBeVisible();
+      await page.keyboard.press("Escape"); // cancel the drag rather than drop it
+      await page.mouse.up();
+      await expect(page.getByTestId("lane-drag-preview")).toHaveCount(0);
+      expect(await serverOrder(loomDaemon.baseURL, project.id)).toEqual(leftOnce);
+    });
+
+    test("the board still renders and lane collapse still works when lane storage throws", async ({ page, loomDaemon }) => {
+      const project = await loomDaemon.createProject(`lane-nostore-${Date.now()}`);
+      const title = uniq("nostore-card");
+      await loomDaemon.createTask(project.id, { title, columnKey: "waiting" });
+      await pin(page, project.id);
+      // Blocked site data for the collapsed-lane key only (the project pin above still has to load the
+      // board). Records each throw so the test proves the board actually hit the failing storage.
+      await page.addInitScript(() => {
+        const throws: string[] = [];
+        (window as unknown as { __laneStorageThrows: string[] }).__laneStorageThrows = throws;
+        const proto = Storage.prototype;
+        const get = proto.getItem, set = proto.setItem;
+        proto.getItem = function (k: string) {
+          if (k.startsWith("loom.board.collapsedLanes.")) { throws.push(`get:${k}`); throw new DOMException("blocked", "SecurityError"); }
+          return get.call(this, k);
+        };
+        proto.setItem = function (k: string, v: string) {
+          if (k.startsWith("loom.board.collapsedLanes.")) { throws.push(`set:${k}`); throw new DOMException("blocked", "SecurityError"); }
+          return set.call(this, k, v);
+        };
+      });
+      const errors: string[] = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.goto(`${loomDaemon.baseURL}${surface}`);
+
+      await expect.poll(() => renderedOrder(page)).toEqual(DEFAULT_KEYS);
+      const lane = page.getByTestId("lane-waiting");
+      await expect(lane.getByText(title, { exact: true })).toBeVisible();
+      await expect(lane).not.toHaveAttribute("data-collapsed", "");
+      const readThrows = () => page.evaluate(() => (window as unknown as { __laneStorageThrows: string[] }).__laneStorageThrows);
+      expect((await readThrows()).some((t) => t.startsWith("get:"))).toBe(true);
+
+      // Collapse still works for this page view; the write throws and is swallowed.
+      await page.getByTestId("lane-menu-button-waiting").click();
+      await page.getByTestId("lane-collapse-waiting").click();
+      await expect(lane).toHaveAttribute("data-collapsed", "");
+      await expect(lane.getByText(title, { exact: true })).toHaveCount(0);
+      expect((await readThrows()).some((t) => t.startsWith("set:"))).toBe(true);
+      await page.getByTestId("lane-expand-waiting").click();
+      await expect(lane).not.toHaveAttribute("data-collapsed", "");
+      await expect(lane.getByText(title, { exact: true })).toBeVisible();
+
+      // Nothing was persisted, so a collapsed lane comes back expanded after a reload.
+      await page.getByTestId("lane-menu-button-waiting").click();
+      await page.getByTestId("lane-collapse-waiting").click();
+      await expect(lane).toHaveAttribute("data-collapsed", "");
+      await page.reload();
+      await expect.poll(() => renderedOrder(page)).toEqual(DEFAULT_KEYS);
+      await expect(page.getByTestId("lane-waiting")).not.toHaveAttribute("data-collapsed", "");
+      expect(errors).toEqual([]);
     });
 
     test("move a card to another lane from its dialog", async ({ page, loomDaemon }) => {

@@ -303,8 +303,10 @@ export type ColumnReorderPlan =
 
 /**
  * Plan a REORDER-ONLY change (card 67c43038): `keys` must name exactly the current column keys, each once,
- * in the new order. PURE. Every column is carried through byte-for-byte; only its index changes, so no card
- * can ever move. Anything other than an exact permutation is refused rather than repaired, because the
+ * in the new order. PURE. Every column is carried through byte-for-byte; only its index changes, so the plan
+ * itself re-keys no card. The write it feeds (Db.applyBoardColumnLayout) still runs its backstop sweep, so a
+ * card that was ALREADY an orphan (its column_key names no current column) is moved to the landing lane; a
+ * card on a real column never moves. Anything other than an exact permutation is refused rather than repaired, because the
  * caller's view is a polled snapshot: a key it lacks is a column created since that poll, and the whole-array
  * planColumnLayout would treat it as removed and re-home its cards. Refusing is what lets a stale client
  * reorder without that risk.

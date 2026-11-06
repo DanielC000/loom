@@ -15444,7 +15444,9 @@ export class SessionService {
    * Reorder-only board-column change (card 67c43038), behind PUT /api/projects/:id/columns/order. `keys` must
    * be an exact permutation of the CURRENT keys (planColumnReorder), else `{ok:false, conflict:true}` and
    * nothing is written. Synchronous read-check-write, so no other request can interleave between the check
-   * and the write. Persists through the same transactional writer as updateBoardColumns with zero re-keys.
+   * and the write. Persists through the same transactional writer as updateBoardColumns with zero re-keys,
+   * so no card on a real column moves; that writer's backstop sweep does still move any PRE-EXISTING orphan
+   * card (column_key naming no current column) to the landing lane.
    */
   reorderBoardColumns(
     projectId: string, keys: string[],

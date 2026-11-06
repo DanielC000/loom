@@ -12,6 +12,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       an unknown project.
 //   (C) trust posture: Tier 0 (loopback-only, not on the remote allowlist) and loopback-bearer guarded
 //       like every other non-GET /api write (no credential → 401, the loopback secret → 200).
+//   (D) a reorder still moves a PRE-EXISTING orphan card (column_key naming no current column) to the
+//       landing lane, via applyBoardColumnLayout's backstop sweep; cards on real columns never move.
 // Run: 1) build (turbo builds shared first), 2) node test/column-reorder-route.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -130,6 +132,20 @@ try {
   const noCred = await put("p1", { keys: current }, H);
   check("(C) no loopback credential → 401", noCred.statusCode === 401);
   check("(C) …and the 401 wrote nothing", keysOf(stored()) === [...current].reverse().join(","));
+
+  // ================================ (D) the pre-existing-orphan sweep ================================
+  // Card 4f6b9988: a reorder re-keys no card, but it persists through applyBoardColumnLayout, whose backstop
+  // sweep moves a card that is ALREADY an orphan (its column_key names no current column) to the landing lane.
+  mkTask("t-orphan", "ghost-column");
+  const cardsBeforeSweep = db.listTasks("p1").filter((t) => t.id !== "t-orphan").map((t) => [t.id, t.columnKey]).sort();
+  check("(D) setup: the orphan card sits on a key that names no column", db.getTask("t-orphan").columnKey === "ghost-column"
+    && !stored().some((c) => c.key === "ghost-column"));
+  const sweepOrder = [...stored().map((c) => c.key)].reverse();
+  const sweep = await put("p1", { keys: sweepOrder });
+  check("(D) a reorder with a pre-existing orphan on the board → 200", sweep.statusCode === 200 && keysOf(stored()) === sweepOrder.join(","));
+  check("(D) …the orphan card is moved to the landing lane (backlog)", db.getTask("t-orphan").columnKey === "backlog");
+  check("(D) …every card on a real column stayed put",
+    JSON.stringify(db.listTasks("p1").filter((t) => t.id !== "t-orphan").map((t) => [t.id, t.columnKey]).sort()) === JSON.stringify(cardsBeforeSweep));
 } finally {
   try { await app?.close(); } catch { /* best-effort */ }
   try { db?.close(); } catch { /* best-effort */ }

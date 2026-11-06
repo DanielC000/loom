@@ -675,7 +675,9 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
   const { setNodeRef, isOver, active } = useDroppable({ id: col.key, data: { type: "lane", key: col.key } satisfies BoardDragData });
   // A lane is ALSO draggable, by its header (card 67c43038). Only the header's handle carries the
   // listeners; the ⋯ button sits outside it so a click there never starts a drag.
-  const laneDrag = useDraggable({ id: laneDragId(col.key), data: { type: "lane", key: col.key } satisfies BoardDragData });
+  // Disabled while a reorder is saving, like the ⋯ menu and Alt+arrows: a second drag on top of a pending
+  // reorder would send an order built from the pre-save columns, and the two could briefly flip the board.
+  const laneDrag = useDraggable({ id: laneDragId(col.key), data: { type: "lane", key: col.key } satisfies BoardDragData, disabled: reordering });
   // The card-drop highlight is for CARD drags only; a lane drag shows an insertion edge instead.
   const cardOver = isOver && (active?.data.current as BoardDragData | undefined)?.type !== "lane";
   const doneLane = isDoneColumn(col);
@@ -761,7 +763,8 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
         {/* The drag handle: grip + dot + label. Pointer-only by design: the keyboard path is the ⋯ menu
             below (a dnd-kit keyboard drag would nudge the lane 25px per keypress, which is no way to reorder). */}
         <span ref={laneDrag.setNodeRef} {...laneDrag.listeners} data-testid={`lane-handle-${col.key}`}
-          className="loom-lane-handle" title="Drag to reorder this lane"
+          className="loom-lane-handle" data-drag-disabled={reordering ? "true" : undefined}
+          title={reordering ? "Saving the lane order…" : "Drag to reorder this lane"}
           style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, touchAction: "none" }}>
           <span aria-hidden className="loom-lane-grip">⠿</span>
           <LaneDot accent={accent} done={doneLane} />
