@@ -3848,6 +3848,9 @@ export interface ConnectionMetadata {
   invalidHost?: boolean;
   /** Fixed-text reason paired with `invalidHost` (never echoes the host). */
   invalidHostReason?: string;
+  /** Present (true) only when the owner opted this api-key/bearer connection into plain `http://` for a
+   *  private/LAN host. Absent = https only. Owner-set over loopback REST/UI only; never an agent path. */
+  allowPlainHttp?: boolean;
   /** `oauth2` rows only — the provider template this connection was registered under. */
   provider?: OAuthProviderSlug;
   /**

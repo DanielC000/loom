@@ -277,6 +277,9 @@ export interface ConnectionRow {
   /** `ssh` rows only — NON-SECRET JSON-encoded `SshCommandRule[]` risky-command pattern list (the shipped
    *  default at create time, owner-editable thereafter). `'[]'` on a non-ssh row. */
   sshRiskyPatterns: string;
+  /** api-key/bearer rows only (card 1d882a8c) — true = the owner opted this connection into plain `http://`
+   *  for a private/LAN host. Default false (every pre-card row). Decoded FAIL-CLOSED: only an explicit 1. */
+  allowPlainHttp: boolean;
 }
 
 /**
@@ -1324,7 +1327,10 @@ CREATE TABLE IF NOT EXISTS connections (
   ssh_host_key_fingerprint TEXT,
   ssh_read_only INTEGER NOT NULL DEFAULT 1,
   ssh_command_allowlist TEXT NOT NULL DEFAULT '[]',
-  ssh_risky_patterns TEXT NOT NULL DEFAULT '[]'
+  ssh_risky_patterns TEXT NOT NULL DEFAULT '[]',
+  -- Opt-in plain http for a private/LAN host (card 1d882a8c). 0 on every pre-card row = https only. Added to
+  -- existing DBs by migrateConnections() (CONNECTION_ADDED_COLUMNS); no index on it.
+  allow_plain_http INTEGER NOT NULL DEFAULT 0
 );
 -- Owner-added capability catalog rows (agent-tooling epic P4). The two BUILTIN capabilities
 -- (browser-testing/document-conversion) are NOT rows here — they stay special-cased in buildMcpServers,
@@ -2756,6 +2762,8 @@ const CONNECTION_ADDED_COLUMNS: Record<string, string> = {
   ssh_read_only: "INTEGER NOT NULL DEFAULT 1",
   ssh_command_allowlist: "TEXT NOT NULL DEFAULT '[]'",
   ssh_risky_patterns: "TEXT NOT NULL DEFAULT '[]'",
+  // Opt-in plain http for a private/LAN host (card 1d882a8c): every legacy row backfills to 0 = https only.
+  allow_plain_http: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Column added to `delivered_credentials` by card f44cc187; applied to existing DBs by
@@ -6300,6 +6308,7 @@ export class Db {
      *  every non-ssh create, exactly as before this phase existed. */
     sshPort?: number | null; sshUser?: string | null; sshHostKeyFingerprint?: string | null;
     sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+    allowPlainHttp?: boolean;
   }): ConnectionRow {
     const row: ConnectionRow = {
       id: randomUUID(), name: input.name, host: input.host, authScheme: input.authScheme,
@@ -6309,11 +6318,12 @@ export class Db {
       projectId: input.projectId ?? null,
       sshPort: input.sshPort ?? null, sshUser: input.sshUser ?? null, sshHostKeyFingerprint: input.sshHostKeyFingerprint ?? null,
       sshReadOnly: input.sshReadOnly ?? true, sshCommandAllowlist: input.sshCommandAllowlist ?? "[]", sshRiskyPatterns: input.sshRiskyPatterns ?? "[]",
+      allowPlainHttp: input.allowPlainHttp === true,
     };
     this.db.prepare(
-      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at, provider, client_id, auth_url, token_url, scopes, token_expires_at, oauth_needs_reauth, project_id, ssh_port, ssh_user, ssh_host_key_fingerprint, ssh_read_only, ssh_command_allowlist, ssh_risky_patterns)
-       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt, @provider, @clientId, @authUrl, @tokenUrl, @scopes, @tokenExpiresAt, @oauthNeedsReauth, @projectId, @sshPort, @sshUser, @sshHostKeyFingerprint, @sshReadOnly, @sshCommandAllowlist, @sshRiskyPatterns)`,
-    ).run({ ...row, oauthNeedsReauth: row.oauthNeedsReauth ? 1 : 0, sshReadOnly: row.sshReadOnly ? 1 : 0 });
+      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at, provider, client_id, auth_url, token_url, scopes, token_expires_at, oauth_needs_reauth, project_id, ssh_port, ssh_user, ssh_host_key_fingerprint, ssh_read_only, ssh_command_allowlist, ssh_risky_patterns, allow_plain_http)
+       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt, @provider, @clientId, @authUrl, @tokenUrl, @scopes, @tokenExpiresAt, @oauthNeedsReauth, @projectId, @sshPort, @sshUser, @sshHostKeyFingerprint, @sshReadOnly, @sshCommandAllowlist, @sshRiskyPatterns, @allowPlainHttp)`,
+    ).run({ ...row, oauthNeedsReauth: row.oauthNeedsReauth ? 1 : 0, sshReadOnly: row.sshReadOnly ? 1 : 0, allowPlainHttp: row.allowPlainHttp ? 1 : 0 });
     return row;
   }
   /** Delete a connection by id (idempotent — a missing id matches nothing). */
@@ -6368,9 +6378,11 @@ export class Db {
     name?: string; host?: string; authScheme?: ConnectionAuthScheme; secretBlob?: string;
     sshPort?: number; sshUser?: string; sshHostKeyFingerprint?: string;
     sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+    allowPlainHttp?: boolean;
   }): void {
     const cols: Array<[keyof typeof patch, string]> = [
       ["name", "name"], ["host", "host"], ["authScheme", "auth_scheme"], ["secretBlob", "secret_blob"],
+      ["allowPlainHttp", "allow_plain_http"],
       ["sshPort", "ssh_port"], ["sshUser", "ssh_user"], ["sshHostKeyFingerprint", "ssh_host_key_fingerprint"],
       ["sshReadOnly", "ssh_read_only"], ["sshCommandAllowlist", "ssh_command_allowlist"], ["sshRiskyPatterns", "ssh_risky_patterns"],
     ];
@@ -13026,6 +13038,8 @@ function toConnectionRow(r0: unknown): ConnectionRow {
     sshReadOnly: (r.ssh_read_only as number | null) !== 0,
     sshCommandAllowlist: (r.ssh_command_allowlist as string | null) ?? "[]",
     sshRiskyPatterns: (r.ssh_risky_patterns as string | null) ?? "[]",
+    // Fail CLOSED the other way: NULL/0/anything-but-1 means https only.
+    allowPlainHttp: (r.allow_plain_http as number | null) === 1,
   };
 }
 /** Canonical (lexicographically smaller-id-first) ordering for a symmetric project_links pair. */

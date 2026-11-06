@@ -18,7 +18,8 @@
  */
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { stripSshKeyPassphrase } from "./sshKey.js";
-import { httpsHostRoundTrips } from "./hostForm.js";
+import { hostRoundTrips } from "./hostForm.js";
+import { daemonReservedPorts, validatePlainHttpHost } from "./lanHttp.js";
 import type { ConnectionRow } from "../db.js";
 import { DEFAULT_SSH_RISKY_COMMAND_PATTERNS } from "@loom/shared";
 
@@ -28,11 +29,13 @@ import { DEFAULT_SSH_RISKY_COMMAND_PATTERNS } from "@loom/shared";
 export class SshConnectionInputError extends Error {
   constructor(message: string) { super(message); this.name = "SshConnectionInputError"; }
 }
-import type { CodexProvider, ConnectionAuthScheme, ConnectionMetadata, OAuthProviderSlug, SshCommandRule } from "@loom/shared";
+import type { CodexProvider, ConnectionAuthScheme, ConnectionMetadata, OAuthProviderSlug, PlatformConfigOverride, SshCommandRule } from "@loom/shared";
 import { codexProviderBindingError } from "../profiles/codex-provider.js";
 
 /** The narrow db surface this module needs (mirrors CompanionConfigStore's shape in companion/store.ts). */
 export interface ConnectionsDbStore {
+  /** Optional: lets the plain-http host check read `remoteAccess.proxyPort` (the daemon's own ports are refused). */
+  getPlatformConfig?(): PlatformConfigOverride;
   listConnections(): ConnectionRow[];
   getConnection(id: string): ConnectionRow | undefined;
   /** Exact-name lookup — the create-or-update seam for credential auto-provisioning v1 (card 193de09e). */
@@ -43,6 +46,7 @@ export interface ConnectionsDbStore {
     projectId?: string | null;
     sshPort?: number | null; sshUser?: string | null; sshHostKeyFingerprint?: string | null;
     sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+    allowPlainHttp?: boolean;
   }): ConnectionRow;
   deleteConnection(id: string): void;
   updateConnectionTokens(id: string, patch: { secretBlob: string; tokenExpiresAt: string | null }): void;
@@ -56,6 +60,7 @@ export interface ConnectionsDbStore {
     name?: string; host?: string; authScheme?: ConnectionAuthScheme; secretBlob?: string;
     sshPort?: number; sshUser?: string; sshHostKeyFingerprint?: string;
     sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+    allowPlainHttp?: boolean;
   }): void;
   /** The profiles' codexProvider bindings — read by an edit's host-change dependent check. */
   listProfiles(): Array<{ name: string; codexProvider?: CodexProvider | null }>;
@@ -93,8 +98,9 @@ function toMetadata(row: ConnectionRow): ConnectionMetadata {
   const base: ConnectionMetadata = { id: row.id, name: row.name, host: row.host, authScheme: row.authScheme, projectId: row.projectId, createdAt: row.createdAt };
   // A stored host that today's validator refuses (a row written before it existed) — flagged, never fixed
   // silently. Absent (not false) on a valid row so every existing metadata shape stays byte-identical.
-  const storedHostCheck = validateConnectionHost(row.host, row.authScheme === "ssh" ? "ssh" : "https");
+  const storedHostCheck = validateConnectionHost(row.host, hostKindOf(row));
   if (!storedHostCheck.ok) { base.invalidHost = true; base.invalidHostReason = storedHostCheck.error; }
+  if (row.allowPlainHttp && (row.authScheme === "api-key" || row.authScheme === "bearer")) base.allowPlainHttp = true;
   if (row.authScheme === "ssh") {
     return {
       ...base,
@@ -207,12 +213,15 @@ export function isConnectionUsableByProject(connectionProjectId: string | null, 
  * whether to throw, and reusable by a caller that wants to pre-check before calling.
  */
 export function validateConnectionInput(input: {
-  name?: unknown; host?: unknown; authScheme?: unknown; secret?: unknown;
-}): { ok: true } | { ok: false; error: string } {
+  name?: unknown; host?: unknown; authScheme?: unknown; secret?: unknown; allowPlainHttp?: unknown;
+}, reservedPorts?: readonly number[]): { ok: true } | { ok: false; error: string } {
   if (!isNonBlankStr(input.name, CONNECTION_NAME_MAX)) {
     return { ok: false, error: `name must be a non-empty string of at most ${CONNECTION_NAME_MAX} characters` };
   }
-  const hostCheck = validateConnectionHost(input.host, "https");
+  if (input.allowPlainHttp !== undefined && typeof input.allowPlainHttp !== "boolean") {
+    return { ok: false, error: "allowPlainHttp, when given, must be a boolean" };
+  }
+  const hostCheck = validateConnectionHost(input.host, input.allowPlainHttp === true ? "http" : "https", reservedPorts);
   if (!hostCheck.ok) return hostCheck;
   if (typeof input.authScheme !== "string" || !CREATE_CONNECTION_SCHEMES.includes(input.authScheme as ConnectionAuthScheme)) {
     return { ok: false, error: "authScheme must be 'api-key' or 'bearer' (register an oauth2 connection via createOAuthConnection instead)" };
@@ -233,7 +242,7 @@ export function validateConnectionInput(input: {
  * ssh. Error strings are FIXED text and never echo the submitted host. Validates the TRIMMED value, exactly what
  * callers store.
  */
-export function validateConnectionHost(host: unknown, kind: "https" | "ssh"): { ok: true } | { ok: false; error: string } {
+export function validateConnectionHost(host: unknown, kind: "https" | "ssh" | "http", reservedPorts?: readonly number[]): { ok: true } | { ok: false; error: string } {
   if (!isNonBlankStr(host, CONNECTION_HOST_MAX)) {
     return { ok: false, error: `host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters` };
   }
@@ -250,7 +259,7 @@ export function validateConnectionHost(host: unknown, kind: "https" | "ssh"): { 
   } else {
     const colons = h.split(":").length - 1;
     if (colons >= 2) {
-      if (kind === "https") return { ok: false, error: "an IPv6 host must be written in [brackets], e.g. [fd00::1]:8443" };
+      if (kind !== "ssh") return { ok: false, error: "an IPv6 host must be written in [brackets], e.g. [fd00::1]:8443" };
       if (!/^[0-9a-fA-F:.]+$/.test(h)) return { ok: false, error: "host is not a valid hostname or IP address" };
     } else if (colons === 1) {
       portText = h.slice(h.indexOf(":") + 1);
@@ -265,15 +274,23 @@ export function validateConnectionHost(host: unknown, kind: "https" | "ssh"): { 
     if (!/^\d{1,5}$/.test(portText) || Number(portText) < 1 || Number(portText) > 65535 || /^0/.test(portText)) {
       return { ok: false, error: "port must be a number between 1 and 65535 with no leading zero" };
     }
-    if (portText === "443") return { ok: false, error: "drop ':443' — requests use https, whose default port is 443" };
+    if (portText === "443" && kind !== "http") return { ok: false, error: "drop ':443' — requests use https, whose default port is 443" };
+    if (portText === "80" && kind === "http") return { ok: false, error: "drop ':80' — plain http's default port is 80" };
   }
-  if (kind === "https") {
+  if (kind !== "ssh") {
     // eslint-disable-next-line no-control-regex
     if (/[^\x00-\x7f]/.test(h)) return { ok: false, error: "host must be ASCII — write an internationalised name in its punycode (xn--) form" };
     if (h.includes("%")) return { ok: false, error: "host must not contain percent-escapes" };
-    if (!httpsHostRoundTrips(h)) return { ok: false, error: "use the canonical host form (lowercase ASCII, compressed IPv6, dotted-decimal IPv4)" };
+    if (!hostRoundTrips(h, kind === "http" ? "http" : "https")) return { ok: false, error: "use the canonical host form (lowercase ASCII, compressed IPv6, dotted-decimal IPv4)" };
   }
+  if (kind === "http") return validatePlainHttpHost(h, reservedPorts);
   return { ok: true };
+}
+
+/** The validator kind a stored connection's host is judged under: its own opt-in decides the scheme. */
+function hostKindOf(row: { authScheme: ConnectionAuthScheme; allowPlainHttp: boolean }): "https" | "ssh" | "http" {
+  if (row.authScheme === "ssh") return "ssh";
+  return row.allowPlainHttp && (row.authScheme === "api-key" || row.authScheme === "bearer") ? "http" : "https";
 }
 
 /** The ssh-target form of {@link validateConnectionHost}, shared by `validateSshConnectionInput` (create) and the
@@ -353,10 +370,10 @@ export function getConnectionMetadata(db: ConnectionsDbStore, id: string): Conne
  */
 export function createConnection(
   db: ConnectionsDbStore,
-  input: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null },
+  input: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null; allowPlainHttp?: boolean },
   keyPath?: string,
 ): ConnectionMetadata {
-  const v = validateConnectionInput(input);
+  const v = validateConnectionInput(input, daemonReservedPorts(db));
   if (!v.ok) throw new Error(v.error);
   const row = db.createConnection({
     name: input.name.trim(),
@@ -364,6 +381,7 @@ export function createConnection(
     authScheme: input.authScheme,
     secretBlob: encryptSecret(input.secret.trim(), keyPath),
     projectId: input.projectId ?? null,
+    allowPlainHttp: input.allowPlainHttp === true,
   });
   return toMetadata(row);
 }
@@ -512,7 +530,7 @@ export function updateConnection(
   const row = db.getConnection(id);
   if (!row) throw new ConnectionInputError("no connection with that id", 404);
   if (row.authScheme === "ssh") throw new ConnectionInputError("an ssh connection is edited through PUT /api/connections/:id/ssh");
-  const editable = row.authScheme === "oauth2" ? ["name", "host"] : ["name", "host", "authScheme", "secret"];
+  const editable = row.authScheme === "oauth2" ? ["name", "host"] : ["name", "host", "authScheme", "secret", "allowPlainHttp"];
   for (const key of Object.keys(patch)) {
     if (patch[key] === undefined || editable.includes(key)) continue;
     // `projectId` echoing its current value is a harmless no-op; any other immutable/unknown key is refused.
@@ -535,12 +553,30 @@ export function updateConnection(
     }
     if (patch.authScheme !== row.authScheme) { scheme = patch.authScheme; next.authScheme = scheme; changed.push("authScheme"); }
   }
+  // The plain-http opt-in (card 1d882a8c): owner-only, api-key/bearer only (oauth2 never reaches here — it is
+  // not in its editable list). The host is judged under the EFFECTIVE flag, so a flag flip re-validates the host.
+  let plainHttp = row.allowPlainHttp;
+  if (patch.allowPlainHttp !== undefined) {
+    if (typeof patch.allowPlainHttp !== "boolean") throw new ConnectionInputError("allowPlainHttp, when given, must be a boolean");
+    if (patch.allowPlainHttp !== row.allowPlainHttp) {
+      plainHttp = patch.allowPlainHttp;
+      next.allowPlainHttp = plainHttp;
+      changed.push("allowPlainHttp");
+    }
+  }
+  const flagChanged = plainHttp !== row.allowPlainHttp;
+  if (patch.host === undefined && flagChanged) {
+    // Flipping the opt-in on an unchanged host: that stored host must be valid under the NEW form.
+    const stored = validateConnectionHost(row.host, plainHttp ? "http" : "https", daemonReservedPorts(db));
+    if (!stored.ok) throw new ConnectionInputError(stored.error);
+  }
   if (patch.host !== undefined) {
     // The shared host validator, applied to a host that is actually CHANGING: a form that resends an
-    // already-stored (legacy, flagged invalidHost) host must still be able to save its other edits.
-    const hostShape = validateConnectionHost(patch.host, "https");
+    // already-stored (legacy, flagged invalidHost) host must still be able to save its other edits —
+    // unless the opt-in flag is itself flipping in this request, which changes what "valid" means.
+    const hostShape = validateConnectionHost(patch.host, plainHttp ? "http" : "https", daemonReservedPorts(db));
     const host = typeof patch.host === "string" ? patch.host.trim() : "";
-    if (!hostShape.ok && host !== row.host) throw new ConnectionInputError(hostShape.error);
+    if (!hostShape.ok && (host !== row.host || flagChanged)) throw new ConnectionInputError(hostShape.error);
     if (!isNonBlankStr(patch.host, CONNECTION_HOST_MAX)) {
       throw new ConnectionInputError(`host must be a non-empty string of at most ${CONNECTION_HOST_MAX} characters`);
     }

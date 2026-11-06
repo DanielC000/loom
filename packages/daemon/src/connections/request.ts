@@ -37,7 +37,8 @@ import {
 } from "./store.js";
 import { ensureFreshOAuthToken } from "./oauth.js";
 import { boundedFetch } from "./boundedFetch.js";
-import { httpsHostRoundTrips } from "./hostForm.js";
+import { hostRoundTrips, type ConnectionUrlScheme } from "./hostForm.js";
+import { createPinnedHttpFetch, daemonReservedPorts, resolveLanTarget, type LanTarget, type LookupImpl } from "./lanHttp.js";
 
 export interface AuthenticatedRequestInput {
   /** The P1 connection's id, OR — card 298b826e — a NAME that matches exactly one connection in the
@@ -89,15 +90,16 @@ function validatePath(path: unknown): { ok: true } | { ok: false; error: string 
  * any interior "//"/"@"/"://" in a path segment is just part of the path/query/fragment) — but asserting
  * it explicitly makes that guarantee load-bearing rather than merely believed.
  */
-function buildRequestUrl(host: string, path: string): URL {
+function buildRequestUrl(host: string, path: string, scheme: ConnectionUrlScheme = "https"): URL {
   // `URL` lowercases the host, so the shared round-trip compares against the lowercased stored host: a
   // mixed-case host names the same server and must not fail the allowlist assertion. Checked BEFORE building
-  // so a host URL would throw on (e.g. `[1.2.3.4]`) fails with the same allowlist error.
-  if (!httpsHostRoundTrips(host)) {
+  // so a host URL would throw on (e.g. `[1.2.3.4]`) fails with the same allowlist error. The scheme is the
+  // connection's own opt-in (never parsed out of `host`), and ONE helper serves both forms.
+  if (!hostRoundTrips(host, scheme)) {
     throw new Error("constructed request URL failed the host/protocol allowlist assertion");
   }
-  const url = new URL(`https://${host}${path}`);
-  if (url.protocol !== "https:" || url.host !== host.toLowerCase()) {
+  const url = new URL(`${scheme}://${host}${path}`);
+  if (url.protocol !== `${scheme}:` || url.host !== host.toLowerCase()) {
     throw new Error("constructed request URL failed the host/protocol allowlist assertion");
   }
   return url;
@@ -138,6 +140,11 @@ export interface AuthenticatedRequestDeps {
   fetchImpl?: typeof fetch;
   /** Clock override — the rate-limiter test seam. */
   now?: () => number;
+  /** DNS override for an opt-in plain-http connection — the hermetic test seam (never a real lookup in tests). */
+  lookupImpl?: LookupImpl;
+  /** Builds the fetch pinned to the CHECKED address for an opt-in plain-http connection. Test seam only — the
+   *  default dials the address via `node:http`. */
+  pinnedFetchFactory?: (target: LanTarget) => typeof fetch;
 }
 
 /**
@@ -219,9 +226,12 @@ export async function performAuthenticatedRequest(
     return { ok: false, error: "the Authorization header is injected by Loom and may not be set by the caller" };
   }
 
+  // The owner's plain-http opt-in (card 1d882a8c) is honoured ONLY for api-key/bearer — an oauth2 row's
+  // token exchange stays https, and an ssh row never reaches this tool's HTTP path.
+  const plainHttp = meta.allowPlainHttp === true && (meta.authScheme === "api-key" || meta.authScheme === "bearer");
   let url: URL;
   try {
-    url = buildRequestUrl(meta.host, input.path);
+    url = buildRequestUrl(meta.host, input.path, plainHttp ? "http" : "https");
   } catch {
     return { ok: false, error: "failed to construct a valid request URL for this connection's host" };
   }
@@ -234,6 +244,17 @@ export async function performAuthenticatedRequest(
       ok: false,
       error: `rate limit exceeded for this connection (max ${guard.rateLimitMax} requests per ${Math.round(guard.rateLimitWindowMs / 1000)}s)`,
     };
+  }
+
+  // Plain http: resolve the host ONCE now, require the RESOLVED address(es) to be private LAN (the DNS-rebinding
+  // guard — see lanHttp.ts for the exact class rules), and PIN the dispatch to that address so nothing is
+  // resolved again between this check and the connect. Placed after the rate limit so a caller cannot use
+  // refused calls to drive unbounded DNS, and before the secret is decrypted so a refusal never touches it.
+  let dispatchFetch = deps.fetchImpl;
+  if (plainHttp) {
+    const lan = await resolveLanTarget(meta.host, { lookupImpl: deps.lookupImpl, timeoutMs: guard.requestTimeoutMs, reservedPorts: daemonReservedPorts(deps.db) });
+    if (!lan.ok) return { ok: false, error: lan.error };
+    dispatchFetch = (deps.pinnedFetchFactory ?? ((t: LanTarget) => createPinnedHttpFetch(t)))(lan.target);
   }
 
   // Decrypt/refresh LAST (right before dispatch) so a rejected call never touches the envelope or fires a
@@ -283,7 +304,7 @@ export async function performAuthenticatedRequest(
     body: requestBody,
     timeoutMs: guard.requestTimeoutMs,
     maxResponseBytes: guard.maxResponseBytes,
-    fetchImpl: deps.fetchImpl,
+    fetchImpl: dispatchFetch,
     treatRedirectAsError: false,
   });
   if (!result.ok) return { ok: false, error: result.error };

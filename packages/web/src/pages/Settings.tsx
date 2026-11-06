@@ -2342,7 +2342,7 @@ function ConnectionsPanel() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ["connections"] });
   const create = useMutation({
     meta: { inlineError: true },
-    mutationFn: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null }) => api.createConnection(b),
+    mutationFn: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null; allowPlainHttp?: boolean }) => api.createConnection(b),
     onSuccess: () => { setAdding(false); invalidate(); },
   });
   const createOAuth = useMutation({
@@ -2438,6 +2438,8 @@ function ConnectionsPanel() {
                 {/* A stored host the current validator refuses (e.g. a scheme/port/path pasted into it): this
                     connection can never resolve, so say so instead of letting it read as bound-and-fine. */}
                 {c.invalidHost && <Badge tone="busy" title={c.invalidHostReason} data-testid="connection-invalid-host">Invalid host</Badge>}
+                {/* The owner opted this connection into unencrypted http for a private/LAN host: say so on the row. */}
+                {c.allowPlainHttp && <Badge tone="busy" title="The secret is sent unencrypted on your local network" data-testid="connection-plain-http">HTTP (LAN)</Badge>}
                 {/* Bound/unbound (api-key/bearer ALLOWLIST, matching the server's RAW_SECRET_AUTH_SCHEMES
                     in connections/store.ts): an oauth2 row shows its own connectedness instead, and an ssh
                     row's secret is never resolvable through this static-injection seam either — the
@@ -2484,6 +2486,30 @@ function ConnectionsPanel() {
   );
 }
 
+// The owner's opt-in to plain http for a private/LAN host (card 1d882a8c), shared by the create and edit forms.
+// The warning uses the existing `busy` tone's colour (no new tokens). The daemon owns every rule (private
+// address only, checked again at each request); this is only the switch and its honest warning.
+function PlainHttpToggle({ checked, onChange, testId }: { checked: boolean; onChange: (v: boolean) => void; testId: string }) {
+  return (
+    <label style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "7px 9px", background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.sm, cursor: "pointer" }}>
+      <input
+        type="checkbox"
+        data-testid={testId}
+        aria-label="Allow plain HTTP (LAN only)"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        style={{ accentColor: color.busy, width: 15, height: 15, marginTop: 1, flexShrink: 0 }}
+      />
+      <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        <span style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>Allow plain HTTP (LAN only)</span>
+        <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.busy }}>
+          The token is sent unencrypted on your local network. Only for a private address (10.x, 172.16-31.x, 192.168.x, loopback, link-local); enter the host as host:port, for example 192.168.1.20:32400.
+        </span>
+      </span>
+    </label>
+  );
+}
+
 // Inline owner edit of an api-key / bearer / oauth2 connection (card 923dfc9d). The secret is WRITE-ONLY: its
 // field starts empty (there is nothing to pre-fill it from) and blank means "keep the stored secret". An oauth2
 // row edits name/host only; scope is immutable for every kind (delete and re-create to change it). A saved
@@ -2494,6 +2520,7 @@ function ConnectionEditForm({ c, onDone, onCancel }: { c: ConnectionMetadata; on
   const [host, setHost] = useState(c.host);
   const [authScheme, setAuthScheme] = useState<ConnectionAuthScheme>(c.authScheme);
   const [secret, setSecret] = useState("");
+  const [allowPlainHttp, setAllowPlainHttp] = useState(c.allowPlainHttp === true);
   const [localErr, setLocalErr] = useState<string | null>(null);
   // gcTime: 0 so the rotated secret does not linger in the MutationCache once this form unmounts.
   const save = useMutation({
@@ -2508,7 +2535,7 @@ function ConnectionEditForm({ c, onDone, onCancel }: { c: ConnectionMetadata; on
     if (!host.trim()) { setLocalErr("A host is required."); return; }
     save.mutate({
       name: name.trim(), host: host.trim(),
-      ...(isOauth ? {} : { authScheme, ...(secret.trim() !== "" ? { secret: secret.trim() } : {}) }),
+      ...(isOauth ? {} : { authScheme, allowPlainHttp, ...(secret.trim() !== "" ? { secret: secret.trim() } : {}) }),
     });
   };
   return (
@@ -2535,6 +2562,7 @@ function ConnectionEditForm({ c, onDone, onCancel }: { c: ConnectionMetadata; on
             <span style={fieldLabel}>New secret</span>
             <Input type="password" aria-label="New connection secret" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" placeholder="leave blank to keep the stored secret" />
           </label>
+          <PlainHttpToggle checked={allowPlainHttp} onChange={setAllowPlainHttp} testId={`connection-edit-plain-http-${c.id}`} />
         </>
       )}
       {(localErr || save.error) && <span role="alert" style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{localErr ?? errorText(save.error)}</span>}
@@ -2667,7 +2695,7 @@ function normalizeSonarQubeHost(raw: string): string {
 function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onSubmitSsh, onCancel }: {
   pending: boolean; error: string | null;
   projects: { id: string; name: string }[];
-  onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null }) => void;
+  onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null; allowPlainHttp?: boolean }) => void;
   onSubmitOAuth: (v: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[]; projectId: string | null }) => void;
   onSubmitSsh: (v: Parameters<typeof api.createSshConnection>[0]) => void;
   onCancel: () => void;
@@ -2691,6 +2719,8 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
   // usable ONLY by that project's own sessions. Applies to BOTH the api-key/bearer and oauth2 branches.
   const [scopeProjectId, setScopeProjectId] = useState("");
   const [secret, setSecret] = useState("");
+  // Opt-in plain http for a private/LAN host (card 1d882a8c). Default off; api-key/bearer only.
+  const [allowPlainHttp, setAllowPlainHttp] = useState(false);
   const [provider, setProvider] = useState<OAuthProviderSlug>("google");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
@@ -2771,7 +2801,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
       setLocalErr("Secret is required.");
       return;
     }
-    onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim(), projectId: scopeProjectId || null });
+    onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim(), projectId: scopeProjectId || null, ...(allowPlainHttp ? { allowPlainHttp: true } : {}) });
   };
 
   // Card 7fba8d90: re-derive the Name from the newly-picked preset ONLY while it is still preset-derived.
@@ -2884,7 +2914,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Host</span>
             <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="e.g. api.github.com" spellCheck={false} />
-            <Hint>the target host this connection's secret is scoped to (metadata only — not yet enforced)</Hint>
+            <Hint>the target host this connection's secret is scoped to (requests are only ever sent to this host)</Hint>
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Auth scheme</span>
@@ -2929,11 +2959,14 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
               </label>
             </>
           ) : (
-            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <span style={fieldLabel}>Secret</span>
-              <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" />
-              <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
-            </label>
+            <>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <span style={fieldLabel}>Secret</span>
+                <Input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" />
+                <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
+              </label>
+              <PlainHttpToggle checked={allowPlainHttp} onChange={setAllowPlainHttp} testId="connection-create-plain-http" />
+            </>
           )}
         </>
       )}
