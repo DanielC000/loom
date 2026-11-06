@@ -70,13 +70,19 @@ export function useCollapsedLanes(projectId: string | undefined): [Set<string>, 
 }
 
 /**
- * The ⋯ lane menu: a real menu button (Enter/Space/ArrowDown open it, focus lands on the first enabled item,
+ * The ⋯ lane menu: a real menu button (Enter/Space open it, focus lands on the first enabled item,
  * arrows/Home/End move, Escape closes and returns focus). Alt+←/→ on the closed button moves the lane
  * directly, the shortcut the menu items advertise.
+ *
+ * The closed button is also the lane's HEADER item in the board's roving focus grid (card 591fe6ed), so
+ * plain arrows on it belong to the grid: ↓ goes to the lane's first card, ←/→ to the next lane. That is why
+ * ↓/↑ no longer open the menu here — Enter/Space (and a click) do.
  */
-export function LaneMenu({ col, index, count, disabled, onMove, onCollapse }: {
+export function LaneMenu({ col, index, count, disabled, onMove, onCollapse, navItem, tabIndex }: {
   col: KanbanColumn; index: number; count: number; disabled?: boolean;
   onMove: (toIndex: number) => void; onCollapse: () => void;
+  /** The board focus grid's item id for this button, and its roving tabIndex (card 591fe6ed). */
+  navItem?: string; tabIndex?: number;
 }) {
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -147,9 +153,7 @@ export function LaneMenu({ col, index, count, disabled, onMove, onCollapse }: {
       e.preventDefault();
       if (e.key === "ArrowLeft" && canLeft) onMove(index - 1);
       if (e.key === "ArrowRight" && canRight) onMove(index + 1);
-      return;
     }
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setOpen(true); }
   };
   const onMenuKey = (e: KeyboardEvent<HTMLDivElement>) => {
     const items = enabledItems();
@@ -181,7 +185,7 @@ export function LaneMenu({ col, index, count, disabled, onMove, onCollapse }: {
   return (
     <div style={{ flexShrink: 0 }}>
       <button type="button" ref={btnRef} className="loom-lane-more" data-testid={`lane-menu-button-${col.key}`}
-        data-lane-more={col.key}
+        data-lane-more={col.key} data-board-nav={navItem} tabIndex={tabIndex}
         aria-label={`${col.label} lane options`} aria-haspopup="menu" aria-expanded={open}
         aria-controls={open ? menuId : undefined}
         aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight"

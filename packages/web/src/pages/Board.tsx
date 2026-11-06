@@ -40,6 +40,10 @@ import {
 import { PRIORITY_META, PriorityChip, prio, byPriorityThenPosition } from "../components/priority";
 import { errorText } from "../lib/loopbackCredential";
 import { submitDraft } from "../lib/draftSubmit";
+import {
+  BoardNavContext, NAV_HEAD, NAV_KEYS, NAV_MORE, NEW_CARD_KEY, navElement, navTarget, readNavLanes, resolveLaneItem,
+  shortcutBlocked, useBoardNav, type BoardFocus, type BoardNav, type NavKey,
+} from "../lib/boardFocus";
 import { usePreviewOnly, PREVIEW_REQUEST_HELD_TITLE } from "../lib/previewOnly";
 // Ship state is only DISCOVERABLE from git while this project writes the reserved trailer paragraph
 // (card bd828fb3) — the drawer says so rather than letting a null read as "did not ship".
@@ -449,6 +453,97 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   const unfetchedDone = windowedTotal === undefined ? 0
     : windowedTotal - allTasks.filter((t) => t.columnKey === windowedLaneKey).length;
 
+  // ── Keyboard focus (card 591fe6ed) ───────────────────────────────────────────
+  // The ONE place the board's focus position lives (see lib/boardFocus.ts). Set from whatever the user
+  // focuses (keyboard or pointer) via the grid's delegated onFocus, so the Tab stop is always the last
+  // item they were on. Resolved against the live board here: a card that moved lane (the dialog's "Move to
+  // lane", another process) is followed to its new lane; a lane that no longer exists falls back to the
+  // first lane's default.
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [focusPos, setFocusPos] = useState<BoardFocus | null>(null);
+  // True while a nav item holds focus, and still true if that item is then removed from the DOM (React
+  // removing a focused node drops focus to <body>). That is the case `repairIfLost` puts right.
+  const navHadFocus = useRef(false);
+  const columnKeys = board.data?.columns.map((c) => c.key) ?? [];
+  let navLane: string | null = null;
+  let navItem: string | null = focusPos?.item ?? null;
+  const navIndex = focusPos?.index ?? 0;
+  if (focusPos) {
+    const followed = shownTasks.find((t) => t.id === focusPos.item)?.columnKey;
+    navLane = followed && columnKeys.includes(followed) ? followed
+      : columnKeys.includes(focusPos.lane) ? focusPos.lane : null;
+  }
+  if (navLane === null) { navLane = columnKeys[0] ?? null; navItem = null; }
+  const focusStop = () => gridRef.current?.querySelector<HTMLElement>("[data-board-nav][tabindex='0']")?.focus();
+  const repairIfLost = () => {
+    if (!navHadFocus.current) return;
+    const ae = document.activeElement;
+    if (ae && ae !== document.body) return;
+    focusStop();
+  };
+  const nav: BoardNav = { lane: navLane, item: navItem, index: navIndex, repairIfLost };
+  useEffect(() => { repairIfLost(); });
+  // Closing the card dialog: useDialogFocus hands focus back to the opener, but when that card has left
+  // the DOM meanwhile (moved lane from the dialog, deleted) focus would land on <body>. Put it on the
+  // Tab stop instead, which `navLane` has already moved to follow the card.
+  const prevOpen = useRef<string | null>(null);
+  useEffect(() => {
+    const was = prevOpen.current;
+    prevOpen.current = openTaskId;
+    if (!was || openTaskId) return;
+    requestAnimationFrame(() => {
+      const ae = document.activeElement;
+      if (!ae || ae === document.body) focusStop();
+    });
+  }, [openTaskId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const onGridFocus = (e: React.FocusEvent<HTMLDivElement>) => {
+    const el = (e.target as HTMLElement).closest<HTMLElement>("[data-board-nav]");
+    const lane = el?.closest<HTMLElement>("[data-lane-key]")?.dataset.laneKey;
+    if (!el || !lane) return;
+    navHadFocus.current = true;
+    const item = el.dataset.boardNav!;
+    const items = [...el.closest("[data-lane-key]")!.querySelectorAll<HTMLElement>("[data-board-nav]")];
+    const index = items.indexOf(el);
+    setFocusPos((p) => (p && p.lane === lane && p.item === item && p.index === index ? p : { lane, item, index }));
+  };
+  const onGridBlur = (e: React.FocusEvent<HTMLDivElement>) => {
+    const el = e.target as HTMLElement;
+    requestAnimationFrame(() => {
+      if (gridRef.current?.contains(document.activeElement)) return;
+      // Still in the DOM and still focusable ⇒ the user moved focus elsewhere on purpose. Removed, or
+      // just disabled (a windowed "Show more" while its page loads) ⇒ keep the flag so the next render
+      // can put focus back.
+      if (el.isConnected && !el.matches(":disabled")) navHadFocus.current = false;
+      else repairIfLost();
+    });
+  };
+  const onGridKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || !NAV_KEYS.has(e.key)) return;
+    const el = e.target as HTMLElement;
+    const item = el.dataset?.boardNav;
+    const lane = el.closest<HTMLElement>("[data-lane-key]")?.dataset.laneKey;
+    if (!item || !lane || !gridRef.current) return;
+    e.preventDefault();
+    const to = navTarget(readNavLanes(gridRef.current), { lane, item }, e.key as NavKey);
+    if (to) navElement(gridRef.current, to.lane, to.item)?.focus();
+  };
+  // The new-card shortcut: `n` focuses this board's "new task title" field. Owned by the component (the
+  // shortcut record a1c6e339: never re-wired per surface). Only the first VISIBLE board in the document
+  // answers, so a second mount parked behind a hidden tab never steals it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== NEW_CARD_KEY || shortcutBlocked(e)) return;
+      const mine = rootRef.current?.querySelector<HTMLInputElement>("[data-board-new-task]");
+      if (!mine || !mine.getClientRects().length) return;
+      const first = [...document.querySelectorAll<HTMLElement>("[data-board-new-task]")].find((el) => el.getClientRects().length);
+      if (first !== mine) return;
+      e.preventDefault();
+      mine.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   return (
     <div ref={rootRef}>
       {/* Polite narration of lane moves / collapses (the visible change is the lane itself). */}
@@ -502,7 +597,8 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                   — so the board degrades gracefully instead of crushing every lane. A collapsed lane
                   takes a fixed slim track; the inline template is set only then, so an all-expanded
                   board keeps the stylesheet's auto tracks untouched. */}
-              <div className="loom-board-grid"
+              <BoardNavContext.Provider value={nav}>
+              <div className="loom-board-grid" ref={gridRef} onFocus={onGridFocus} onBlur={onGridBlur} onKeyDown={onGridKey}
                 style={board.data.columns.some((c) => collapsedLanes.has(c.key))
                   ? { gridTemplateColumns: board.data.columns.map((c) => (collapsedLanes.has(c.key) ? "44px" : "minmax(var(--loom-lane-min), 1fr)")).join(" ") }
                   : undefined}>
@@ -532,6 +628,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                       : null} />
                 ))}
               </div>
+              </BoardNavContext.Provider>
               {/* The lifted lane's preview: its header only, so it reads as "this lane" without dragging a
                   4,000-card list across the screen. No drop animation: the lane snaps into its new slot. */}
               <DragOverlay dropAnimation={null}>
@@ -718,6 +815,19 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
   const hasWipLimit = col.wipLimit !== undefined;
   const atOrOverWip = hasWipLimit && wipCount >= col.wipLimit!;
 
+  // Keyboard focus (card 591fe6ed): this lane's items in render order, and which one (if the board's Tab
+  // stop is in this lane) gets tabIndex 0. Everything else in the grid is -1, so the whole board is one
+  // Tab stop. Only RENDERED cards are items: a collapsed lane is its rail alone, and the done lane's
+  // capped/windowed tail is reached through its "Show N more" button, never focused while hidden.
+  const nav = useBoardNav();
+  const navItems = collapsed ? [NAV_HEAD] : [NAV_HEAD, ...visible.map((t) => t.id), ...(hidden > 0 ? [NAV_MORE] : [])];
+  const stop = nav && nav.lane === col.key ? resolveLaneItem(navItems, nav.item, nav.index) : undefined;
+  const tabFor = (item: string) => (item === stop ? 0 : -1);
+  // A focused node this lane just removed (a reveal button that vanished, a card the poll moved) leaves
+  // focus on <body>; the board puts it back on the Tab stop. Runs on this lane's own renders too, since a
+  // client-side reveal re-renders the lane without re-rendering the board.
+  useEffect(() => { nav?.repairIfLost(); });
+
   // The header shows the label, its resolved role tint and the card count / soft-WIP readout, plus the
   // two ORDER/VIEW controls (card 67c43038): drag by the header to reorder, and the ⋯ lane menu. Column
   // CRUD (add/rename/delete/role/accent/WIP) still lives ONLY in Settings › Board Columns (ColumnManager).
@@ -741,6 +851,7 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
       <div ref={setNodeRef} data-testid={`lane-${col.key}`} data-lane-key={col.key} data-collapsed=""
         style={laneChrome}>
         <button type="button" className="loom-lane-rail" data-lane-expand={col.key} data-testid={`lane-expand-${col.key}`}
+          data-board-nav={NAV_HEAD} tabIndex={tabFor(NAV_HEAD)}
           aria-expanded={false} aria-label={`Expand the ${col.label} lane (${laneLength} card${laneLength === 1 ? "" : "s"})`}
           title={`Expand ${col.label}`} onClick={() => onCollapse(false)} style={{ color: labelColor }}>
           <span className="loom-lane-rail-label">{col.label} <span style={{ fontWeight: 500 }}>({laneLength})</span></span>
@@ -783,10 +894,10 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
           <span style={{ marginLeft: "auto", flexShrink: 0, fontFamily: font.mono, fontWeight: 400, color: color.text3 }}>({laneLength})</span>
         )}
         <LaneMenu col={col} index={index} count={laneCount} disabled={reordering}
-          onMove={onMoveLane} onCollapse={() => onCollapse(true)} />
+          onMove={onMoveLane} onCollapse={() => onCollapse(true)} navItem={NAV_HEAD} tabIndex={tabFor(NAV_HEAD)} />
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
-        {visible.map((task) => <Card key={task.id} task={task} worker={workers.get(task.id)} policy={policyByTask[task.id]} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} />)}
+        {visible.map((task) => <Card key={task.id} task={task} worker={workers.get(task.id)} policy={policyByTask[task.id]} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} tabIndex={tabFor(task.id)} />)}
         {/* The reveal for the done-lane page. Sits INSIDE the lane's own scroll region (so it trails the
             last rendered card rather than pinning to the lane footer) and is full-width so it reads as
             the continuation of the list it extends, not as a card. One-way: revealing more is not a
@@ -798,7 +909,7 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
             same fact to a screen reader rather than leaving it to the visible text alone. The lane keeps
             showing the page it already has (keepPreviousData), so nothing flashes empty underneath. */}
         {hidden > 0 && (
-          <Button variant="ghost"
+          <Button variant="ghost" data-board-nav={NAV_MORE} tabIndex={tabFor(NAV_MORE)}
             onClick={() => (serverWindowed ? onRevealMore?.() : setExpanded(true))}
             disabled={serverWindowed && revealPending}
             aria-busy={serverWindowed && revealPending ? true : undefined}
@@ -1111,8 +1222,10 @@ function MergeTrack({ merge }: { merge: MergeDisplay }) {
 const cardStateTag: React.CSSProperties = { flexShrink: 0, fontFamily: font.ui, fontSize: fs.xs, fontWeight: 600,
   borderRadius: radius.pill, padding: "1px 7px", lineHeight: "16px" };
 
-function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen }:
-  { task: BoardTask; worker?: SessionListItem; policy?: CardPolicyCardStatus; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void }) {
+function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen, tabIndex }:
+  { task: BoardTask; worker?: SessionListItem; policy?: CardPolicyCardStatus; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void;
+    /** The board's roving Tab stop (card 591fe6ed): 0 on the one focusable item, -1 everywhere else. */
+    tabIndex: number }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id, data: { type: "card" } satisfies BoardDragData });
   // One shared react-query key, so every card reads the same cached request list (no extra polling).
   const decisions = usePendingDecisionsBySession();
@@ -1144,7 +1257,10 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
         {/* Drag is confined to this grip so a click on the card body opens the detail drawer instead.
             The grip keeps the mono face: the sans has no braille glyph, and the fallback face draws ⠿
             wider, which pushes a reflowed title off the card's left edge on a tight lane. */}
-        <span {...listeners} {...attributes} title="Drag to move"
+        {/* tabIndex -1 over dnd-kit's own 0: the grip is a pointer handle, and leaving it a Tab stop would
+            put two stops on every card and break the board's single one (card 591fe6ed). A keyboard user
+            moves a card from its dialog's "Move to lane". */}
+        <span {...listeners} {...attributes} tabIndex={-1} title="Drag to move"
           style={{ cursor: "grab", color: color.text3, fontFamily: font.mono, fontSize: fs.mono, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
         {/* The card's open target is a real control, not a clickable div (card a6d7a102): the detail
             dialog had no keyboard way in at all, and with nothing focused when it opened, Esc left a
@@ -1152,7 +1268,7 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
             the minimal shape — a <button> element would reset the card's whole type/layout here, and
             this subtree carries only spans, never a nested link, so no interactive content is buried
             inside it (see the note in components/taskLinks.tsx on why the card deliberately has none). */}
-        <div role="button" tabIndex={0} className="loom-board-open" onClick={onOpen}
+        <div role="button" tabIndex={tabIndex} data-board-nav={task.id} className="loom-board-open" onClick={onOpen}
           onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
           title="Open task" style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
           {/* flexWrap is the phone-density hinge: the priority chip + a held/deferred badge share this
@@ -2279,7 +2395,10 @@ function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCre
   return (
     <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        <Input placeholder="new task title" value={title} onChange={(e) => setTitle(e.target.value)}
+        {/* `data-board-new-task` is the board's `n` shortcut target (card 591fe6ed); the placeholder
+            advertises it the way the session composer advertises Ctrl/Cmd+Enter. */}
+        <Input placeholder="new task title  (N)" aria-label="New task title" aria-keyshortcuts="N" data-board-new-task=""
+          value={title} onChange={(e) => setTitle(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
           style={{ flex: "1 1 260px", minWidth: 0 }} />
         {/* Repo picker — rendered ONLY when the project actually has a registry. A single-repo project

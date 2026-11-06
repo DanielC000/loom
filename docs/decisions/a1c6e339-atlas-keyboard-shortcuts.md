@@ -15,6 +15,11 @@ Derived by grepping every `metaKey|ctrlKey` site in `packages/web/src` — there
 | ⌘/Ctrl+F · scoped in-doc find | `DocFind.tsx` | `/repository` › Files (`pages/Vault.tsx`) | Repository node (project tier) |
 | ⌘/Ctrl+V, ⌘/Ctrl+C · smart clipboard | `Terminal.tsx` `attachCustomKeyEventHandler` | every host above, plus `/companion`'s read-only Terminal | same |
 | ⌘/Ctrl+K · Command Palette | `CommandPalette.tsx` | `App.tsx` overlays | passed to `AtlasShell` as `overlays` — already covered by P1-5 |
+| `n` · focus the board's new-card field | `pages/Board.tsx` (`window` listener owned by `Board`) | every `<Board>` mount: `/board`, the `/overview` embed, the Platform node's Board tab | same; only the first VISIBLE board answers, so a mount parked behind a hidden tab never takes it |
+| ↑↓←→ / Home / End · move between cards and lanes | `pages/Board.tsx` (the lane grid's `onKeyDown`) | every `<Board>` mount | same |
+| Alt+←/→ · move a lane | `components/boardLanes.tsx` `LaneMenu` | every `<Board>` mount | same |
+
+The last three rows were added after this card. The board rows are card `591fe6ed` (focus model and its reasons: `docs/decisions/591fe6ed-board-keyboard-navigation.md`); Alt+←/→ predates it (card `67c43038`) and was missing here. `n` is the app's only bare-letter shortcut: it is ignored with a modifier held, in any input/textarea/select/contenteditable (which also covers an xterm terminal's own textarea), and while any `aria-modal` dialog or `role="menu"` is open.
 
 Three corrections to the §F table fall out of that trace, and each one changes where a test has to look:
 
