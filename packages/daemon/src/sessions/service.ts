@@ -5668,15 +5668,48 @@ export class SessionService {
     }
     this.bestEffortPostSpawn("re-driving undelivered durable messages", sessionId, () => this.redriveUndeliveredMessagesForRecipient(sessionId));
     // The exhaustion notice told the owner this session was dead; it no longer is. Dismiss every open one.
-    this.bestEffortPostSpawn("dismissing the exhaustion notice", sessionId, () => {
-      const open = this.db.listQuestionsForSession(sessionId)
-        .filter((q) => q.type === "notice" && q.dismissedAt == null && q.title.endsWith(ASSISTANT_EXHAUSTION_TITLE_SUFFIX))
-        .map((q) => q.id);
-      this.db.dismissNotices(open, new Date().toISOString());
-    });
+    this.bestEffortPostSpawn("dismissing the exhaustion notice", sessionId, () => this.dismissOpenAssistantExhaustionNotices(sessionId));
     // eslint-disable-next-line no-console
     console.log(`[companion] recycled ${sessionId} onto a fresh engine session (carried ${carried.length} queued message(s))`);
     return { ...this.db.getSession(sessionId)!, processState: "live", busy: false };
+  }
+
+  /** Dismiss (the same `dismissed_at` write the human Dismiss uses) every UNDISMISSED exhaustion notice of one
+   *  Companion. Idempotent: an already-dismissed or absent notice is skipped by the SQL guard, so a recycle's own
+   *  dismissal followed by a recovery retire never double-stamps. Returns the ids actually dismissed. */
+  private dismissOpenAssistantExhaustionNotices(sessionId: string): string[] {
+    const open = this.db.listQuestionsForSession(sessionId)
+      .filter((q) => q.type === "notice" && q.dismissedAt == null && q.title.endsWith(ASSISTANT_EXHAUSTION_TITLE_SUFFIX))
+      .map((q) => q.id);
+    return this.db.dismissNotices(open, new Date().toISOString());
+  }
+
+  /**
+   * Card da0e3fee — retire a Companion's exhaustion notice once it has GENUINELY recovered. Called from
+   * `onTurnCompleted` (a real Stop/StopFailure completion), NOT from the mark-clear: the clear fires on the
+   * rising edge of ANY retry, including one that fails again, and a failed-context turn never fires Stop at
+   * all, so a completed turn is the only honest recovery signal. Defensive on top: a session whose DB mark
+   * is set (re-exhausted) is never retired. Never throws; no-op for a non-Companion, a session with no open
+   * notice, or a notice already dismissed (e.g. by `recycleCompanion`).
+   *
+   * Dismiss rather than amend the notice text: an "it recovered" notice would still demand a dismissal click
+   * from the owner for a problem that no longer exists.
+   */
+  retireAssistantExhaustionNoticeOnRecovery(sessionId: string): string[] {
+    try {
+      if (!this.db.getCompanionConfig(sessionId)) return [];
+      if (this.db.getSession(sessionId)?.contextExhaustedAt != null) return [];
+      const dismissed = this.dismissOpenAssistantExhaustionNotices(sessionId);
+      if (dismissed.length > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[companion] ${sessionId} completed a turn after context exhaustion — daemon auto-dismissed ${dismissed.length} exhaustion notice(s)`);
+      }
+      return dismissed;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[companion] could not retire the exhaustion notice for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
   }
 
   // @decision 6745e4bc — HUMAN-ONLY (REST, never an MCP tool anywhere) re-pin of a manager/worker/

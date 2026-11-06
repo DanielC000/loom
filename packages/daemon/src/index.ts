@@ -488,6 +488,7 @@ async function main(): Promise<void> {
     // front of, so it's isolated.
     onTurnCompleted: (sessionId) => {
       db.incrementTurnSeq(sessionId);
+      sessions.retireAssistantExhaustionNoticeOnRecovery(sessionId); // card da0e3fee — never throws
       try {
         checkCompanionReplyHealth(db, sessionId);
       } catch (err) {
