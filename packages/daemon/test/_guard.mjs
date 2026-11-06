@@ -69,6 +69,10 @@ globalThis.__LOOM_TEST_SPAWNED_PID_CREATION_TIMES__ = LOOM_TEST_SPAWNED_PID_CREA
 const CAPTURE_STATS = { started: 0, skippedReentrant: 0, failed: 0 };
 globalThis.__LOOM_TEST_CAPTURE_STATS__ = CAPTURE_STATS;
 
+// @decision c5b4dbfb — tally of test-guard lineage refusals (bumped in pty/host.ts's refuseReapTarget, the one
+// chokepoint). Initialised here so it is always a number; the exit hook below prints a loud line if nonzero.
+globalThis.__LOOM_TEST_REAP_LINEAGE_REFUSALS__ = 0;
+
 // @decision 0d8270b2 — pid -> WHY the most recent capture for that pid came back unverified (never why it
 // succeeded — a verified entry clears/overwrites any stale reason here). One of "no-row" (the OS enumeration
 // returned nothing for this pid), "ppid-mismatch" (a live row exists but its ppid isn't ours — the genuine
@@ -551,6 +555,13 @@ if (process.platform === "win32" && !process.env.PSModuleAnalysisCachePath) {
 // no pass/fail branch) — matching that established convention here avoids a new, surprising asymmetry
 // where this ONE derived path survives a failure and nothing else does.
 process.on("exit", () => {
+  // @decision c5b4dbfb — never silent: a nonzero tally means the reap test-guard refused a pid as "not our
+  // descendant" (swallowed so it can't crash the process). Loud line only; never changes the exit code.
+  const lineageRefusals = globalThis.__LOOM_TEST_REAP_LINEAGE_REFUSALS__;
+  if (typeof lineageRefusals === "number" && lineageRefusals > 0) {
+    // eslint-disable-next-line no-console
+    console.error(`[test-guard] LINEAGE REFUSALS: ${lineageRefusals} reap target(s) refused as not-our-descendant in this process (swallowed, nothing killed) — investigate if unexpected`);
+  }
   // @decision d5432aff — best-effort cleanup of the dir THIS file (never test-daemon.mjs) created above.
   if (psModuleCacheDir) cleanupPathSync(psModuleCacheDir);
 

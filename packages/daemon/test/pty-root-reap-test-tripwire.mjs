@@ -575,8 +575,8 @@ try {
         capturedLines.some((l) => l.includes("onExit sweep's enumeration-failure refusal caught at the exit chokepoint, not crashing")));
     }
 
-    // (G2) a lineage refusal through the SAME chokepoint must still propagate — unchanged from before this
-    // card. Feeds the guard's OWN enumeration a FABRICATED, deterministic empty snapshot (same execFileSync
+    // (G2) a lineage refusal through the SAME chokepoint is swallowed (card c5b4dbfb reversed b1ea823d's
+    // "must still propagate") and tallied. Feeds the guard's OWN enumeration a FABRICATED, deterministic empty snapshot (same execFileSync
     // monkeypatch technique as G1/scenario E) rather than letting the real OS enumeration run: a real
     // `powershell.exe`/`ps` call can itself ETIMEDOUT under exactly the load this card targets, which would
     // make this specific assertion flake for a reason unrelated to what it's checking (CR 79a80cd5, minor 4).
@@ -586,6 +586,7 @@ try {
       const originalExecFileSync = cp.execFileSync;
       cp.execFileSync = () => ""; // zero rows: SENTINEL_PID is provably absent, never a descendant.
       syncBuiltinESMExports();
+      const refusalsBeforeG2 = globalThis.__LOOM_TEST_REAP_LINEAGE_REFUSALS__ ?? 0;
       let threw = null;
       try {
         // @decision b1ea823d — reapExitedDescendants is now async (card 0201b378, item B); await it so a
@@ -596,10 +597,29 @@ try {
         cp.execFileSync = originalExecFileSync;
         syncBuiltinESMExports();
       }
-      check("(G2) a lineage refusal through the real onExit chokepoint STILL throws (propagates, unswallowed)",
-        threw instanceof Error && threw.message.includes("not a live descendant"));
-      check("(G2) the lineage refusal is NOT the enumeration-failure code — this stays an unswallowed REFUSAL, never routed through the one code reapExitedDescendants's own catch tolerates",
-        threw instanceof Error && threw.code !== "LOOM_REAP_TEST_GUARD_ENUMERATION_FAILED");
+      // @decision c5b4dbfb — REVERSES b1ea823d's "a lineage refusal still propagates": that crashed the
+      // whole test process on a benign orphaned fake-claude child. Now swallowed at this chokepoint (the
+      // refusal still prevents the kill), logged loudly, and tallied for a test that cares.
+      check("(G2) a lineage refusal through the real onExit chokepoint does NOT crash (swallowed at the chokepoint)",
+        threw === null);
+      check("(G2) the swallow was logged: pid + 'lineage refusal at exit reap; nothing was killed'",
+        capturedLines.some((l) => l.includes("lineage refusal at exit reap; nothing was killed") && l.includes(`pid=${SENTINEL_PID}`)));
+      check("(G2) the test-visible refusal counter incremented by exactly 1",
+        (globalThis.__LOOM_TEST_REAP_LINEAGE_REFUSALS__ ?? 0) === refusalsBeforeG2 + 1);
+    }
+
+    // (G2b) the swallow is code-discriminated, not broad: a DIFFERENT throw from the sweep still propagates.
+    {
+      // Instance-level override (not a subclass): pty-subclass-reap-seam-guard polices `extends PtyHost`.
+      const other = new PtyHost(events);
+      other.sweepOrphanedDescendants = () => { throw new Error("some other, unrelated sweep failure (card c5b4dbfb G2b)"); };
+      other.verifyRootDeadOrForceKill = host.verifyRootDeadOrForceKill;
+      other.resolveRootReapPlatform = () => "win32";
+      let threw = null;
+      try { await other.reapExitedDescendants(SENTINEL_PID, "sess-c5b4dbfb-other", { creationTime: null, creationTimeReady: Promise.resolve() }); }
+      catch (err) { threw = err; }
+      check("(G2b) a non-refusal error from the sweep STILL propagates (the catch is code-discriminated, not broad)",
+        threw instanceof Error && threw.message.includes("unrelated sweep failure"));
     }
 
     // (G3) card 0201b378, item B — the ORIGINAL specimen: a fast-exiting root whose creation-time capture
@@ -631,6 +651,7 @@ try {
         resolveCreationTime();
       }, 50); // well inside ROOT_CREATION_CAPTURE_AWAIT_MS's 3000ms default — this is the specimen's whole point
 
+      const refusalsBeforeG3 = globalThis.__LOOM_TEST_REAP_LINEAGE_REFUSALS__ ?? 0;
       let threw = null;
       try {
         try { await host.reapExitedDescendants(SENTINEL_PID, "sess-0201b378-timing", liveRef); }
@@ -641,6 +662,10 @@ try {
       }
       check("(G3) a fast-exiting root whose capture resolves shortly AFTER onExit does NOT throw (the await gave the mismatch check real data)",
         threw === null);
+      // c5b4dbfb: with the lineage refusal now swallowed, "no throw" alone no longer proves the mismatch was
+      // verified (a swallowed refusal also doesn't throw) — assert the refusal tally did NOT move.
+      check("(G3) no lineage refusal was swallowed (the pid-reuse skip, not a swallowed refusal, is why nothing threw)",
+        (globalThis.__LOOM_TEST_REAP_LINEAGE_REFUSALS__ ?? 0) === refusalsBeforeG3);
       check("(G3) the guard's own SKIPPED log line fired — the mismatch was genuinely VERIFIED, not an unresolved fallthrough",
         capturedLines.some((l) => l.includes(`[pty-reap-test-guard] SKIPPED reapOrphanedDescendants(pid=${SENTINEL_PID})`)));
     }

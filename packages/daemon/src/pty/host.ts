@@ -5073,10 +5073,22 @@ function creationTimeFromTestSpawnRegistry(pid: number): number | null {
   return registry?.get(pid) ?? null;
 }
 
-/** @decision b1ea823d — the ONE enumeration-failure refusal (never any other refusal) that {@link
+/** @decision b1ea823d — one of the TWO refusals (with the lineage refusal below, per c5b4dbfb) that {@link
  * PtyHost.reapExitedDescendants}'s onExit chokepoint may swallow instead of letting crash the exit path;
  * set structurally on the thrown error's own `code`, never matched by message text at the catch site. */
 const REAP_TEST_GUARD_ENUMERATION_FAILURE_CODE = "LOOM_REAP_TEST_GUARD_ENUMERATION_FAILED";
+
+/** @decision c5b4dbfb — the lineage refusal is the only other refusal reapExitedDescendants swallows
+ * (log + tally, never a kill); match it by this `code`, never by message text. Test-mode only. */
+const REAP_TEST_GUARD_LINEAGE_REFUSAL_CODE = "LOOM_REAP_TEST_GUARD_LINEAGE_REFUSED";
+
+/** @decision c5b4dbfb — test-visible tally of lineage refusals on `globalThis`, bumped ONLY at
+ * {@link refuseReapTarget}'s lineage throw (counts every swallow site). Test mode + registry only. */
+function noteLineageRefusal(): number {
+  const g = globalThis as { __LOOM_TEST_REAP_LINEAGE_REFUSALS__?: number };
+  g.__LOOM_TEST_REAP_LINEAGE_REFUSALS__ = (g.__LOOM_TEST_REAP_LINEAGE_REFUSALS__ ?? 0) + 1;
+  return g.__LOOM_TEST_REAP_LINEAGE_REFUSALS__;
+}
 
 /** @decision dbbb52db — logs unconditionally; THROWS only when `hasRegistry`, else refuses silently
  * (returns false — caller MUST check it) so a registry-less LOOM_TEST process can never crash here.
@@ -5089,6 +5101,7 @@ function refuseReapTarget(label: string, pid: number, reason: string, hasRegistr
   // eslint-disable-next-line no-console
   console.error(msg);
   if (hasRegistry) {
+    if (code === REAP_TEST_GUARD_LINEAGE_REFUSAL_CODE) noteLineageRefusal();
     const err = new Error(msg) as Error & { code?: string };
     if (code) err.code = code;
     throw err;
@@ -5132,7 +5145,7 @@ function assertReapTargetIsOwnLiveDescendantUnderTest(pid: number, label: string
   if (!isDescendantPid(rows, pid, process.pid)) {
     return refuseReapTarget(label, pid,
       `not a live descendant of this test process (pid=${process.pid}), and this test process never spawned it (or it is now live and no longer verifiable as ours) — a test may only reap/kill a process it itself (transitively) spawned`,
-      hasRegistry);
+      hasRegistry, REAP_TEST_GUARD_LINEAGE_REFUSAL_CODE);
   }
   return true;
 }
@@ -8616,11 +8629,22 @@ export class PtyHost {
       // (unknown/null still fails the abort closed, never silently promotes to "ours").
       this.sweepOrphanedDescendants(rootPid, liveRef.creationTime);
     } catch (err) {
-      // @decision b1ea823d — swallow ONLY the enumeration-failure refusal (code-discriminated, never by
-      // message text); every other throw, incl. a lineage refusal, must keep propagating unchanged.
-      if ((err as { code?: string }).code !== REAP_TEST_GUARD_ENUMERATION_FAILURE_CODE) throw err;
-      // eslint-disable-next-line no-console
-      console.error(`[pty-reap] ${sessionId} pid=${rootPid}: onExit sweep's enumeration-failure refusal caught at the exit chokepoint, not crashing (${(err as Error).message})`);
+      // @decision b1ea823d, c5b4dbfb — swallow ONLY the enumeration-failure refusal and the lineage
+      // refusal (code-discriminated, never by message text); every other throw must keep propagating.
+      const code = (err as { code?: string }).code;
+      if (code === REAP_TEST_GUARD_LINEAGE_REFUSAL_CODE) {
+        // @decision c5b4dbfb — the refusal already prevented the kill and was already tallied at
+        // refuseReapTarget; this exit path is fire-and-forget, so an unhandled rejection here only crashes
+        // the test process. Log loudly; no content.
+        const n = (globalThis as { __LOOM_TEST_REAP_LINEAGE_REFUSALS__?: number }).__LOOM_TEST_REAP_LINEAGE_REFUSALS__ ?? 0;
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid}: lineage refusal at exit reap; nothing was killed (test-guard lineage refusals so far: ${n})`);
+      } else if (code !== REAP_TEST_GUARD_ENUMERATION_FAILURE_CODE) {
+        throw err;
+      } else {
+        // eslint-disable-next-line no-console
+        console.error(`[pty-reap] ${sessionId} pid=${rootPid}: onExit sweep's enumeration-failure refusal caught at the exit chokepoint, not crashing (${(err as Error).message})`);
+      }
     }
     // Card 2897acc4 (S1): node-pty's own exit notification is not always true — confirm the root itself
     // is actually gone, independent of that signal, rather than trusting it the way the descendant sweep

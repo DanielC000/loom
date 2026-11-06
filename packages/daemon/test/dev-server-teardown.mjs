@@ -250,6 +250,10 @@ const allTrackedDead = await waitUntil(
 );
 check("cleanup: finally's own sweep kills EVERY tracked grandchild pid, not just the most recently assigned one", allTrackedDead);
 
+// @decision c5b4dbfb — every root here is a REAL registered pid pushed through the real reap path, so the
+// test-guard must never have refused one as "not our descendant" (a swallowed refusal would not fail above).
+check("(c5b4dbfb) no reap lineage refusal was swallowed in this run", (globalThis.__LOOM_TEST_REAP_LINEAGE_REFUSALS__ ?? 0) === 0);
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — a worker's escaped dev-server process is reaped on session end, even though it outlived its own root process."
   : `\n❌ ${failures} FAILURE(S).`);

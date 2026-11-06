@@ -750,6 +750,13 @@ if (process.platform !== "win32") {
   }
 }
 
+// Card c5b4dbfb: PART 2's fake-claude `.cmd` wrapper can die first (0xC000013A) and orphan its node child,
+// which the reap test-guard then REFUSES as "not a live descendant" (~1 in 15 solo runs). That is the
+// benign case, now swallowed + tallied at the exit chokepoint instead of crashing this process (exit 1, no
+// FAIL line). Tolerated here on purpose: a plain log line, not a check (a never-failing check inflates the
+// pass count); _guard.mjs's exit hook also prints a loud line when the tally is nonzero.
+console.log(`[c5b4dbfb] lineage refusals swallowed at the exit reap this run: ${globalThis.__LOOM_TEST_REAP_LINEAGE_REFUSALS__ ?? 0}`);
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — the mcp-config secret file gets a full lifecycle: a secret-free spawn clears a stale file (DoD-1), the current spawn's own file is cleared at the earliest safe point (SessionStart/markReady) with an unconditional onExit backstop (DoD-2), SETTINGS_DIR is denied to every role unconditionally (DoD-4), a boot-time sweep catches anything a hard crash left behind (DoD-3), the settings/hook-token file gets the SAME lifecycle (card a50b8afd), and the mcpToken header is a placeholder, never a literal value, backed by the real spawned process's own env (card a50b8afd, b1)."
   : `\n❌ ${failures} FAILURE(S).`);
