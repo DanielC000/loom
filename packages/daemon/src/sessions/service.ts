@@ -93,7 +93,7 @@ import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, gateOnlyListPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
 import { decideMergeGate, applyUngatedLanding, applyGatePass, applyGateFail, applyGateNext, applyCadenceCleared, agentViewOf, statusOf, counterNote, type MergeGateDecision } from "../orchestration/merge-gate-interval.js";
-import { touchedDistPathsFor, computeDistImporterCap, rankAndCapRunSet, newDistImporterCheckQueueState, enqueueLanding, drainFollowUp, formatDistImporterResultNudge, formatDistImporterMechanismFailureNudge, formatDistImporterCancelledNudge, type DistImporterCheckQueueState } from "../orchestration/dist-importer-check.js";
+import { touchedDistPathsFor, computeDistImporterCap, rankAndCapRunSet, newDistImporterCheckQueueState, enqueueLanding, drainFollowUp, formatDistImporterResultNudge, formatDistImporterMechanismFailureNudge, formatDistImporterCancelledNudge, formatDistImporterSupersededNudge, type DistImporterCheckQueueState } from "../orchestration/dist-importer-check.js";
 import { GateSemaphore, GateCancelledError, isMergeGateRed, type GateContinuation, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
@@ -3157,7 +3157,14 @@ export class SessionService {
    * (`resolveWorktreePath(projectId, "dist-importer-check-<opId>", repoKey)`) to reap strays scoped to that
    * path alone. In-memory like the queue state above; entries live exactly as long as the run.
    */
-  private readonly activeDistImporterRuns = new Map<string, { projectId: string; repoKey: string; managerSessionId: string; touchedDistPaths: string[]; worktreePath?: string }>();
+  private readonly activeDistImporterRuns = new Map<string, { projectId: string; repoKey: string; repoPath: string; landedSha: string; managerSessionId: string; touchedDistPaths: string[]; worktreePath?: string }>();
+  /**
+   * @decision cdc262b5 — advisories withdrawn by a full merge gate, keyed by that gate's opId then `${projectId}:${repoKey}`.
+   * "Superseded" is not "covered" until the gate PASSES: on any other outcome they re-enqueue through the ordinary path.
+   * In-memory; a deploy restart folds them into its refire set (`preemptAdvisoryDistImporterChecks`).
+   */
+  private readonly advisoryCoveredOps = new Set<string>();
+  private readonly supersededAdvisories = new Map<string, Map<string, { projectId: string; repoKey: string; repoPath: string; managerSessionId: string; sha: string; paths: Set<string> }>>();
   /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
    * must not mean "dangles forever"). A wedge is usually eventually-resolvable (a held OS-indexer/
@@ -3460,6 +3467,11 @@ export class SessionService {
    * concurrent merges/deploys can no longer pile up host load unbounded. See {@link GateSemaphore}.
    */
   private readonly gateSemaphore = new GateSemaphore();
+  // @decision cdc262b5 — wired once at construction; both hooks only ever fire for a gate that superseded a queued advisory.
+  private readonly advisorySupersedeWiring = ((): true => {
+    this.gateSemaphore.onAdvisorySuperseded = (ad, key) => this.captureSupersededAdvisory(ad, key);
+    return true;
+  })();
   /** Card a5d1ae04 — the advisory-only "I intend to fire at ~T" declaration registry `gate_queue`'s new
    *  `declarations` array reads from. Deliberately NOT a field on {@link gateSemaphore} — see
    *  {@link GateIntentRegistry}'s own file-level doc for why this is a separate class with zero
@@ -20863,6 +20875,8 @@ export class SessionService {
     //  into mergeBranch as requireCanonicalHead so it can re-verify main hasn't moved since; never more
     //  than one producer per merge (mutually exclusive on `gateRan`) — preLanded can be overwritten by reuse.
     let gateBaseMainHead: string | undefined;
+    // @decision cdc262b5 — true only for a gate that genuinely ran+passed, full configured command, union (not preLanded) base; see reportAdvisoryCoverage.
+    let advisoryFullGatePassed = false;
     // @decision eda70da6 — companion capture, preLanded producer only: an unchanged branch tip inside the
     //  lock SKIPS the requireCanonicalHead re-check entirely, so a routine preLanded re-confirm isn't
     //  spuriously refused just because main moved during an 8-14min gate.
@@ -22376,6 +22390,7 @@ export class SessionService {
       // `gateStepsResult`'s own "nothing to report" discipline just above.
       gateOutputTailForRecord = gateRan && gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
       gateOutputFileForRecord = gateRan ? gateResult.outputFile : undefined;
+      advisoryFullGatePassed = gateRan && gateResult.passed === true && !preLanded && !!gateBaseMainHead && effectiveGate === gate;
       // @decision e2b6f900 — capture this triple once here, read from either branch; it always describes
       //  the ONE admission the whole chain ran under (retries are links of it, card 68155573).
       //  `durationMs` on the same row is a SEPARATE field with its own scope — never read the two as one.
@@ -22747,6 +22762,7 @@ export class SessionService {
     // `finally` below) — so the counter's order equals main's order: a later pass resets only what precedes it on main, and an ungated landing
     // that squashed after a pass is never erased by it. (Recording in `finalizeMerge`, after the guard, raced exactly that.) An inert docs-only
     // skip and a gateless repo are not counted.
+    if (merge.ok && !merge.noop && advisoryFullGatePassed) this.reportAdvisoryCoverage(thisOpId);
     if (gate && merge.ok && !merge.noop && (gateDisabled ? inertSkip : !inertSkip)) {
       try { this.recordMergeGateOutcome(project.id, gateDisabled ? { kind: "ungated", landed: 1 } : { kind: "pass", sha: merge.sha ?? null, opId: reusedOpId ?? thisOpId, periodic: mergeGateDecision.cadence !== "every" }, worker.repoKey ?? "primary"); } catch (err) { console.warn(`[merge-gate] failed to record a landing (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
       onMergeGateRecorded?.();
@@ -24160,6 +24176,8 @@ export class SessionService {
         // batch-merge.ts), so the `endSquash` call below never fires for an opId that was never admitted
         // for `finalRepoPath` in the first place.
         let batchGateRan = false;
+        // @decision cdc262b5 — set once the batch gate ran+passed on the project's FULL gateCommand (never reduced); reported only after the ff lands.
+        let batchFullGatePassed = false;
         let batchRedRecorded = false;
         // @decision 13571c71 — true once the batch gate has PASSED; a throw after it (and only after it) is reported per candidate by the catch below.
         let batchGatePassed = false;
@@ -24455,6 +24473,7 @@ export class SessionService {
             // finalize, still to come after this closure returns) is done.
             batchGateVerdict = deriveBatchGateVerdict(r, batchGateAttempt1DurationMs, opMintedAtMs, nowMs, orchestration.maxConcurrentGates, concurrentAtStart, concurrentGatesMax, landedCount, { retriedFile, retryPassed });
             pruneGateSpillsClassified(this.db);
+            batchFullGatePassed = r.passed === true && !batchReduced && effectiveGate === gate;
             // Card 92be634e: the --only-file= overflow cleanup for THIS op lives in the outer `onSettle`
             // hook below (`mergeBatchTracked`'s own attach()), not here — this closure's own happy-path tail
             // is never reached on a throw (e.g. a pre-gate ReducedGateOnlyFileError resolved further up, or
@@ -24582,6 +24601,7 @@ export class SessionService {
             // @decision 2a6a292a round 20 (card aa7677fa) — record UNCONDITIONALLY (independent of
             // batchCheckedTip, which can be null): `base` is `baseMainSha` directly, never a first-parent
             // read — the ff's own contract already guarantees HEAD === baseMainSha before it ran.
+            if (result.ok && result.landed.length > 0 && batchFullGatePassed) this.reportAdvisoryCoverage(opId);
             if (result.ok && result.landed.length > 0 && result.batchHeadSha && expectedBaseBranch) {
               this.recordMainlineLedgerEntryIfRepoUnchanged(finalProjectId, batchRepoKey, finalRepoPath, expectedBaseBranch, result.batchHeadSha, baseMainSha);
             }
@@ -25053,6 +25073,8 @@ export class SessionService {
         // @decision 641cc62c — released on the RUN's own completion (chained here), NEVER from the
         // `onSettle` opt below — that hook never fires for an entry `evictDeadOwner()` force-removed.
         for (const c of liveChosen) if (c.taskId) this.clearMergeInFlightForTask(c.taskId, opId);
+        // @decision cdc262b5 — every exit settles the advisories this batch gate withdrew (re-run unless it reported coverage).
+        this.settleSupersededAdvisories(opId);
       }),
       // @decision f944d4e4 — this async settle nudge fires ONLY for a caller that observed
       //  {settled:false}; a sync-settled caller gets zero notices, and this is the one place a batch's
@@ -26326,6 +26348,15 @@ export class SessionService {
         if (!existing) { console.warn(`[dist-importer-check] restart pre-empt: queue ${k} holds a pending follow-up but no active run — cannot re-fire it`); continue; }
         for (const p of q.pendingTouchedDistPaths) existing.paths.add(p);
       }
+      // @decision cdc262b5 — advisories a full gate withdrew but whose verdict hasn't landed yet ride the SAME refire set; the map is
+      // emptied so an aborted restart's in-process refire and a later gate settle can never both re-run them.
+      for (const byKey2 of this.supersededAdvisories.values()) {
+        for (const s2 of byKey2.values()) {
+          const sl = slot(s2.projectId, s2.repoKey, s2.managerSessionId);
+          for (const p of s2.paths) sl.paths.add(p);
+        }
+      }
+      this.supersededAdvisories.clear();
       const detail = "cancelled by a daemon restart (the deploy supersedes this advisory) — ONE check re-fires at the then-current HEAD after boot";
       const waits: Array<{ entry: (typeof entries)[number]; settled: Promise<boolean> }> = [];
       let cancelled = 0;
@@ -26359,6 +26390,59 @@ export class SessionService {
     } catch (err) {
       console.warn(`[dist-importer-check] restart pre-empt failed (non-fatal, the restart proceeds): ${err instanceof Error ? err.message : String(err)}`);
       return { cancelled: 0, refire: [], unverified: [] };
+    }
+  }
+
+  /**
+   * @decision cdc262b5 — runs SYNCHRONOUSLY inside `GateSemaphore.admit`, so the split between landings that arrived BEFORE the
+   * gate's admission (its base covers them: moved here, under the superseding opId) and AFTER it (not in its base: left in the
+   * queue to drain normally) is exact, not timestamp-approximate.
+   */
+  private captureSupersededAdvisory(ad: GateDescriptor, supersedingKey: string): void {
+    const run = ad.opId ? this.activeDistImporterRuns.get(ad.opId) : undefined;
+    if (!run) return;
+    const k = `${run.projectId}:${run.repoKey}`;
+    let byKey = this.supersededAdvisories.get(supersedingKey);
+    if (!byKey) { byKey = new Map(); this.supersededAdvisories.set(supersedingKey, byKey); }
+    let s = byKey.get(k);
+    if (!s) { s = { projectId: run.projectId, repoKey: run.repoKey, repoPath: run.repoPath, managerSessionId: run.managerSessionId, sha: run.landedSha, paths: new Set() }; byKey.set(k, s); }
+    for (const p of run.touchedDistPaths) s.paths.add(p);
+    const q = this.distImporterCheckQueues.get(k);
+    if (q && q.pendingShas.length > 0) {
+      s.sha = q.pendingShas[q.pendingShas.length - 1]!;
+      for (const p of q.pendingTouchedDistPaths) s.paths.add(p);
+      q.pendingShas = [];
+      q.pendingTouchedDistPaths = new Set();
+    }
+  }
+
+  /**
+   * @decision cdc262b5 — the caller's explicit "my gate COVERED the landings I superseded" signal, called only after a LANDED-GREEN
+   * full-gate merge (coverage rule in the record). No-op unless this op really superseded something.
+   */
+  private reportAdvisoryCoverage(opId: string): void {
+    if (this.supersededAdvisories.has(opId)) this.advisoryCoveredOps.add(opId);
+  }
+
+  /**
+   * @decision cdc262b5 — run from the merge caller's outermost `finally`, on EVERY exit. Covered (reported above) drops the held
+   * landings; anything else — a reduced/non-full pass, a pass followed by a refusal, a fail, a throw, a cancel — re-enqueues them
+   * exactly once. One-shot: both maps are deleted here, so a second call (e.g. a batch fallback) is a no-op.
+   */
+  private settleSupersededAdvisories(opId: string): void {
+    const covered = this.advisoryCoveredOps.delete(opId);
+    this.resolveSupersededAdvisories(opId, covered);
+  }
+
+  /** @decision cdc262b5 — covered drops the captured landings; any other outcome re-enqueues them through the ordinary path (respects pause/restart). */
+  private resolveSupersededAdvisories(supersedingKey: string, passed: boolean): void {
+    const byKey = this.supersededAdvisories.get(supersedingKey);
+    if (!byKey) return;
+    this.supersededAdvisories.delete(supersedingKey);
+    if (passed) return;
+    for (const s of byKey.values()) {
+      void this.enqueueDistImporterCheck(s.projectId, s.repoKey, s.repoPath, s.managerSessionId, s.sha, [...s.paths])
+        .catch((err) => console.warn(`[dist-importer-check] re-run of a superseded advisory failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`));
     }
   }
 
@@ -26536,7 +26620,7 @@ export class SessionService {
       opId, kind: "gate", key: `dist-importer-check:${opId}`, ownerSessionId: managerSessionId,
       projectId, taskId: null, branch: null, startedAt: new Date().toISOString(), state: "pending", surfacedPending: false,
     });
-    this.activeDistImporterRuns.set(opId, { projectId, repoKey, managerSessionId, touchedDistPaths });
+    this.activeDistImporterRuns.set(opId, { projectId, repoKey, repoPath, landedSha, managerSessionId, touchedDistPaths });
 
     type Outcome =
       | { kind: "mechanism-failure"; reason: string }
@@ -26545,7 +26629,7 @@ export class SessionService {
       | { kind: "gate"; gate: GateSequentialResult; ranSize: number; matchedSize: number; corpusSize: number };
     let worktreePath: string | undefined;
     let branch: string | undefined;
-    const gateDescriptor: GateDescriptor = { gateType: "worker", projectId, sessionId: managerSessionId, taskId: null, branch: null, opId, distImporterCheckOnly: true };
+    const gateDescriptor: GateDescriptor = { gateType: "worker", projectId, sessionId: managerSessionId, taskId: null, branch: null, opId, distImporterCheckOnly: true, advisoryRepoPath: repoPath };
     let gateStartedAt = 0;
     // @decision cee17efe — captured so a post-admission cancel can still report WHY (mirrors runWorkerGate's cancelSignalRef).
     let cancelSignalRef: AbortSignal | undefined;
@@ -26623,6 +26707,14 @@ export class SessionService {
         "low",
       );
     } catch (err) {
+      if (err instanceof GateCancelledError && err.kind === "superseded-by-gate") {
+        // @decision cdc262b5 — a full gate on this repo took over: recorded as superseded (never a failure), ONE short nudge
+        // (round-2 ruling 8 stays: no silent cancel). The landing was captured synchronously at admission (captureSupersededAdvisory).
+        this.db.settlePendingGateOp(opId, { kind: "cancelled" });
+        recordEvent({ cancelled: true, superseded: true, supersededByOpId: err.supersededByOpId ?? null, cancelDetail: err.detail, gateSpawned: false });
+        pushNudge(formatDistImporterSupersededNudge({ landedSha, supersedingOpId: err.supersededByOpId ?? "unknown" }));
+        return;
+      }
       if (err instanceof GateCancelledError) {
         this.db.settlePendingGateOp(opId, { kind: "cancelled" });
         recordEvent({ cancelled: true, cancelDetail: err.detail ?? "no reason given", gateSpawned: false });
@@ -27271,6 +27363,8 @@ export class SessionService {
         // @decision 641cc62c — released on the RUN's own completion (chained here), NEVER from the
         // `onSettle` opt below — that hook never fires for an entry `evictDeadOwner()` force-removed.
         if (taskId) this.clearMergeInFlightForTask(taskId, opId);
+        // @decision cdc262b5 — every exit of the run settles the advisories this op's gate withdrew (re-run unless it reported coverage).
+        this.settleSupersededAdvisories(opId);
       }),
       (outcome, opId) => {
         // TOMBSTONE ALREADY MARKED (card e3e40167): the `onSettle` opt below (fires unconditionally, for

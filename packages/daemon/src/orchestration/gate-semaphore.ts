@@ -140,6 +140,22 @@ export interface GateDescriptor {
    *  never refuses a landing) — see that field's own doc for why the two never collapse into one flag.
    *  `undefined`/`false` on every other gate. */
   distImporterCheckOnly?: boolean;
+  /** Card cdc262b5 — set ONLY on a `distImporterCheckOnly` descriptor: the repo this advisory checks, so a FULL merge gate
+   *  admitted for the SAME repo can supersede it while it is still QUEUED (see {@link GateSemaphore.supersedeQueuedAdvisories}).
+   *  ⚠️ Deliberately NOT `repoPath`: `mergeRepoFree`/`activeWorkerRepos`/`mergeWaitingOnRepo` read only `repoPath`, so carrying the
+   *  identity here keeps the advisory out of the per-repo admission guard (e4701333's asymmetry). Never echoed into the snapshot. */
+  advisoryRepoPath?: string | null;
+}
+
+/**
+ * Card cdc262b5 — the one comparison key for "same repo" between a merge descriptor's `repoPath` and an advisory's
+ * `advisoryRepoPath`. On win32 slashes and drive/dir casing are not significant, so both are folded; elsewhere the path
+ * is compared as-is apart from trailing separators. `platform` is a test seam only.
+ */
+export function normalizeRepoPathForCompare(p: string, platform: string = process.platform): string {
+  let s = p;
+  if (platform === "win32") s = s.replace(/\\/g, "/").toLowerCase();
+  return s.length > 1 ? s.replace(/\/+$/, "") : s;
 }
 
 /** The callback shape {@link GateSemaphore.runExclusive} runs once admitted — one per chain link. */
@@ -343,7 +359,7 @@ interface RegistryEntry {
  *  (SessionService's settle-nudge text) can tell a manager-decided supersede apart from a manager's
  *  explicit cancel without re-deriving it from free text.
  */
-export type GateCancelKind = "superseded-by-merge" | "manual";
+export type GateCancelKind = "superseded-by-merge" | "manual" | "superseded-by-gate";
 
 /**
  * Thrown by {@link GateSemaphore.runExclusive} when a QUEUED op is cancelled before it was ever admitted —
@@ -353,7 +369,8 @@ export type GateCancelKind = "superseded-by-merge" | "manual";
  * a distinct `cancelled` shape instead of rethrowing — see SessionService.runWorkerGate's own catch.
  */
 export class GateCancelledError extends Error {
-  constructor(public readonly kind: GateCancelKind, public readonly detail: string) {
+  /** `supersededByOpId` (card cdc262b5): set only for kind `"superseded-by-gate"` — the admitted gate's own opId (or entry id). */
+  constructor(public readonly kind: GateCancelKind, public readonly detail: string, public readonly supersededByOpId?: string) {
     super(`gate cancelled (${kind}): ${detail}`);
     this.name = "GateCancelledError";
   }
@@ -378,12 +395,12 @@ interface Waiter {
   id: string;
   entry: RegistryEntry;
   grant: () => void;
-  cancel: (kind: GateCancelKind, detail: string) => void;
+  cancel: (kind: GateCancelKind, detail: string, supersededByOpId?: string) => void;
 }
 
 /** {@link GateSemaphore}'s private `acquire()` outcome — `admitted:false` carries the SAME
  *  {@link GateCancelledError} shape `runExclusive` throws, so that call site is a one-line translation. */
-type AcquireOutcome = { admitted: true } | { admitted: false; kind: GateCancelKind; detail: string };
+type AcquireOutcome = { admitted: true } | { admitted: false; kind: GateCancelKind; detail: string; supersededByOpId?: string };
 
 export class GateSemaphore {
   private active = 0;
@@ -578,6 +595,36 @@ export class GateSemaphore {
     for (const e of this.registry.values()) {
       if (e.startedAt != null && this.active > e.maxConcurrent) e.maxConcurrent = this.active;
     }
+    this.supersedeQueuedAdvisories(entry);
+  }
+
+  /** Card cdc262b5 — called by `SessionService` (synchronously, from inside {@link admit}, only when an advisory was actually
+   *  superseded) so it can capture the advisory's landing before the cancel unwinds. The semaphore never decides whether the
+   *  superseding gate COVERED the landing — only the merge caller can (see `SessionService.settleSupersededAdvisories`). `supersedingKey` = the admitted gate's opId
+   *  (entry id when it has none). */
+  onAdvisorySuperseded?: (advisory: GateDescriptor, supersedingKey: string) => void;
+
+  /**
+   * @decision cdc262b5 — a FULL merge gate (solo or batch, never a batch's per-branch fallback) admitted for a repo withdraws that
+   * repo's QUEUED advisory dist-importer checks; a RUNNING advisory is never touched (24642c3d forbids pre-empting a running gate).
+   * Reads only `lowWaiters`; mutates nothing and logs nothing when no advisory matches. Never keys on `repoPath`.
+   */
+  private supersedeQueuedAdvisories(entry: RegistryEntry): void {
+    const d = entry.descriptor;
+    if (d.gateType !== "merge" || d.repoPath == null || d.fallbackOfBatchOpId != null) return;
+    let want: string | undefined;
+    const key = d.opId ?? entry.id;
+    for (let i = 0; i < this.lowWaiters.length; i++) {
+      const w = this.lowWaiters[i]!;
+      const ad = w.entry.descriptor;
+      if (!ad.distImporterCheckOnly || ad.advisoryRepoPath == null) continue;
+      want ??= normalizeRepoPathForCompare(d.repoPath);
+      if (normalizeRepoPathForCompare(ad.advisoryRepoPath) !== want) continue;
+      this.lowWaiters.splice(i--, 1);
+      try { this.onAdvisorySuperseded?.(ad, key); }
+      catch (err) { console.warn(`[gate] onAdvisorySuperseded hook failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`); }
+      w.cancel("superseded-by-gate", `superseded by full gate ${key.slice(0, 8)}`, key);
+    }
   }
 
   /** Acquire a slot under `cap`, queueing (awaiting) if it's already saturated OR its worktree is
@@ -597,7 +644,7 @@ export class GateSemaphore {
         id: entry.id,
         entry,
         grant: () => { this.admit(entry); resolve({ admitted: true }); },
-        cancel: (kind, detail) => resolve({ admitted: false, kind, detail }),
+        cancel: (kind, detail, supersededByOpId) => resolve({ admitted: false, kind, detail, ...(supersededByOpId !== undefined ? { supersededByOpId } : {}) }),
       };
       (priority === "high" ? this.highWaiters : this.lowWaiters).push(waiter);
     });
@@ -992,7 +1039,7 @@ export class GateSemaphore {
     const holdRepoGuardOnExit = (): void => { holdRepoGuard = true; };
     try {
       const outcome = await this.acquire(cap, priority, entry);
-      if (!outcome.admitted) throw new GateCancelledError(outcome.kind, outcome.detail);
+      if (!outcome.admitted) throw new GateCancelledError(outcome.kind, outcome.detail, outcome.supersededByOpId);
       acquired = true;
       let result = await fn(entry.startedAt!, entry.controller.signal, hooks, getMaxConcurrentGates, holdRepoGuardOnExit);
       // Card 68155573 — CHAIN: each further link runs INSIDE this same try, so the one `finally` below is the

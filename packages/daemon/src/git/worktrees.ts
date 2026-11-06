@@ -6254,6 +6254,9 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   // mcp/platform.ts) and compiled dist/mcp/*.js TEXT (comment-stripped, but anchored on exact code shapes a comment-only
   // diff near them can still shift) and pattern-matches it, so it belongs on the changed-compiled-.ts trigger.
   "packages/daemon/test/card-policy-source-pins.mjs",
+  // Card cdc262b5: reads real src/sessions/service.ts TEXT (comment-stripped) and pins the advisory-coverage expressions; split out of
+  // the slow behavioural dist-importer-supersede-coverage.mjs so the text pin runs on the changed-compiled-.ts trigger.
+  "packages/daemon/test/dist-importer-supersede-coverage-source-pin.mjs",
 ];
 
 /** @decision f862f9c5 — never fold this list into {@link CHANGED_TS_TEXT_SCANNER_REPO_PATHS} or its

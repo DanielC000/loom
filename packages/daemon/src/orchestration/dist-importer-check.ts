@@ -180,6 +180,10 @@ export function formatDistImporterMechanismFailureNudge(args: { landedSha: strin
  * @decision cee17efe — shared by every cancel site this check can settle through (queued, mid-phase, and
  * running); see that record's own "LEAD round-3 ruling 1" section for why all three share one format.
  */
+export function formatDistImporterSupersededNudge(args: { landedSha: string; supersedingOpId: string }): string {
+  return `[loom:dist-importer-check] advisory check for ${args.landedSha.slice(0, 8)} superseded by full gate ${args.supersedingOpId.slice(0, 8)}; it re-runs only if that gate does not pass.`;
+}
+
 export function formatDistImporterCancelledNudge(args: { landedSha: string; reason: string }): string {
   return `[loom:dist-importer-check] the automatic check for ungated landing ${args.landedSha.slice(0, 8)} was cancelled before it produced a result (${args.reason}). This was never a gate and touches nothing — nothing further to do.`;
 }

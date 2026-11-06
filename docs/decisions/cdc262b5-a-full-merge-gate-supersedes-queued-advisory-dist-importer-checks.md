@@ -1,0 +1,24 @@
+# cdc262b5 — a full merge gate admitted for a repo supersedes that repo's QUEUED advisory dist-importer checks
+
+On 2026-11-06 an advisory dist-importer check ran 92 minutes beside a full `merge_batch` gate and the gate went red on two load-sensitive tests; the advisory added nothing a full gate does not cover. `GateSemaphore.admit()` now withdraws every QUEUED advisory (`distImporterCheckOnly`) whose `advisoryRepoPath` matches the admitted merge descriptor's `repoPath`. The advisory's `runExclusive` throws `GateCancelledError("superseded-by-gate")`; `fn` is never invoked, so there is no process to kill.
+
+"Superseded" is not "covered". The landing (newest sha + touched modules, including landings folded into the queue BEFORE admission) is held in memory under the gate's opId (`SessionService.supersededAdvisories`). The semaphore never decides whether the superseding gate covered it: a gate PASS says nothing about the advisory's modules, because a reduced gate (`buildReducedGateCommand`: `pnpm build` + the static guards + changed test files + the asset/ts-text/script-text lists) derives none of its content from them. The configured `gateCommand` is TRUSTED as the full suite: the code only compares against it (`effectiveGate === gate`) and never inspects its content, so a project whose `gateCommand` is a narrower command would still count as coverage. That holds in practice because the advisory only fires for repos with `packages/daemon/src` (Loom), whose `gateCommand` runs the whole suite. There is deliberately no `gateCommand`-content check.
+
+## The coverage rule (the MERGE CALLER decides, after the landing)
+
+`reportAdvisoryCoverage(opId)` is called only when ALL hold: the gate genuinely RAN and PASSED, it was NOT emit-compare-reduced, it ran the project's full configured `gateCommand` (`effectiveGate === gate`), its tree contained main as of admission (the union producer, so not `preLanded`, and `gateBaseMainHead` non-null), AND the branch actually LANDED. "Covered" means LANDED GREEN, so the report sits AFTER the squash (`mergeBranch` ok and not a no-op) on the solo path and after a successful fast-forward (`result.ok && landed.length > 0`) on `merge_batch`. A pass followed by any refusal (squash conflict, `gate_tip_moved`, `gate_worktree_dirty`, `landed_content_diverged`, `gate_base_invalidated`, a throw) re-runs the held landings.
+
+`settleSupersededAdvisories(opId)` runs from the `.finally` of the `pendingOps.attach` run closure in `confirmWorkerMergeTracked` and `mergeBatchTracked`, i.e. on EVERY exit: covered drops the held landings, anything else re-enqueues them exactly once through `enqueueDistImporterCheck` (which respects the restart pause). Both maps are deleted on settle, so a batch's per-branch fallback merges (their own opIds, `fallbackOfBatchOpId` set: they never supersede and hold nothing) cannot double-report. A deploy restart folds held entries into its refire set and empties the map. Landings arriving AFTER admission are not in that gate's base and drain normally.
+
+Exclusions, by design: an interval-skipped or gate-disabled landing admits no gate, so it supersedes nothing (and `kickDistImporterCheck` is its own advisory); a gate that was emit-compare-reduced never counts as coverage and the advisory simply re-runs (cost: one extra advisory run, never a lost check). A non-full configured `gateCommand` is NOT excluded (see above: it is trusted as full).
+
+## Do not
+
+- Do not pre-empt a RUNNING advisory (or any running gate) — only `lowWaiters` are scanned; 24642c3d still holds.
+- Do not put the advisory's repo identity in `repoPath` — `mergeRepoFree`/`activeWorkerRepos` read only that, and the advisory must stay outside the per-repo guard (e4701333's asymmetry). It lives in `advisoryRepoPath` and is never echoed into the snapshot.
+- Do not compare repo paths raw — go through `normalizeRepoPathForCompare` on both sides (win32 folds slashes and case).
+- Do not treat a supersede as coverage, and do not treat a gate PASS as coverage: drop the landing only on the caller's explicit landed-green report. Do not move the drop decision back into `GateSemaphore` (it cannot see reduced/non-full/landed).
+- Do not report coverage before the squash/fast-forward succeeded, and do not report it from a reduced, `preLanded` or null-`gateBaseMainHead` pass.
+- Do not trigger on anything but a real admission: a batch's per-branch fallback merge (`fallbackOfBatchOpId`), a worker/deploy gate, a repo-guard-only hold and an ungated/interval-skipped landing never supersede.
+- Do not let the supersede record a failure or push a failure nudge; the only nudge is the single superseded one (no silent cancel, cee17efe round-2 ruling 8).
+- Do not scan or mutate anything in `admit()` when no advisory matches — it stays a pure O(queue) read.
