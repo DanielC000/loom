@@ -41,6 +41,7 @@ const ALLOWED_FILES = new Set(["gateway/trust-tier.ts"]);
 const EXCEPTIONS = [
   ["gateway/server.ts", "equality test against a loopback literal", 1, "isLoopbackHostname — the CSRF hook's Host/Origin HOSTNAME allowlist for the loopback class (a header check, not a peer-address trust decision; the class it applies to is decided by requestClass)"],
   ["gateway/server.ts", "proxy-shaped header-name literal", 1, "tailscale-funnel-request — a REFUSAL-only check on the proxy listener (it can only deny a request, never grant or lower trust)"],
+  ["connections/apiKeyHeader.ts", "proxy-shaped header-name literal", 2, "the api-key header-name DENYLIST — it refuses an owner-chosen credential header named like a proxy header; it reads no request and decides no trust"],
   ["codescape/supervisor.ts", "equality test against a loopback literal", 1, "validates the hostname of the codescape serve URL Loom itself constructed — no request peer involved"],
 ];
 

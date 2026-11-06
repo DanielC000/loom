@@ -1511,7 +1511,7 @@ export const api = {
   pendingBindings: () => get<PendingBinding[]>("/api/pending-bindings"),
   // `projectId` (card f2abce7e) scopes the connection to that ONE project — usable only by its own
   // sessions; omitted/null creates a GLOBAL connection, reachable by any profile that allowlists it.
-  createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null; allowPlainHttp?: boolean }) =>
+  createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null; allowPlainHttp?: boolean; apiKeyHeader?: string }) =>
     postErr<ConnectionMetadata>("/api/connections", b),
   deleteConnection: (id: string) => delErr<{ ok: boolean }>(`/api/connections/${encodeURIComponent(id)}`),
   // SSH connections (design record a3d5c7f4, UI card b5565d4c). The private key + passphrase are WRITE-ONLY:
@@ -1532,7 +1532,7 @@ export const api = {
   }) => putErr<ConnectionMetadata>(`/api/connections/${encodeURIComponent(id)}/ssh`, b),
   // Owner edit of an api-key/bearer/oauth2 connection (card 923dfc9d). A blank `secret` = unchanged
   // (write-only, never returned); oauth2 takes name/host only; scope (projectId) is immutable.
-  updateConnection: (id: string, b: { name?: string; host?: string; authScheme?: ConnectionAuthScheme; secret?: string; allowPlainHttp?: boolean }) =>
+  updateConnection: (id: string, b: { name?: string; host?: string; authScheme?: ConnectionAuthScheme; secret?: string; allowPlainHttp?: boolean; apiKeyHeader?: string | null }) =>
     patchErr<ConnectionMetadata>(`/api/connections/${encodeURIComponent(id)}`, b),
   // Card 1e8e9b1e: a live pre-save probe for the SonarQube preset — never persists anything. The preset's
   // "Create connection" submit calls this FIRST and only proceeds to createConnection() once it resolves.

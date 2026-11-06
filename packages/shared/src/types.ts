@@ -3851,6 +3851,13 @@ export interface ConnectionMetadata {
   /** Present (true) only when the owner opted this api-key/bearer connection into plain `http://` for a
    *  private/LAN host. Absent = https only. Owner-set over loopback REST/UI only; never an agent path. */
   allowPlainHttp?: boolean;
+  /** Present only when the owner named a custom request header for this api-key connection's secret (e.g.
+   *  `X-Plex-Token`); absent = the default `X-API-Key`. Non-secret. Owner-set over loopback REST/UI only. */
+  apiKeyHeader?: string;
+  /** Present (true) only when the STORED `apiKeyHeader` fails today's validator — requests on this connection fail closed. */
+  invalidApiKeyHeader?: boolean;
+  /** Fixed-text reason paired with `invalidApiKeyHeader` (never echoes the name). */
+  invalidApiKeyHeaderReason?: string;
   /** `oauth2` rows only — the provider template this connection was registered under. */
   provider?: OAuthProviderSlug;
   /**

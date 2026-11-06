@@ -19,6 +19,7 @@
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { stripSshKeyPassphrase } from "./sshKey.js";
 import { hostRoundTrips } from "./hostForm.js";
+import { validateApiKeyHeaderName, INVALID_STORED_API_KEY_HEADER_REASON } from "./apiKeyHeader.js";
 import { daemonReservedPorts, validatePlainHttpHost } from "./lanHttp.js";
 import type { ConnectionRow } from "../db.js";
 import { DEFAULT_SSH_RISKY_COMMAND_PATTERNS } from "@loom/shared";
@@ -47,6 +48,7 @@ export interface ConnectionsDbStore {
     sshPort?: number | null; sshUser?: string | null; sshHostKeyFingerprint?: string | null;
     sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
     allowPlainHttp?: boolean;
+    apiKeyHeader?: string | null;
   }): ConnectionRow;
   deleteConnection(id: string): void;
   updateConnectionTokens(id: string, patch: { secretBlob: string; tokenExpiresAt: string | null }): void;
@@ -61,6 +63,7 @@ export interface ConnectionsDbStore {
     sshPort?: number; sshUser?: string; sshHostKeyFingerprint?: string;
     sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
     allowPlainHttp?: boolean;
+    apiKeyHeader?: string | null;
   }): void;
   /** The profiles' codexProvider bindings — read by an edit's host-change dependent check. */
   listProfiles(): Array<{ name: string; codexProvider?: CodexProvider | null }>;
@@ -101,6 +104,12 @@ function toMetadata(row: ConnectionRow): ConnectionMetadata {
   const storedHostCheck = validateConnectionHost(row.host, hostKindOf(row));
   if (!storedHostCheck.ok) { base.invalidHost = true; base.invalidHostReason = storedHostCheck.error; }
   if (row.allowPlainHttp && (row.authScheme === "api-key" || row.authScheme === "bearer")) base.allowPlainHttp = true;
+  if (row.apiKeyHeader && row.authScheme === "api-key") {
+    base.apiKeyHeader = row.apiKeyHeader;
+    // Re-validated on every read (like the host above): a row written before a name was refused, or tampered
+    // with directly in the DB, is flagged here and fails closed at request time.
+    if (!validateApiKeyHeaderName(row.apiKeyHeader).ok) { base.invalidApiKeyHeader = true; base.invalidApiKeyHeaderReason = INVALID_STORED_API_KEY_HEADER_REASON; }
+  }
   if (row.authScheme === "ssh") {
     return {
       ...base,
@@ -213,10 +222,15 @@ export function isConnectionUsableByProject(connectionProjectId: string | null, 
  * whether to throw, and reusable by a caller that wants to pre-check before calling.
  */
 export function validateConnectionInput(input: {
-  name?: unknown; host?: unknown; authScheme?: unknown; secret?: unknown; allowPlainHttp?: unknown;
+  name?: unknown; host?: unknown; authScheme?: unknown; secret?: unknown; allowPlainHttp?: unknown; apiKeyHeader?: unknown;
 }, reservedPorts?: readonly number[]): { ok: true } | { ok: false; error: string } {
   if (!isNonBlankStr(input.name, CONNECTION_NAME_MAX)) {
     return { ok: false, error: `name must be a non-empty string of at most ${CONNECTION_NAME_MAX} characters` };
+  }
+  if (input.apiKeyHeader !== undefined && input.apiKeyHeader !== null && !(typeof input.apiKeyHeader === "string" && input.apiKeyHeader.trim() === "")) {
+    const hv = validateApiKeyHeaderName(input.apiKeyHeader);
+    if (!hv.ok) return hv;
+    if (input.authScheme !== "api-key") return { ok: false, error: "apiKeyHeader applies to an api-key connection only" };
   }
   if (input.allowPlainHttp !== undefined && typeof input.allowPlainHttp !== "boolean") {
     return { ok: false, error: "allowPlainHttp, when given, must be a boolean" };
@@ -370,13 +384,15 @@ export function getConnectionMetadata(db: ConnectionsDbStore, id: string): Conne
  */
 export function createConnection(
   db: ConnectionsDbStore,
-  input: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null; allowPlainHttp?: boolean },
+  input: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null; allowPlainHttp?: boolean; apiKeyHeader?: string | null },
   keyPath?: string,
 ): ConnectionMetadata {
   const v = validateConnectionInput(input, daemonReservedPorts(db));
   if (!v.ok) throw new Error(v.error);
+  const apiKeyHeader = typeof input.apiKeyHeader === "string" && input.apiKeyHeader.trim() !== "" ? input.apiKeyHeader.trim() : null;
   assertNameFree(db, null, input.name.trim());
   const row = db.createConnection({
+    apiKeyHeader,
     name: input.name.trim(),
     host: input.host.trim(),
     authScheme: input.authScheme,
@@ -532,7 +548,7 @@ export function updateConnection(
   const row = db.getConnection(id);
   if (!row) throw new ConnectionInputError("no connection with that id", 404);
   if (row.authScheme === "ssh") throw new ConnectionInputError("an ssh connection is edited through PUT /api/connections/:id/ssh");
-  const editable = row.authScheme === "oauth2" ? ["name", "host"] : ["name", "host", "authScheme", "secret", "allowPlainHttp"];
+  const editable = row.authScheme === "oauth2" ? ["name", "host"] : ["name", "host", "authScheme", "secret", "allowPlainHttp", "apiKeyHeader"];
   for (const key of Object.keys(patch)) {
     if (patch[key] === undefined || editable.includes(key)) continue;
     // `projectId` echoing its current value is a harmless no-op; any other immutable/unknown key is refused.
@@ -565,6 +581,23 @@ export function updateConnection(
       next.allowPlainHttp = plainHttp;
       changed.push("allowPlainHttp");
     }
+  }
+  // The api-key header name (card 0683ac4d): owner-only, api-key rows only. null/blank CLEARS it back to the
+  // default X-API-Key. A swap away from api-key drops a stored name so it cannot linger on a bearer row.
+  if (patch.apiKeyHeader !== undefined) {
+    const blank = patch.apiKeyHeader === null || (typeof patch.apiKeyHeader === "string" && patch.apiKeyHeader.trim() === "");
+    if (blank) {
+      if (row.apiKeyHeader !== null) { next.apiKeyHeader = null; changed.push("apiKeyHeader"); }
+    } else {
+      const hv = validateApiKeyHeaderName(patch.apiKeyHeader);
+      if (!hv.ok) throw new ConnectionInputError(hv.error);
+      if (scheme !== "api-key") throw new ConnectionInputError("apiKeyHeader applies to an api-key connection only");
+      if (hv.value !== row.apiKeyHeader) { next.apiKeyHeader = hv.value; changed.push("apiKeyHeader"); }
+    }
+  }
+  if (scheme !== "api-key" && row.apiKeyHeader !== null && next.apiKeyHeader === undefined) {
+    next.apiKeyHeader = null;
+    changed.push("apiKeyHeader");
   }
   const flagChanged = plainHttp !== row.allowPlainHttp;
   if (patch.host === undefined && flagChanged) {

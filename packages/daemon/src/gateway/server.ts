@@ -2847,7 +2847,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     try {
       // `allowPlainHttp` (card 1d882a8c) is validated inside createConnection (must be a boolean). This route is
       // Tier 0 (loopback only — absent from the trust-tier allowlists), so a remote/gateway-token caller never reaches it.
-      const created = createConnection(deps.db, { name: b.name, host: b.host, authScheme: b.authScheme, secret: b.secret, projectId: scope.projectId, allowPlainHttp: b.allowPlainHttp as boolean | undefined });
+      const created = createConnection(deps.db, { name: b.name, host: b.host, authScheme: b.authScheme, secret: b.secret, projectId: scope.projectId, allowPlainHttp: b.allowPlainHttp as boolean | undefined, apiKeyHeader: b.apiKeyHeader as string | null | undefined });
       return reply.code(201).send(created);
     } catch (err) {
       if (err instanceof ConnectionInputError) return reply.code(err.status).send({ error: err.message });

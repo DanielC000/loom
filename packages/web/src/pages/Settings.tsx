@@ -2342,7 +2342,7 @@ function ConnectionsPanel() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ["connections"] });
   const create = useMutation({
     meta: { inlineError: true },
-    mutationFn: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null; allowPlainHttp?: boolean }) => api.createConnection(b),
+    mutationFn: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null; allowPlainHttp?: boolean; apiKeyHeader?: string }) => api.createConnection(b),
     onSuccess: () => { setAdding(false); invalidate(); },
   });
   const createOAuth = useMutation({
@@ -2442,6 +2442,7 @@ function ConnectionsPanel() {
                 {/* A stored host the current validator refuses (e.g. a scheme/port/path pasted into it): this
                     connection can never resolve, so say so instead of letting it read as bound-and-fine. */}
                 {c.invalidHost && <Badge tone="busy" title={c.invalidHostReason} data-testid="connection-invalid-host">Invalid host</Badge>}
+                {c.invalidApiKeyHeader && <Badge tone="busy" title={c.invalidApiKeyHeaderReason} data-testid="connection-invalid-api-key-header">Invalid header</Badge>}
                 {(nameCounts.get(c.name) ?? 0) > 1 && (
                   <Badge tone="busy" title="Another connection has this name; rename one" data-testid="connection-duplicate-name">Duplicate name</Badge>
                 )}
@@ -2528,6 +2529,7 @@ function ConnectionEditForm({ c, onDone, onCancel }: { c: ConnectionMetadata; on
   const [authScheme, setAuthScheme] = useState<ConnectionAuthScheme>(c.authScheme);
   const [secret, setSecret] = useState("");
   const [allowPlainHttp, setAllowPlainHttp] = useState(c.allowPlainHttp === true);
+  const [apiKeyHeader, setApiKeyHeader] = useState(c.apiKeyHeader ?? "");
   const [localErr, setLocalErr] = useState<string | null>(null);
   // gcTime: 0 so the rotated secret does not linger in the MutationCache once this form unmounts.
   const save = useMutation({
@@ -2542,7 +2544,8 @@ function ConnectionEditForm({ c, onDone, onCancel }: { c: ConnectionMetadata; on
     if (!host.trim()) { setLocalErr("A host is required."); return; }
     save.mutate({
       name: name.trim(), host: host.trim(),
-      ...(isOauth ? {} : { authScheme, allowPlainHttp, ...(secret.trim() !== "" ? { secret: secret.trim() } : {}) }),
+      // A blank header on an api-key row sends null: that CLEARS a stored name back to the X-API-Key default.
+      ...(isOauth ? {} : { authScheme, allowPlainHttp, ...(authScheme === "api-key" ? { apiKeyHeader: apiKeyHeader.trim() === "" ? null : apiKeyHeader.trim() } : {}), ...(secret.trim() !== "" ? { secret: secret.trim() } : {}) }),
     });
   };
   return (
@@ -2570,6 +2573,13 @@ function ConnectionEditForm({ c, onDone, onCancel }: { c: ConnectionMetadata; on
             <Input type="password" aria-label="New connection secret" value={secret} onChange={(e) => setSecret(e.target.value)} spellCheck={false} autoComplete="off" placeholder="leave blank to keep the stored secret" />
           </label>
           <PlainHttpToggle checked={allowPlainHttp} onChange={setAllowPlainHttp} testId={`connection-edit-plain-http-${c.id}`} />
+          {authScheme === "api-key" && (
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={fieldLabel}>Header name</span>
+              <Input aria-label="API key header name" data-testid={`connection-edit-api-key-header-${c.id}`} value={apiKeyHeader} onChange={(e) => setApiKeyHeader(e.target.value)} placeholder="X-API-Key" spellCheck={false} autoComplete="off" />
+              <Hint>the request header that carries the secret, e.g. X-Plex-Token · blank sends X-API-Key</Hint>
+            </label>
+          )}
         </>
       )}
       {(localErr || save.error) && <span role="alert" style={{ color: color.danger, fontSize: fs.mono, fontFamily: font.mono }}>{localErr ?? errorText(save.error)}</span>}
@@ -2702,7 +2712,7 @@ function normalizeSonarQubeHost(raw: string): string {
 function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onSubmitSsh, onCancel }: {
   pending: boolean; error: string | null;
   projects: { id: string; name: string }[];
-  onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null; allowPlainHttp?: boolean }) => void;
+  onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null; allowPlainHttp?: boolean; apiKeyHeader?: string }) => void;
   onSubmitOAuth: (v: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[]; projectId: string | null }) => void;
   onSubmitSsh: (v: Parameters<typeof api.createSshConnection>[0]) => void;
   onCancel: () => void;
@@ -2728,6 +2738,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
   const [secret, setSecret] = useState("");
   // Opt-in plain http for a private/LAN host (card 1d882a8c). Default off; api-key/bearer only.
   const [allowPlainHttp, setAllowPlainHttp] = useState(false);
+  const [apiKeyHeader, setApiKeyHeader] = useState("");
   const [provider, setProvider] = useState<OAuthProviderSlug>("google");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
@@ -2808,7 +2819,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
       setLocalErr("Secret is required.");
       return;
     }
-    onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim(), projectId: scopeProjectId || null, ...(allowPlainHttp ? { allowPlainHttp: true } : {}) });
+    onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim(), projectId: scopeProjectId || null, ...(allowPlainHttp ? { allowPlainHttp: true } : {}), ...(authScheme === "api-key" && apiKeyHeader.trim() !== "" ? { apiKeyHeader: apiKeyHeader.trim() } : {}) });
   };
 
   // Card 7fba8d90: re-derive the Name from the newly-picked preset ONLY while it is still preset-derived.
@@ -2973,6 +2984,13 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
                 <Hint>encrypted at rest immediately · never shown again after this form is submitted</Hint>
               </label>
               <PlainHttpToggle checked={allowPlainHttp} onChange={setAllowPlainHttp} testId="connection-create-plain-http" />
+              {authScheme === "api-key" && (
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={fieldLabel}>Header name <span style={{ fontWeight: 400, color: color.text3 }}>(optional)</span></span>
+                  <Input aria-label="API key header name" data-testid="connection-create-api-key-header" value={apiKeyHeader} onChange={(e) => setApiKeyHeader(e.target.value)} placeholder="X-API-Key" spellCheck={false} autoComplete="off" />
+                  <Hint>the request header that carries the secret, e.g. X-Plex-Token · blank sends X-API-Key</Hint>
+                </label>
+              )}
             </>
           )}
         </>

@@ -37,6 +37,7 @@ import {
 } from "./store.js";
 import { ensureFreshOAuthToken } from "./oauth.js";
 import { boundedFetch } from "./boundedFetch.js";
+import { apiKeyHeaderFor } from "./apiKeyHeader.js";
 import { hostRoundTrips, type ConnectionUrlScheme } from "./hostForm.js";
 import { createPinnedHttpFetch, daemonReservedPorts, resolveLanTarget, type LanTarget, type LookupImpl } from "./lanHttp.js";
 
@@ -265,6 +266,9 @@ export async function performAuthenticatedRequest(
   // same graceful {ok:false} every other rejection does, instead of propagating an uncaught throw out of
   // the tool handler (no secret leak either way — the crypto error text carries no plaintext — but every
   // other failure path here is a clean return, and this one shouldn't be the lone exception).
+  // A stored api-key header name that today's validator refuses fails closed BEFORE the secret is decrypted
+  // or any fetch happens; fixed text, never the name or the secret.
+  if (meta.invalidApiKeyHeader) return { ok: false, error: "connection api key header is invalid; edit the connection" };
   let secret: string | undefined;
   try {
     if (meta.authScheme === "oauth2") {
@@ -280,8 +284,12 @@ export async function performAuthenticatedRequest(
   if (secret === undefined) return { ok: false, error: "connection not found" }; // revoked between metadata read and use
 
   const authHeader: Record<string, string> =
-    meta.authScheme === "bearer" || meta.authScheme === "oauth2" ? { Authorization: `Bearer ${secret}` } : { "X-API-Key": secret };
-  const headers: Record<string, string> = { ...callerHeaders, ...authHeader };
+    meta.authScheme === "bearer" || meta.authScheme === "oauth2" ? { Authorization: `Bearer ${secret}` } : { [apiKeyHeaderFor(meta.apiKeyHeader)]: secret };
+  // A caller header that differs from the injected credential header only by case would travel beside it
+  // (an object spread is case-sensitive), so Loom's own credential header always wins outright.
+  const authKeyLower = Object.keys(authHeader)[0]!.toLowerCase();
+  const keptCallerHeaders = Object.fromEntries(Object.entries(callerHeaders).filter(([k]) => k.toLowerCase() !== authKeyLower));
+  const headers: Record<string, string> = { ...keptCallerHeaders, ...authHeader };
 
   let requestBody: string | undefined;
   if (input.body !== undefined && method !== "GET" && method !== "DELETE") {
