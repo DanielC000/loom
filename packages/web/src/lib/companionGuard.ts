@@ -38,7 +38,7 @@ import { isCompanionSession } from "./sessions";
 export function useIsCompanionSession(sessionId: string): boolean {
   const { data } = useQuery({
     queryKey: ["allSessions"],
-    queryFn: api.allSessions,
+    queryFn: ({ signal }) => api.allSessions(signal),
     select: (rows) => isCompanionSession(rows.find((s) => s.id === sessionId)),
   });
   // PENDING (`undefined`) ⇒ false ⇒ writable. Deliberate, and NOT fail-closed — see the pending-window

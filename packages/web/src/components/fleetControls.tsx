@@ -34,7 +34,7 @@ export function useOrchestrationPaused(): boolean {
  * larger set would be a confirm that lies about what the next click does.
  */
 function useLiveWorkerCount(): number {
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   return (sessions.data ?? []).filter((s) => s.role === "worker" && s.processState === "live").length;
 }
 

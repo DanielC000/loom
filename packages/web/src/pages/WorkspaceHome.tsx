@@ -96,7 +96,7 @@ export default function WorkspaceHome() {
   // node you happened to be standing on when you asked for it.
   const [dashOpen, setDashOpen] = useDashboardOpen();
 
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const usageQ = useQuery<UsageLimitsStatus>({ queryKey: ["usageLimits"], queryFn: api.usageLimits, refetchInterval: 30_000 });
   const activeGatesQ = useGatesActive();
   const historyQ = useGateHistoryRecent();
@@ -138,7 +138,7 @@ export default function WorkspaceHome() {
   // from here is already warm. No refetchInterval: the grid is a glance, and the board page itself
   // owns the live cadence once you are actually looking at one.
   const boardQs = useQueries({
-    queries: projects.map((p) => ({ queryKey: ["board", p.id], queryFn: () => api.board(p.id), staleTime: 30_000 })),
+    queries: projects.map((p) => ({ queryKey: ["board", p.id], queryFn: ({ signal }) => api.board(p.id, undefined, signal), staleTime: 30_000 })),
   });
   const boards = new Map(projects.map((p, i) => [p.id, boardRollup(boardQs[i]?.data?.columns, boardQs[i]?.data?.tasks)]));
   const openCards = [...boards.values()].reduce((n, b) => n + b.open, 0);
@@ -155,9 +155,9 @@ export default function WorkspaceHome() {
   const exitedManagers = useMemo(() => pulseExitedManagers(sessions), [sessions]);
   const eventQs = useQueries({
     queries: [
-      ...managers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id) })), // live tier: pushed over /ws/fleet, no poll (card 670b2081)
+      ...managers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: ({ signal }: { signal: AbortSignal }) => api.orchestrationEvents(m.id, signal) })), // live tier: pushed over /ws/fleet, no poll (card 670b2081)
       ...exitedManagers.map((m) => ({
-        queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id),
+        queryKey: ["orchEvents", m.id], queryFn: ({ signal }: { signal: AbortSignal }) => api.orchestrationEvents(m.id, signal),
         refetchInterval: PULSE_EXITED_REFETCH_MS,
       })),
     ],
@@ -178,7 +178,7 @@ export default function WorkspaceHome() {
   // Automation reads are the only new fetches this card adds — one-shot, no interval, 30s stale — and
   // they are the same keys pages/Schedules.tsx and pages/EventTriggers.tsx fill, so landing on that tab
   // finds its own tables already warm rather than paying twice.
-  const questionsQ = useQuery<QuestionInboxItem[]>({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
+  const questionsQ = useQuery<QuestionInboxItem[]>({ queryKey: ["openQuestions"], queryFn: ({ signal }) => api.openQuestions(false, signal) });
   const schedulesQ = useQuery<Schedule[]>({ queryKey: ["schedules"], queryFn: api.schedules, staleTime: 30_000 });
   const triggersQ = useQuery<EventTrigger[]>({ queryKey: ["eventTriggers"], queryFn: api.eventTriggers, staleTime: 30_000 });
   // The Inbox page's OWN headline figure ("Waiting on me (N)", components/requests.tsx): pending plus

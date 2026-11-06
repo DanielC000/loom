@@ -506,7 +506,7 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
   const [editing, setEditing] = useState<string | null>(agentId);
   const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
   const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // Edition discovery, off the SAME shared key pages/Projects.tsx reads it from — one cached fetch
   // for the whole app. It gates which rigs the bind dropdown offers; `isSuccess &&` holds it false
   // until the query settles so an end user never flashes a dev-layer rig mid-load.

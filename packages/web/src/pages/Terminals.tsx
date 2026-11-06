@@ -89,7 +89,7 @@ export default function Terminals({ projectId, projectName, layoutKey }: {
   // written when the host actually names one, so the god-eye mount never has its "all" reset.
   useEffect(() => { if (projectName !== undefined) setFilter(projectName); }, [projectName]);
 
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const stop = useStopSession();
   const fork = useForkSession();
   // Companion (assistant-role) sessions are EXCLUDED here at the source: a companion is driven ONLY

@@ -650,7 +650,7 @@ function FilterChip({ label, count, active, dotTone, onClick }:
 // facet — both narrow WITHOUT leaving this destination. Pending rank first, then answered below. Row action
 // opens the detail modal in place.
 export function RequestsInbox() {
-  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: ({ signal }) => api.openQuestions(false, signal) });
   const qc = useQueryClient();
   const [typeFacet, setTypeFacet] = useState<QuestionType | "all">("all");
   const [projFacet, setProjFacet] = useState<string>("all"); // projectId | "all"
@@ -872,7 +872,7 @@ export function useOpenRequest(): (questionId: string) => void {
 export function RequestDetail({ id, onClose }: { id: string; onClose?: () => void }) {
   const navigate = useNavigate();
   const active = useActiveProject();
-  const q = useQuery({ queryKey: ["question", id], queryFn: () => api.question(id), enabled: !!id, retry: false });
+  const q = useQuery({ queryKey: ["question", id], queryFn: ({ signal }) => api.question(id, signal), enabled: !!id, retry: false });
   const question = q.data;
   const now = Date.now();
 
@@ -892,7 +892,7 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
   // Best-effort linked-task title (soft link — tolerate a dangling id). Only fetched when a taskId is set.
   const tasks = useQuery({
     queryKey: ["tasks", question?.projectId],
-    queryFn: () => api.tasks(question!.projectId),
+    queryFn: ({ signal }) => api.tasks(question!.projectId, signal),
     enabled: !!question?.taskId && !!question?.projectId,
   });
   const linkedTask = question?.taskId ? tasks.data?.find((t) => t.id === question.taskId) : undefined;
@@ -1283,7 +1283,7 @@ function SubmitRow({ label, disabled, pending, success, onSubmit }:
 // `openQuestions(true)` folds in the terminal (consumed) history. A console-style table with a search box
 // + type/project/outcome/date filters. Clicking a row opens the same detail modal (read-only readout).
 export function RequestHistory() {
-  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true) });
+  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: ({ signal }) => api.openQuestions(true, signal) });
   const [search, setSearch] = useState("");
   const [typeF, setTypeF] = useState<QuestionType | "all">("all");
   const [projF, setProjF] = useState<string>("all");

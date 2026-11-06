@@ -415,7 +415,7 @@ function RepoPathEditor({ project }: { project: Project }) {
 // and the figure it disables Archive on is the same one those surfaces show.
 function ProjectLifecyclePanel({ project }: { project: Project | null }) {
   const { setProjectId } = useActiveProject();
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // A project that just got archived or deleted cannot stay the active one. Dropping the stored id is
   // enough: ActiveProjectProvider's own resolver then falls back to the most-recently-active project
   // rather than leaving the app scoped to a row that no longer resolves.

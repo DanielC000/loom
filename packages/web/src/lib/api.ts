@@ -284,16 +284,21 @@ async function errorMessageFrom(url: string, r: Response): Promise<string> {
   return msg;
 }
 
-async function get<T>(url: string): Promise<T> {
-  const r = await guardedFetch(url);
+// The optional `signal` on `get`/`getOrNull`/`getErr` is react-query's per-query AbortSignal: it aborts the
+// request AND the 429 backoff sleep, and an abort rejects with an AbortError (react-query treats that as a
+// cancelled query, never a rendered error). Passed explicitly per call — never via ambient module state.
+const sig = (signal?: AbortSignal): RequestInit | undefined => (signal ? { signal } : undefined);
+
+async function get<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const r = await guardedFetch(url, sig(signal));
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json() as Promise<T>;
 }
 // GET that resolves to `null` on an EXPECTED 404 (not found) instead of throwing — for a by-id lookup a
 // caller probes optimistically (e.g. "is this id archived?") and treats absence as a normal outcome, not
 // a query error.
-async function getOrNull<T>(url: string): Promise<T | null> {
-  const r = await guardedFetch(url);
+async function getOrNull<T>(url: string, signal?: AbortSignal): Promise<T | null> {
+  const r = await guardedFetch(url, sig(signal));
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json() as Promise<T>;
@@ -301,8 +306,8 @@ async function getOrNull<T>(url: string): Promise<T | null> {
 // GET that surfaces the server's JSON `{ error }` body as the thrown message — for the audit diff
 // reader, whose EXPECTED 400 ("no predecessor — pass an explicit 'b'") carries a reason the replay
 // panel shows verbatim instead of an opaque "-> 400".
-async function getErr<T>(url: string): Promise<T> {
-  const r = await guardedFetch(url);
+async function getErr<T>(url: string, signal?: AbortSignal): Promise<T> {
+  const r = await guardedFetch(url, sig(signal));
   if (!r.ok) {
     let msg = `${url} -> ${r.status}`;
     try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON */ }
@@ -648,7 +653,7 @@ export const api = {
   // replaces the list, so a grant landed concurrently elsewhere is not lost.
   addAgentConnection: (id: string, connectionId: string) =>
     post<Agent & { added: boolean }>(`/api/agents/${id}/connections`, { connectionId }),
-  tasks: (projectId: string) => get<Task[]>(`/api/projects/${projectId}/tasks`),
+  tasks: (projectId: string, signal?: AbortSignal) => get<Task[]>(`/api/projects/${projectId}/tasks`, signal),
   // Memory — the read-only per-project project_memory list (pinned first, then most-recently-updated).
   // Full entries incl. the note `text`, so client-side search (title+key+content) + the note-detail
   // body render off this one read. Human-only; there is deliberately no write/forget counterpart. Each
@@ -687,7 +692,7 @@ export const api = {
   // surface). Clears the park + episode deadline, drops the global usage latch, and re-submits the
   // held turn if the session is live; returns the updated session (rateLimitedUntil now null).
   clearSessionRateLimit: (id: string) => post<Session>(`/api/sessions/${id}/rate-limit/clear`),
-  allSessions: () => get<SessionListItem[]>("/api/sessions"),
+  allSessions: (signal?: AbortSignal) => get<SessionListItem[]>("/api/sessions", signal),
 
   // --- Per-project session Archive (HUMAN-only; mirrors stop/fork — no agent MCP surface). Archiving
   // is now AUTOMATIC on session exit (the manual archive endpoint was removed), so there is no
@@ -807,9 +812,9 @@ export const api = {
   // URL is byte-identical to before, so the shared `["board", projectId]` cache entry still holds the
   // WHOLE done set. `doneTotal`/`doneLimit` are absent, not zero, on that unwindowed response: read
   // `doneTotal !== undefined` as "this response is windowed", never a falsy check.
-  board: (projectId: string, doneLimit?: number) =>
+  board: (projectId: string, doneLimit?: number, signal?: AbortSignal) =>
     get<{ columns: KanbanColumn[]; tasks: BoardTask[]; doneTotal?: number; doneLimit?: number }>(
-      `/api/projects/${projectId}/board${doneLimit === undefined ? "" : `?doneLimit=${doneLimit}`}`),
+      `/api/projects/${projectId}/board${doneLimit === undefined ? "" : `?doneLimit=${doneLimit}`}`, signal),
   // One task's full row (incl. body) — the board drawer's lazy fetch for a DONE card, whose body the
   // board() list route above omits (card 4fa2c146).
   getTask: (id: string) => get<Task>(`/api/tasks/${id}`),
@@ -942,12 +947,12 @@ export const api = {
     patch<{ reordered: boolean }>(`/api/sessions/${sessionId}/queue`, { orderedIds }),
 
   // --- phase-2 orchestration (#18b view) ---
-  orchestrationEvents: (managerId: string) =>
-    get<OrchestrationEvent[]>(`/api/orchestration/events?managerId=${encodeURIComponent(managerId)}`),
+  orchestrationEvents: (managerId: string, signal?: AbortSignal) =>
+    get<OrchestrationEvent[]>(`/api/orchestration/events?managerId=${encodeURIComponent(managerId)}`, signal),
   // Card 43084723 — the cross-session twin: rows for a small set of KINDS across every session, not one
   // manager's own timeline. See /api/orchestration/events's own `kinds` handling (gateway/server.ts).
-  orchestrationEventsByKinds: (kinds: readonly OrchestrationEventKind[]) =>
-    get<OrchestrationEvent[]>(`/api/orchestration/events?kinds=${kinds.map(encodeURIComponent).join(",")}`),
+  orchestrationEventsByKinds: (kinds: readonly OrchestrationEventKind[], signal?: AbortSignal) =>
+    get<OrchestrationEvent[]>(`/api/orchestration/events?kinds=${kinds.map(encodeURIComponent).join(",")}`, signal),
 
   // --- Gates page (card a1c86452): god-eye view of daemon-executed gates across all projects. Both are
   // read-only, human-only. `gatesActive` = the live GateSemaphore registry snapshot (running + queued),
@@ -1004,9 +1009,9 @@ export const api = {
   // getErr). WRITE side: `answerQuestion` is the ONLY writer of chosenOption/note — it POSTs the existing
   // human-only answer route (options question → a chosenOption from options; pure-blocker → note only,
   // required). All human-only loopback REST — there is NO agent MCP path (the agent can only ask/pull). ---
-  openQuestions: (includeConsumed = false) =>
-    get<QuestionInboxItem[]>(`/api/questions${includeConsumed ? "?includeConsumed=true" : ""}`),
-  question: (id: string) => getErr<QuestionInboxItem>(`/api/questions/${encodeURIComponent(id)}`),
+  openQuestions: (includeConsumed = false, signal?: AbortSignal) =>
+    get<QuestionInboxItem[]>(`/api/questions${includeConsumed ? "?includeConsumed=true" : ""}`, signal),
+  question: (id: string, signal?: AbortSignal) => getErr<QuestionInboxItem>(`/api/questions/${encodeURIComponent(id)}`, signal),
   // The answer route (POST /api/questions/:id/answer) branches its body SHAPE by the question's `type`
   // server-side (see gateway/server.ts): decision/input → {chosenOption?,note?}; permission →
   // {decision,scope?,expiresAt?,note?} — `scope`/`expiresAt` (fix(mcp): persist and surface permission

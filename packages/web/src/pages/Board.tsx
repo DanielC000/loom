@@ -147,13 +147,13 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // The key EXTENDS `["board", projectId]` rather than replacing it: that exact entry stays the full,
   // unwindowed set its four other consumers read, while `invalidateQueries(["board", projectId])` below
   // still reaches every windowed entry too, because react-query matches a key by prefix.
-  const board = useQuery({ queryKey: ["board", projectId, doneLimit], queryFn: () => api.board(projectId, doneLimit ?? undefined), enabled: !!projectId, refetchInterval: 4000, placeholderData: keepPreviousData });
+  const board = useQuery({ queryKey: ["board", projectId, doneLimit], queryFn: ({ signal }) => api.board(projectId, doneLimit ?? undefined, signal), enabled: !!projectId, refetchInterval: 4000, placeholderData: keepPreviousData });
   // True while a DIFFERENT window (or the windowed↔full switch) is in flight and the lane is still
   // showing the previous response — the reveal button's loading state.
   const windowPending = board.isPlaceholderData;
   // Link the board to the orchestration spine: a worker carries its task id, so cards can show the
   // live worker's status + branch for the task they represent.
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // The project's WRITABLE repo registry (multi-repo epic 49136451, phase 3). Drives the card repo
   // picker + badge. A project with an EMPTY registry (the overwhelmingly common case) renders no picker
   // and no badge at all — zero UI tax for a single-repo project, which is the point. Reuses the
@@ -391,7 +391,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // ── Card-detail filter inputs (card cea577af) ──────────────────────────────────
   // Pending Requests come from the SAME app-wide key the sidebar badge already polls, so this is a cache
   // read, not a new request per board.
-  const openQuestions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
+  const openQuestions = useQuery({ queryKey: ["openQuestions"], queryFn: ({ signal }) => api.openQuestions(false, signal) });
   const facets = useMemo(() => {
     const ids = allTasks.map((t) => t.id);
     const parentOf = new Map(allTasks.map((t) => [t.id, t.parentId]));
@@ -1554,7 +1554,7 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
   // exact `q.taskId === task.id` check below — but a row filed BEFORE that fix landed can still carry a
   // raw 8-char id-PREFIX (`question_ask({taskId: "28f425c2"})`), which never equals the card's full id.
   // The `startsWith` fallback is belt-and-suspenders for those legacy rows (card c089a959).
-  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: () => api.openQuestions(true) });
+  const questions = useQuery({ queryKey: ["openQuestions", "history"], queryFn: ({ signal }) => api.openQuestions(true, signal) });
   const linked = (questions.data ?? []).filter(
     (q) => q.projectId === task.projectId && (q.taskId === task.id || (!!q.taskId && task.id.startsWith(`${q.taskId}-`))),
   );

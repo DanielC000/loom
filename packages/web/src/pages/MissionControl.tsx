@@ -45,7 +45,7 @@ export default function MissionControl() {
   const navigate = useNavigate();
   const openRequest = useOpenRequest();
 
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // No refetchInterval (C6 of the WS delta-push umbrella, 1efde4ba) — same shared cache the rail reads;
   // FleetSocketProvider keeps it live off the /ws/fleet `status` feed. `refreshStatus` below is KEPT: it is
   // a one-shot invalidate on this page's OWN pause/resume mutation, not a poll, and it is what still gives
@@ -116,7 +116,7 @@ export default function MissionControl() {
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
       queryKey: ["orchEvents", m.id],
-      queryFn: () => api.orchestrationEvents(m.id), // kept live by the /ws/fleet event push — no poll (card 670b2081)
+      queryFn: ({ signal }) => api.orchestrationEvents(m.id, signal), // kept live by the /ws/fleet event push — no poll (card 670b2081)
     })),
   });
   const allEvents = eventQueries

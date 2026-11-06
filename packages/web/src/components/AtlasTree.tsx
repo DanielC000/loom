@@ -532,7 +532,7 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
   // number the page below it shows. (Card ec1aa18e dropped the `["agents", id]` and `["board", id]`
   // reads along with the rows that carried their counts — those figures are on the project node's own
   // tab row now, which is where the owner's feedback moved a reader's eye for them.)
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const { items: attention } = useAttention();
 
   const liveByProject = useMemo(() => liveCountsByProject(sessionsQ.data), [sessionsQ.data]);

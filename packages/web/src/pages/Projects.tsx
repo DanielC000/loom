@@ -75,7 +75,7 @@ export default function Projects() {
   // on destructive project/agent ops (archive/delete disable while a related session is live). Archived
   // projects feed the restore / permanent-delete footer. Both are cheap loopback reads, invalidated by
   // the mutations (the live set also polls, mirroring the header picker's live marker).
-  const globalSessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const globalSessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const archivedProjects = useQuery({ queryKey: ["archivedProjects"], queryFn: api.archivedProjects });
   const { liveByProject, liveByAgent } = useMemo(() => {
     const byProject = new Map<string, number>();

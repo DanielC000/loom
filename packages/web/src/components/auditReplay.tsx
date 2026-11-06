@@ -211,7 +211,7 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
 
   // The full session set drives `session` scope: a manager's workers are sessions whose parent is it.
   // Reuse the shared ["allSessions"] cache — kept live by FleetSocketProvider's /ws/fleet deltas (no new prop).
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const allSessions = sessionsQ.data ?? [];
 
   // Climb a subject to its anchoring MANAGER: a worker → its parent; a manager (or unknown) → itself.

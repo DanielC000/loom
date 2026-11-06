@@ -24,7 +24,7 @@ import { api } from "./api";
 // Both reads use the SHARED cache entries (["allSessions"], ["archivedSessionById", id]), so wherever
 // a page is already making them this costs no extra request.
 export function useLatchedSession(sessionId: string): SessionListItem | undefined {
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, enabled: !!sessionId });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal), enabled: !!sessionId });
   const live = (sessions.data ?? []).find((s) => s.id === sessionId);
 
   // Only once the live feed has ANSWERED without this row — `!sessions.data` would fire the lookup on

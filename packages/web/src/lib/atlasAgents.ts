@@ -311,7 +311,7 @@ export function standingOperators(sessions: readonly SessionListItem[] | undefin
 export function useAgentRoster(projectId: string): { roster: AgentRoster; isLoading: boolean } {
   const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
   const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   return {
     roster: splitRoster(agentsQ.data, profilesQ.data, sessionsQ.data),
     // The ROSTER is only trustworthy once the agents AND the profiles have landed: a resolved agent

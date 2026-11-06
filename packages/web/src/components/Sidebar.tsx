@@ -49,7 +49,7 @@ function RailProjectControl({ onOpenChange }: { onOpenChange: (open: boolean) =>
   const btnRef = useRef<HTMLButtonElement>(null);
   const ref = useDismissable<HTMLDivElement>(open, () => { setOpen(false); onOpenChange(false); });
 
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const liveByProject = useMemo(() => {
     const m = new Map<string, number>();
     for (const s of sessionsQ.data ?? []) {
@@ -149,7 +149,7 @@ export function Sidebar() {
   // it with the attention hook's own use of the key).
   const { items: attentionItems } = useAttention();
   const alertCount = attentionItems.filter((it) => !it.questionId).length;
-  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: ({ signal }) => api.openQuestions(false, signal) });
   const pendingRequests = (questions.data ?? []).filter((q) => q.state === "pending").length;
   // Phase 2 of card 59fa6403 (read/unread) — a SEPARATE, muted count from the red pending badge above:
   // unread is orthogonal to state (a notice can be unread with nothing pending at all), so this is never

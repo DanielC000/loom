@@ -91,7 +91,7 @@ export default function Companion() {
   );
   // Shared cache key (["allSessions"], used app-wide) — read here ONLY for each companion's ctxTurns/
   // createdAt, to pick the history-bearing default selection below. Never used to reorder the switcher.
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
 
   // Have BOTH companion reads actually ANSWERED? Everything orphan-derived below is gated on this (card
   // ed49cef6, review round 1). `isSuccess` — not `data !== undefined` — because a query that errored on a
@@ -777,7 +777,7 @@ function CompanionIdentity({ companion, label }: { companion: CompanionRow; labe
 // trust window is closed. Human-only (loopback REST), behind an explicit confirm.
 function RecycleExhaustedControl({ sessionId, label }: { sessionId: string; label: string }) {
   const qc = useQueryClient();
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const [confirming, setConfirming] = useState(false);
   const recycle = useMutation({
     meta: { inlineError: true },

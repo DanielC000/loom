@@ -21,7 +21,7 @@ import { color, font, radius, tone, fs } from "../theme";
 // so the cards nest directly under Overview's own "Attention" heading without stacking two headers.
 export function ReviewQueue({ workerIds, showLabel = true }: { workerIds: string[]; showLabel?: boolean }) {
   const navigate = useNavigate();
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const all = sessions.data ?? [];
 
   // One diff fetch per pending review. Pending reviews are few (the parallel ceiling is ~3-8), so this

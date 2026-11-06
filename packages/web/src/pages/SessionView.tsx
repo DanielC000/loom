@@ -31,7 +31,7 @@ export default function SessionView() {
   // a direct lookup, not a `.find()` over the (now paginated) full archived list, so this resolves an
   // archived session regardless of how far back it sits in archive order. A null from both ⇒ a graceful
   // "not found" rather than a blank page.
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const live = (sessions.data ?? []).find((s) => s.id === id);
   const archived = useQuery({
     queryKey: ["archivedSessionById", id], queryFn: () => api.archivedSessionById(id), refetchInterval: 15000,

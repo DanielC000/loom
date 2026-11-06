@@ -27,7 +27,7 @@ const ARCHIVED_PAGE = 300;
 export function WorkspaceReplay() {
   // The live, non-archived feed — the shared cache entry every fleet surface already reads, kept live by
   // FleetSocketProvider's /ws/fleet deltas. No interval of its own.
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // Archived (now-exited) sessions across every project, ALL roles — what makes a finished wave's project
   // visible at all, since sessions auto-archive on exit and drop out of the live feed. Paginated: this is
   // a recent-history read, not the full cross-project archive (2137 rows / 2.4MB measured live).

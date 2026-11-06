@@ -33,7 +33,7 @@ export default function EventTriggers() {
 
   const triggers = useQuery({ queryKey: ["eventTriggers"], queryFn: api.eventTriggers });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // Flat "Project / Agent" labels for BOTH the spawn-mode picker and the table's target resolution. A
   // trigger's scope (which project's events it reacts to) is independent of where its target lives, so
   // the target may be any project's agent — this stays god-eye.

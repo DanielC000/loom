@@ -276,13 +276,13 @@ export function attentionOpenTarget(item: AttentionItem): string | null {
 }
 
 export function useAttention(): { items: AttentionItem[]; count: number; resolved: boolean } {
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const all = sessions.data ?? [];
   // Manager→human DECISION INBOX (card 8701bdbb): the GLOBAL "waiting on me" queue. A PENDING question is
   // ONE attention item (tone cyan — the signed "actionable question" color); it clears the instant the
   // human answers it (state → 'answered', dropped server-side from the pending set). Same shared query
   // key as the inbox page/bell, so react-query dedups the poll.
-  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: ({ signal }) => api.openQuestions(false, signal) });
   // LIVE managers only: an EXITED manager has no actionable merge/idle state (it's gone), so its
   // events (e.g. an orphaned merge_request whose merge_done was never recorded) must not surface as
   // permanent attention items. Only a live manager's pending reviews / idle states are actionable.
@@ -296,7 +296,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // unresolved event unreachable the moment its FILING manager stopped being live (e.g. recycled).
   const bootStuckEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "claude_boot_dialog_stuck", "claude_boot_dialog_resolved"],
-    queryFn: () => api.orchestrationEventsByKinds(["claude_boot_dialog_stuck", "claude_boot_dialog_resolved"]),
+    queryFn: ({ signal }) => api.orchestrationEventsByKinds(["claude_boot_dialog_stuck", "claude_boot_dialog_resolved"], signal),
     // No refetchInterval on any orchestration-event list (card 670b2081): FleetSocketProvider patches them
     // from the `/ws/fleet` event push, re-reads on every (re)connect, and polls only while the socket is down.
   });
@@ -312,7 +312,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // section — this superseded round 1's "no cleared counterpart" call).
   const vaultLockEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "vault_index_lock_stale", "vault_index_lock_cleared"],
-    queryFn: () => api.orchestrationEventsByKinds(["vault_index_lock_stale", "vault_index_lock_cleared"]),
+    queryFn: ({ signal }) => api.orchestrationEventsByKinds(["vault_index_lock_stale", "vault_index_lock_cleared"], signal),
   });
   const activeVaultLocks = activeVaultLockAlerts(vaultLockEventsQuery.data ?? []);
 
@@ -324,7 +324,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // manager cadence — this is a standing configuration fact, not a live incident.
   const codexGapEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "codex_isolation_gap_disclosed"],
-    queryFn: () => api.orchestrationEventsByKinds(["codex_isolation_gap_disclosed"]),
+    queryFn: ({ signal }) => api.orchestrationEventsByKinds(["codex_isolation_gap_disclosed"], signal),
   });
   const activeCodexGaps = activeCodexIsolationGapAlerts(codexGapEventsQuery.data ?? []);
 
@@ -333,7 +333,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // kind-filtered-query reason as the two queries above (card 43084723's rule).
   const recycleConsolidatedEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "recycle_split_lineage_consolidated"],
-    queryFn: () => api.orchestrationEventsByKinds(["recycle_split_lineage_consolidated"]),
+    queryFn: ({ signal }) => api.orchestrationEventsByKinds(["recycle_split_lineage_consolidated"], signal),
   });
   const activeRecycleConsolidated = activeRecycleLineageConsolidatedAlerts(
     recycleConsolidatedEventsQuery.data ?? [],
@@ -351,17 +351,17 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // call — see `activeCrashLoopAbandonments`'s own doc for why a shared cap can evict the rarer kind.
   const crashLoopAbandonedEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "session_recovery_abandoned"],
-    queryFn: () => api.orchestrationEventsByKinds(["session_recovery_abandoned"]),
+    queryFn: ({ signal }) => api.orchestrationEventsByKinds(["session_recovery_abandoned"], signal),
   });
   const crashLoopRecoveredEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "session_recovered"],
-    queryFn: () => api.orchestrationEventsByKinds(["session_recovered"]),
+    queryFn: ({ signal }) => api.orchestrationEventsByKinds(["session_recovered"], signal),
   });
 
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
       queryKey: ["orchEvents", m.id],
-      queryFn: () => api.orchestrationEvents(m.id),
+      queryFn: ({ signal }) => api.orchestrationEvents(m.id, signal),
     })),
   });
   // Round 2 (Code Review e5290bc2 MAJOR), reaffirmed by card 43084723: do NOT fold bootStuckEvents into
@@ -424,7 +424,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // reasoning as `kickoffDroppedEventsQuery` below) so a Lead's event reaches this surface too.
   const contextExhaustedEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "manager_context_exhausted"],
-    queryFn: () => api.orchestrationEventsByKinds(["manager_context_exhausted"]),
+    queryFn: ({ signal }) => api.orchestrationEventsByKinds(["manager_context_exhausted"], signal),
   });
   // Unlike context_escalated/idle_escalated above (one-shot episodes with no "cleared" event),
   // exhaustion is a SESSION STATE (`Session.contextExhaustedAt`, cleared in place by a human /compact or
@@ -462,7 +462,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // (lib/fleet.ts) for the same reason that one is: unit-testable without React/react-query.
   const kickoffDroppedEventsQuery = useQuery({
     queryKey: ["orchEventsByKind", "manager_kickoff_dropped", "manager_kickoff_dropped_resolved"],
-    queryFn: () => api.orchestrationEventsByKinds(["manager_kickoff_dropped", "manager_kickoff_dropped_resolved"]),
+    queryFn: ({ signal }) => api.orchestrationEventsByKinds(["manager_kickoff_dropped", "manager_kickoff_dropped_resolved"], signal),
   });
   const activeKickoffDropped = activeKickoffDroppedAlerts(kickoffDroppedEventsQuery.data ?? [],
     (sessionId) => all.find((s) => s.id === sessionId)?.processState === "live");
@@ -951,7 +951,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
 // FIRST (newest) pending question for that session — the "Answer →" jump target.
 export interface PendingDecision { questionId: string; count: number }
 export function usePendingDecisionsBySession(): Map<string, PendingDecision> {
-  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions() });
+  const questions = useQuery({ queryKey: ["openQuestions"], queryFn: ({ signal }) => api.openQuestions(false, signal) });
   return useMemo(() => {
     const m = new Map<string, PendingDecision>();
     // openQuestions is newest-first, so the first pending row seen per session is the newest → the jump target.

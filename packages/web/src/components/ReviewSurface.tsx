@@ -32,7 +32,7 @@ export function ReviewSurface({ workerId, embedded = false }: {
   const [note, setNote] = useState("");
   const [result, setResult] = useState<string | null>(null);
 
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const worker = (sessions.data ?? []).find((s) => s.id === workerId);
   // Shares the Review-queue card's cache entry (same key via workerDiffQuery), so arriving here from a
   // card — the normal path — renders the diff from cache instead of re-issuing the git call.

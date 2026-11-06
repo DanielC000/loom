@@ -45,7 +45,7 @@ export default function Overview() {
   // resolve each agent's role → which agents are managers). Both already cached elsewhere.
   const agents = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   // Polled (not just invalidation-driven): the accordion below now folds archived rows in as the
   // durable Resume path (finding #15), so a session that just auto-archived should surface here
   // promptly, not only after some other mutation happens to invalidate this query. PAGINATED — this is
@@ -72,7 +72,7 @@ export default function Overview() {
   const eventQueries = useQueries({
     queries: managers.map((m) => ({
       queryKey: ["orchEvents", m.id],
-      queryFn: () => api.orchestrationEvents(m.id), // kept live by the /ws/fleet event push — no poll (card 670b2081)
+      queryFn: ({ signal }) => api.orchestrationEvents(m.id, signal), // kept live by the /ws/fleet event push — no poll (card 670b2081)
     })),
   });
   const allEvents = eventQueries

@@ -148,10 +148,10 @@ export default function ProjectHome() {
     if (projectId) writeRosterScope(projectId, next);
   };
 
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: () => api.agents(projectId), enabled: !!projectId });
   const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const boardQ = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, staleTime: 30_000 });
+  const boardQ = useQuery({ queryKey: ["board", projectId], queryFn: ({ signal }) => api.board(projectId, undefined, signal), enabled: !!projectId, staleTime: 30_000 });
   const archivedQ = useQuery({ queryKey: ["archive", projectId, 100], queryFn: () => api.archivedSessions(projectId), enabled: !!projectId });
   // The two tab counts no existing read on this page already answers (card 25c08fba). Both reuse the
   // EXACT query key + fetcher their own tab body uses — ["projectMemory", id] in pages/Memory.tsx,
@@ -260,9 +260,9 @@ export default function ProjectHome() {
   const exitedManagers = useMemo(() => pulseExitedManagers(all), [all]);
   const eventQs = useQueries({
     queries: [
-      ...liveManagers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id) })), // live tier: pushed over /ws/fleet, no poll (card 670b2081)
+      ...liveManagers.map((m) => ({ queryKey: ["orchEvents", m.id], queryFn: ({ signal }: { signal: AbortSignal }) => api.orchestrationEvents(m.id, signal) })), // live tier: pushed over /ws/fleet, no poll (card 670b2081)
       ...exitedManagers.map((m) => ({
-        queryKey: ["orchEvents", m.id], queryFn: () => api.orchestrationEvents(m.id),
+        queryKey: ["orchEvents", m.id], queryFn: ({ signal }: { signal: AbortSignal }) => api.orchestrationEvents(m.id, signal),
         refetchInterval: PULSE_EXITED_REFETCH_MS,
       })),
     ],
