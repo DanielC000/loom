@@ -91,9 +91,13 @@ test.describe("multi-repo registry + card routing (card ebb50819)", () => {
 
     // ── ROUTE A CARD AT THE NEW REPO. The picker exists only because this project now has a registry.
     await page.goto(`${loomDaemon.baseURL}/board`);
-    const picker = page.getByLabel("Target repo");
+    // exact: the board filter bar's "Filter by target repo" select would otherwise also match (substring).
+    const picker = page.getByLabel("Target repo", { exact: true });
     await expect(picker).toBeVisible();
     await expect(picker).toHaveValue(""); // defaults to primary
+    // Only the real target-repo select offers the registered "api" repo as a card destination with a
+    // primary default ""; assert its options so a wrong-element match can't pass.
+    await expect(picker.locator("option")).toHaveCount(2);
     await picker.selectOption("api");
     const title = `routed to api ${Date.now()}`;
     await page.getByPlaceholder("new task title").fill(title);
@@ -109,7 +113,7 @@ test.describe("multi-repo registry + card routing (card ebb50819)", () => {
     // A render-only check wouldn't prove the control does anything; this is a real observable state
     // change, round-tripped through the server and back onto the board.
     await card.getByText(title).click();
-    const drawerPicker = page.getByRole("dialog").getByLabel("Target repo");
+    const drawerPicker = page.getByRole("dialog").getByLabel("Target repo", { exact: true });
     await expect(drawerPicker).toBeVisible();
     await expect(drawerPicker).toHaveValue("api");
     // The resolved absolute path of the selected repo is shown — the "which repo did this land on"
@@ -207,7 +211,7 @@ test.describe("multi-repo registry + card routing (card ebb50819)", () => {
     await patch([{ key: "current", path: donorRepo }]);
     await page.goto(`${loomDaemon.baseURL}/board`);
     await page.locator(".loom-board-card").filter({ hasText: "doomed repo" }).getByText("doomed repo").click();
-    const picker = page.getByRole("dialog").getByLabel("Target repo");
+    const picker = page.getByRole("dialog").getByLabel("Target repo", { exact: true });
     await expect(picker).toBeVisible();
     await expect(picker).toHaveValue("legacy"); // NOT "" — the control must not claim `primary`
     await expect(page.getByRole("dialog")).toContainText("no longer registered");
@@ -272,14 +276,14 @@ test.describe("multi-repo registry + card routing (card ebb50819)", () => {
     await expect(card).toBeVisible();
 
     // No picker on the new-task row.
-    await expect(page.getByLabel("Target repo")).toHaveCount(0);
+    await expect(page.getByLabel("Target repo", { exact: true })).toHaveCount(0);
     // No badge on any card.
     await expect(page.getByTitle(/Targets the/)).toHaveCount(0);
 
     // And none in the drawer either.
     await card.click();
     await expect(page.getByRole("dialog")).toBeVisible();
-    await expect(page.getByRole("dialog").getByLabel("Target repo")).toHaveCount(0);
+    await expect(page.getByRole("dialog").getByLabel("Target repo", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("dialog").getByText("Repo", { exact: true })).toHaveCount(0);
   });
 });
