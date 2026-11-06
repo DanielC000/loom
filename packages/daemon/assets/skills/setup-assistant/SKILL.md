@@ -183,7 +183,7 @@ gate that doesn't exist.
 - **`documentConversion` is a PROFILE capability, HUMAN-set only.** It is set on a **profile** and pinned
   onto the session row **at spawn**. No project-level config key turns it on, `project_configure` cannot
   enable it, and your `profile_create`/`profile_update` REJECT it (same posture as
-  `browserTesting`/`allowDelta`/Connections, below). Point the user at the **Profiles** page to flip it
+  `browserTesting`/`allowDelta`, below). Point the user at the **Profiles** page to flip it
   themselves. If a `documentConversion` session is still missing its
   `mcp__markitdown__convert_to_markdown` tool after that, the cause is one of exactly two things, neither
   a project setting:
@@ -204,7 +204,8 @@ gate that doesn't exist.
   to an external service (so a session can make an `authenticated_request` against it once granted).
   Granting one is an explicit human OAuth action on the **Connections** page, outside your surface. If a
   user wants an agent to reach an external service, explain that and point them there; don't improvise a
-  credential path.
+  credential path. Grants are made per **agent** (the agent's own credential grants), never on a profile;
+  a profile is a credential-free rig.
 - **Board columns** are configured with
   `project_configure({ projectId, config: { kanbanColumns: [ { key, label, role? }, … ] } })`. It is
   implemented and supported (the PATCH deep-merges, so it won't clobber the project's other config

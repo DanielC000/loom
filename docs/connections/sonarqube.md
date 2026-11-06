@@ -13,12 +13,13 @@ signal — quality gate status, issues, coverage — without the agent ever seei
    needed for the read surface below.
 4. Loom validates the host+token live (against `/api/users/current`) before saving — a wrong token or
    host is refused with a clear error, never silently stored.
-5. **Grant it to a profile**: Settings → Actors → the profile → Connections → tick the new connection,
-   Save. This is the same human-only step every connection needs — Loom never auto-grants one.
+5. **Grant it to an agent**: Actors → the agent → Credential grants → Connections → tick the new
+   connection, then **Save grants**. This is the same human-only step every connection needs — Loom never
+   auto-grants one. A profile is a credential-free rig and carries no connections.
 
 ## What an agent can actually do once granted
 
-A session whose profile grants this connection gets the `authenticated_request` MCP tool with this
+A session whose agent is granted this connection gets the `authenticated_request` MCP tool with this
 connection's id. It is a generic credential-injected HTTP passthrough (Loom builds the URL from the
 connection's fixed host + the agent's path and injects `Authorization: Bearer <token>` server-side — the
 token itself never reaches the agent or a transcript). Useful read-only SonarQube Web API paths:
