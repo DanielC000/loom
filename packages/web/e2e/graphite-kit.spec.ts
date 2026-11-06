@@ -21,8 +21,9 @@ const shotDir = process.env.LOOM_E2E_SHOTS;
 const THEMES = ["dark", "light"] as const;
 type Theme = (typeof THEMES)[number];
 
-/** Seed the theme. `dark` is the default, so only `light` is written: an init script re-runs on every
- *  navigation, and seeding the default would hide a regression in the default itself. */
+/** Seed the theme. `dark` is what the default ("system") resolves to under the suite's emulated dark OS
+ *  (playwright.config.ts), so only `light` is written: an init script re-runs on every navigation, and
+ *  seeding the default would hide a regression in the default itself. */
 async function useTheme(page: Page, theme: Theme) {
   if (theme === "light") await page.addInitScript(() => { try { localStorage.setItem("loom.theme", "light"); } catch { /* blocked */ } });
 }

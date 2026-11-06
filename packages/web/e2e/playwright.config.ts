@@ -28,6 +28,11 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    // The app's theme defaults to "system" (card 3b5b3106), and Playwright emulates a LIGHT OS unless
+    // told otherwise. Pin the emulated OS to dark so every spec keeps rendering the theme it was written
+    // against. Specs that test the theme itself (theme-switch.spec.ts) override this per test with
+    // `test.use({ colorScheme })` or `page.emulateMedia`, and light is covered there and by the specs
+    // that seed `loom.theme = "light"`.
+    { name: "chromium", use: { ...devices["Desktop Chrome"], colorScheme: "dark" } },
   ],
 });

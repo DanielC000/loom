@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark light" />
     <!-- Sets the colour theme before first paint, so the page never flashes the wrong one. Mirrors
-         src/lib/themePref.ts (key "loom.theme", default "dark"); test/theme-pref.mjs checks they agree. -->
+         src/lib/themePref.ts (key "loom.theme", default "system"); test/theme-pref.mjs checks they agree. -->
     <script>
       (function () {
-        var pref = "dark";
+        var pref = "system";
         try {
           var v = localStorage.getItem("loom.theme");
           if (v === "system" || v === "light" || v === "dark") pref = v;

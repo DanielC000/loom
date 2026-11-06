@@ -18,9 +18,10 @@ export const THEME_STORAGE_KEY = "loom.theme";
 export type ThemePref = "system" | "light" | "dark";
 export type ResolvedTheme = "light" | "dark";
 
-// Dark while the Graphite cards land one by one; the last card flips this to "system". Keep the
-// index.html script's default in step (the unit test checks it).
-export const THEME_DEFAULT: ThemePref = "dark";
+// Follow the OS (card 3b5b3106, the last Graphite card, flipped this from the interim "dark"). Keep the
+// index.html script's default in step (the unit test checks it). Where the OS setting can't be read,
+// "system" resolves to dark (see `systemTheme`).
+export const THEME_DEFAULT: ThemePref = "system";
 
 export const THEME_PREFS: readonly ThemePref[] = ["system", "light", "dark"];
 

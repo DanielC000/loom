@@ -44,7 +44,7 @@ const { THEME_STORAGE_KEY, THEME_DEFAULT } = base;
 
 await check("the key and default are the agreed literals", () => {
   assert.equal(THEME_STORAGE_KEY, "loom.theme");
-  assert.equal(THEME_DEFAULT, "dark");
+  assert.equal(THEME_DEFAULT, "system");
 });
 
 await check("parseThemePref keeps the three real values and maps everything else to the default", () => {
@@ -62,6 +62,18 @@ await check("an invalid stored value reads as the default", async () => {
   const m = await loadWith(storeOf("sepia"));
   assert.equal(m.getThemePref(), THEME_DEFAULT);
   assert.equal(m.getResolvedTheme(), "dark");
+});
+
+await check("with nothing stored, the default follows the OS setting, and an unreadable OS setting reads as dark", async () => {
+  const withOs = async (dark) => {
+    globalThis.window = { matchMedia: (q) => ({ matches: q === "(prefers-color-scheme: dark)" && dark }) };
+    try { return await loadWith(storeOf(undefined)); } finally { delete globalThis.window; }
+  };
+  assert.equal((await withOs(false)).getResolvedTheme(), "light");
+  assert.equal((await withOs(true)).getResolvedTheme(), "dark");
+  const none = await loadWith(storeOf(undefined)); // no window at all: matchMedia can't be asked
+  assert.equal(none.getThemePref(), "system");
+  assert.equal(none.getResolvedTheme(), "dark");
 });
 
 await check("a valid stored value is read back", async () => {

@@ -8,7 +8,7 @@ Loom orchestrates a fleet of real Claude Code sessions. The UI should be calm, d
 
 ## Themes
 
-There are two themes, `dark` and `light`, chosen per browser (Settings → Interface → Theme: System / Light / Dark). `lib/themePref.ts` stores the preference (`loom.theme`), resolves `system` through `prefers-color-scheme`, and sets `data-theme` and `color-scheme` on `<html>`; an inline script in `index.html` does the same before first paint, so there is no flash. Every token is defined under `:root[data-theme="dark"]` and `:root[data-theme="light"]`; bare `:root` carries the dark set as the fallback. The terminal stays a dark well in both themes, because the `claude` TUI's ANSI colours are tuned for a dark background (`lib/xtermTheme.ts`).
+There are two themes, `dark` and `light`, chosen per browser (Settings → Interface → Theme: System / Light / Dark; the default is System). `lib/themePref.ts` stores the preference (`loom.theme`), resolves `system` through `prefers-color-scheme`, and sets `data-theme` and `color-scheme` on `<html>`; an inline script in `index.html` does the same before first paint, so there is no flash. Every token is defined under `:root[data-theme="dark"]` and `:root[data-theme="light"]`; bare `:root` carries the dark set as the fallback. The terminal stays a dark well in both themes, because the `claude` TUI's ANSI colours are tuned for a dark background (`lib/xtermTheme.ts`).
 
 ## Colour tokens
 

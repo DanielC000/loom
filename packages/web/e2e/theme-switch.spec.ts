@@ -2,17 +2,20 @@
 // Settings → Interface, stored per browser under `loom.theme` and applied as `data-theme` on <html>.
 //
 // What this spec pins, each against the RUNNING app rather than the source:
+//   0. the default is System (card 3b5b3106): with nothing stored the page follows the OS, live;
 //   1. each Settings option sets `data-theme` (and `color-scheme`), and the choice survives a reload;
-//   2. no flash: the theme is already on <html> before the stylesheet or the app's module script is
-//      even parsed, so first paint is the right theme;
-//   3. "System" follows the OS setting live, and another tab's change is applied at once;
-//   4. the terminal stays a dark well in BOTH themes, and its xterm theme follows the switch live;
+//   2. no flash: the theme (stored, or the default resolved from the OS) is already on <html> before
+//      the stylesheet or the app's module script is even parsed, so first paint is the right theme;
+//   3. "System" follows the OS setting live, and another tab's change (or removal) is applied at once;
+//   4. the terminal stays a dark well in BOTH themes, it paints exactly `xtermTheme(theme)` slot by
+//      slot, and it follows the switch live;
 //   5. the main contrast pairs clear WCAG AA in both themes, read from LIVE computed token values;
 //   6. Overview, the board and a session render in light.
 //
 // Set LOOM_E2E_SHOTS to a directory to persist light/dark screenshots of those three pages for review.
 import path from "node:path";
 import { expect, test, type Page } from "./fixtures/daemon";
+import { xtermTheme } from "../src/lib/xtermTheme";
 
 const shotDir = process.env.LOOM_E2E_SHOTS;
 const shoot = async (page: Page, name: string) => {
@@ -68,12 +71,31 @@ async function pickTheme(page: Page, label: "System" | "Light" | "Dark") {
   await expect(sw.getByRole("radio", { name: label, exact: true })).toHaveAttribute("aria-checked", "true");
 }
 
+test("the default is System: with nothing stored, the page follows the OS from first load and live", async ({ page, loomDaemon }) => {
+  // Nothing is seeded: the default itself is under test. The suite emulates a dark OS
+  // (playwright.config.ts), so start from a LIGHT one, where the old interim default ("dark") would differ.
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto(loomDaemon.baseURL + "/settings");
+  expect(await themeOf(page)).toEqual({ attr: "light", scheme: "light", stored: null });
+  await expect(page.getByTestId("theme-switch").getByRole("radio", { name: "System", exact: true }))
+    .toHaveAttribute("aria-checked", "true");
+  expect(luminance(await pageBg(page))).toBeGreaterThan(0.8);
+
+  // Still nothing stored, and the OS flips: the page follows without a reload.
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect.poll(async () => (await themeOf(page)).attr).toBe("dark");
+  expect(await themeOf(page)).toEqual({ attr: "dark", scheme: "dark", stored: null });
+  expect(luminance(await pageBg(page))).toBeLessThan(0.05);
+  await page.emulateMedia({ colorScheme: "light" });
+  await expect.poll(async () => (await themeOf(page)).attr).toBe("light");
+
+  // Following the OS never writes a preference: a reload still reads nothing stored.
+  await page.reload();
+  expect(await themeOf(page)).toEqual({ attr: "light", scheme: "light", stored: null });
+});
+
 test("each Settings option sets data-theme on <html>, and the choice survives a reload", async ({ page, loomDaemon }) => {
   await page.goto(loomDaemon.baseURL + "/settings");
-  // The default is dark until the last Graphite card flips it to system.
-  expect(await themeOf(page)).toMatchObject({ attr: "dark", scheme: "dark", stored: null });
-  await expect(page.getByTestId("theme-switch").getByRole("radio", { name: "Dark", exact: true }))
-    .toHaveAttribute("aria-checked", "true");
 
   await pickTheme(page, "Light");
   expect(await themeOf(page)).toEqual({ attr: "light", scheme: "light", stored: "light" });
@@ -103,13 +125,13 @@ test("each Settings option sets data-theme on <html>, and the choice survives a 
   expect(await themeOf(page)).toMatchObject({ attr: "light", stored: "system" });
 });
 
-test("no flash: the stored theme is on <html> before the stylesheet and the app script are parsed", async ({ page, loomDaemon }) => {
-  await page.goto(loomDaemon.baseURL + "/settings");
-  await pickTheme(page, "Light");
-
-  // A PROBE, not a seed: it only records what the page's own inline script has done by the time the
-  // parser reaches the first stylesheet and the first module script. If either were reached with no
-  // data-theme (or the wrong one), first paint could show the wrong theme.
+/**
+ * A PROBE, not a seed: it only records what the page's own inline script has done by the time the
+ * parser reaches the first stylesheet and the first module script. If either were reached with no
+ * data-theme (or the wrong one), first paint could show the wrong theme. Installed once, it re-runs on
+ * every later navigation of the page, which is what a probe should do.
+ */
+async function installParseProbe(page: Page) {
   await page.addInitScript(() => {
     const seen: Record<string, string | null> = {};
     (window as unknown as { __themeAtParse: typeof seen }).__themeAtParse = seen;
@@ -122,10 +144,29 @@ test("no flash: the stored theme is on <html> before the stylesheet and the app 
       }
     }).observe(document, { childList: true, subtree: true });
   });
+}
+const themeAtParse = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __themeAtParse: Record<string, string | null> }).__themeAtParse);
+
+test("no flash: the stored theme is on <html> before the stylesheet and the app script are parsed", async ({ page, loomDaemon }) => {
+  // The OS stays dark (the suite's emulation) and the CSS fallback on a bare :root is dark too, so only
+  // the inline script reading the STORED light can make the probe see "light".
+  await page.goto(loomDaemon.baseURL + "/settings");
+  await pickTheme(page, "Light");
+  await installParseProbe(page);
   await page.reload();
-  const atParse = await page.evaluate(() => (window as unknown as { __themeAtParse: Record<string, string | null> }).__themeAtParse);
-  expect(atParse, "the built page links a stylesheet and a module script, and both saw the theme already set")
+  expect(await themeAtParse(page), "the built page links a stylesheet and a module script, and both saw the theme already set")
     .toEqual({ stylesheet: "light", moduleScript: "light" });
+});
+
+test("no flash for the default: with nothing stored, the OS theme is on <html> before the stylesheet and the app script", async ({ page, loomDaemon }) => {
+  // A light OS and nothing stored: "light" at parse time needs the inline script to default to System
+  // AND resolve it through matchMedia before anything else runs.
+  await page.emulateMedia({ colorScheme: "light" });
+  await installParseProbe(page);
+  await page.goto(loomDaemon.baseURL + "/settings");
+  expect((await themeOf(page)).stored, "nothing was seeded").toBeNull();
+  expect(await themeAtParse(page)).toEqual({ stylesheet: "light", moduleScript: "light" });
 });
 
 test("another tab's change is applied at once", async ({ page, loomDaemon, context }) => {
@@ -137,6 +178,14 @@ test("another tab's change is applied at once", async ({ page, loomDaemon, conte
   await pickTheme(page, "Light");
   await expect.poll(async () => (await themeOf(other)).attr).toBe("light");
   await expect(other.getByTestId("theme-switch").getByRole("radio", { name: "Light", exact: true }))
+    .toHaveAttribute("aria-checked", "true");
+
+  // The reverse, through raw storage rather than the control: the first tab REMOVES the key, and the
+  // other tab drops back to the default (System, so the suite's dark OS) without a reload.
+  await page.evaluate(() => localStorage.removeItem("loom.theme"));
+  await expect.poll(async () => (await themeOf(other)).attr).toBe("dark");
+  expect(await themeOf(other)).toEqual({ attr: "dark", scheme: "dark", stored: null });
+  await expect(other.getByTestId("theme-switch").getByRole("radio", { name: "System", exact: true }))
     .toHaveAttribute("aria-checked", "true");
   await other.close();
 });
@@ -237,6 +286,7 @@ test("Overview, the board and a session render in light; the terminal stays a da
   // xterm writes `theme.background` onto its viewport, so this IS term.options.theme.background.
   const darkWell = await rgbOf(page, "--loom-term-bg");
   expect(close(await termBg(), darkWell), "dark: the xterm background is --loom-term-bg").toBe(true);
+  await expectXtermTheme(page, "dark");
   await shoot(page, "session-dark.png");
 
   // Switch theme from Settings and come back: the SAME token now resolves to the light page's well.
@@ -250,6 +300,9 @@ test("Overview, the board and a session render in light; the terminal stays a da
   await expect.poll(async () => close(await termBg(), lightWell), { message: "light: the xterm background is --loom-term-bg" }).toBe(true);
   expect(luminance(await termBg()), "the terminal stays a DARK well on the light page").toBeLessThan(0.05);
   expect(luminance(await pageBg(page))).toBeGreaterThan(0.8);
+  await expectXtermTheme(page, "light");
+  // The two themes' wells really differ, so the two checks above did not compare one object twice.
+  expect(xtermTheme("light").background).not.toBe(xtermTheme("dark").background);
   await shoot(page, "session-light.png");
 
   // LIVE re-theme of an open terminal: flip the preference from another tab while this one stays put.
@@ -259,6 +312,7 @@ test("Overview, the board and a session render in light; the terminal stays a da
   await pickTheme(settings, "Dark");
   await settings.close();
   await expect.poll(async () => close(await termBg(), darkWell), { message: "the open terminal re-themed live" }).toBe(true);
+  await expectXtermTheme(page, "dark");
   await expect(page.locator(".xterm-accessibility-tree > div").filter({ hasText: "THEME-SWITCH-593674a7" })).toBeVisible();
   await shoot(page, "session-dark-after-live-switch.png");
 
@@ -279,6 +333,59 @@ test("Overview, the board and a session render in light; the terminal stays a da
     await shoot(page, `${name}-dark.png`);
   }
 });
+
+const ANSI_SLOTS = [
+  "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+  "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+] as const;
+const hexRgb = (hex: string): [number, number, number] =>
+  [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as [number, number, number];
+
+/**
+ * What the open terminal is actually painting, read back from xterm's DOM renderer: it turns
+ * `options.theme` into CSS (the viewport background, the row colour, one `.xterm-fg-N` class per ANSI
+ * slot, the selection fill), so probe elements inside the terminal resolve to the theme in force.
+ */
+function xtermPainted(page: Page) {
+  return page.evaluate((slots) => {
+    const root = document.querySelector(".xterm")!;
+    const rows = root.querySelector(".xterm-rows")!;
+    const sel = root.querySelector(".xterm-selection")!;
+    const col = (el: Element, prop: "color" | "backgroundColor") => getComputedStyle(el)[prop];
+    const ansi = slots.map((_, i) => {
+      const span = document.createElement("span");
+      span.className = `xterm-fg-${i}`;
+      rows.appendChild(span);
+      const c = col(span, "color");
+      span.remove();
+      return c;
+    });
+    const div = document.createElement("div");
+    sel.appendChild(div);
+    // The terminal is not focused, so xterm paints the INACTIVE selection colour.
+    const selection = col(div, "backgroundColor");
+    div.remove();
+    return {
+      background: col(root.querySelector(".xterm-viewport")!, "backgroundColor"),
+      foreground: col(rows, "color"),
+      selection,
+      ansi,
+    };
+  }, [...ANSI_SLOTS]);
+}
+
+/** Assert the open terminal paints exactly `xtermTheme(t)` (lib/xtermTheme.ts), slot by slot. */
+async function expectXtermTheme(page: Page, t: "light" | "dark") {
+  const want = xtermTheme(t);
+  await expect.poll(async () => close(parseRgb((await xtermPainted(page)).background), hexRgb(want.background!)),
+    { message: `${t}: the xterm background is xtermTheme("${t}").background` }).toBe(true);
+  const got = await xtermPainted(page);
+  expect(close(parseRgb(got.foreground), hexRgb(want.foreground!)), `${t}: foreground ${got.foreground}`).toBe(true);
+  expect(close(parseRgb(got.selection), hexRgb(want.selectionInactiveBackground!)), `${t}: selection ${got.selection}`).toBe(true);
+  ANSI_SLOTS.forEach((slot, i) => {
+    expect(close(parseRgb(got.ansi[i]!), hexRgb(want[slot]!)), `${t}: ANSI ${slot} ${got.ansi[i]}`).toBe(true);
+  });
+}
 
 async function pickThemeVia(page: Page, baseURL: string, label: "System" | "Light" | "Dark") {
   await page.goto(baseURL + "/settings");
