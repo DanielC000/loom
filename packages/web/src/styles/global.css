@@ -2766,6 +2766,9 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-blk.refused { color: var(--loom-attn); border-color: color-mix(in oklab, var(--loom-attn) 40%, var(--loom-line)); }
 .loom-mcp-hint { margin: 5px 0 0; font-family: var(--loom-font-ui); font-size: 11px; color: var(--loom-text-3); }
 .loom-mcp-hint.refused { color: color-mix(in oklab, var(--loom-attn) 70%, var(--loom-text-2)); }
+/* A recorded (codex) call's detail: no Asked/Answered columns, so its note spans the row (card d4d3481e). */
+.loom-mcp-obnote { grid-column: 1 / -1; }
+.loom-mcp-obnote > .loom-mcp-hint:first-child { margin-top: 0; }
 .loom-mcp-links { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11px; }
 .loom-mcp-links .loom-mcp-subh { margin: 0; }
 .loom-mcp-lk {

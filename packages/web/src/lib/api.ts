@@ -10,6 +10,8 @@ import type { CapabilityProvisioning } from "./capabilityProvisioning";
 // Type-only — the merge-gate cadence wire contract (card 6f13746c), mirrored in the JSX-free lib module
 // that also owns this feature's state vocabulary and validation copy.
 import type { MergeGateStatus } from "./mergeGate";
+// The per-call MCP record's wire shape and row limit (card d4d3481e), owned by the strip's record mapper.
+import { MCP_RECORD_LIMIT, type McpCallRecordPage } from "./mcpCallRecord";
 // Card 093981dd — the loopback credential's storage + the "writes are locked" signal (JSX-free, so it
 // stays unit-testable without a DOM renderer).
 import { captureTokenFromUrl, getLoopbackToken, isCredentialGuardFailure, noteCredentialLock } from "./loopbackCredential";
@@ -887,6 +889,10 @@ export const api = {
   transcriptTail: (sessionId: string, offset: number, signal?: AbortSignal) =>
     get<{ turns: TranscriptTurn[]; totalTurns: number; offset: number; returned: number; nextOffset: number | null }>(
       `/api/sessions/${sessionId}/transcript?offset=${offset}`, signal),
+  // Per-call MCP record (card 8ef582d0): identity and shape only, newest first. The strip reads it for codex
+  // sessions only (lib/mcpCallRecord.ts mcpRecordQuery), whose transcripts carry no tool-call lines.
+  mcpCalls: (sessionId: string, signal?: AbortSignal) =>
+    get<McpCallRecordPage>(`/api/sessions/${sessionId}/mcp-calls?limit=${MCP_RECORD_LIMIT}`, signal),
 
   // --- Agent Runs (R4b Runs UI; HUMAN/loopback REST, project-scoped, no auth — mirrors the other
   // /api/projects/:id surfaces, DELIBERATELY off the R3 key-authed path). list returns FULL AgentRun

@@ -37,4 +37,4 @@ The daemon side of the marker contract is pinned by `packages/daemon/test/transc
 
 ## Codex sessions
 
-A codex-harness transcript (`pty/codex-adapter.ts`) does not render calls with these markers, so it parses to zero calls. The strip says plainly that codex sessions don't show their Loom calls here yet, rather than claiming the session made none.
+A codex-harness transcript carries no tool-call lines at all, so a codex session's strip reads the daemon's per-call record instead (`GET /api/sessions/:id/mcp-calls`, card `8ef582d0`): no arguments, no answer, no turns, and a router-measured duration. Record: `d4d3481e-codex-mcp-strip-reads-the-call-record.md`.

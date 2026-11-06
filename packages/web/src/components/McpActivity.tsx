@@ -2,7 +2,9 @@
 // owner pick B · Ledger). Compact: the latest Loom call as a sentence. Expanded: every call grouped by
 // agent turn, a facet rail, and an inline "Asked Loom / Loom answered" per call. Data and its limits:
 // lib/mcpActivity.ts. Arguments and results are agent-authored text and render as React text only.
-import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
+// A codex session reads the daemon's per-call record instead (lib/mcpCallRecord.ts): no args, no answer,
+// no turns, and a duration the router measured, so its copy says so (SourceCtx).
+import { createContext, useContext, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type TranscriptTurn } from "../lib/api";
 import { fetchTranscriptIncremental } from "../lib/transcriptTail";
@@ -12,6 +14,14 @@ import {
   type McpCall, type McpFilter, type McpOutcome, type McpSubsystem,
 } from "../lib/mcpActivity";
 import { turnCauses, type TurnCause } from "../lib/turnCause";
+import {
+  mcpRecordQuery, mcpSourceFor, recordSentenceOf, recordToMcpCalls, RECORD_DURATION_HINT, RECORD_GROUP_LABEL, RECORD_NOT_KEPT,
+  RECORD_REFUSED_HINT, RECORD_SPAN_HINT, type McpSource,
+} from "../lib/mcpCallRecord";
+
+/** Where this strip's calls came from: the transcript (claude) or the per-call record (codex). */
+const SourceCtx = createContext<McpSource>("transcript");
+const NO_CAUSES: ReadonlyMap<number, TurnCause> = new Map();
 
 const OUTCOME_MARK: Record<McpOutcome, string> = { ok: "✓", refused: "!", error: "✕", pending: "…" };
 const OUTCOME_LABEL: Record<McpOutcome, string> = { ok: "ok", refused: "refused", error: "error", pending: "no answer yet" };
@@ -23,17 +33,21 @@ function Glyph({ sub }: { sub: McpSubsystem }) {
   return <span className={`loom-mcp-gl ${sub}`} aria-hidden="true" />;
 }
 
+const refusedHint = (src: McpSource) => (src === "record" ? RECORD_REFUSED_HINT : REFUSED_HINT);
+const durationHint = (src: McpSource) => (src === "record" ? RECORD_DURATION_HINT : DURATION_HINT);
+
 function Mark({ outcome }: { outcome: McpOutcome }) {
+  const src = useContext(SourceCtx);
   return (
     <span className={`loom-mcp-ocx ${outcome}`} role="img" aria-label={OUTCOME_LABEL[outcome]}
-      title={outcome === "refused" ? `refused · ${REFUSED_HINT}` : undefined}>
+      title={outcome === "refused" ? `refused · ${refusedHint(src)}` : undefined}>
       {OUTCOME_MARK[outcome]}
     </span>
   );
 }
 
 function Sentence({ call }: { call: McpCall }) {
-  const s = sentenceOf(call);
+  const s = useContext(SourceCtx) === "record" ? recordSentenceOf(call) : sentenceOf(call);
   return (
     <>
       {s.lead}
@@ -63,13 +77,16 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 
 /** "≈42ms", always marked approximate (lib/mcpActivity.ts DURATION_HINT). */
 const approx = (ms: number) => `≈${fmtMs(ms)}`;
+/** A recorded duration is the router's own measurement, so it carries no "≈". */
+const fmtDur = (src: McpSource, ms: number) => (src === "record" ? fmtMs(ms) : approx(ms));
 
 /** A row's duration cell: the figure and a log-scale bar, or nothing at all when there is no duration. */
 function Duration({ call }: { call: McpCall }) {
+  const src = useContext(SourceCtx);
   if (call.ms == null) return <span className="loom-mcp-dur" />;
   return (
-    <span className="loom-mcp-dur" data-testid={`mcp-call-${call.seq}-dur`} title={DURATION_HINT}>
-      {approx(call.ms)}
+    <span className="loom-mcp-dur" data-testid={`mcp-call-${call.seq}-dur`} title={durationHint(src)}>
+      {fmtDur(src, call.ms)}
       <i className={call.outcome} data-testid={`mcp-call-${call.seq}-bar`} style={{ width: durationBarPx(call.ms) }} />
     </span>
   );
@@ -97,6 +114,10 @@ export function McpActivity({ sessionId, harness, busy = false }: {
   // The fetch is incremental (first load full, then only the tail); the cached array stays the full
   // transcript, so the Transcript tab reading the same key is unaffected.
   const qc = useQueryClient();
+  // A codex transcript has no tool-call lines, so codex reads the per-call record on its own key at the
+  // same cadence; each session fetches exactly one of the two (lib/mcpCallRecord.ts mcpRecordQuery).
+  const source = mcpSourceFor(harness);
+  const interval = mcpPollInterval({ hidden, expanded, busy });
   const t = useQuery({
     queryKey: ["transcript", sessionId],
     queryFn: ({ signal }) => fetchTranscriptIncremental(
@@ -104,19 +125,28 @@ export function McpActivity({ sessionId, harness, busy = false }: {
       (offset) => api.transcriptTail(sessionId, offset, signal),
       () => api.transcript(sessionId, signal),
     ),
-    refetchInterval: mcpPollInterval({ hidden, expanded, busy }),
+    enabled: source === "transcript",
+    refetchInterval: interval,
   });
-  const calls = useMemo(() => parseMcpCalls(t.data ?? []), [t.data]);
-  const causes = useMemo(() => turnCauses(t.data ?? []), [t.data]);
+  const r = useQuery(mcpRecordQuery(sessionId, harness, api.mcpCalls, interval));
+  const calls = useMemo(
+    () => (source === "record" ? recordToMcpCalls(r.data?.calls ?? []) : parseMcpCalls(t.data ?? [])),
+    [source, r.data, t.data],
+  );
+  const causes = useMemo(() => (source === "record" ? NO_CAUSES : turnCauses(t.data ?? [])), [source, t.data]);
   const panelId = useId();
 
   if (!calls.length) {
-    const note = t.isError ? "Couldn't read this session's transcript."
-      : t.isLoading ? "Reading the transcript…"
-      : harness === "codex" ? "Codex sessions don't show their Loom calls here yet."
-      : "No Loom MCP calls yet this session.";
+    const q = source === "record" ? r : t;
+    const note = source === "record"
+      ? q.isError ? "Couldn't read this session's Loom call record."
+        : q.isLoading ? "Reading the call record…"
+        : "No Loom MCP calls recorded for this codex session yet."
+      : q.isError ? "Couldn't read this session's transcript."
+        : q.isLoading ? "Reading the transcript…"
+        : "No Loom MCP calls yet this session.";
     return (
-      <div className="loom-mcp" data-testid="mcp-activity" data-state="empty">
+      <div className="loom-mcp" data-testid="mcp-activity" data-state="empty" data-source={source}>
         <div className="loom-mcp-empty-bar"><span className="loom-mcp-lab">Loom MCP</span><span>{note}</span></div>
       </div>
     );
@@ -127,9 +157,11 @@ export function McpActivity({ sessionId, harness, busy = false }: {
   const errors = calls.filter((c) => c.outcome === "error").length;
   const refused = calls.filter((c) => c.outcome === "refused").length;
   const beads = turnCalls.slice(-MAX_BEADS);
+  const recorded = source === "record";
 
   return (
-    <div className={`loom-mcp${expanded ? " open" : ""}`} data-testid="mcp-activity">
+    <SourceCtx.Provider value={source}>
+    <div className={`loom-mcp${expanded ? " open" : ""}`} data-testid="mcp-activity" data-source={source}>
       <button
         type="button"
         className="loom-mcp-bar"
@@ -141,9 +173,9 @@ export function McpActivity({ sessionId, harness, busy = false }: {
       >
         <span className="loom-mcp-l1">
           <span className="loom-mcp-lab">Loom MCP</span>
-          <span>· turn {latest.turn}</span>
+          {recorded ? <span data-testid="mcp-activity-scope">· latest calls</span> : <span>· turn {latest.turn}</span>}
           <Cause cause={causes.get(latest.turn)} testId="mcp-activity-cause" />
-          <span className="loom-mcp-beads" aria-label={`${plural(turnCalls.length, "call")} this turn`}>
+          <span className="loom-mcp-beads" aria-label={recorded ? `latest ${plural(beads.length, "call")}` : `${plural(turnCalls.length, "call")} this turn`}>
             {turnCalls.length > beads.length && <span className="loom-mcp-more">+{turnCalls.length - beads.length}</span>}
             {beads.map((c) => (
               <span key={c.seq} className={`loom-mcp-bead ${c.outcome}`} title={`${c.tool} · ${OUTCOME_LABEL[c.outcome]}`}>
@@ -159,7 +191,7 @@ export function McpActivity({ sessionId, harness, busy = false }: {
           </span>
           <span className="loom-mcp-meta">
             {latest.tool}
-            {latest.ms != null && <span data-testid="mcp-activity-latest-dur" title={DURATION_HINT}> · {approx(latest.ms)}</span>}
+            {latest.ms != null && <span data-testid="mcp-activity-latest-dur" title={durationHint(source)}> · {fmtDur(source, latest.ms)}</span>}
           </span>
         </span>
         <span className="loom-mcp-right">
@@ -167,7 +199,7 @@ export function McpActivity({ sessionId, harness, busy = false }: {
             <span data-testid="mcp-activity-count">{calls.length}</span>
             {calls.length === 1 ? " call" : " calls"}
             {refused > 0 && (
-              <span className="loom-mcp-refn" data-testid="mcp-activity-refused-count" title={REFUSED_HINT}> · {refused} refused</span>
+              <span className="loom-mcp-refn" data-testid="mcp-activity-refused-count" title={refusedHint(source)}> · {refused} refused</span>
             )}
             {errors > 0 && <span className="loom-mcp-errn"> · {plural(errors, "error")}</span>}
           </span>
@@ -176,10 +208,12 @@ export function McpActivity({ sessionId, harness, busy = false }: {
       </button>
       {expanded && <Expanded id={panelId} calls={calls} causes={causes} />}
     </div>
+    </SourceCtx.Provider>
   );
 }
 
 function Expanded({ id, calls, causes }: { id: string; calls: McpCall[]; causes: ReadonlyMap<number, TurnCause> }) {
+  const src = useContext(SourceCtx);
   const [filter, setFilter] = useState<McpFilter>(emptyFilter);
   const [openSeq, setOpenSeq] = useState<ReadonlySet<number>>(() => new Set());
   const shown = useMemo(() => applyFilter(calls, filter), [calls, filter]);
@@ -215,7 +249,7 @@ function Expanded({ id, calls, causes }: { id: string; calls: McpCall[]; causes:
           return (
             <div key={g.turn} role="listitem" className="loom-mcp-turn" data-testid={`mcp-turn-${g.turn}`}>
               <div className="loom-mcp-turnh">
-                <span className="loom-mcp-tn">Turn {g.turn}</span>
+                <span className="loom-mcp-tn">{src === "record" ? RECORD_GROUP_LABEL : `Turn ${g.turn}`}</span>
                 {startedAt && (
                   <span className="loom-mcp-tat" data-testid={`mcp-turn-${g.turn}-at`} title={`first Loom call at ${fmtDateTime(startedAt)}`}>
                     {fmtClock(startedAt).slice(0, 5)}
@@ -225,7 +259,7 @@ function Expanded({ id, calls, causes }: { id: string; calls: McpCall[]; causes:
                 <span className="loom-mcp-tcount">
                   {plural(tot.n, "call")}
                   {span != null && (
-                    <span data-testid={`mcp-turn-${g.turn}-total`} title={SPAN_HINT}>{" · "}{approx(span)}</span>
+                    <span data-testid={`mcp-turn-${g.turn}-total`} title={src === "record" ? RECORD_SPAN_HINT : SPAN_HINT}>{" · "}{fmtDur(src, span)}</span>
                   )}
                   {tot.ref > 0 && <span className="loom-mcp-refn"> · {tot.ref} refused</span>}
                   {tot.err > 0 && <span className="loom-mcp-errn"> · {plural(tot.err, "error")}</span>}
@@ -246,6 +280,7 @@ function Expanded({ id, calls, causes }: { id: string; calls: McpCall[]; causes:
 }
 
 function Entry({ call, open, onToggle }: { call: McpCall; open: boolean; onToggle: () => void }) {
+  const recorded = useContext(SourceCtx) === "record";
   const bodyId = `loom-mcp-call-${call.seq}`;
   const links = linksOf(call);
   return (
@@ -272,11 +307,19 @@ function Entry({ call, open, onToggle }: { call: McpCall; open: boolean; onToggl
         <div className="loom-mcp-ob" id={bodyId} data-testid={`mcp-call-${call.seq}-detail`}>
           <div className="loom-mcp-obmeta">
             <span>router <b>{call.router}</b></span>
-            <span>call <b>#{call.seq}</b> this session</span>
+            {recorded ? <span>recorded call <b>#{call.seq}</b></span> : <span>call <b>#{call.seq}</b> this session</span>}
             {call.tag && <span>transcript tag <b>{`{${call.tag}}`}</b></span>}
             {call.at && <span>at <b>{fmtClock(call.at)}</b></span>}
-            {call.ms != null && <span title={DURATION_HINT}>took <b>{approx(call.ms)}</b>, approximate: includes hook and harness time</span>}
+            {call.ms != null && (recorded
+              ? <span title={RECORD_DURATION_HINT}>took <b>{fmtMs(call.ms)}</b>, measured by Loom's router</span>
+              : <span title={DURATION_HINT}>took <b>{approx(call.ms)}</b>, approximate: includes hook and harness time</span>)}
           </div>
+          {recorded ? (
+            <div className="loom-mcp-obnote">
+              <p className="loom-mcp-hint" data-testid={`mcp-call-${call.seq}-not-kept`}>{RECORD_NOT_KEPT}</p>
+              {call.outcome === "refused" && <p className="loom-mcp-hint refused">{RECORD_REFUSED_HINT}</p>}
+            </div>
+          ) : <>
           <div>
             <div className="loom-mcp-subh">Asked Loom</div>
             <pre className="loom-mcp-blk">{JSON.stringify(call.args, null, 2)}</pre>
@@ -296,6 +339,7 @@ function Entry({ call, open, onToggle }: { call: McpCall; open: boolean; onToggl
                 <span key={`${l.kind}:${l.id}`} className="loom-mcp-lk"><span>{LINK_LABEL[l.kind]}</span>{l.id}</span>
               ))}
           </div>
+          </>}
         </div>
       )}
     </>
@@ -318,6 +362,7 @@ function FacetRow({ testId, lead, label, n, max, pressed, barClass, onClick }: {
 }
 
 function Facets({ calls, filter, setFilter }: { calls: McpCall[]; filter: McpFilter; setFilter: (f: McpFilter) => void }) {
+  const recorded = useContext(SourceCtx) === "record";
   const subs = new Map(tally(calls, "subsystem"));
   const maxSub = Math.max(1, ...subs.values());
   const outcomes = new Map(tally(calls, "outcome"));
@@ -344,7 +389,7 @@ function Facets({ calls, filter, setFilter }: { calls: McpCall[]; filter: McpFil
         <input
           className="loom-mcp-search"
           data-testid="mcp-filter-search"
-          placeholder="tool, card, worker, key"
+          placeholder={recorded ? "tool name" : "tool, card, worker, key"}
           aria-label="Search calls"
           value={filter.query}
           onChange={(e) => setFilter({ ...filter, query: e.target.value })}
@@ -366,7 +411,8 @@ function Facets({ calls, filter, setFilter }: { calls: McpCall[]; filter: McpFil
             onClick={() => setFilter({ ...filter, outcomes: toggleIn(filter.outcomes, o) })} />
         ))}
         <p className="loom-mcp-legend" data-testid="mcp-refused-legend">
-          <span className="loom-mcp-ocx refused" aria-hidden="true">!</span> refused is a guess: the answer carried an error field.
+          <span className="loom-mcp-ocx refused" aria-hidden="true">!</span>
+          {recorded ? " refused: the tool returned an error envelope." : " refused is a guess: the answer carried an error field."}
           {unclassified > 0 && (
             <span data-testid="mcp-unclassified-count" title={UNCLASSIFIED_HINT}>
               {" "}<b>{unclassified}</b> {unclassified === 1 ? "answer" : "answers"} too long to check.

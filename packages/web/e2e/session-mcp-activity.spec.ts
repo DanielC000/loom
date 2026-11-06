@@ -383,3 +383,121 @@ test.describe("session Loom MCP activity strip", () => {
     await expect(page.getByTestId("mcp-activity-bar")).toHaveCount(0);
   });
 });
+
+// Card d4d3481e: a codex transcript has no tool-call lines, so a codex session's strip reads the daemon's
+// per-call record (GET /api/sessions/:id/mcp-calls). The fixture has no way to seed mcp_call_log rows, so
+// the rows spec fulfils that route with rows in the shape db.ts listMcpCalls serves (newest first); the
+// empty spec reads the REAL route, which is genuinely empty for a freshly seeded session.
+// Record: docs/decisions/d4d3481e-codex-mcp-strip-reads-the-call-record.md
+const REC_T0 = Date.parse("2026-11-06T10:14:05.000Z");
+const RECORD_ROWS = [
+  { id: 904, router: "loom-tasks", tool: "tasks_update", startedAt: REC_T0 + 9000, durationMs: 3, outcome: "ok", errClass: null, attribution: null, agentId: null, agentType: null },
+  { id: 903, router: "loom-tasks", tool: "decisions_for", startedAt: REC_T0 + 6000, durationMs: null, outcome: "ok", errClass: null, attribution: null, agentId: null, agentType: null },
+  { id: 902, router: "loom-orchestration", tool: "worker_spawn", startedAt: REC_T0 + 4000, durationMs: 1450, outcome: "refused", errClass: "envelope", attribution: null, agentId: null, agentType: null },
+  { id: 901, router: "loom-orchestration", tool: "worker_redirect", startedAt: REC_T0, durationMs: 88, outcome: "error", errClass: "throw", attribution: null, agentId: null, agentType: null },
+];
+
+async function openCodexSession(page: Page, loomDaemon: LoomDaemon, rows: typeof RECORD_ROWS | null) {
+  const s = await loomDaemon.seedLiveSession({
+    role: "manager", agentName: "McpCodex", id: `e2e-mcpx-${Date.now()}`, harness: "codex",
+    ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
+  });
+  const hits = { record: [] as string[], transcript: 0 };
+  page.on("request", (req) => {
+    const u = new URL(req.url());
+    if (u.pathname === `/api/sessions/${s.sessionId}/mcp-calls`) hits.record.push(u.search);
+    if (u.pathname === `/api/sessions/${s.sessionId}/transcript`) hits.transcript++;
+  });
+  if (rows) {
+    await page.route(new RegExp(`/api/sessions/${s.sessionId}/mcp-calls(\\?.*)?$`), (route) =>
+      route.fulfill({ json: { calls: rows, dropped: 0, writeFailures: 0 } }));
+  }
+  await seedAtlasOn(page, s.projectId);
+  await page.goto(`${loomDaemon.baseURL}/session/${s.sessionId}`);
+  return { s, hits };
+}
+
+test.describe("session Loom MCP activity strip · codex (per-call record)", () => {
+  test("renders recorded calls compact and expanded, with the record's own semantics", async ({ page, loomDaemon }) => {
+    test.setTimeout(120_000);
+    const { hits } = await openCodexSession(page, loomDaemon, RECORD_ROWS);
+
+    // Compact: the latest recorded call, no object (none is recorded), a measured duration with no "≈".
+    const strip = page.getByTestId("mcp-activity");
+    await expect(strip).toHaveAttribute("data-source", "record");
+    await expect(page.getByTestId("mcp-activity-latest")).toHaveText("Updated card");
+    await expect(page.getByTestId("mcp-activity-latest-dur")).toHaveText(" · 3ms");
+    await expect(page.getByTestId("mcp-activity-latest-dur")).toHaveAttribute("title", /router/);
+    await expect(page.getByTestId("mcp-activity-scope")).toHaveText("· latest calls");
+    await expect(page.getByTestId("mcp-activity-count")).toHaveText("4");
+    await expect(page.getByTestId("mcp-activity-refused-count")).toHaveAttribute("title", /error envelope/);
+    await expect(page.getByTestId("mcp-activity-bar")).toContainText("1 refused");
+    await expect(page.getByTestId("mcp-activity-bar")).toContainText("1 error");
+    await expect(page.getByTestId("mcp-activity-cause")).toHaveCount(0);
+    await expect(strip).not.toContainText("Codex sessions don't show");
+
+    // Expand: one honestly labelled group, newest first.
+    await expect(page.getByTestId("mcp-activity-log")).toHaveCount(0);
+    await page.getByTestId("mcp-activity-bar").click();
+    await expect(page.getByTestId("mcp-activity-bar")).toHaveAttribute("aria-expanded", "true");
+    const log = page.getByTestId("mcp-activity-log");
+    await expect(log.locator(".loom-mcp-turn")).toHaveCount(1);
+    await expect(page.getByTestId("mcp-turn-0")).toContainText("All calls · codex records no turns");
+    await expect(page.getByTestId("mcp-turn-0")).toContainText("4 calls");
+    await expect(page.getByTestId("mcp-turn-0-total")).toHaveText(" · 9.0s");
+    expect(await entries(page).evaluateAll((els) => els.map((e) => e.getAttribute("data-testid"))))
+      .toEqual(["mcp-call-4", "mcp-call-3", "mcp-call-2", "mcp-call-1"]);
+    await expect(page.getByTestId("mcp-call-1")).toHaveAttribute("data-outcome", "error");
+    await expect(page.getByTestId("mcp-call-1")).toContainText("Tried to redirect worker");
+    await expect(page.getByTestId("mcp-call-2")).toHaveAttribute("data-outcome", "refused");
+    await expect(page.getByTestId("mcp-call-2-dur")).toHaveText("1.4s");
+    // A lead that would hang on "for" reads as the bare tool name; a missing duration shows none.
+    await expect(page.getByTestId("mcp-call-3")).toContainText("Ran decisions_for");
+    await expect(page.getByTestId("mcp-call-3-dur")).toHaveCount(0);
+    await expect(page.getByTestId("mcp-refused-legend")).toHaveText("! refused: the tool returned an error envelope.");
+
+    // Detail: what the record does not keep is said, not left blank.
+    await page.getByTestId("mcp-call-2").click();
+    const detail = page.getByTestId("mcp-call-2-detail");
+    await expect(detail).toContainText("router loom-orchestration");
+    await expect(detail).toContainText("took 1.4s, measured by Loom's router");
+    await expect(page.getByTestId("mcp-call-2-not-kept")).toHaveText("Arguments and answer aren't recorded for codex calls.");
+    await expect(detail).toContainText("returned an error envelope");
+    await expect(detail).not.toContainText("Asked Loom");
+    await expect(detail).not.toContainText("Touched");
+    await expect(detail).not.toContainText("≈");
+
+    // Collapse.
+    await page.getByTestId("mcp-activity-bar").click();
+    await expect(page.getByTestId("mcp-activity-bar")).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByTestId("mcp-activity-log")).toHaveCount(0);
+
+    // The strip asked the record route (with the store's per-session cap), and never the transcript.
+    expect(hits.record.length).toBeGreaterThanOrEqual(1);
+    expect(hits.record[0]).toBe("?limit=500");
+    expect(hits.transcript, "a codex strip must not fetch the transcript").toBe(0);
+  });
+
+  test("an empty record says so for codex, read from the real route", async ({ page, loomDaemon }) => {
+    test.setTimeout(120_000);
+    const { hits } = await openCodexSession(page, loomDaemon, null);
+    await expect(page.getByTestId("mcp-activity")).toHaveAttribute("data-state", "empty");
+    await expect(page.getByTestId("mcp-activity")).toContainText("No Loom MCP calls recorded for this codex session yet.");
+    await expect(page.getByTestId("mcp-activity-bar")).toHaveCount(0);
+    expect(hits.record.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a claude session never asks the record route", async ({ page, loomDaemon }) => {
+    test.setTimeout(120_000);
+    // Counted from before the first navigation, so the mount-time fetch an enabled query would make is seen.
+    let recordHits = 0;
+    page.on("request", (req) => { if (new URL(req.url()).pathname.endsWith("/mcp-calls")) recordHits++; });
+    await openSession(page, loomDaemon);
+    await expect(page.getByTestId("mcp-activity")).toHaveAttribute("data-source", "transcript");
+    await expect(page.getByTestId("mcp-activity-latest")).toHaveText("Moved card a9a7140c to Review");
+    await page.getByTestId("mcp-activity-bar").click();
+    await expect(page.getByTestId("mcp-activity-log")).toBeVisible();
+    await page.waitForTimeout(6_000); // one active poll window
+    expect(recordHits).toBe(0);
+  });
+});
