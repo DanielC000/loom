@@ -198,7 +198,7 @@ const SKIP_CHECK_ALLOWLIST = [
   // recycleCompanion (card 79e030d9) — HUMAN-authorized REST route (POST /api/companion/:id/recycle, no MCP
   // path), the same bypass class as upgradeCompanionCapabilities above; the role is the literal "assistant"
   // the method has already asserted of THIS session's own row, never a caller-supplied value.
-  { file: "sessions/service.ts", mustContain: 'this.effectiveForcePlain(session, agent), companionName', method: "recycleCompanion" },
+  { file: "sessions/service.ts", mustContain: 'this.effectiveForcePlain(session, agent), companionName', method: "recycleCompanionInner" },
   // startRun — every forbidden-key field is hardcoded false/absent on the spawned run session regardless.
   { file: "sessions/service.ts", mustContain: '"run", false, undefined', method: "startRun" },
   // recycleWorker/recycleManager/recyclePlatformLead — recycle carries every field from the OLD row.

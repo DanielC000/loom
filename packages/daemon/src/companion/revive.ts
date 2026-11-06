@@ -59,10 +59,28 @@ export function reviveCompanionSessionAtBoot(cfg: CompanionConfig | null, deps: 
  * position:N}` (held in the FIFO) — that queued result is surfaced to the caller UNCHANGED, exactly like
  * chat-gateway's own "queued" ack for a busy/not-ready session; only resume/retry itself is one-shot.
  */
-export function withCompanionSelfHeal(submit: SubmitTurn, deps: Pick<ReviveDeps, "resume">): SubmitTurn {
-  return (sessionId, text, route, ownerText, senderId) => {
+export interface SelfHealTransitionSeam {
+  /** If a recycle/upgrade of `sessionId` is in flight, park `replay` until it ends and return the held position; else null. */
+  holdIfInFlight(sessionId: string, replay: () => void): number | null;
+}
+
+/**
+ * @decision d10ac47e — while a recycle/upgrade is in flight the dead pty is the op's own doing: resuming the
+ * OLD engine id here loses the message (recycle) — hold it instead; it replays once through this same wrapper at op end.
+ */
+export function withCompanionSelfHeal(submit: SubmitTurn, deps: Pick<ReviveDeps, "resume"> & { transition?: SelfHealTransitionSeam; onReplayDead?: (sessionId: string) => void }): SubmitTurn {
+  const healing: SubmitTurn = (sessionId, text, route, ownerText, senderId) => {
     const result = submit(sessionId, text, route, ownerText, senderId);
     if (result.delivered || result.position !== undefined) return result;
+    const held = deps.transition?.holdIfInFlight(sessionId, () => {
+      const r = healing(sessionId, text, route, ownerText, senderId);
+      // The gateway already acked "queued" for this message; a still-dead replay must not vanish silently.
+      if (!r.delivered && r.position === undefined) {
+        if (deps.onReplayDead) deps.onReplayDead(sessionId);
+        else console.warn(`[companion] held inbound for ${sessionId} could not be delivered after the recycle/upgrade ended (session dead)`);
+      }
+    });
+    if (held != null) return { delivered: false, position: held };
     try {
       deps.resume(sessionId);
     } catch {
@@ -70,4 +88,5 @@ export function withCompanionSelfHeal(submit: SubmitTurn, deps: Pick<ReviveDeps,
     }
     return submit(sessionId, text, route, ownerText, senderId);
   };
+  return healing;
 }

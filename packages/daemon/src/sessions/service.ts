@@ -2338,7 +2338,17 @@ const COMPANION_RECYCLE_PREAMBLE =
  *  so it's a genuine wall-clock bound even if an individual 100ms poll tick runs long under event-loop
  *  load. Env-overridable (mirrors pty/host.ts's LOOM_GRACEFUL_*_MS seams) so a test can shrink it instead
  *  of waiting out the real bound. */
-const UPGRADE_BUSY_WAIT_MS = Number(process.env.LOOM_UPGRADE_BUSY_WAIT_MS) || 3_000;
+/** Hard ceiling on the env-settable busy wait: an env value can never push the dead window past the marker TTL below. */
+export const UPGRADE_BUSY_WAIT_MAX_MS = 60_000;
+const UPGRADE_BUSY_WAIT_MS = Math.min(Number(process.env.LOOM_UPGRADE_BUSY_WAIT_MS) || 3_000, UPGRADE_BUSY_WAIT_MAX_MS);
+
+/** Companion stop loops: 80 graceful + 20 hard polls of 100 ms (recycleCompanion / upgradeCompanionCapabilities). */
+const COMPANION_STOP_BOUND_MS = (80 + 20) * 100;
+
+/** Upper bound on an in-flight recycle/upgrade marker (card d10ac47e), DERIVED from the bounds it protects: busy wait +
+ *  both stop loops + a margin for the resume/spawn. Past this an un-ended token stops blocking self-heal even if its
+ *  `finally` never ran. */
+export const COMPANION_TRANSITION_MARKER_TTL_MS = UPGRADE_BUSY_WAIT_MS + COMPANION_STOP_BOUND_MS + 60_000;
 
 /**
  * Board card ce7d99bb: how long the auto-retire path (`workerReport`'s `autoRetireNoCommit` branch)
@@ -5419,6 +5429,57 @@ export class SessionService {
   // capability surface, stop the old pty, then resume() into the SAME transcript. A deliberate,
   // human-triggered escape hatch (REST only) — never auto-fire this from a capability-grant write.
   async upgradeCompanionCapabilities(sessionId: string): Promise<Session> {
+    const end = this.beginCompanionTransition(sessionId);
+    try {
+      return await this.upgradeCompanionCapabilitiesInner(sessionId);
+    } finally {
+      end();
+    }
+  }
+
+  // @decision d10ac47e — in-flight recycle/upgrade marker: self-heal must not resume the OLD engine mid-op;
+  // inbound is held and replayed once at op end. Do not drop the TTL or the `finally` (leak = self-heal blocked forever).
+  private readonly companionTransitions = new Map<string, { tokens: Map<symbol, number>; held: Array<() => void> }>();
+
+  /** Mark `sessionId` as mid recycle/upgrade; the returned `end()` (call in `finally`) clears the token and
+   *  replays held inbound once the LAST concurrent op for the session ends. Idempotent. */
+  beginCompanionTransition(sessionId: string): () => void {
+    let st = this.companionTransitions.get(sessionId);
+    if (!st) { st = { tokens: new Map(), held: [] }; this.companionTransitions.set(sessionId, st); }
+    const token = Symbol("companion-transition");
+    st.tokens.set(token, Date.now() + COMPANION_TRANSITION_MARKER_TTL_MS);
+    return () => {
+      const cur = this.companionTransitions.get(sessionId);
+      if (!cur || !cur.tokens.delete(token)) return;
+      if (cur.tokens.size > 0) return;
+      this.companionTransitions.delete(sessionId);
+      for (const replay of cur.held.splice(0)) {
+        try { replay(); } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(`[companion] replay of a held inbound for ${sessionId} threw: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    };
+  }
+
+  /** Whether a recycle/upgrade is in flight (TTL-bounded: an expired token never blocks self-heal). */
+  isCompanionTransitionInFlight(sessionId: string): boolean {
+    const st = this.companionTransitions.get(sessionId);
+    if (!st) return false;
+    const now = Date.now();
+    for (const exp of st.tokens.values()) if (exp > now) return true;
+    return false;
+  }
+
+  /** If a transition is in flight, park `replay` until it ends and return the 1-based held position; else null. */
+  holdInboundDuringCompanionTransition(sessionId: string, replay: () => void): number | null {
+    if (!this.isCompanionTransitionInFlight(sessionId)) return null;
+    const st = this.companionTransitions.get(sessionId)!;
+    st.held.push(replay);
+    return st.held.length;
+  }
+
+  private async upgradeCompanionCapabilitiesInner(sessionId: string): Promise<Session> {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     if (session.role !== "assistant") throw new Error("only a companion (assistant-role) session can be live-upgraded");
@@ -5519,6 +5580,15 @@ export class SessionService {
    * @decision 79e030d9 — never mint a successor row here, never skip nulling the engine id before the spawn.
    */
   async recycleCompanion(sessionId: string, hooks: { onPointOfNoReturn?: () => void } = {}): Promise<Session> {
+    const end = this.beginCompanionTransition(sessionId);
+    try {
+      return await this.recycleCompanionInner(sessionId, hooks);
+    } finally {
+      end();
+    }
+  }
+
+  private async recycleCompanionInner(sessionId: string, hooks: { onPointOfNoReturn?: () => void }): Promise<Session> {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("session not found");
     if (session.role !== "assistant") throw new Error("only a companion (assistant-role) session can be recycled");

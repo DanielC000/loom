@@ -1020,7 +1020,7 @@ async function main(): Promise<void> {
     // bound session died AFTER boot, strictly after chat-gateway's allowlist + sender-authz gates run.
     submitTurn: withCompanionSelfHeal(
       (sid, text, route, ownerText, senderId) => pty.enqueueStdin(sid, text, "system", undefined, route, "agent", undefined, ownerText, undefined, senderId),
-      { resume: (sid) => { sessions.resume(sid); } },
+      { resume: (sid) => { sessions.resume(sid); }, transition: { holdIfInFlight: (sid, replay) => sessions.holdInboundDuringCompanionTransition(sid, replay) } },
     ),
     pty,
     hooks: companionHooks,
