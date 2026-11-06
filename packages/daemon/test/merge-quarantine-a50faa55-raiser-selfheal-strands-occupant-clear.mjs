@@ -382,6 +382,85 @@ try {
   if (teamAAfterBoot) for (const t of teamAAfterBoot.tokens ?? []) rebooted.clearMergeQuarantineByToken(teamA, t);
   if (yAfterBoot) for (const t of yAfterBoot.tokens ?? []) rebooted.clearMergeQuarantineByToken(y, t);
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  // SCENARIO (placeholder-relocate) — card c02784b5. Same placeholder fixture, but clear every teamA and W
+  // token while Y SURVIVES: Y's content is relocated from Kw's final to its own pending-<hash>.json
+  // (protectOccupantContentBeforeDelete). The relocated record must keep `placeholder:true` — on disk, in
+  // memory (listActiveMergeQuarantines), and identically after a reboot.
+  //
+  // Four variants (2x2): `inject` = Y's own pending mint is rename-failed at raise time, which makes the
+  // relocation run protectOccupantContentBeforeDelete TWICE (the 2nd write unions against the 1st's on-disk
+  // copy, so the on-disk READER re-supplies the flag); without it the relocation is a SINGLE write straight
+  // from `toPersist`, which is the only shape that pins that site on its own. `legacy` = Y's file carries NO
+  // `placeholder` key (branch text only) — only a flag derived via the shared predicate survives it, never a
+  // hand-copied `parsed.placeholder === true`.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════
+  for (const v of [
+    { name: "double-write", inject: true, legacy: false },
+    { name: "double-write, legacy branch-text-only", inject: true, legacy: true },
+    { name: "single-write", inject: false, legacy: false },
+    { name: "single-write, legacy branch-text-only", inject: false, legacy: true },
+  ]) {
+  const L = `placeholder-relocate: ${v.name}`;
+  const w = makeToplevelRepo("phr-w");
+  const kw = canonicalRepoLockKey(w);
+  const teamA = path.join(w, "teamA");
+  const y = path.join(os.tmpdir(), `loom-a50faa55-phr-y-ghost-${freshSfx()}`);
+
+  const mod = await freshMergeQuarantineModule();
+  const {
+    reenterMergeQuarantinesAtBoot, enterMergeQuarantine, clearMergeQuarantineByToken,
+    assertRepoNotQuarantined, MERGE_QUARANTINE_DIR, stillBlockedEntryFor, listActiveMergeQuarantines,
+  } = mod;
+  fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
+
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kw)}.json`), JSON.stringify({
+    repoPath: y, branch: "(unknown — corrupt boot-time latch)", reason: "Y is a boot-synthetic placeholder, not a real occupant",
+    enteredAt: Date.now() - 60_000, tokens: ["c02784b5-y1"], ...(v.legacy ? {} : { placeholder: true }),
+  }, null, 2) + "\n");
+  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `!stale-teamA-${freshSfx()}.json`), JSON.stringify({
+    repoPath: teamA, branch: "teamA-branch", reason: "teamA's real reason", enteredAt: Date.now(), tokens: ["c02784b5-teamA-token"],
+  }, null, 2) + "\n");
+
+  reenterMergeQuarantinesAtBoot([w, teamA, y]);
+  fs.mkdirSync(teamA, { recursive: true });
+  fs.writeFileSync(path.join(teamA, "marker.txt"), "teamA now exists\n");
+
+  const yPendingName = pendingDivertFilenameForTest(y);
+  const inject = v.inject ? injectScopedRenameFailure(yPendingName.replace(/\.json$/, "")) : { restore() {}, hits: () => 0 };
+  let wToken;
+  try {
+    wToken = enterMergeQuarantine(w, "w-branch", "W raises while Y (a placeholder) occupies its key via teamA's graduation");
+  } finally {
+    inject.restore();
+  }
+  if (v.inject) check(`(${L}, positive control) Y's OWN mint rename was selectively failed`, inject.hits() >= 1);
+  assertRepoNotQuarantined(w);
+
+  // Clear EVERY teamA and W token; Y's own token is never cleared.
+  clearMergeQuarantineByToken(teamA, "c02784b5-teamA-token");
+  clearMergeQuarantineByToken(w, wToken);
+  check(`(${L}, precondition) teamA/W fully unblocked`, !stillBlockedEntryFor(teamA) && !stillBlockedEntryFor(w));
+  check(`(${L}, precondition) Y survives, still blocked in-process (pure read)`, !!stillBlockedEntryFor(y));
+
+  const yPendingPath = path.join(MERGE_QUARANTINE_DIR, yPendingName);
+  const relocated = fs.existsSync(yPendingPath) ? JSON.parse(fs.readFileSync(yPendingPath, "utf8")) : undefined;
+  check(`(${L}, precondition) Y's content was relocated to its own pending file`, !!relocated && relocated.repoPath === y);
+  check(`*** THE FIX (c02784b5, ${L}) *** the relocated pending file keeps placeholder:true on disk`, relocated?.placeholder === true);
+  const yInProcess = listActiveMergeQuarantines().filter((e) => e.repoPath === y);
+  check(`*** THE FIX (c02784b5, ${L}) *** Y's in-process entry keeps placeholder:true (listActiveMergeQuarantines)`,
+    yInProcess.length >= 1 && yInProcess.every((e) => e.placeholder === true));
+
+  const rebooted = await freshMergeQuarantineModule();
+  rebooted.reenterMergeQuarantinesAtBoot([w, teamA, y]);
+  const yAfterBoot = rebooted.listActiveMergeQuarantines().filter((e) => e.repoPath === y);
+  check(`(${L}, restart) Y stays blocked after a real reboot`, !!rebooted.stillBlockedEntryFor(y));
+  check(`(${L}, restart) the post-reboot placeholder value matches the in-process value`,
+    yAfterBoot.length >= 1 && yAfterBoot.every((e) => e.placeholder === true));
+
+  for (const t of rebooted.stillBlockedEntryFor(y)?.tokens ?? []) rebooted.clearMergeQuarantineByToken(y, t);
+  }
 } finally {
   // Best-effort — real git repos under os.tmpdir(), never this test's own LOOM_HOME.
 }

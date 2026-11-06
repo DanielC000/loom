@@ -4238,9 +4238,13 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   const occupantResolvedKeys = Array.isArray(parsed.resolvedKeys) && parsed.resolvedKeys.every((s): s is string => typeof s === "string")
     ? parsed.resolvedKeys : undefined;
   const resolvedKeysToCarry = excludeLiftedResolvedKeys(occupantResolvedKeys, final, liftedKeys);
+  // NOTE: this literal's TAIL (through `const finalBasename`) is a withDistMutation anchor in merge-quarantine-unknown-provenance.mjs — add new fields near the top, not the end.
   const toPersist: MergeQuarantineEntry = {
     repoPath: parsed.repoPath, branch: parsed.branch, reason: parsed.reason,
     opId: typeof parsed.opId === "string" ? parsed.opId : undefined,
+    // @decision c02784b5 — carry the placeholder flag too (same predicate as the disk readers): this copy
+    // is the SAME occupant, and a dropped flag leaves the in-process entry unflagged until a reboot.
+    placeholder: isPlaceholderEntryShape(parsed) ? true : undefined,
     enteredAt: typeof parsed.enteredAt === "number" ? parsed.enteredAt : Date.now(),
     tokens,
     orphanLatchFiles: Array.isArray(parsed.orphanLatchFiles) && parsed.orphanLatchFiles.every((s): s is string => typeof s === "string")
@@ -4763,6 +4767,9 @@ function readPendingDivertFileAt(filePath: string): { state: "enoent" } | { stat
     // @decision 6de79dc0 — same carry-forward, same reason, for `genuineContributorKeys`.
     genuineContributorKeys: Array.isArray(parsed.genuineContributorKeys) && parsed.genuineContributorKeys.every((s): s is string => typeof s === "string")
       ? parsed.genuineContributorKeys : undefined,
+    // @decision c02784b5 — a union against this on-disk copy spreads its fields, so a dropped flag here
+    // wipes it from the written record even when the incoming entry carries it.
+    placeholder: isPlaceholderEntryShape(parsed) ? true : undefined,
   };
   return { state: "entry", entry };
 }
