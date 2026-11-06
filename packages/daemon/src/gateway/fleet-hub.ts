@@ -13,6 +13,15 @@ export const DIRTY_FLUSH_MS = 200;
 // per-socket subscription map lets any co-resident process grow it without limit (memory DoS).
 export const MAX_EVENT_SUBSCRIPTIONS_PER_SOCKET = 128;
 
+/** WebSocket close code 1013 "Try Again Later" — sent to a fleet client that stopped reading. */
+export const WS_CLOSE_TRY_AGAIN_LATER = 1013;
+
+/** Unsent-bytes ceiling per /ws/fleet socket (card cfd1fe04). 4 MiB: a gate event's outputTail is ~4 KB and
+ *  a full-feed burst is a few hundred KB at most, so a client that is merely slow/busy stays far below it,
+ *  while a never-reading loopback client (no credential, d5e3fa82) hits it after ~1000 frames and is closed
+ *  rather than pinning unbounded memory. The web client resyncs on reopen, so a close loses nothing. */
+export const MAX_FLEET_SOCKET_BUFFERED_BYTES = 4 * 1024 * 1024;
+
 /**
  * C2/C3 of the WS delta-push umbrella (1efde4ba) — the registry backing `/ws/fleet`. Holds every connected
  * fleet socket (one per client/tab, NOT per session — contrast `/ws/term`'s per-sessionId subscribe) and,
@@ -122,19 +131,35 @@ export class FleetHub {
     }
   }
 
+  /** The ONE send path for every fleet frame. A socket whose unsent backlog (`bufferedAmount`) is already
+   *  over `MAX_FLEET_SOCKET_BUFFERED_BYTES` is a client that is not reading: it is closed (1013) and dropped
+   *  from the registry instead of being sent to, so `ws` can't buffer frames in daemon memory without
+   *  bound. Never throws (a send/close fault on one socket must not skip the rest of a fan-out). */
+  private deliver(socket: WebSocket, data: string): void {
+    if (socket.readyState !== socket.OPEN) return;
+    try {
+      if (socket.bufferedAmount > MAX_FLEET_SOCKET_BUFFERED_BYTES) {
+        this.sockets.delete(socket);
+        // Deliberately logs counts only — never frame content.
+        console.warn(`[fleet] closing slow /ws/fleet client: bufferedAmount=${socket.bufferedAmount} > ${MAX_FLEET_SOCKET_BUFFERED_BYTES}`);
+        socket.close(WS_CLOSE_TRY_AGAIN_LATER, "slow consumer");
+        return;
+      }
+      socket.send(data);
+    } catch { /* one socket's fault must never break the fan-out for the others */ }
+  }
+
   /** Fan out a message to every connected fleet socket (used by C3/C5). */
   broadcast(msg: ServerFleetMessage): void {
     const data = JSON.stringify(msg);
-    for (const socket of this.sockets.keys()) {
-      if (socket.readyState === socket.OPEN) socket.send(data);
-    }
+    for (const socket of [...this.sockets.keys()]) this.deliver(socket, data);
   }
 
   /** Fan out a message only to sockets currently subscribed to `managerId`'s events (used by C7). */
   broadcastEvent(managerId: string, msg: ServerFleetMessage): void {
     const data = JSON.stringify(msg);
-    for (const [socket, subs] of this.sockets) {
-      if (subs.has(managerId) && socket.readyState === socket.OPEN) socket.send(data);
+    for (const [socket, subs] of [...this.sockets]) {
+      if (subs.has(managerId)) this.deliver(socket, data);
     }
   }
 
