@@ -1,7 +1,7 @@
 // Board keyboard focus (card 591fe6ed): ONE Tab stop into the lane grid, arrow keys between cards and
 // lanes. The focus position lives in exactly one place — Board's `BoardFocus` state, handed down through
-// `BoardNavContext` — so a later selection model (card 19074e42) can read the same position instead of
-// growing a second one.
+// `BoardNavContext` — and the multi-select (card 19074e42) rides the same context and anchors its ranges
+// on that same position instead of growing a second one.
 //
 // The navigable items are marked in the DOM, not registered: each lane (`[data-lane-key]`) lists its items
 // in render order as `[data-board-nav="<id>"]`, where `<id>` is HEAD (the lane header control: the ⋯ menu
@@ -27,6 +27,13 @@ export type BoardNav = {
   index: number;
   /** Put focus back on the Tab stop if the element that held it has left the DOM. */
   repairIfLost: () => void;
+  /** Multi-select (card 19074e42): the selected card ids. Always a subset of the RENDERED cards. */
+  selected: ReadonlySet<string>;
+  /** A pointer press on a card's open target. True when it was a selection gesture (Ctrl/⌘ or Shift held),
+   *  so the caller must NOT open the card. */
+  press: (id: string, mods: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => boolean;
+  /** Drop selected ids that are no longer rendered (filtered out, collapsed away, deleted, past the cap). */
+  pruneSelection: () => void;
 };
 
 export const BoardNavContext = createContext<BoardNav | null>(null);
@@ -90,6 +97,24 @@ export function navElement(grid: HTMLElement, lane: string, item: string): HTMLE
 
 /** The board's new-card shortcut key. Plain `n`: no other handler in the app reads a bare letter. */
 export const NEW_CARD_KEY = "n";
+
+/** Toggle the focused card in or out of the selection (card 19074e42). Plain `x`, read ONLY by the lane
+ *  grid's own keydown while a card holds focus, so it can never take a key from a field. */
+export const SELECT_KEY = "x";
+
+/** The cards of one lane from `a` to `b` inclusive, in render order. Empty when either is not a rendered
+ *  card of that lane: a range never crosses lanes and never reaches a hidden card. */
+export function laneRange(lanes: readonly NavLane[], lane: string, a: string, b: string): string[] {
+  const cards = cardsOf(lanes.find((l) => l.lane === lane)?.items ?? []);
+  const i = cards.indexOf(a), j = cards.indexOf(b);
+  if (i < 0 || j < 0) return [];
+  return cards.slice(Math.min(i, j), Math.max(i, j) + 1);
+}
+
+/** Every card id the grid currently renders. */
+export function renderedCards(lanes: readonly NavLane[]): Set<string> {
+  return new Set(lanes.flatMap((l) => cardsOf(l.items)));
+}
 
 /** True when a keypress belongs to whatever is being typed into, or to an open dialog or menu — the
  *  new-card shortcut must never take a key from any of them. */

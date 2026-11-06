@@ -9,7 +9,7 @@ import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, Ques
 // `columnKeyForRole` is the daemon's OWN terminal-lane resolver, used here only to identify which lane
 // a windowed response describes — never to decide a lane's tint or sort (that stays `isDoneColumn`).
 import { byRecentlyDone, columnKeyForRole } from "@loom/shared";
-import { api, type TaskUpdateConflictError } from "../lib/api";
+import { api, type TaskUpdateConflictError, type TaskUpdatePatch } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } from "../components/ui";
 import { useOpenRequest, RequestTypeTag, RequestProvenance } from "../components/requests";
@@ -41,8 +41,8 @@ import { PRIORITY_META, PriorityChip, prio, byPriorityThenPosition } from "../co
 import { errorText } from "../lib/loopbackCredential";
 import { submitDraft } from "../lib/draftSubmit";
 import {
-  BoardNavContext, NAV_HEAD, NAV_KEYS, NAV_MORE, NEW_CARD_KEY, navElement, navTarget, readNavLanes, resolveLaneItem,
-  shortcutBlocked, useBoardNav, type BoardFocus, type BoardNav, type NavKey,
+  BoardNavContext, NAV_HEAD, NAV_KEYS, NAV_MORE, NEW_CARD_KEY, SELECT_KEY, laneRange, navElement, navTarget, readNavLanes,
+  renderedCards, resolveLaneItem, shortcutBlocked, useBoardNav, type BoardFocus, type BoardNav, type NavKey,
 } from "../lib/boardFocus";
 import { usePreviewOnly, PREVIEW_REQUEST_HELD_TITLE } from "../lib/previewOnly";
 // Ship state is only DISCOVERABLE from git while this project writes the reserved trailer paragraph
@@ -77,6 +77,17 @@ type TaskEditPatch = {
 // client must drop the param and fetch the whole set, or a search can only ever see the newest page.
 const DONE_LANE_PAGE = 50;
 const NO_POLICY_STATUS: Record<string, CardPolicyCardStatus> = {};
+
+// The outcome of one bulk action (card 19074e42). `verb` is the past-tense phrase ("moved to Review").
+type BulkResult = { verb: string; updated: number; skipped: number; failed: { id: string; title: string; error: string }[] };
+const cardsWord = (n: number) => `${n} card${n === 1 ? "" : "s"}`;
+function bulkSummary(r: BulkResult): string {
+  const parts: string[] = [];
+  if (r.updated || !r.failed.length) parts.push(`${cardsWord(r.updated)} ${r.verb}`);
+  if (r.skipped) parts.push(`${r.skipped} already were`);
+  if (r.failed.length) parts.push(`${r.failed.length} failed`);
+  return parts.join(", ");
+}
 
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
 // POSTs columnKey, which a spawned agent's tasks_list immediately sees, and vice versa.
@@ -481,8 +492,91 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     if (ae && ae !== document.body) return;
     focusStop();
   };
-  const nav: BoardNav = { lane: navLane, item: navItem, index: navIndex, repairIfLost };
-  useEffect(() => { repairIfLost(); });
+  // ── Multi-select (card 19074e42) ─────────────────────────────────────────────
+  // The selection is a set of card ids; its range ANCHOR is the board's one focus position above, never a
+  // second one (591fe6ed's record). A selection press (Ctrl/⌘/Shift + click) suppresses the mousedown's
+  // focus move, so `focusPos` is still the previous card when the click is read, then focuses the clicked
+  // card itself so it becomes the next anchor.
+  //
+  // @decision 19074e42 — the anchor is BoardFocus; the selection is only ever a subset of rendered cards.
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
+  const clearSelection = () => setSelected((s) => (s.size ? new Set() : s));
+  const focusCard = (id: string) => requestAnimationFrame(() => {
+    const el = gridRef.current?.querySelector<HTMLElement>(`[data-board-nav="${CSS.escape(id)}"]`);
+    el?.focus();
+  });
+  const press: BoardNav["press"] = (id, { ctrlKey, metaKey, shiftKey }) => {
+    if (!ctrlKey && !metaKey && !shiftKey) return false;
+    const grid = gridRef.current;
+    const lane = grid?.querySelector<HTMLElement>(`[data-board-nav="${CSS.escape(id)}"]`)?.closest<HTMLElement>("[data-lane-key]")?.dataset.laneKey;
+    if (!grid || !lane) return false;
+    if (shiftKey) {
+      const range = focusPos ? laneRange(readNavLanes(grid), lane, focusPos.item, id) : [];
+      setSelected((s) => new Set([...s, ...(range.length ? range : [id])]));
+    } else {
+      setSelected((s) => { const n = new Set(s); n.delete(id) || n.add(id); return n; });
+    }
+    focusCard(id);
+    return true;
+  };
+  // Whatever is no longer RENDERED leaves the selection: a filter hid it, its lane collapsed, the done cap
+  // or window dropped it, the poll found it deleted. A card that only changed lane is still rendered, so it
+  // stays selected. Runs after every board and lane render (Column calls it too, like repairIfLost).
+  const pruneSelection = () => {
+    if (!gridRef.current || selected.size === 0) return;
+    const shown = renderedCards(readNavLanes(gridRef.current));
+    if ([...selected].some((id) => !shown.has(id))) setSelected((s) => new Set([...s].filter((id) => shown.has(id))));
+  };
+  const nav: BoardNav = { lane: navLane, item: navItem, index: navIndex, repairIfLost, selected, press, pruneSelection };
+  useEffect(() => { repairIfLost(); pruneSelection(); });
+  // Escape clears the selection from anywhere on the page, except while a field, a dialog or a menu owns
+  // the key (the same rule as `n`). The bulk bar's own controls are the exception: they act on the
+  // selection, so Escape there clears it too. Every board clears only its own selection. Clearing from the
+  // bar unmounts the control that held focus, so focus goes back to the board's Tab stop.
+  const clearSelectionFrom = (from: EventTarget | null) => {
+    const inBar = from instanceof HTMLElement && !!from.closest("[data-board-bulk-bar]");
+    clearSelection();
+    if (inBar) requestAnimationFrame(() => focusStop());
+  };
+  const clearRef = useRef(clearSelectionFrom);
+  clearRef.current = clearSelectionFrom;
+  useEffect(() => {
+    if (selected.size === 0) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      const inBar = e.target instanceof HTMLElement && !!e.target.closest("[data-board-bulk-bar]");
+      if (inBar || !shortcutBlocked(e)) clearRef.current(e.target);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected.size > 0]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A bulk action: one PATCH per selected card through api.updateTask, all settled before anything is
+  // reported. A card already in the target state is skipped rather than rewritten. The cards that FAILED
+  // stay selected (so a retry is one click) and are named with the server's reason; a fully successful
+  // action keeps the selection so a second action can follow (move, then set priority).
+  const [bulkPending, setBulkPending] = useState<string | null>(null);
+  const [bulkResult, setBulkResult] = useState<BulkResult | null>(null);
+  const runBulk = async (verb: string, patch: TaskUpdatePatch, unchanged: (t: BoardTask) => boolean) => {
+    const targets = allTasks.filter((t) => selected.has(t.id));
+    const todo = targets.filter((t) => !unchanged(t));
+    setBulkPending(verb);
+    setBulkResult(null);
+    const settled = await Promise.allSettled(todo.map((t) => api.updateTask(t.id, patch).then((r) => {
+      if (r && r.ok === false) throw new Error("the server did not apply the change");
+    })));
+    const failed = todo.flatMap((t, i) => {
+      const r = settled[i]!;
+      return r.status === "rejected" ? [{ id: t.id, title: t.title, error: errorText(r.reason) }] : [];
+    });
+    const result: BulkResult = { verb, updated: todo.length - failed.length, skipped: targets.length - todo.length, failed };
+    setBulkPending(null);
+    setBulkResult(result);
+    if (failed.length) setSelected(new Set(failed.map((f) => f.id)));
+    setAnnouncement(bulkSummary(result));
+    await qc.invalidateQueries({ queryKey: ["board", projectId] });
+    for (const t of todo) qc.invalidateQueries({ queryKey: ["task", t.id] });
+  };
   // Closing the card dialog: useDialogFocus hands focus back to the opener, but when that card has left
   // the DOM meanwhile (moved lane from the dialog, deleted) focus would land on <body>. Put it on the
   // Tab stop instead, which `navLane` has already moved to follow the card.
@@ -518,11 +612,30 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     });
   };
   const onGridKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || !NAV_KEYS.has(e.key)) return;
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     const el = e.target as HTMLElement;
     const item = el.dataset?.boardNav;
     const lane = el.closest<HTMLElement>("[data-lane-key]")?.dataset.laneKey;
     if (!item || !lane || !gridRef.current) return;
+    const isCard = item !== NAV_HEAD && item !== NAV_MORE;
+    // Selection keys (card 19074e42): `x` toggles the focused card; Shift+↑/↓ extends the selection to the
+    // neighbouring card in the same lane and moves there. Both act on cards only, never a header.
+    if (!e.shiftKey && e.key.toLowerCase() === SELECT_KEY) {
+      if (!isCard) return;
+      e.preventDefault();
+      setSelected((s) => { const n = new Set(s); n.delete(item) || n.add(item); return n; });
+      return;
+    }
+    if (e.shiftKey) {
+      if (!isCard || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+      e.preventDefault();
+      const to = navTarget(readNavLanes(gridRef.current), { lane, item }, e.key);
+      if (!to || to.lane !== lane || to.item === NAV_HEAD || to.item === NAV_MORE) return;
+      setSelected((s) => new Set([...s, item, to.item]));
+      navElement(gridRef.current, to.lane, to.item)?.focus();
+      return;
+    }
+    if (!NAV_KEYS.has(e.key)) return;
     e.preventDefault();
     const to = navTarget(readNavLanes(gridRef.current), { lane, item }, e.key as NavKey);
     if (to) navElement(gridRef.current, to.lane, to.item)?.focus();
@@ -636,6 +749,13 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
               </DragOverlay>
             </DndContext>
           </div>
+          {(selected.size > 0 || bulkResult) && (
+            <BulkBar count={selected.size} columns={board.data.columns} pending={bulkPending} result={bulkResult}
+              onDismissResult={() => setBulkResult(null)} onClear={(e) => clearSelectionFrom(e.currentTarget)}
+              onMove={(col) => runBulk(`moved to ${col.label}`, { columnKey: col.key }, (t) => t.columnKey === col.key)}
+              onPriority={(p) => runBulk(`set to ${PRIORITY_META[p].short}`, { priority: p }, (t) => prio(t) === p)}
+              onHold={(held) => runBulk(held ? "held" : "released", { held }, (t) => !!t.held === held)} />
+          )}
           {dragLane && (
             <div data-testid="lane-drag-hint" aria-hidden
               style={{ marginTop: 8, color: color.text2, fontSize: fs.sm }}>
@@ -826,7 +946,7 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
   // A focused node this lane just removed (a reveal button that vanished, a card the poll moved) leaves
   // focus on <body>; the board puts it back on the Tab stop. Runs on this lane's own renders too, since a
   // client-side reveal re-renders the lane without re-rendering the board.
-  useEffect(() => { nav?.repairIfLost(); });
+  useEffect(() => { nav?.repairIfLost(); nav?.pruneSelection(); });
 
   // The header shows the label, its resolved role tint and the card count / soft-WIP readout, plus the
   // two ORDER/VIEW controls (card 67c43038): drag by the header to reorder, and the ⋯ lane menu. Column
@@ -936,6 +1056,65 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── Bulk bar (card 19074e42) ───────────────────────────────────────────────────
+// Shown while at least one card is selected, or while the last action's outcome is still on screen. It sits
+// UNDER the lane grid and sticks to the viewport's bottom edge, so appearing never pushes the cards being
+// clicked; the two selects are actions (they reset to their prompt after each pick), not state.
+function BulkBar({ count, columns, pending, result, onDismissResult, onClear, onMove, onPriority, onHold }:
+  { count: number; columns: KanbanColumn[]; pending: string | null; result: BulkResult | null;
+    onDismissResult: () => void; onClear: (e: React.MouseEvent<HTMLButtonElement>) => void; onMove: (col: KanbanColumn) => void;
+    onPriority: (p: TaskPriority) => void; onHold: (held: boolean) => void }) {
+  const busy = pending !== null;
+  const actionSelect: React.CSSProperties = { fontSize: fs.sm, padding: "3px 8px", maxWidth: 220, borderRadius: radius.base };
+  return (
+    <div data-testid="board-bulk-bar" data-board-bulk-bar="" aria-busy={busy || undefined}
+      style={{ position: "sticky", bottom: 12, zIndex: 2, marginTop: 10, background: color.surface, borderRadius: radius.lg,
+        boxShadow: shadow.panel, border: `1px solid ${color.line}`, padding: "8px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+      {count > 0 && (
+        <div role="toolbar" aria-label="Selected cards" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span data-testid="board-bulk-count" style={{ fontSize: fs.sm, fontWeight: 600, color: color.text }}>
+            {count} selected
+          </span>
+          <Select aria-label="Move the selected cards to a lane" value="" disabled={busy} style={actionSelect}
+            onChange={(e) => { const col = columns.find((c) => c.key === e.target.value); if (col) onMove(col); }}>
+            <option value="" disabled>Move to lane…</option>
+            {columns.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+          </Select>
+          <Select aria-label="Set the priority of the selected cards" value="" disabled={busy} style={actionSelect}
+            onChange={(e) => { const p = e.target.value as TaskPriority; if (PRIORITIES.includes(p)) onPriority(p); }}>
+            <option value="" disabled>Set priority…</option>
+            {PRIORITIES.map((p) => <option key={p} value={p}>{PRIORITY_META[p].short} · {PRIORITY_META[p].label}</option>)}
+          </Select>
+          <Button disabled={busy} onClick={() => onHold(true)} title="Hold: the owner's brake, nothing works or nags these cards">Hold</Button>
+          <Button disabled={busy} onClick={() => onHold(false)}>Release hold</Button>
+          {busy && <span style={{ fontSize: fs.sm, color: color.text3 }}>Updating {cardsWord(count)}…</span>}
+          <Button variant="ghost" onClick={onClear} title="Esc" style={{ marginLeft: "auto" }}>Clear selection</Button>
+        </div>
+      )}
+      {result && (
+        <div role={result.failed.length ? "alert" : "status"} data-testid="board-bulk-result"
+          style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: fs.sm,
+            color: result.failed.length ? color.attnText : color.text2 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div>{bulkSummary(result)}{result.failed.length ? ". The failed cards are still selected:" : "."}</div>
+            {result.failed.length > 0 && (
+              <ul data-testid="board-bulk-failures" style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                {result.failed.map((f) => (
+                  <li key={f.id} data-task-id={f.id}>
+                    <span style={{ color: color.text, fontWeight: 500 }}>{f.title}</span>
+                    <span style={{ fontFamily: font.mono, color: color.text3 }}> {f.id.slice(0, 8)}</span>: {f.error}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <Button variant="ghost" onClick={onDismissResult}>Dismiss</Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1235,9 +1414,12 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
   // Hierarchy (card 1ae4f88c) — every field defaults to empty, so on an older daemon `hier` is all-zero,
   // `hasBoardHierarchy` is false, and this card renders exactly as it did before the card existed.
   const hier = boardHierarchy(task);
+  // Multi-select (card 19074e42): read straight off the board's nav context.
+  const nav = useBoardNav();
+  const selected = !!nav?.selected.has(task.id);
   return (
     <div ref={setNodeRef}
-      className="loom-board-card"
+      className="loom-board-card" data-selected={selected ? "" : undefined}
       style={{
         // position:relative anchors the merge-gate hairline (MergeTrack), which is absolutely positioned
         // flush at the card's bottom edge so it adds no height.
@@ -1246,9 +1428,12 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
         // shadow in light only (the card-border/card-shadow tokens are transparent/none in dark). The
         // lane's identity rides its head dot, not a per-card edge. Held reads as braked WHEREVER the card
         // sits: a muted strong edge plus a 3px muted left rule, so a held card never blends into a lane.
-        border: `1px solid ${task.held ? color.lineStrong : color.cardBorder}`,
-        borderLeft: task.held ? `3px solid ${color.text3}` : `1px solid ${color.cardBorder}`, borderRadius: radius.base,
-        boxShadow: shadow.card, padding: "8px 10px", marginBottom: 8, background: color.cardBg,
+        // Selected: the selection fill plus the accent edge, and an inset accent ring so the mark survives
+        // the held card's own left rule. Held keeps its rule either way.
+        border: `1px solid ${selected ? color.accentEdge : task.held ? color.lineStrong : color.cardBorder}`,
+        borderLeft: task.held ? `3px solid ${color.text3}` : `1px solid ${selected ? color.accentEdge : color.cardBorder}`, borderRadius: radius.base,
+        boxShadow: selected ? `inset 0 0 0 1px ${color.accentEdge}` : shadow.card, padding: "8px 10px", marginBottom: 8,
+        background: selected ? color.selected : color.cardBg,
         opacity: isDragging ? 0.5 : 1,
         transform: transform ? `translate(${transform.x}px, ${transform.y}px)` : undefined,
         fontSize: fs.sm, color: color.text,
@@ -1268,7 +1453,12 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
             the minimal shape — a <button> element would reset the card's whole type/layout here, and
             this subtree carries only spans, never a nested link, so no interactive content is buried
             inside it (see the note in components/taskLinks.tsx on why the card deliberately has none). */}
-        <div role="button" tabIndex={tabIndex} data-board-nav={task.id} className="loom-board-open" onClick={onOpen}
+        {/* A press with Ctrl/⌘ or Shift is a selection gesture (card 19074e42): its mousedown is suppressed
+            so neither text selection nor the focus move happens before the board reads its anchor, and its
+            click never opens the card. A plain press opens it exactly as before. */}
+        <div role="button" tabIndex={tabIndex} data-board-nav={task.id} className="loom-board-open"
+          onMouseDown={(e) => { if (e.ctrlKey || e.metaKey || e.shiftKey) e.preventDefault(); }}
+          onClick={(e) => { if (!nav?.press(task.id, e)) onOpen(); }}
           onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
           title="Open task" style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
           {/* flexWrap is the phone-density hinge: the priority chip + a held/deferred badge share this
@@ -1327,6 +1517,8 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
                 This gives specs the card's OWN title to filter on. */}
             <span data-testid="card-title" style={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "break-word",
               fontFamily: font.ui, fontSize: fs.body, fontWeight: 500, lineHeight: 1.4 }}>{task.title}</span>
+            {/* The selection mark for a screen reader; the fill and edge carry it visually. */}
+            {selected && <span style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap" }}>(selected)</span>}
             {hasBody && <span title="has a description" style={{ color: color.text3, flexShrink: 0 }}>≣</span>}
             {/* Ship-state (card 1eebc46a) — a compact "landed" marker naming the sha; the REPO it landed on
                 (which may differ from the target-repo badge above, though it normally agrees) is in the
