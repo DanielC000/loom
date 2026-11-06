@@ -1525,7 +1525,7 @@ export class PlatformMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. THREE ways to touch startupPrompt, mutually exclusive (pick at most one): `startupPrompt` REPLACES it wholesale (as before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause mid-document WITHOUT retyping the whole prompt — `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (0 matches = not found; 2+ = ambiguous, add more surrounding context). Read the current prompt first with agent_get. Passing more than one of the three modes in the same call is REJECTED. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId. An elevated/locked-role profileId (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here (administering the Lead's own elevated rigs is this surface's job), but a profileId carrying a human-only field (see agentAssignableProfileError in profiles/validate.ts) is REJECTED regardless of role (human-only, via the Profiles UI / REST). An elevated/locked-role profileId OTHER than \"assistant\" is also REJECTED if the agent's project is NOT a reserved/system project — those roles are confined to the Lead's or Setup Assistant's own home. A REBIND that widens this agent's reach relative to its PRIOR profile (a role change, or a restrictedTools relax — never blocked here, administering elevated rigs is this surface's job; EXCEPT that a rebind which changes the resolved role or removes restrictedTools is REFUSED when this agent carries its own connections/capabilities grant (ask the human to rebind in the Profiles/Agents UI)) is reported on the response as a `rebindReach` field ({addedKeys, roleChange?}) — RELAY this to the human; it's the only signal they get, same as `profile_update`'s `grantReach`. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file instead of inlining (same shape as agent_get), and the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
+          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied; an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). A non-null profileId must reference a real profile. THREE ways to touch startupPrompt, mutually exclusive (more than one in a call is REJECTED): `startupPrompt` REPLACES it wholesale; `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line); `replaceInStartupPrompt: {old, new}` edits ONE clause without retyping the prompt: `old` is matched against the agent's CURRENT server-side prompt and REJECTED with no write unless it occurs EXACTLY ONCE (read it first with agent_get). agentId " + ID_PREFIX_DOC + ". Edits apply to the agent's NEXT new session. The HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here; use this for name/startupPrompt/profileId. An elevated/locked-role profileId (platform/auditor/workspace-auditor/assistant/operator/setup) MAY be assigned here, but a profileId carrying a human-only field is REJECTED regardless of role (set it via the Profiles UI / REST). An elevated/locked-role profileId OTHER than \"assistant\" is also REJECTED if the agent's project is NOT a reserved/system project. A REBIND that widens this agent's reach relative to its PRIOR profile (a role change, or a restrictedTools relax) is reported on the response as a `rebindReach` field ({addedKeys, roleChange?}); RELAY this to the human, it's the only signal they get (same as `profile_update`'s `grantReach`). A rebind that changes the resolved role or removes restrictedTools is REFUSED when this agent carries its own connections/capabilities grant (ask the human to rebind in the Profiles/Agents UI). Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the updated startupPrompt spills to a scratch file (same shape as agent_get): the response becomes {..., startupPromptFile, startupPromptChars, note} in place of `startupPrompt`.",
         inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
@@ -1611,24 +1611,16 @@ export class PlatformMcpRouter {
       {
         description:
           "Clone an existing agent's name/startupPrompt/profile assignment into a (usually different) " +
-          "project — the primitive for provisioning a per-family role (e.g. \"Web Designer\") across a " +
-          "roster of sibling projects without hand-authoring the full prompt at every site. Reads " +
+          "project, to provision a per-family role (e.g. \"Web Designer\") across sibling projects. Reads " +
           "sourceAgentId's name/startupPrompt/profileId, applies nameOverride (else keeps the source name) " +
-          "and promptPatch (else keeps the source startupPrompt VERBATIM — promptPatch REPLACES the prompt " +
-          "text, it is not a diff), and creates the clone in targetProjectId through the SAME validated " +
-          "core agent_create uses (createAgentCore) — no forked create path. LEAST-PRIVILEGE (load-bearing, " +
-          "STRICTER than assigning an elevated profile directly via agent_create/agent_update/profile_assign, " +
-          "which this surface permits): REFUSED if the source agent's profile role is operator/platform/" +
-          "auditor — cloning an elevated rig into another project is never allowed, even though this same " +
-          "router's own direct-assign tools may bind one (clone stays stricter by design). ALSO REFUSED, regardless of role, if the source agent's profile carries a human-only " +
-          "field (see agentAssignableProfileError in profiles/validate.ts) — human-only, via the Profiles " +
-          "UI / REST. 404 (\"source agent not found\") if sourceAgentId is unknown; \"project not found\" if " +
-          "targetProjectId is unknown (same as agent_create); \"profile not found\" is impossible here (the " +
-          "source's profileId was already validated when the source agent itself was created/updated). " +
-          "ALSO REFUSED if the source agent's profile role is setup/workspace-auditor (or any other " +
-          "locked role except assistant) and targetProjectId is NOT a reserved/system project — " +
-          "createAgentCore's own confinement check backstops this for every " +
-          "role that check's own early role-check above doesn't already cover.",
+          "and promptPatch (else keeps the source startupPrompt VERBATIM; promptPatch REPLACES the prompt " +
+          "text, it is not a diff), and creates the clone in targetProjectId through the same validated " +
+          "core agent_create uses. LEAST-PRIVILEGE, STRICTER than assigning an elevated profile directly via " +
+          "agent_create/agent_update/profile_assign (which this surface permits): REFUSED if the source " +
+          "agent's profile role is operator/platform/auditor. ALSO REFUSED, regardless of role, if the " +
+          "source agent's profile carries a human-only field (set via the Profiles UI / REST), and if the " +
+          "source profile role is setup/workspace-auditor (or any other locked role except assistant) and " +
+          "targetProjectId is NOT a reserved/system project.",
         inputSchema: strictShape({
           sourceAgentId: z.string(),
           targetProjectId: z.string(),
@@ -1939,7 +1931,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_sessions",
       {
-        description: "List sessions across the platform, each enriched with its project + agent name. scope (default \"live\"): \"live\" = archived sessions excluded; \"archived\" = archived sessions ONLY; \"all\" = every session including archived. ⚠️ Any worktreePath/branch aliasing or cross-session-history question asked at the default scope is structurally UNDER-COUNTED: the dangling half of a worktree-path pairing (a stopped/crashed worker whose worktree still lingers) is overwhelmingly an ARCHIVED row — don't conclude \"no aliases\" from a live-only read. 📌 For a PRECISE per-worker aliasing check, prefer a manager's worker_list/worker_status \`worktreePathAliases\` field first (exact-string-keyed, includes archived rows, per-project-complete). Reach for scope here only for CROSS-PROJECT DISCOVERY/audit, since worker_list is per-manager-lineage-scoped and can't see another manager's rows. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (finished sessions that have NOT been archived are dropped); \"exited\" = terminated sessions only; \"all\" = both. ARCHIVED rows are ALWAYS kept regardless of state — state only thins non-archived rows, mirroring list_sessions' contract. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns, turnSeq) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. EVERY row (summary or full alike) also carries `lastEngineOutputAt` — an intra-turn liveness signal read live from THIS daemon process (see worker_list's identical field for the reading guide): CLAUDE-ONLY — a codex row ALWAYS reads `null` here, never a liveness OR death verdict; `null` also covers a session that isn't live in this process at all. `turnSeq` (0 while a session has never completed a turn) lets you tell \"working, mid-first-turn\" from \"wedged, never started\" without a second full:true call — but `turnSeq:0` ALONE is not evidence of a wedge: a genuinely long first turn reads identically, so pair it with independent evidence of progress (e.g. transcript growth via session_transcript). ⛔ NEVER COMPARE `turnSeq` AGAINST `ctxTurns` — different units (ctxTurns counts assistant lines including every intra-turn tool round trip, turnSeq counts only completed turns), so a large gap is normal. `turnSeq` survives a daemon restart intact. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, returns the bare sessions array — otherwise, or whenever you pass offset/limit explicitly, it returns a page envelope {sessions, total, returned, offset, nextOffset}, the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is offset+returned while more remains, else null. Page via offset:nextOffset until it is null — never mistake a bare array at the cap for 'that's everything'.",
+        description: "List sessions across the platform, each enriched with its project + agent name. scope (default \"live\"): \"live\" = archived sessions excluded; \"archived\" = archived sessions ONLY; \"all\" = every session including archived. ⚠️ A worktreePath/branch aliasing or cross-session-history question at the default scope is UNDER-COUNTED: the dangling half of a worktree-path pairing is overwhelmingly an ARCHIVED row, so don't conclude \"no aliases\" from a live-only read. For a PRECISE per-worker aliasing check prefer a manager's worker_list/worker_status \`worktreePathAliases\` field (includes archived rows); use scope here only for CROSS-PROJECT discovery/audit, since worker_list is per-manager-lineage-scoped. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only; \"exited\" = terminated sessions only; \"all\" = both. ARCHIVED rows are ALWAYS kept regardless of state; state only thins non-archived rows. projectId " + ID_PREFIX_DOC + ". DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns, turnSeq); heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. EVERY row also carries `lastEngineOutputAt`, an intra-turn liveness signal read live from THIS daemon process (see worker_list's identical field): CLAUDE-ONLY; a codex row ALWAYS reads `null`, never a liveness OR death verdict, and `null` also covers a session not live in this process. `turnSeq` (0 until a session completes a turn; survives a daemon restart) separates \"working, mid-first-turn\" from \"wedged, never started\", but `turnSeq:0` ALONE is not evidence of a wedge: pair it with independent progress evidence (e.g. transcript growth via session_transcript). ⛔ NEVER COMPARE `turnSeq` AGAINST `ctxTurns`: ctxTurns counts assistant lines including every intra-turn tool round trip, turnSeq counts only completed turns, so a large gap is normal. Optional limit/offset paginate (newest last activity first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default. PAGINATION: with NO offset/limit and the whole matching set in one page, returns the bare sessions array; otherwise, or whenever you pass offset/limit, a page envelope {sessions, total, returned, offset, nextOffset} (the shape session_transcript uses): total is the true matching-row count, nextOffset is offset+returned while more remains, else null. Page via offset:nextOffset until it is null; never mistake a bare array at the cap for 'that's everything'.",
         inputSchema: strictShape({
           projectId: z.string().optional(),
           scope: z.enum(["all", "live", "archived"]).optional(),
@@ -2062,7 +2054,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "events_search",
       {
-        description: "A BOUNDED, newest-first page of orchestration_events across the platform (or scoped to one project/session/task) — the general sibling of the Gates page's gate-only history read (e.g. kill_switch/recycle_begin/merge_rejected/platform_escalate, not just gate runs). `kind` optionally narrows to specific event kinds — omitted, returns every kind. An UNRECOGNIZED kind is an EXPLICIT error (never a silent `[]`) naming the bad value(s), so a wrongly-empty result can't misread as \"this never occurred\". Valid kind values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". `projectId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. `sessionId` (input filter — the DAEMON's own Loom-namespaced session id, e.g. `loomSessionId` from `my_context`, or the bare `id` `list_all_sessions` returns, never the engine's own id) matches an event where that session is EITHER the manager or the worker. `taskId` matches the event's linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, loomSessionId, projectId, projectName, agentName, branch} — `loomSessionId` is the SAME Loom session id the `sessionId` input filter matches on. `detail` is the raw kind-specific payload (operational metadata, not transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, returned, offset, nextOffset, limit} envelope (never a bare array) — page via offset:nextOffset until it is null. SPILL: when `events` is too large to inline, it is rendered as NDJSON (one event per line, UTF-8) in your own scratch dir — `events` is then ABSENT and replaced by `eventsFile`/`eventsChars`/`eventsCount`/`note` alongside the same total/returned/offset/nextOffset/limit fields; page the file with Read (offset/limit are LINE-based) or grep it, same as tasks_list's `rowsFile` spill. `limit` echoes the EFFECTIVE, already-clamped limit (never the raw request) — if it differs from what you passed (or from " + DEFAULT_EVENTS_SEARCH_CAP + " when you omitted one), your request was clamped and `returned` rows are NOT the whole matching set even though `total` may say otherwise. `fields:[...]` (same contract as `tasks_list`'s `fields`) projects each returned event down to ONLY the given top-level key names — an un-asked-for field is genuinely ABSENT, and an unknown field name is silently ignored. `id` is NOT auto-added. `countsOnly:true` (same contract as `tasks_list`'s `countsOnly`) SHORT-CIRCUITS before any row fetch, JOIN-enrichment, or spill and returns {total, byKind} instead of {events,...} — `limit`/`offset`/`fields` are ignored when set. GLOBAL-SCOPED KINDS ARE INVISIBLE TO A `projectId` FILTER: a kind filed with no owning session and no single project to stamp (e.g. `profile_grant_reach`, for a Profile — which is platform-wide, not project-scoped) resolves `projectId` to NULL and can never match a `projectId`-filtered call; omit `projectId` to see it.",
+        description: "A BOUNDED, newest-first page of orchestration_events across the platform, optionally scoped to one project/session/task (e.g. kill_switch/recycle_begin/merge_rejected/platform_escalate, not just gate runs). `kind` narrows to specific event kinds; omitted, every kind. An unrecognized kind is an explicit error naming the bad value(s), never a silent `[]`. Valid kind values: " + EVENT_SEARCH_VALID_KINDS_LIST + ". `projectId` " + ID_PREFIX_DOC + ". `sessionId` is the daemon's own Loom session id (`loomSessionId` from `my_context`, or the bare `id` `list_all_sessions` returns; never the engine's id) and matches an event where that session is EITHER the manager or the worker. `taskId` matches the event's linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, loomSessionId, projectId, projectName, agentName, branch}; `detail` is the raw kind-specific payload (operational metadata, not transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP + ", clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, returned, offset, nextOffset, limit} envelope — page via offset:nextOffset until it is null. `limit` echoes the EFFECTIVE clamped limit: if it differs from what you passed (or the default), `returned` rows are NOT the whole matching set even though `total` may say otherwise. SPILL: when `events` is too large to inline it is written as NDJSON (one event per line) in your scratch dir; `events` is then ABSENT, replaced by `eventsFile`/`eventsChars`/`eventsCount`/`note` beside the same total/returned/offset/nextOffset/limit fields; page the file with Read (LINE-based offset/limit) or grep it. `fields:[...]` (same contract as `tasks_list`'s `fields`) projects each event down to ONLY the given top-level keys; an unknown field name is silently ignored and `id` is NOT auto-added. `countsOnly:true` returns {total, byKind} instead of {events,...} before any row fetch or spill; `limit`/`offset`/`fields` are ignored. GLOBAL-SCOPED KINDS ARE INVISIBLE TO A `projectId` FILTER: a kind with no owning session and no single project (e.g. `profile_grant_reach`) resolves `projectId` to NULL and never matches a `projectId`-filtered call; omit `projectId` to see it.",
         inputSchema: strictShape({
           kind: z.array(z.string()).optional(),
           projectId: z.string().optional(),
@@ -2126,7 +2118,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_memory_search",
       {
-        description: "Case-insensitive LITERAL substring search over every project_memory note's title+text across the platform (or one project) — the project_memory sibling of agent_prompt_search, for the cross-project 'has this propagated' question over the higher-circulation surface (a memory note reaches every session whose kickoff matches it, workers included). `query` is a plain substring, not a regex/FTS query. Optional `projectId` narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. Read-only — there is no cross-project memory WRITE on this surface; a project's store is its own to curate (use session_message or a board card to ask for a correction). Bounded: collects EVERY match first, then orders by `retrievalCount` DESCENDING (a HIGH-circulation note is the dangerous one, since circulation turns a wrong note into live doctrine) before capping at `limit` (default " + DEFAULT_MEMORY_SEARCH_CAP + ", max " + MAX_MEMORY_SEARCH_CAP + ") with `truncated:true` when more matches exist and `totalMatches` naming the real count — narrow with projectId or a more specific query rather than raising limit past the cap. This ordering is a convenience, not a substitute for reading the full returned set: every hit ships INLINE with its own snippet. `asOf` (ISO) is this call's read timestamp — `retrievalCount` increments on its own schedule, so two reads a moment apart can legitimately disagree. `retrievalCountCaveat` restates the field's known blind spot: a hit's `retrievalCount:0` (or `everDelivered:false`) CANNOT distinguish a note that has never matched a kickoff from one that keeps matching and keeps losing the delivery-budget race against other pinned/related notes — 0 is NOT evidence the note is harmless. Each hit is {projectId, projectName, key, title, pinned, retrievalCount, everDelivered, lastRetrievedAt, snippet} — snippet is a short excerpt around the first match in title or text, NOT the full body (memory_list/memory_read already cover reading one project's notes in full).",
+        description: "Case-insensitive LITERAL substring search over every project_memory note's title+text across the platform (or one project) — the project_memory sibling of agent_prompt_search, for the cross-project 'has this propagated' question (a memory note reaches every session whose kickoff matches it, workers included). `query` is a plain substring, not a regex/FTS query. Optional `projectId` narrows to one project and " + ID_PREFIX_DOC + ". Read-only: there is no cross-project memory WRITE on this surface; use session_message or a board card to ask a project to correct a note. Bounded: collects EVERY match, orders by `retrievalCount` DESCENDING (a HIGH-circulation note is the dangerous one), then caps at `limit` (default " + DEFAULT_MEMORY_SEARCH_CAP + ", max " + MAX_MEMORY_SEARCH_CAP + ") with `truncated:true` when more matches exist and `totalMatches` naming the real count; narrow with projectId or a more specific query rather than raising limit past the cap. Every hit ships INLINE with its own snippet. `asOf` (ISO) is this call's read timestamp; `retrievalCount` increments on its own schedule, so two reads a moment apart can disagree. `retrievalCountCaveat` restates the field's blind spot: a hit's `retrievalCount:0` (or `everDelivered:false`) CANNOT distinguish a note that never matched a kickoff from one that keeps matching and keeps losing the delivery-budget race, so 0 is NOT evidence the note is harmless. Each hit is {projectId, projectName, key, title, pinned, retrievalCount, everDelivered, lastRetrievedAt, snippet}; snippet is a short excerpt around the first match in title or text, NOT the full body (memory_list/memory_read read a note in full).",
         inputSchema: strictShape({
           query: z.string().min(1),
           projectId: z.string().optional(),
@@ -2701,32 +2693,23 @@ export class PlatformMcpRouter {
         {
           description:
             "SELF-HOSTING ONLY (orchestrating Loom with Loom): rebuild + restart the Loom daemon so merged " +
-            "daemon-`src` code goes LIVE in the running process — a cross-project, platform-level action " +
-            "that's naturally yours to own (no need to relay execution through a project manager). This is " +
-            "a DEPLOY (per /platform-lead's safety posture) — it drops every live session across every " +
-            "project, the largest blast radius on this surface: get the human's go via `question_ask` " +
-            "FIRST, then fire this yourself. Use after " +
-            "you've merged worker/project branch(es) that change the daemon and you need the new behavior " +
-            "actually running (e.g. to end-to-end verify it). Loom REBUILDS FIRST: if the build fails it does " +
-            "NOT restart and returns the error (stays up — fix it and retry). On a green build the daemon " +
-            "restarts: EVERY live session across ALL projects is dropped, then the whole fleet — you " +
-            "included — is AUTOMATICALLY resumed with a note once it's back. Returns {restarting:true} on " +
-            "success, or {restarting:false, error} if unsupervised, a live restart supervisor process can " +
-            "no longer be confirmed (card 83718377 — re-checks the live OS process table on every call, not " +
-            "just whether this process was ONCE spawned under one; refuses rather than exit into an orphan " +
-            "nothing would relaunch — retry if the error says the CHECK itself failed, ask a human to " +
-            "restart the supervisor if it says the supervisor is actually gone), or build failed. If the " +
-            "deploy going live " +
-            "also touches scripts/daemon-supervisor.mjs (the OUTER process that spawned this daemon and is " +
-            "NOT re-execed by this restart), the success result additionally carries " +
-            "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does " +
-            "a manual `pnpm daemon:stable`; never report that part of the change as fully live. Card 2e84a250: " +
-            "if that check ITSELF fails (e.g. git unavailable) the result instead carries " +
-            "{supervisorCheckFailed:true, supervisorWarning} — a DIFFERENT, mutually-exclusive pair of fields " +
-            "from supervisorChanged — treat this as UNKNOWN whether the supervisor script changed, never as a " +
-            "confirmed-clean deploy; the SAME distinction also appears on the post-restart resume nudge (your " +
-            "reliable read of it — this immediate response returns into a session about to be killed by the " +
-            "restart itself).",
+            "daemon-`src` code goes LIVE in the running process. This is a DEPLOY: it drops every live session " +
+            "across every project, the largest blast radius on this surface, so get the human's go via " +
+            "`question_ask` FIRST, then fire this yourself. Use after merging branch(es) that change the daemon " +
+            "when you need the new behavior running. Loom REBUILDS FIRST: if the build fails it does NOT restart " +
+            "and returns the error (the daemon stays up; fix it and retry). On a green build EVERY live session " +
+            "across ALL projects is dropped, then the whole fleet, you included, is AUTOMATICALLY resumed with a " +
+            "note once it's back. Returns {restarting:true} on success, or {restarting:false, error} if " +
+            "unsupervised, a live restart supervisor process can no longer be confirmed (re-checked against the " +
+            "live OS process table on every call; retry if the error says the CHECK itself failed, ask a human to " +
+            "restart the supervisor if it says the supervisor is gone), or the build failed. If the deploy also " +
+            "touches scripts/daemon-supervisor.mjs (the OUTER process, NOT re-execed by this restart), the " +
+            "success result also carries {supervisorChanged:true, supervisorWarning}: those lines are inert until " +
+            "a human runs a manual `pnpm daemon:stable`, so never report that part as fully live. If that check " +
+            "ITSELF fails (e.g. git unavailable) the result instead carries {supervisorCheckFailed:true, " +
+            "supervisorWarning}, a mutually-exclusive pair: treat it as UNKNOWN whether the supervisor script " +
+            "changed, never as a confirmed-clean deploy. The same distinction appears on the post-restart resume " +
+            "nudge, your reliable read of it (this immediate response returns into a session about to be killed).",
           inputSchema: strictShape({ reason: z.string() }),
         },
         async ({ reason }) => {
@@ -2867,7 +2850,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_update",
       {
-        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. REJECTS a NAME CHANGE on a reserved/system project (your platform home board) — DELIBERATELY, as a least-privilege trust-boundary choice: renaming a reserved home is a rare administrative action kept human-REST-only, never surfaced on this or any agent-facing tool (even the elevated Platform Lead's own), even though every runtime lookup that resolves these homes now survives a rename via the stable id marker and no longer needs this refusal for correctness; rename it via the Projects UI/REST instead. vaultPath/repoPath/config edits to a reserved project remain allowed. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. referenceRepos and repos (the writable multi-repo registry) are NOT settable even here — both are REST/UI-only (human), same exfil-adjacent trust class as repoPath/gateCommand. 404 if the project is unknown. Returns the updated project PLUS `staleStartupPrompts`: any agent in this project whose startupPrompt still references a name/repoPath/vaultPath value THIS call just changed away from (a rename lint, WARN-only — it never edits the prompt; fix stale content via agent_update). The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret) — feeding a masked value back as a later write is rejected, not silently stored.",
+        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. REJECTS a NAME CHANGE on a reserved/system project (your platform home board): renaming a reserved home is human-REST-only, so use the Projects UI/REST. vaultPath/repoPath/config edits to a reserved project remain allowed. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository, and the rebind is REFUSED while the project has any live session occupying a worktree (the offending sessions are named). This is the ONLY surface where repoPath is editable. referenceRepos and repos (the writable multi-repo registry) are NOT settable even here (REST/UI-only, human). Returns the updated project PLUS `staleStartupPrompts`: any agent in this project whose startupPrompt still references a name/repoPath/vaultPath value THIS call just changed away from (a WARN-only lint that never edits the prompt; fix stale content via agent_update). The returned config's sessionEnv values are MASKED (same-length bullet filler, never the real secret); feeding a masked value back as a later write is rejected, not silently stored.",
         inputSchema: strictShape({ projectId: z.string(), name: z.string().optional(), vaultPath: z.string().optional(), repoPath: z.string().optional() }),
       },
       async ({ projectId, name, vaultPath, repoPath }) => {
@@ -3534,31 +3517,23 @@ export class PlatformMcpRouter {
       "session_message",
       {
         description:
-          "Message ANY session by id, cross-project (the Lead is above the manager/worker tree, so there is " +
-          "NO parent/child scoping). Returns a deliveryStatus so you get an HONEST outcome: a LIVE target gets " +
-          "the message submitted as a turn if idle (delivered-live) or queued FIFO + delivered on its next turn " +
-          "boundary if mid-turn (queued). `delivered-live` is NOT a terminal guarantee: it means " +
-          "Loom SUBMITTED the message this turn, not that the recipient's engine has CONFIRMED receiving it — a " +
-          "submission can still, rarely, fail to land, and Loom's redelivery retries can later exhaust and " +
-          "PARK it (a `[loom:redelivery-parked]` notice back to you), minutes after you saw delivered-live. Treat " +
-          "delivered-live as strong evidence, not proof, for anything safety-critical or time-sensitive. " +
-          "A NOT-LIVE target whose recycle lineage has a LIVE successor is " +
-          "routed there instead (deliveryStatus reflects the successor's delivery, and routedTo names it); a " +
-          "NOT-LIVE target with no live successor anywhere in its lineage is instead BOARDED as a durable card " +
-          "on that target's project board (boarded, never silently lost) — and the returned taskId names it. " +
-          "Separately: a target that is STILL `live` but has ALREADY been recycled (its predecessor stays live " +
-          "until its successor settles — ordinarily seconds, but unboundedly longer if the successor never " +
-          "reaches ready or dies) gets neither of the above: it is disclosed, not delivered and not silently " +
-          "redirected — deliveryStatus is dropped and replacedBy names the successor (which may itself be dead; " +
-          "re-address it and a dead successor falls through to the NOT-LIVE/boarding path above). Re-send " +
-          "addressed to `replacedBy` if the message should still go out. " +
-          "Framed [loom:from-platform] so a live receiver knows the source (the tag is applied for you — do NOT " +
-          "prepend it yourself in `text`). DELIVER-ONCE: a retried/duplicated call for the SAME (sessionId, text) " +
-          "within a short window returns the ORIGINAL delivery result with duplicate:true and injects NOTHING new " +
-          "— safe to retry on an uncertain outcome. DELIVERY ONLY — this never spawns anything. Accepts a full " +
-          `session id OR an unambiguous ${MIN_ID_PREFIX_LEN}-char id-prefix (the short id Loom displays), same ` +
-          "resolution as session_transcript — an ambiguous prefix errors naming the candidate ids. {error} if " +
-          "the session id is unknown or the prefix is ambiguous/too-short.",
+          "Message ANY session by id, cross-project (no parent/child scoping). Returns a deliveryStatus: a LIVE " +
+          "target gets the message submitted as a turn if idle (delivered-live) or queued FIFO and delivered at its " +
+          "next turn boundary if mid-turn (queued). `delivered-live` is NOT a terminal guarantee: Loom SUBMITTED " +
+          "the message, but the recipient's engine has not CONFIRMED receiving it, and redelivery retries can later " +
+          "exhaust and PARK it (a `[loom:redelivery-parked]` notice back to you); treat it as strong evidence, not " +
+          "proof, for anything safety-critical or time-sensitive. A NOT-LIVE target whose recycle lineage has a " +
+          "LIVE successor is routed there instead (deliveryStatus reflects the successor's delivery, routedTo names " +
+          "it); a NOT-LIVE target with no live successor is BOARDED as a durable card on that target's project " +
+          "board and the returned taskId names it. A target that is STILL `live` but has ALREADY been recycled " +
+          "(its predecessor stays live until its successor settles) is disclosed, not delivered: deliveryStatus is " +
+          "dropped and replacedBy names the successor (which may itself be dead; a dead successor falls through to " +
+          "the NOT-LIVE/boarding path). Re-send addressed to `replacedBy` if the message should still go out. " +
+          "Framed [loom:from-platform] so a live receiver knows the source (applied for you; do NOT prepend it " +
+          "in `text`). DELIVER-ONCE: a retried call for the SAME (sessionId, text) within a short window returns " +
+          "the ORIGINAL result with duplicate:true and injects NOTHING new, so it is safe to retry on an " +
+          "uncertain outcome. DELIVERY ONLY: this never spawns anything. " +
+          `sessionId accepts a full id OR an unambiguous ${MIN_ID_PREFIX_LEN}-char id-prefix (the short id Loom displays); an unknown, ambiguous or too-short id returns {error}.`,
         inputSchema: strictShape({ sessionId: z.string(), text: z.string() }),
       },
       async ({ sessionId, text }) => {
@@ -3664,33 +3639,28 @@ export class PlatformMcpRouter {
       "question_pull",
       {
         description:
-          "Pull (return AND consume) every ANSWERED request you've asked via question_ask — your " +
-          "requests-inbox pickup. A \"notice\" entry is NEVER returned here — it completes immediately at " +
-          "ask time, with nothing to pull back. Each entry carries {questionId, title, type, ...}: a \"decision\"/" +
-          "\"input\" entry has {chosenOption, note} (chosenOption is one of the options you offered, or " +
-          "null); a \"permission\" entry has {approved, note, scope, expiresAt, lapsed, fulfillment} — " +
-          "`scope`/`expiresAt` are the human's ACTUAL decided grant (null/null if they never chose one, " +
-          "e.g. an older answer, or a denial), and `lapsed` is true only once `expiresAt` is set AND in " +
-          "the past. ADVISORY ONLY: this is a display signal for YOU to check — Loom itself never " +
-          "enforces, blocks, or revokes a standing grant, so re-read `lapsed` (e.g. after a recycle) " +
-          "rather than assuming a prior 'standing' answer still holds. `fulfillment: {state, detail}` — " +
-          "an APPROVAL IS AN AUTHORIZATION, NOT EVIDENCE THE HUMAN-ONLY WRITE IT AUTHORIZES ACTUALLY " +
-          "HAPPENED; this reports whether it was OBSERVED, recomputed fresh on EVERY read (never cached, " +
-          "so it self-corrects the moment the write lands): `state` is one of — \"unknown\" (you never " +
-          "declared a `fulfillmentTarget` at ask time; today's default, unconditionally), \"unwritable\" " +
-          "(a target was declared but can NEVER be observed — a bad profile key or a since-deleted " +
-          "profile; `detail` names which), \"not_yet_done\" (a target was declared and checked, but the " +
-          "live value doesn't match yet — a MEASURED false, never to be confused with \"unknown\"), or " +
-          "\"fulfilled\" (it matches). See question_ask's `fulfillmentTarget` param for how to opt in; a \"credential\" entry has {ack} — NEVER " +
-          "the secret itself. Pulling CONSUMES an entry (flips it to 'consumed') so it won't be returned " +
-          "again — call this when you reach the point the request was blocking, or after the push nudge " +
-          "tells you one was answered. Returns {questions: [...], remaining}: `remaining` is a count of " +
-          "OTHER answered-but-not-yet-fetched requests — NEVER lost, NEVER consumed, still 'answered' " +
-          "and still re-nudged. This happens ONLY when a single pull's answers would together be too " +
-          "large to return safely; ordinary pulls always return everything in one call (remaining:0). " +
-          "When remaining>0 a `note` also tells you to call question_pull again to fetch the rest — do " +
-          "so; a still-'answered' request is not returned yet, but a still-'pending' one (never answered) " +
-          "never will be — keep working and check back later for that case instead.",
+          "Pull (return AND consume) every ANSWERED request you've asked via question_ask, your " +
+          "requests-inbox pickup. A \"notice\" entry is NEVER returned (it completes at ask time). Each entry " +
+          "carries {questionId, title, type, ...}: a \"decision\"/\"input\" entry has {chosenOption, note} " +
+          "(chosenOption is one of the options you offered, or null); a \"permission\" entry has {approved, note, " +
+          "scope, expiresAt, lapsed, fulfillment}: `scope`/`expiresAt` are the human's ACTUAL decided grant " +
+          "(null/null if they never chose one, e.g. an older answer or a denial), and `lapsed` is true only once " +
+          "`expiresAt` is set AND in the past. ADVISORY ONLY: Loom never enforces, blocks, or revokes a standing " +
+          "grant, so re-read `lapsed` (e.g. after a recycle) rather than assuming a prior 'standing' answer still " +
+          "holds. `fulfillment: {state, detail}`: an APPROVAL IS AN AUTHORIZATION, NOT EVIDENCE THE HUMAN-ONLY " +
+          "WRITE IT AUTHORIZES ACTUALLY HAPPENED; this reports whether it was OBSERVED, recomputed fresh on EVERY " +
+          "read. `state` is \"unknown\" (you never declared a `fulfillmentTarget` at ask time; the default), " +
+          "\"unwritable\" (a target was declared but can NEVER be observed, e.g. a bad profile key or a " +
+          "since-deleted profile; `detail` names which), \"not_yet_done\" (a target was declared and checked, but " +
+          "the live value doesn't match yet; a MEASURED false, not \"unknown\"), or \"fulfilled\" (it matches). " +
+          "See question_ask's `fulfillmentTarget` param to opt in. A \"credential\" entry has {ack}, NEVER the " +
+          "secret itself. Pulling CONSUMES an entry (flips it to 'consumed') so it is not returned again; call " +
+          "this when you reach the point the request was blocking, or after the push nudge says one was answered. " +
+          "Returns {questions: [...], remaining}: `remaining` counts OTHER answered-but-not-yet-fetched requests, " +
+          "never lost or consumed and still re-nudged; it is >0 ONLY when one pull's answers together are too " +
+          "large to return safely (ordinary pulls return everything, remaining:0). When remaining>0 a `note` " +
+          "tells you to call question_pull again for the rest. A still-'pending' request (never answered) is not " +
+          "returned: keep working and check back later.",
         inputSchema: strictShape({}),
       },
       async () => {
@@ -3800,28 +3770,23 @@ export class PlatformMcpRouter {
       {
         description:
           "Mark a still-PENDING request YOU asked via question_ask as ANSWERED, using the OWNER'S OWN " +
-          "words from their most recent reply — for when the owner answers conversationally instead of " +
+          "words from their most recent reply, for when the owner answers conversationally instead of " +
           "using the web Requests UI. You do NOT supply the answer text: the `note` recorded is always " +
           "the exact, server-captured text of the owner's current turn, or (if the current turn isn't " +
-          "owner-authored) their single most recent owner-authored turn — never something you write or " +
-          "paraphrase. This is what lets you resolve your OWN question without reopening the human-only " +
-          "answer boundary. Refused if there is no owner-authored turn at all yet this session (nothing " +
-          "to attest), if a reply typed directly in the terminal raced an in-flight agent turn and wasn't " +
-          "captured (ask the owner to repeat it once nothing else is in flight, or use the web Requests " +
-          "UI), if the request isn't yours (own agent lineage only) or isn't still 'pending', and " +
-          "for type:\"credential\" (a secret must go through the secure REST answer flow, never chat " +
-          "text). `chosenOption` is REQUIRED for type:\"permission\" (must be \"authorize\" or \"deny\"), " +
-          "optional-but-validated for a \"decision\" that offers `options` (must be one of them), and " +
-          "must be OMITTED for a question with no offered options — the owner's reply stands alone as " +
-          "the note either way. Prefer this over question_ask-then-question_cancel whenever the owner " +
-          "has already answered live in this chat. For type:\"permission\": unlike the REST inbox answer " +
-          "path (which captures the human's chosen scope/expiry structurally into decidedScope/" +
-          "decidedExpiresAt), this path has no structured scope/expiry input — the chat composer is " +
-          "freeform prose — so a chat-resolved permission always surfaces decidedScope/decidedExpiresAt " +
-          "null and lapsed false; the owner's actual scope/expiry (if they stated one) lives only in " +
-          "`note` prose. A successor reading this answer must read `note` for a chat-answered grant's " +
-          "lifetime rather than assuming no scope was given. Returns {resolved:true, questionId, " +
-          "chosenOption, note} or {error}.",
+          "owner-authored) their single most recent owner-authored turn, never something you write or " +
+          "paraphrase. Refused if there is no owner-authored turn yet this session, if a reply typed " +
+          "directly in the terminal raced an in-flight agent turn and wasn't captured (ask the owner to " +
+          "repeat it once nothing else is in flight, or use the web Requests UI), if the request isn't yours " +
+          "(own agent lineage only) or isn't still 'pending', and for type:\"credential\" (a secret must go " +
+          "through the secure REST answer flow, never chat text). `chosenOption` is REQUIRED for " +
+          "type:\"permission\" (\"authorize\" or \"deny\"), optional-but-validated for a \"decision\" that " +
+          "offers `options` (must be one of them), and must be OMITTED for a question with no offered " +
+          "options. Prefer this over question_ask-then-question_cancel whenever the owner has already " +
+          "answered live in this chat. For type:\"permission\" this path has no structured scope/expiry " +
+          "input, so a chat-resolved permission always surfaces decidedScope/decidedExpiresAt null and " +
+          "lapsed false; the owner's actual scope/expiry (if stated) lives only in `note` prose, so a " +
+          "successor must read `note` for a chat-answered grant's lifetime. Returns {resolved:true, " +
+          "questionId, chosenOption, note} or {error}.",
         inputSchema: strictShape({ questionId: z.string(), chosenOption: z.string().optional() }),
       },
       async ({ questionId, chosenOption }) => {
@@ -3927,7 +3892,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "git_commit",
       {
-        description: "Stage ALL changes (add -A) — or, with `paths`, ONLY those repo-relative paths (add -A -- <paths>, commit -- <paths>; unrelated untracked files in the checkout are never swept in) — and commit a project's repo with the given message — plain commit under the repo's configured identity (no -c overrides, no Co-Authored-By trailer). PENDING-MERGE GUARD: a commit to a repo's mainline moves the base a queued/running merge (solo or batch) pinned and forfeits it, so while any same-repo merge op is pending this call REFUSES (nothing staged or committed) with { ok:false, refused:true, error, pendingMergeOps:[{opId,kind,phase,branchCount,ageMs}] } — read `gate_queue`, wait for it to settle, or re-call with acknowledgePendingMerge:true if you accept forfeiting it (e.g. you are committing on a non-mainline branch). Explicit projectId. Optional repoKey (multi-repo epic) targets one of the project's registered `repos` entries instead of its primary repo — omit (or pass \"primary\") for primary; an unknown key (including anything path-shaped) is rejected with {error}, never silently falling back to primary. A clean tree is an EXPECTED no-op failure ('nothing to commit'). Returns { ok:true, hash, warning?, residue? } or { ok:false, error } — `residue` (when present) names any path(s) that were ALREADY staged before this call's own `add -A` ran (e.g. a stray out-of-band `git add`, or an escaped descendant's residue from an earlier quarantine) and got swept into this commit alongside whatever you asked for; also folded into `warning` as prose. 404 if the project is unknown.",
+        description: "Stage ALL changes (add -A), or with `paths` ONLY those repo-relative paths (unrelated untracked files are never swept in), and commit a project's repo with the given message under the repo's configured identity (no -c overrides, no Co-Authored-By trailer). PENDING-MERGE GUARD: a commit to a repo's mainline moves the base a queued/running merge (solo or batch) pinned and forfeits it, so while any same-repo merge op is pending this call REFUSES (nothing staged or committed) with { ok:false, refused:true, error, pendingMergeOps:[{opId,kind,phase,branchCount,ageMs}] }: read `gate_queue`, wait for it to settle, or re-call with acknowledgePendingMerge:true if you accept forfeiting it (e.g. you are committing on a non-mainline branch). Optional repoKey targets one of the project's registered `repos` entries; omit (or pass \"primary\") for the primary repo. An unknown key (including anything path-shaped) is rejected with {error}, never falling back to primary. A clean tree is an EXPECTED no-op failure ('nothing to commit'). Returns { ok:true, hash, warning?, residue? } or { ok:false, error }; `residue` (when present, also folded into `warning`) names any path(s) ALREADY staged before this call's own `add -A` ran that got swept into this commit alongside what you asked for.",
         inputSchema: strictShape({
           projectId: z.string(), message: z.string(), repoKey: z.string().nullable().optional(),
           paths: z.array(z.string()).optional(), acknowledgePendingMerge: z.boolean().optional(),
