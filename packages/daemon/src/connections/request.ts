@@ -38,6 +38,7 @@ import {
 import { ensureFreshOAuthToken } from "./oauth.js";
 import { boundedFetch } from "./boundedFetch.js";
 import { apiKeyHeaderFor } from "./apiKeyHeader.js";
+import { buildSecretRedactor, RedactionBudgetExceeded } from "./redact.js";
 import { hostRoundTrips, type ConnectionUrlScheme } from "./hostForm.js";
 import { createPinnedHttpFetch, daemonReservedPorts, resolveLanTarget, type LanTarget, type LookupImpl } from "./lanHttp.js";
 
@@ -106,11 +107,6 @@ function buildRequestUrl(host: string, path: string, scheme: ConnectionUrlScheme
   return url;
 }
 
-/** Redact every literal occurrence of `secret` from `text`. A no-op on an empty/undefined secret. */
-function redact(text: string, secret: string): string {
-  if (!secret) return text;
-  return text.split(secret).join("[REDACTED]");
-}
 
 // --- per-connection rate limiter (in-memory, daemon-process lifetime) ---------------------------------
 const rateLimitState = new Map<string, number[]>();
@@ -146,6 +142,9 @@ export interface AuthenticatedRequestDeps {
   /** Builds the fetch pinned to the CHECKED address for an opt-in plain-http connection. Test seam only — the
    *  default dials the address via `node:http`. */
   pinnedFetchFactory?: (target: LanTarget) => typeof fetch;
+  /** Per-redact-call wall-clock budget override. Test seam only (a negative value is an already-spent budget);
+   *  the default is `REDACT_BUDGET_MS`. */
+  redactBudgetMs?: number;
 }
 
 /**
@@ -317,21 +316,29 @@ export async function performAuthenticatedRequest(
   });
   if (!result.ok) return { ok: false, error: result.error };
 
-  const responseHeaders: Record<string, string> = {};
-  result.headers.forEach((value, key) => {
-    if (key.toLowerCase() === "set-cookie") return; // never forward Set-Cookie
-    responseHeaders[key] = redact(value, secret);
-  });
+  // Exact secret plus its common re-encodings (redact.ts), computed once for body, headers and location.
+  const redact = buildSecretRedactor(secret, deps.redactBudgetMs);
+  try {
+    const responseHeaders: Record<string, string> = {};
+    result.headers.forEach((value, key) => {
+      if (key.toLowerCase() === "set-cookie") return; // never forward Set-Cookie
+      responseHeaders[key] = redact(value);
+    });
 
-  const final: AuthenticatedRequestResult = {
-    ok: true,
-    status: result.status,
-    headers: responseHeaders,
-    body: redact(result.text, secret),
-  };
-  if (result.status >= 300 && result.status < 400) {
-    const location = result.headers.get("location");
-    if (location) final.location = redact(location, secret);
+    const final: AuthenticatedRequestResult = {
+      ok: true,
+      status: result.status,
+      headers: responseHeaders,
+      body: redact(result.text),
+    };
+    if (result.status >= 300 && result.status < 400) {
+      const location = result.headers.get("location");
+      if (location) final.location = redact(location);
+    }
+    return final;
+  } catch (err) {
+    // Fail closed: redaction is linear, so this is defence in depth. NEVER fall back to the unredacted response.
+    if (err instanceof RedactionBudgetExceeded) return { ok: false, error: "response redaction exceeded its time budget; the response was withheld" };
+    throw err;
   }
-  return final;
 }

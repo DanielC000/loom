@@ -138,6 +138,20 @@ try {
       check("1g echo: Set-Cookie is stripped entirely, not merely redacted", !("set-cookie" in r.headers));
     }
 
+    // --- 1g2. fail-closed redaction budget: an exhausted budget withholds the WHOLE response ---
+    {
+      const echoBody = `leaked: ${PLAINTEXT} and BODY-CANARY`;
+      const fetchImpl = async () => new Response(echoBody, { status: 200, headers: { "x-echo": PLAINTEXT, "content-type": "text/plain" } });
+      const r = await performAuthenticatedRequest({ db, fetchImpl, redactBudgetMs: -1 }, [bearerConn.id], GUARD, { connection: bearerConn.id, path: "/headers" });
+      const wire = JSON.stringify(r);
+      check("1g2 budget: exhausted budget returns ok:false with the fixed error", r.ok === false && r.error === "response redaction exceeded its time budget; the response was withheld");
+      check("1g2 budget: no secret anywhere in the returned value", !wire.includes(PLAINTEXT));
+      check("1g2 budget: no body text returned (fail closed, not fail open)", !wire.includes("BODY-CANARY") && r.body === undefined && r.headers === undefined);
+      // Control: the same request under the default budget still succeeds and redacts.
+      const ok = await performAuthenticatedRequest({ db, fetchImpl }, [bearerConn.id], GUARD, { connection: bearerConn.id, path: "/headers" });
+      check("1g2 budget control: default budget redacts and returns the body", ok.ok === true && ok.body.includes("BODY-CANARY") && !ok.body.includes(PLAINTEXT));
+    }
+
     // --- 1h. response-size cap aborts an oversized body (GUARD.maxResponseBytes === 100 here) ---
     {
       const fetchImpl = async () => new Response("x".repeat(GUARD.maxResponseBytes * 5), { status: 200 });
