@@ -577,7 +577,7 @@ export class SetupMcpRouter {
         };
         db.insertAgent(agent);
         // Advisory only (card 5338a86a) — never blocks the create; see agents/promptLint.ts.
-        const warning = agentCreatePromptWarning(db, { startupPrompt, profileId });
+        const warning = agentCreatePromptWarning(db, { startupPrompt, profileId, projectId });
         return ok(warning ? { ...agent, promptWarning: warning } : agent);
       },
     );

@@ -6011,7 +6011,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // insertAgent silently strips control bytes at write time, so the local object can diverge from it.
     const created = deps.db.getAgent(agent.id) ?? agent;
     // Advisory only (card 5338a86a) — never blocks the create; see agents/promptLint.ts.
-    const warning = agentCreatePromptWarning(deps.db, { startupPrompt: created.startupPrompt, profileId: created.profileId });
+    const warning = agentCreatePromptWarning(deps.db, { startupPrompt: created.startupPrompt, profileId: created.profileId, connections: created.connections, projectId: created.projectId });
     return reply.code(201).send(warning ? { ...created, promptWarning: warning } : created);
   });
 

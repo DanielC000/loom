@@ -126,7 +126,7 @@ export function createAgentCore(
   };
   db.insertAgent(agent);
   // Advisory only (card 5338a86a) — never blocks the create; see agents/promptLint.ts.
-  return { ok: true, agent, promptWarning: agentCreatePromptWarning(db, { startupPrompt, profileId }) };
+  return { ok: true, agent, promptWarning: agentCreatePromptWarning(db, { startupPrompt, profileId, projectId }) };
 }
 
 // Least-privilege ROLE guard shared by every clone call site (incl. the human-only REST companion

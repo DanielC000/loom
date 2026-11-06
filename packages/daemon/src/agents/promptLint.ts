@@ -1,6 +1,7 @@
 import type { Db } from "../db.js";
 import type { SessionRole } from "@loom/shared";
 import { resolveProfile } from "@loom/shared";
+import { resolveUsableSshConnections } from "../connections/store.js";
 
 /**
  * Warn (never block) at agent create/update time when a startupPrompt names a tool that is NOT on
@@ -110,8 +111,9 @@ export const TASKS_ASSISTANT_EXCLUDED_TOOLS: readonly string[] = ["tasks_create"
 // Conditional on the resolved profile, not the role — see resolveKnownToolSurface.
 export const TASKS_VAULT_WRITE_TOOL = "vault_write";
 export const TASKS_AUTHENTICATED_REQUEST_TOOL = "authenticated_request";
-// Registered only for a session whose granted connections include an ssh one; the lint approximates that
-// as "any connection granted" (it cannot see the connection's scheme).
+// Registered only for a session whose granted connections include a USABLE ssh one (mcp/server.ts gates it
+// on resolveUsableSshConnections); the lint uses that same predicate via ToolSurfaceProfile.usableSsh.
+// It reads the agent's CURRENT grants while a live session reads its spawn-pinned grants — a known non-goal.
 export const TASKS_SSH_EXEC_TOOL = "ssh_exec";
 
 // Companion-gated (live `companionSessionIds` binding, reachable from manager OR worker OR
@@ -146,6 +148,9 @@ export interface ToolSurfaceProfile {
   documentConversion?: boolean | null;
   vaultWrite?: boolean | null;
   connections?: readonly string[] | null;
+  /** True iff `resolveUsableSshConnections` is non-empty for these grants — gates ssh_exec. Precomputed by
+   *  toolSurfaceProfileForAgentProfile (needs the db + project); absent/false = ssh_exec not on the surface. */
+  usableSsh?: boolean | null;
 }
 
 /** Resolve the known bare tool names on a profile's actual surface (Layer A role→server selection
@@ -165,8 +170,8 @@ export function resolveKnownToolSurface(profile: ToolSurfaceProfile): Set<string
   if (profile.vaultWrite) surface.add(TASKS_VAULT_WRITE_TOOL);
   if (profile.connections && profile.connections.length > 0) {
     surface.add(TASKS_AUTHENTICATED_REQUEST_TOOL);
-    surface.add(TASKS_SSH_EXEC_TOOL);
   }
+  if (profile.usableSsh) surface.add(TASKS_SSH_EXEC_TOOL);
 
   if (role === "manager") for (const t of ORCH_MANAGER_TOOLS) surface.add(t);
   else if (role === "worker") for (const t of ORCH_WORKER_TOOLS) surface.add(t);
@@ -193,18 +198,27 @@ export function resolveKnownToolSurface(profile: ToolSurfaceProfile): Set<string
  *  `resolveProfile` the real spawn path uses, so this lint can never drift from what a session would
  *  actually resolve; `agentConnections` is passed in separately since this function only has the
  *  profileId, not the agent row. */
-export function toolSurfaceProfileForAgentProfile(db: Db, profileId: string | null | undefined, agentConnections?: readonly string[] | null): ToolSurfaceProfile {
+export function toolSurfaceProfileForAgentProfile(
+  db: Db,
+  profileId: string | null | undefined,
+  agentConnections?: readonly string[] | null,
+  projectId?: string | null,
+): ToolSurfaceProfile {
   const agentLike = { startupPrompt: null, connections: agentConnections ? [...agentConnections] : agentConnections };
-  if (!profileId) return { role: null, connections: resolveProfile(agentLike, null).connections };
+  const withSsh = (p: ToolSurfaceProfile): ToolSurfaceProfile => ({
+    ...p,
+    usableSsh: resolveUsableSshConnections(db, p.connections ? [...p.connections] : [], projectId).length > 0,
+  });
+  if (!profileId) return withSsh({ role: null, connections: resolveProfile(agentLike, null).connections });
   const profile = db.getProfile(profileId);
-  if (!profile) return { role: null, connections: resolveProfile(agentLike, null).connections };
-  return {
+  if (!profile) return withSsh({ role: null, connections: resolveProfile(agentLike, null).connections });
+  return withSsh({
     role: profile.role ?? null,
     browserTesting: profile.browserTesting,
     documentConversion: profile.documentConversion,
     vaultWrite: profile.vaultWrite,
     connections: resolveProfile(agentLike, profile).connections,
-  };
+  });
 }
 
 const MCP_TOKEN_RE = /\bmcp__([\w-]+)\b/g;
@@ -245,8 +259,8 @@ export function toolSurfaceWarning(offendingTools: readonly string[]): string | 
 
 /** Convenience for an agent_create-shaped write: lint the prompt against the (about-to-be-assigned)
  *  profileId. Never throws. */
-export function agentCreatePromptWarning(db: Db, args: { startupPrompt?: string | null; profileId?: string | null; connections?: readonly string[] | null }): string | null {
-  const profile = toolSurfaceProfileForAgentProfile(db, args.profileId, args.connections);
+export function agentCreatePromptWarning(db: Db, args: { startupPrompt?: string | null; profileId?: string | null; connections?: readonly string[] | null; projectId?: string | null }): string | null {
+  const profile = toolSurfaceProfileForAgentProfile(db, args.profileId, args.connections, args.projectId);
   return toolSurfaceWarning(lintStartupPromptToolSurface(args.startupPrompt, profile));
 }
 
@@ -255,13 +269,13 @@ export function agentCreatePromptWarning(db: Db, args: { startupPrompt?: string 
  *  still gets checked against the agent's unchanged startupPrompt/profile/connections. Never throws. */
 export function agentUpdatePromptWarning(
   db: Db,
-  existing: { startupPrompt: string; profileId: string | null; connections?: readonly string[] | null },
+  existing: { startupPrompt: string; profileId: string | null; connections?: readonly string[] | null; projectId?: string | null },
   patch: { startupPrompt?: string; profileId?: string | null; connections?: readonly string[] | null },
 ): string | null {
   const effectivePrompt = patch.startupPrompt !== undefined ? patch.startupPrompt : existing.startupPrompt;
   const effectiveProfileId = patch.profileId !== undefined ? patch.profileId : existing.profileId;
   const effectiveConnections = patch.connections !== undefined ? patch.connections : existing.connections;
-  const profile = toolSurfaceProfileForAgentProfile(db, effectiveProfileId, effectiveConnections);
+  const profile = toolSurfaceProfileForAgentProfile(db, effectiveProfileId, effectiveConnections, existing.projectId);
   return toolSurfaceWarning(lintStartupPromptToolSurface(effectivePrompt, profile));
 }
 
