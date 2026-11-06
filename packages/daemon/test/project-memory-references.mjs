@@ -7,23 +7,24 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // THE FIX (sessions/project-memory-references.ts + sessions/project-memory-annotations.ts): extract card
 // ids (8-hex, filtered to ones that resolve to a REAL task on the project), @decision anchors, and path
 // tokens from note text; build a corpus-bounded reverse index ("which notes mention X"); render a
-// "[mentions: ...]" annotation line, capped at MAX_MENTIONS_DIGEST, for any note whose own reference is
-// ALSO shared by at least one other note. STRICT SUPERSET of the wikilink mechanism — a wikilink-wrapped
-// id/path is masked out before extraction, so it is never double-counted here too.
+// structured `mentions` list on memory_read (single-note only), capped at MAX_MENTIONS with a
+// `mentionsTruncated` flag, for any entity the note cites that ALSO appears in at least one other live
+// note. STRICT SUPERSET of the wikilink mechanism — a wikilink-wrapped id/path is masked out before
+// extraction, so it is never double-counted here too.
 //
 // This file proves, against the REAL compiled modules:
 //   1. extractDecisionAnchorIds: pure parsing (sha:/bare forms, dedup, case handling, negative controls).
 //   2. extractCardIdCandidates: pure parsing + the wikilink/decision-anchor masking that keeps this
 //      extractor disjoint from both of those (the "no double-counting" constraint), plus the \b boundary
 //      rule that keeps it from matching only part of a longer hex run.
-//   3. extractNoteReferences: the false-match limiter — a bare 8-hex token only counts as a card mention
-//      once it resolves, unambiguously, to a real task on the project; an unresolvable or AMBIGUOUS
-//      candidate is dropped, never guessed.
-//   4. findConnectedMentionsBulk: the reverse index + "connected" semantics (shared by ≥1 OTHER note,
-//      never just self), the MAX_MENTIONS_DIGEST cap + "N of M" totalFound, and a MEASURED ZERO for an
-//      entity nothing else shares.
-//   5. findConnectedMentions (DB-backed) equivalence to the bulk path, and the kickoff digest actually
-//      rendering the "[mentions: ...]" annotation on a pinned note.
+//   3. extractNoteReferencesUsingPrefixCounts + db.countTaskIdPrefixes: the false-match limiter — a bare
+//      8-hex token only counts as a card mention once it resolves, unambiguously, to a real task on the
+//      project; an unresolvable or AMBIGUOUS candidate is dropped, never guessed.
+//   4. findConnectedMentions: the "connected" semantics (shared by ≥1 OTHER live note, never just
+//      self), the MAX_MENTIONS cap + true totalFound, a MEASURED ZERO for an entity nothing else
+//      shares, and expired notes excluded.
+//   5. readProjectMemory (memory_read): returns `mentions` + `mentionsTruncated`; memory_list rows and the
+//      kickoff digest do NOT carry mentions.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/project-memory-references.mjs
 import fs from "node:fs";
@@ -39,12 +40,16 @@ process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 const {
-  extractDecisionAnchorIds, extractCardIdCandidates, extractNoteReferences,
-  extractNoteReferencesUsingPrefixCounts, buildCardIdPrefixCounts,
-  findConnectedMentionsBulk, buildMentionsIndex, annotateMentionsPrecomputed, MAX_MENTIONS_DIGEST,
+  extractDecisionAnchorIds, extractCardIdCandidates,
+  extractNoteReferencesUsingPrefixCounts, findConnectedMentions, MAX_MENTIONS,
 } = await import("../dist/sessions/project-memory-references.js");
 const { retrieveProjectMemoryForKickoff } = await import("../dist/sessions/project-memory-recall.js");
-const { writeProjectMemory } = await import("../dist/mcp/memory.js");
+const { writeProjectMemory, readProjectMemory, listProjectMemoryEntries } = await import("../dist/mcp/memory.js");
+
+// Resolve a note's references the way findConnectedMentions does: only that text's own candidates probed.
+const refsFor = (db, proj, text) =>
+  extractNoteReferencesUsingPrefixCounts(text, db.countTaskIdPrefixes(proj, extractCardIdCandidates(text)));
+const mentionsOf = (db, proj, key) => findConnectedMentions(db, proj, db.getProjectMemoryByKey(proj, key));
 
 const db = new Db();
 const now = new Date().toISOString();
@@ -137,9 +142,8 @@ try {
     db.insertProject({ id: proj, name: "Path Filter E2E Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
     db.upsertProjectMemory(proj, { key: "ratio-note-a", text: "our suite is green, proven 3/3 on this run" }, 500);
     db.upsertProjectMemory(proj, { key: "ratio-note-b", text: "completely unrelated topic, also proven 3/3 somewhere else" }, 500);
-    const bulkPathFilter = findConnectedMentionsBulk(db.listProjectMemory(proj), db.listTasks(proj));
     check("(path filter) END-TO-END: two notes sharing ONLY a '3/3' ratio are reported as NOT connected",
-      bulkPathFilter.get("ratio-note-a").totalFound === 0 && bulkPathFilter.get("ratio-note-b").totalFound === 0);
+      mentionsOf(db, proj, "ratio-note-a").totalFound === 0 && mentionsOf(db, proj, "ratio-note-b").totalFound === 0);
   }
 
   // ===================== 3. extractNoteReferences: false-match limiting (resolve-to-real-task) =====================
@@ -149,84 +153,62 @@ try {
     db.insertTask({ id: SOLO_ID, projectId: proj, title: "solo card", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
     db.insertTask({ id: DUP_A, projectId: proj, title: "dup A", body: "", columnKey: "backlog", position: 2, priority: "p2", createdAt: now, updatedAt: now });
     db.insertTask({ id: DUP_B, projectId: proj, title: "dup B", body: "", columnKey: "backlog", position: 3, priority: "p2", createdAt: now, updatedAt: now });
-    const tasks = db.listTasks(proj);
-
     check("(resolve) a bare id that resolves to exactly one real task counts as a card mention",
-      JSON.stringify(extractNoteReferences("see c0ffee00 for the fix", tasks).cardIds) === JSON.stringify(["c0ffee00"]));
+      JSON.stringify(refsFor(db, proj, "see c0ffee00 for the fix").cardIds) === JSON.stringify(["c0ffee00"]));
 
     // FALSE-MATCH LIMITING (the card's own explicit DoD item): an 8-hex token shaped exactly like a
     // commit sha / random hex, with NO matching task on the project, must NOT be counted.
     check("(resolve) NEGATIVE CONTROL — false-match limiting: an 8-hex token with NO matching task is excluded",
-      extractNoteReferences("looks like a commit 1234abcd but is not a card", tasks).cardIds.length === 0);
+      refsFor(db, proj, "looks like a commit 1234abcd but is not a card").cardIds.length === 0);
 
     // AMBIGUOUS PREFIX: two tasks share the same 8-char prefix — resolveIdPrefix reports "ambiguous",
     // and this must be treated as UNRESOLVED, never silently guessed (the 3a3f587 precedent).
     check("(resolve) an AMBIGUOUS prefix (matches two tasks) is excluded, never guessed",
-      extractNoteReferences("references deadbeef in passing", tasks).cardIds.length === 0);
+      refsFor(db, proj, "references deadbeef in passing").cardIds.length === 0);
 
     // Decision anchors and path tokens are accepted as-is, unverified (no task/filesystem check).
-    const refs = extractNoteReferences("@decision sha:ffffffff and packages/daemon/src/db.ts", tasks);
+    const refs = refsFor(db, proj, "@decision sha:ffffffff and packages/daemon/src/db.ts");
     check("(resolve) a decision sha: anchor is accepted unverified",
       JSON.stringify(refs.decisionIds) === JSON.stringify(["sha:ffffffff"]));
     check("(resolve) a path token is accepted unverified",
       refs.paths.includes("packages/daemon/src/db.ts"));
 
-    // EQUIVALENCE (round 2, performance): the convenience wrapper (builds its own prefix map per call)
-    // and the hot-path function (given a prebuilt prefix map) must agree exactly — the refactor changed
-    // HOW card ids are resolved (O(tasks)-per-candidate scan -> O(1) map lookup), never WHAT counts as
-    // resolved.
-    const prefixCounts = buildCardIdPrefixCounts(tasks);
-    const viaConvenience = extractNoteReferences("c0ffee00, 1234abcd, deadbeef, @decision sha:ffffffff", tasks);
-    const viaPrefixCounts = extractNoteReferencesUsingPrefixCounts("c0ffee00, 1234abcd, deadbeef, @decision sha:ffffffff", prefixCounts);
-    check("(resolve) EQUIVALENCE: extractNoteReferences and extractNoteReferencesUsingPrefixCounts agree exactly",
-      JSON.stringify(viaConvenience) === JSON.stringify(viaPrefixCounts));
+    // EQUIVALENCE: the bounded per-candidate probe must agree with a full-board prefix tally built from
+    // db.listTasks — the probe changed HOW prefixes are counted (indexed range per candidate), never WHAT.
+    const board = new Map();
+    for (const t of db.listTasks(proj)) board.set(t.id.slice(0, 8), (board.get(t.id.slice(0, 8)) ?? 0) + 1);
+    const probe = db.countTaskIdPrefixes(proj, ["c0ffee00", "1234abcd", "deadbeef"]);
+    check("(resolve) EQUIVALENCE: countTaskIdPrefixes agrees with a full-board prefix tally (1 / absent / 2)",
+      probe.get("c0ffee00") === 1 && !probe.has("1234abcd") && probe.get("deadbeef") === 2 &&
+      board.get("c0ffee00") === 1 && board.get("deadbeef") === 2 && !board.has("1234abcd"));
 
     // Additive guard: a project with zero tasks never throws, just resolves nothing.
     const emptyProj = "proj-refs-empty-tasks";
     db.insertProject({ id: emptyProj, name: "No Tasks Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
     check("(resolve) a project with zero tasks resolves zero card mentions, no throw",
-      extractNoteReferences("c0ffee00 mentioned here", db.listTasks(emptyProj)).cardIds.length === 0);
+      refsFor(db, emptyProj, "c0ffee00 mentioned here").cardIds.length === 0);
+
+    // Project scoping + range edges: a prefix present only on ANOTHER project, and a longer-prefix
+    // neighbour ("c0ffee01") that a sloppy range would swallow, are both absent here.
+    check("(resolve) countTaskIdPrefixes is project-scoped (the other project's task is not counted)",
+      db.countTaskIdPrefixes(emptyProj, ["c0ffee00"]).size === 0);
+    check("(resolve) countTaskIdPrefixes([]) returns an empty map, no throw", db.countTaskIdPrefixes(proj, []).size === 0);
+    check("(resolve) a near-neighbour prefix 'c0ffee01' does not match 'c0ffee00…'", !db.countTaskIdPrefixes(proj, ["c0ffee01"]).has("c0ffee01"));
   }
 
-  // ===================== 3b. db.listTaskIds: narrow id-only read (round 3, performance) =====================
-  // card a140598a round 3 — buildMentionsIndex uses db.listTaskIds (never the general db.listTasks) so
-  // it never pays toTask's per-row conversion or the separate deferral-edges join for data it never
-  // reads. Proven here: the SAME set of ids as the general read, on a real multi-task project.
-  {
-    const proj = "proj-refs-listtaskids";
-    db.insertProject({ id: proj, name: "listTaskIds Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
-    const craftedIds = [
-      "11110000-0000-4000-8000-000000000001",
-      "22220000-0000-4000-8000-000000000002",
-      "33330000-0000-4000-8000-000000000003",
-      "44440000-0000-4000-8000-000000000004",
-    ];
-    for (const id of craftedIds) {
-      db.insertTask({ id, projectId: proj, title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
-    }
-    const viaListTaskIds = new Set(db.listTaskIds(proj));
-    const viaListTasks = new Set(db.listTasks(proj).map((t) => t.id));
-    check("(listTaskIds) returns EXACTLY the same id set as db.listTasks(...).map(t => t.id)",
-      viaListTaskIds.size === craftedIds.length && JSON.stringify([...viaListTaskIds].sort()) === JSON.stringify([...viaListTasks].sort()));
-
-    // Additive guard: a project with zero tasks returns [], no throw.
-    const emptyTaskProj = "proj-refs-listtaskids-empty";
-    db.insertProject({ id: emptyTaskProj, name: "No Tasks", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
-    check("(listTaskIds) a project with zero tasks returns [], no throw", db.listTaskIds(emptyTaskProj).length === 0);
-  }
-
-  // ===================== 4. findConnectedMentionsBulk: reverse index, cap, totalFound =====================
+  // ===================== 4. findConnectedMentions: cap, totalFound, connected-vs-resolved =====================
   {
     const proj = "proj-refs-bulk";
     db.insertProject({ id: proj, name: "Refs Bulk Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
     db.insertTask({ id: SOLO2_ID, projectId: proj, title: "lonely card", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
     const hubCardIds = [];
-    for (let i = 0; i < 8; i++) {
-      const id = `0000000${i}-0000-4000-8000-000000000000`;
+    const HUB_N = MAX_MENTIONS + 3; // deliberately over the cap
+    for (let i = 0; i < HUB_N; i++) {
+      const hex = i.toString(16).padStart(8, "0");
+      const id = `${hex}-0000-4000-8000-000000000000`;
       db.insertTask({ id, projectId: proj, title: `hub card ${i}`, body: "", columnKey: "backlog", position: 10 + i, priority: "p2", createdAt: now, updatedAt: now });
-      hubCardIds.push(`0000000${i}`);
+      hubCardIds.push(hex);
     }
-    const tasks = db.listTasks(proj);
 
     db.upsertProjectMemory(proj, { key: "hub-note", text: `refs: ${hubCardIds.join(" ")}` }, 500);
     for (const cid of hubCardIds) {
@@ -237,33 +219,36 @@ try {
     db.upsertProjectMemory(proj, { key: "lonely-mentioner", text: `only I mention ${SOLO2_ID.slice(0, 8)}` }, 500);
     db.upsertProjectMemory(proj, { key: "unrelated-note", text: "nothing relevant here at all" }, 500);
 
-    const corpus = db.listProjectMemory(proj);
-    const bulk = findConnectedMentionsBulk(corpus, tasks);
+    const hubResult = mentionsOf(db, proj, "hub-note");
+    check(`(single) hub note: totalFound reports the TRUE total (${HUB_N} connected cards), uncapped`, hubResult.totalFound === HUB_N);
+    check(`(single) hub note: matches is capped at MAX_MENTIONS (${MAX_MENTIONS})`, hubResult.matches.length === MAX_MENTIONS);
+    check("(single) hub note: every rendered match is kind:card", hubResult.matches.every((m) => m.kind === "card"));
 
-    const hubResult = bulk.get("hub-note");
-    check(`(bulk) hub note: totalFound reports the TRUE total (8 connected cards), uncapped`, hubResult.totalFound === 8);
-    check(`(bulk) hub note: matches is capped at MAX_MENTIONS_DIGEST (${MAX_MENTIONS_DIGEST})`, hubResult.matches.length === MAX_MENTIONS_DIGEST);
-    check("(bulk) hub note: every rendered match is kind:card", hubResult.matches.every((m) => m.kind === "card"));
-
-    const unrelatedResult = bulk.get("unrelated-note");
-    check("(bulk) MEASURED ZERO: a note with no references at all reports totalFound:0, matches:[]",
+    const unrelatedResult = mentionsOf(db, proj, "unrelated-note");
+    check("(single) MEASURED ZERO: a note with no references at all reports totalFound:0, matches:[]",
       unrelatedResult.totalFound === 0 && unrelatedResult.matches.length === 0);
 
-    const lonelyResult = bulk.get("lonely-mentioner");
-    check("(bulk) MEASURED ZERO (discriminating): a RESOLVED reference that NOTHING ELSE shares is still not 'connected'",
+    const lonelyResult = mentionsOf(db, proj, "lonely-mentioner");
+    check("(single) MEASURED ZERO (discriminating): a RESOLVED reference that NOTHING ELSE shares is still not 'connected'",
       lonelyResult.totalFound === 0 && lonelyResult.matches.length === 0);
 
-    const satelliteResult = bulk.get(`satellite-${hubCardIds[0]}`);
-    check("(bulk) a satellite note's own connection back to the hub's shared card is symmetric",
+    const satelliteResult = mentionsOf(db, proj, `satellite-${hubCardIds[0]}`);
+    check("(single) a satellite note's own connection back to the hub's shared card is symmetric",
       satelliteResult.totalFound === 1 && satelliteResult.matches[0].kind === "card" && satelliteResult.matches[0].id === hubCardIds[0]);
 
-    // POSITIVE CONTROL (DoD-4 shape): re-run against a DESYNCED corpus (missing one of the real
-    // satellites) and require the hub's totalFound to come back LOWER — proves the comparison can
-    // actually detect a real difference, not vacuously agree no matter what.
-    const desyncedCorpus = corpus.filter((e) => e.key !== `satellite-${hubCardIds[7]}`);
-    const desyncedBulk = findConnectedMentionsBulk(desyncedCorpus, tasks);
-    check("(bulk) POSITIVE CONTROL: removing one satellite from the corpus correctly drops the hub's totalFound by one",
-      desyncedBulk.get("hub-note").totalFound === hubResult.totalFound - 1);
+    // POSITIVE CONTROL: delete one real satellite and require the hub's totalFound to come back LOWER —
+    // proves the comparison can detect a real difference, not vacuously agree no matter what.
+    db.deleteProjectMemory(proj, `satellite-${hubCardIds[HUB_N - 1]}`);
+    check("(single) POSITIVE CONTROL: removing one satellite correctly drops the hub's totalFound by one",
+      mentionsOf(db, proj, "hub-note").totalFound === hubResult.totalFound - 1);
+
+    // decision + path kinds are connected the same way (no board lookup involved).
+    db.upsertProjectMemory(proj, { key: "dp-a", text: "see @decision a1b2c3d4 and packages/daemon/src/zzz-unique.ts" }, 500);
+    db.upsertProjectMemory(proj, { key: "dp-b", text: "also @decision a1b2c3d4 and packages/daemon/src/zzz-unique.ts" }, 500);
+    const dp = mentionsOf(db, proj, "dp-a");
+    check("(single) a shared @decision anchor and a shared path are both reported",
+      dp.totalFound === 2 && dp.matches.some((m) => m.kind === "decision" && m.id === "a1b2c3d4") &&
+      dp.matches.some((m) => m.kind === "path" && m.id === "packages/daemon/src/zzz-unique.ts"));
   }
 
   // ===================== 4b. expired notes are excluded from the mentions corpus entirely (card 57a91801, round 4) =====================
@@ -289,17 +274,12 @@ try {
     db.upsertProjectMemory(proj, { key: "live-control-a", text: `control note A mentioning ${controlPrefix}` }, 500);
     db.upsertProjectMemory(proj, { key: "live-control-b", text: `control note B ALSO mentioning ${controlPrefix}` }, 500);
 
-    const mentionsIndex = buildMentionsIndex(db, proj);
     check("(expiry) POSITIVE CONTROL: two LIVE notes sharing a card id ARE reported as connected",
-      mentionsIndex.get("live-control-a")?.totalFound === 1 && mentionsIndex.get("live-control-b")?.totalFound === 1);
+      mentionsOf(db, proj, "live-control-a").totalFound === 1 && mentionsOf(db, proj, "live-control-b").totalFound === 1);
     check("(expiry) a LIVE note whose ONLY sharer is an EXPIRED note is reported as NOT connected",
-      mentionsIndex.get("live-mentioner")?.totalFound === 0);
-    check("(expiry) an EXPIRED note itself has NO entry in the mentions index at all (never a mentioner)",
-      !mentionsIndex.has("expired-mentioner"));
-    check("(expiry) annotateMentionsPrecomputed on the expired note's own key returns [] (no entry to look up)",
-      annotateMentionsPrecomputed(mentionsIndex, "expired-mentioner").length === 0);
-    check("(expiry) annotateMentionsPrecomputed on the live note that only shared with the expired one renders no line",
-      annotateMentionsPrecomputed(mentionsIndex, "live-mentioner").length === 0);
+      mentionsOf(db, proj, "live-mentioner").totalFound === 0);
+    check("(expiry) an EXPIRED note itself reports NO mentions (never a mentioner)",
+      mentionsOf(db, proj, "expired-mentioner").totalFound === 0);
   }
 
   // ===================== 5. buildMentionsIndex (built ONCE) + annotateMentionsPrecomputed + kickoff digest =====================
@@ -315,25 +295,40 @@ try {
     const lonely = writeProjectMemory(db, proj, { key: "digest-lonely", text: "a note mentioning nothing shared" });
     check("(digest) setup: lonely note written", !("error" in lonely));
 
-    // buildMentionsIndex (round 2): built EXACTLY ONCE, then every note's lookup is an O(1) Map.get —
-    // this is what real callers (retrieveProjectMemoryForKickoff, computeNeverDropStatus/
-    // computeRestTierSignal) now do instead of re-scanning the corpus+tasks per annotated note.
-    const mentionsIndex = buildMentionsIndex(db, proj);
-    const dbResult = mentionsIndex.get("digest-canonical");
-    check("(db) buildMentionsIndex resolves the shared card id as a connected mention",
-      dbResult.totalFound === 1 && dbResult.matches[0].kind === "card" && dbResult.matches[0].id === "c0ffee00");
+    // memory_read (readProjectMemory) is the ONE surface: a structured, bounded field.
+    const readCanon = readProjectMemory(db, proj, "digest-canonical");
+    check("(read) memory_read returns the shared card as a connected mention",
+      Array.isArray(readCanon.mentions) && readCanon.mentions.length === 1 &&
+      readCanon.mentions[0].kind === "card" && readCanon.mentions[0].id === "c0ffee00");
+    check("(read) mentionsTruncated is false when nothing was cut", readCanon.mentionsTruncated === false);
+    const readLonely = readProjectMemory(db, proj, "digest-lonely");
+    check("(read) a note with nothing connected returns mentions:[] (measured zero, not omitted)",
+      Array.isArray(readLonely.mentions) && readLonely.mentions.length === 0 && readLonely.mentionsTruncated === false);
+    check("(read) memory_read keeps its existing link fields alongside mentions",
+      Array.isArray(readCanon.backlinks) && Array.isArray(readCanon.unresolvedOutboundLinks) && "expired" in readCanon);
+    check("(read) an unknown key still returns {error} with no mentions field",
+      "error" in readProjectMemory(db, proj, "no-such-key") && !("mentions" in readProjectMemory(db, proj, "no-such-key")));
 
-    const lines = annotateMentionsPrecomputed(mentionsIndex, "digest-canonical");
-    check("(db) annotateMentionsPrecomputed renders a '[mentions: card c0ffee00]' line",
-      lines.some((l) => l === "[mentions: card c0ffee00]"));
-    const lonelyLines = annotateMentionsPrecomputed(mentionsIndex, "digest-lonely");
-    check("(db) annotateMentionsPrecomputed on a note with nothing connected returns [] (measured zero, not omitted)",
-      Array.isArray(lonelyLines) && lonelyLines.length === 0);
-    check("(db) annotateMentionsPrecomputed with an undefined index returns [] rather than throwing",
-      Array.isArray(annotateMentionsPrecomputed(undefined, "digest-canonical")) && annotateMentionsPrecomputed(undefined, "digest-canonical").length === 0);
+    // memory_list does NOT carry mentions.
+    check("(list) memory_list rows carry NO mentions field",
+      listProjectMemoryEntries(db, proj).every((r) => !("mentions" in r) && !("mentionsTruncated" in r)));
 
-    // The kickoff digest actually renders the mentions annotation — THE auto-detected reference
-    // surfacing a connection a hand wikilink never made (the card's own measurement framing).
+    // Truncation flag end-to-end through memory_read: a hub citing more shared cards than the cap.
+    const trProj = "proj-refs-read-trunc";
+    db.insertProject({ id: trProj, name: "Read Trunc Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+    const trIds = [];
+    for (let i = 0; i < MAX_MENTIONS + 2; i++) {
+      const hex = (0xabc00000 + i).toString(16);
+      db.insertTask({ id: `${hex}-0000-4000-8000-000000000000`, projectId: trProj, title: `t${i}`, body: "", columnKey: "backlog", position: i, priority: "p2", createdAt: now, updatedAt: now });
+      trIds.push(hex);
+    }
+    db.upsertProjectMemory(trProj, { key: "tr-hub", text: trIds.join(" ") }, 500);
+    db.upsertProjectMemory(trProj, { key: "tr-other", text: trIds.join(" ") }, 500);
+    const readTr = readProjectMemory(db, trProj, "tr-hub");
+    check(`(read) over the cap: mentions.length === MAX_MENTIONS (${MAX_MENTIONS}) AND mentionsTruncated is true`,
+      readTr.mentions.length === MAX_MENTIONS && readTr.mentionsTruncated === true);
+
+    // The kickoff digest renders NO mentions annotation (it no longer injects one).
     const framed = retrieveProjectMemoryForKickoff(db, proj, "");
     check("(digest) positive control: the pinned canonical note is delivered",
       typeof framed === "string" && framed.includes("(digest-canonical)"));
@@ -344,12 +339,13 @@ try {
   }
 
   // ===================== zero-notes additive guard =====================
-  check("(additive) buildMentionsIndex on an empty project returns an empty map, no throw",
+  check("(additive) findConnectedMentions for a lone note in an otherwise empty project returns zero, no throw",
     (() => {
       const emptyProj = "proj-refs-empty";
       db.insertProject({ id: emptyProj, name: "Empty Refs Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
-      const m = buildMentionsIndex(db, emptyProj);
-      return m.size === 0;
+      db.upsertProjectMemory(emptyProj, { key: "only", text: "c0ffee00 and packages/daemon/src/db.ts" }, 500);
+      const m = mentionsOf(db, emptyProj, "only");
+      return m.totalFound === 0 && m.matches.length === 0;
     })());
 } finally {
   db.close();
@@ -360,8 +356,8 @@ console.log(failures === 0
   ? "\n✅ ALL PASS — auto-detected card/decision/path reference extraction (pure parsing, dedup, " +
     "@decision + wikilink masking for no-double-counting, \\b hex-boundary protection), the false-match " +
     "limiter (resolve-to-a-real-task, ambiguous-prefix exclusion), the corpus-bounded reverse index " +
-    "(connected-vs-merely-resolved distinction, MAX_MENTIONS_DIGEST cap + totalFound), and the kickoff " +
-    "digest rendering the '[mentions: ...]' annotation for a cross-note connection no [[wikilink]] ever " +
-    "made — all claude-free, network-free."
+    "(connected-vs-merely-resolved distinction, MAX_MENTIONS cap + truncation flag), and memory_read " +
+    "returning `mentions` for a cross-note connection no [[wikilink]] ever made (memory_list and the " +
+    "kickoff digest carrying none) — all claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

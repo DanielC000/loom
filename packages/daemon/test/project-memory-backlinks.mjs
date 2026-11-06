@@ -43,8 +43,9 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
-const { extractWikilinkKeys, findInboundBacklinks, findInboundBacklinksBulk, annotateBacklinks, MAX_BACKLINKS, MAX_BACKLINKS_DIGEST } =
+const { extractWikilinkKeys, findInboundBacklinks, findInboundBacklinksBulk, annotateBacklinks, MAX_BACKLINKS } =
   await import("../dist/sessions/project-memory-backlinks.js");
+const MAX_BACKLINKS_DIGEST = 5; // the old kickoff-digest cap, kept only as a fixture size (the digest renders none)
 const { retrieveProjectMemoryForKickoff, NEVER_DROP_TAG } = await import("../dist/sessions/project-memory-recall.js");
 const { writeProjectMemory, listProjectMemoryEntries, readProjectMemory } = await import("../dist/mcp/memory.js");
 

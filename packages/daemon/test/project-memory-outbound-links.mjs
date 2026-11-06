@@ -23,7 +23,7 @@ const loomHome = useOwnLoomHome("loom-pm-outbound-links-");
 const { Db } = await import("../dist/db.js");
 const {
   findUnresolvedOutboundLinks, findUnresolvedOutboundLinksBulk, existingKeysFromCorpus,
-  buildOutboundLinksIndex, unresolvedOutboundLinksDigestLine, unresolvedOutboundLinksMessage,
+  unresolvedOutboundLinksMessage,
 } = await import("../dist/sessions/project-memory-outbound-links.js");
 const { retrieveProjectMemoryForKickoff } = await import("../dist/sessions/project-memory-recall.js");
 const { writeProjectMemory, listProjectMemoryEntries, readProjectMemory } = await import("../dist/mcp/memory.js");
@@ -66,11 +66,6 @@ db.insertProject({ id: PROJECT_ID, name: "Outbound Links Project", repoPath: loo
   const perNote = new Map(corpus.map((e) => [e.key, findUnresolvedOutboundLinks(e, keySet)]));
   check("(pure) bulk resolver is byte-identical to the per-note resolver over the same corpus+keyset",
     JSON.stringify([...bulk.entries()].sort()) === JSON.stringify([...perNote.entries()].sort()));
-
-  // Digest line rendering — compact, single line, no explanatory prose
-  check("(pure) digest line is absent for a resolved note", unresolvedOutboundLinksDigestLine([]).length === 0);
-  check("(pure) digest line is ONE compact bracketed line naming every unresolved key",
-    JSON.stringify(unresolvedOutboundLinksDigestLine(["x", "y"])) === JSON.stringify(["[unresolved links: x, y]"]));
 
   // memory_read/memory_write message — fuller wording, still never empty when keys are present
   const msg = unresolvedOutboundLinksMessage(["x", "y"]);
@@ -152,8 +147,7 @@ db.insertProject({ id: PROJECT_ID, name: "Outbound Links Project", repoPath: loo
   check("(digest) the rendered kickoff digest carries NO unresolved-links marker (memory_read-only)",
     !digest.includes("[unresolved links"));
 
-  // Call-count: db.listProjectMemory must not scale with corpus size — same bounded-count discipline as
-  // project-memory-backlinks-build-once.mjs's own §5.
+  // Call-count: db.listProjectMemory must not scale with corpus size.
   let calls = 0;
   const realListProjectMemory = db.listProjectMemory.bind(db);
   db.listProjectMemory = (projectId) => { calls++; return realListProjectMemory(projectId); };

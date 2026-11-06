@@ -1,5 +1,7 @@
 # 527ed4f0 — build the backlinks index once per digest composition, not once per note
 
+> **Superseded in code:** the kickoff digest stopped injecting backlinks/mentions, and `buildBacklinksIndex`, `annotateBacklinksPrecomputed`, `buildMentionsIndex` and their equivalence test (`project-memory-backlinks-build-once.mjs`) were deleted as dead. `memory_read` resolves backlinks per note and returns single-note `mentions`; the text below is the history of the removed design.
+
 ## Context
 
 Card a140598a built `buildMentionsIndex` so cross-note "mentions" annotation resolved once per digest

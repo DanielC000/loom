@@ -9657,14 +9657,19 @@ export class Db {
   countTasks(projectId: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE project_id = ?").get(projectId) as { c: number }).c;
   }
-  /** Card a140598a round 3 — bare id column ONLY, never a full board read: project-memory-references.ts's
-   *  `buildCardIdPrefixCounts` only ever reads `id.slice(0,8)`, so this skips `toTask`'s per-row JSON
-   *  parsing/field mapping AND the separate `loadDeferralIds` join `listTasks` always pays — measured
-   *  ~64ms → a small fraction of that at 4,700 tasks, the single biggest line item in the mentions
-   *  index's own cost breakdown (see that card's decision record, "Round 3"). */
-  listTaskIds(projectId: string): string[] {
-    return (this.db.prepare("SELECT id FROM tasks WHERE project_id = ?").all(projectId) as { id: string }[])
-      .map((r) => r.id);
+  /** Card a140598a — `prefix(8) -> how many of this project's tasks share it`, for ONLY the given
+   *  lowercase 8-hex `prefixes` (project-memory-references.ts's `findConnectedMentions`). One indexed
+   *  range probe on the `id` primary key per prefix (ids are lowercase hex UUIDs, so `[p, p+"g")` is
+   *  exactly "starts with p") — never a board read. A prefix with no task is absent from the map. */
+  countTaskIdPrefixes(projectId: string, prefixes: string[]): Map<string, number> {
+    const counts = new Map<string, number>();
+    if (prefixes.length === 0) return counts;
+    const stmt = this.db.prepare("SELECT COUNT(*) AS c FROM tasks WHERE project_id = ? AND id >= ? AND id < ?");
+    for (const p of prefixes) {
+      const c = (stmt.get(projectId, p, `${p}g`) as { c: number }).c;
+      if (c > 0) counts.set(p, c);
+    }
+    return counts;
   }
   getTask(id: string): Task | undefined {
     const r = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;

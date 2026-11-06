@@ -3,6 +3,7 @@ import { resolveConfig, isProjectMemoryExpired } from "@loom/shared";
 import type { Db } from "../db.js";
 import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
 import { annotateBacklinks, annotateBacklinksBulk } from "../sessions/project-memory-backlinks.js";
+import { findConnectedMentions, type NoteMention } from "../sessions/project-memory-references.js";
 import { annotateNote } from "../sessions/project-memory-annotations.js";
 import { computeFloorTierStatus, computeRestTierStatus, NEVER_DROP_TAG } from "../sessions/project-memory-recall.js";
 import { computeNearDuplicateSignal, type NearDuplicateSignal } from "../sessions/project-memory-dedup.js";
@@ -652,11 +653,21 @@ export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemo
  *  `[[wikilink]]` targets (card 1c9dcb24) are resolved against a KEY-ONLY corpus fetch ({@link
  *  Db.listProjectMemoryKeys}) rather than the full-row fetch `annotateBacklinks` makes for inbound
  *  matching — cheaper for this single-note read, since it never needs any OTHER note's body. */
-export function readProjectMemory(db: Db, projectId: string, key: string): ProjectMemoryEntryWithLinks | { error: string } {
+export function readProjectMemory(
+  db: Db, projectId: string, key: string,
+): (ProjectMemoryEntryWithLinks & { mentions: NoteMention[]; mentionsTruncated: boolean }) | { error: string } {
   const found = db.getProjectMemoryByKey(projectId, key.trim());
   if (!found) return { error: `no memory note with key "${key}" on this project` };
   const existingKeys = new Set(db.listProjectMemoryKeys(projectId));
-  return withLinks(db, projectId, found, annotateBacklinks(db, projectId, found.key), findUnresolvedOutboundLinks(found, existingKeys));
+  // `mentions` rides ONLY on this single-note read (not memory_list, not the kickoff digest): the
+  // entities (card/decision/path) this note cites that another live note also cites, capped at
+  // MAX_MENTIONS with `mentionsTruncated` saying when the list was cut.
+  const { matches, totalFound } = findConnectedMentions(db, projectId, found);
+  return {
+    ...withLinks(db, projectId, found, annotateBacklinks(db, projectId, found.key), findUnresolvedOutboundLinks(found, existingKeys)),
+    mentions: matches,
+    mentionsTruncated: totalFound > matches.length,
+  };
 }
 
 /** A bounded cap on `memory_history`'s own `limit` param — independent of, and tighter than, the

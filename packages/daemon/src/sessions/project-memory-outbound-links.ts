@@ -1,5 +1,4 @@
 import type { ProjectMemoryEntry } from "@loom/shared";
-import type { Db } from "../db.js";
 import { extractWikilinkKeys } from "./project-memory-backlinks.js";
 
 /**
@@ -50,33 +49,8 @@ export function findUnresolvedOutboundLinksBulk(corpus: ProjectMemoryEntry[]): M
   return result;
 }
 
-/**
- * Card 1c9dcb24 — the ONE impure entry point real DIGEST/write-time-status callers use, mirroring {@link
- * buildBacklinksIndex}/{@link buildMentionsIndex}'s own shape exactly: its OWN raw `db.listProjectMemory`
- * fetch, built ONCE per digest composition / per write-time status computation by the CALLER, never once
- * per note. A LIST caller that already holds its own corpus (`memory_list`'s `listProjectMemoryEntries`)
- * must call {@link findUnresolvedOutboundLinksBulk} directly over that corpus instead — never this
- * function — or it pays for a redundant second full-corpus fetch.
- */
-export function buildOutboundLinksIndex(db: Db, projectId: string): Map<string, string[]> {
-  return findUnresolvedOutboundLinksBulk(db.listProjectMemory(projectId));
-}
-
-/**
- * The COMPACT, single-line digest marker for `unresolved` — rides on EVERY kickoff for every pinned note
- * that has one, so (unlike {@link UNRESOLVED_LINK_MESSAGE}'s fuller memory_read/memory_write wording) it
- * stays ONE short bracketed line naming every unresolved key, never a sentence per link. `[]` (no line)
- * when `unresolved` is empty — mirrors every sibling digest-annotation line's "absent when there's
- * nothing to say" shape (backlinks, mentions, request-links).
- */
-export function unresolvedOutboundLinksDigestLine(unresolved: string[]): string[] {
-  if (unresolved.length === 0) return [];
-  return [`[unresolved links: ${unresolved.join(", ")}]`];
-}
-
-/** The fuller, explanatory wording for `memory_read`/`memory_write` responses (never rendered into the
- *  kickoff digest, which uses {@link unresolvedOutboundLinksDigestLine}'s compact form instead) —
- *  acknowledges that an unresolved target MAY be a deliberate reference into a different memory system
+/** The explanatory wording for `memory_read`/`memory_write` responses (never rendered into the
+ *  kickoff digest) — acknowledges that an unresolved target MAY be a deliberate reference into a different memory system
  *  this project's store has no visibility into, per card 1c9dcb24's "flag unconditionally, never strip"
  *  decision. */
 export function unresolvedOutboundLinksMessage(unresolved: string[]): string {

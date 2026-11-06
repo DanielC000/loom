@@ -1,4 +1,4 @@
-import type { ProjectMemoryEntry, Task } from "@loom/shared";
+import type { ProjectMemoryEntry } from "@loom/shared";
 import { isProjectMemoryExpired } from "@loom/shared";
 import type { Db } from "../db.js";
 import { extractPathTokens } from "./project-memory-path-tokens.js";
@@ -85,29 +85,9 @@ export function extractCardIdCandidates(text: string): string[] {
   return ordered;
 }
 
-/**
- * Card a140598a round 2 (performance — see the decision record's "Round 2" section) — a ONE-TIME
- * O(tasks) pass building `prefix(8) -> how many tasks share it`, so resolving N bare-hex candidates
- * against a project's task list costs O(N) total (one `Map.get` per candidate) once this map has been
- * built, instead of O(N × tasks) (one linear `resolveIdPrefix` scan per candidate). Exactly equivalent
- * to `resolveIdPrefix`'s own semantics for an 8-char ref: a card-id candidate is always exactly 8 hex
- * chars ({@link BARE_CARD_ID_RE}'s own match width) and a task id is a 36-char UUID, so
- * `id.startsWith(ref)` for an 8-char `ref` is identical to `id.slice(0,8) === ref` — there is no
- * shorter-than-8 or exact-full-id case to special-case here the way the general-purpose
- * `resolveIdPrefix` must. Build this ONCE per digest composition (see {@link buildMentionsIndex}),
- * never once per candidate or once per note.
- */
-export function buildCardIdPrefixCounts(tasks: Pick<Task, "id">[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const t of tasks) {
-    const prefix = t.id.slice(0, 8).toLowerCase();
-    counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
-  }
-  return counts;
-}
-
 /** Filters `candidateIds` down to the ones that resolve to EXACTLY ONE real task, via an O(1) lookup
- *  into a prebuilt {@link buildCardIdPrefixCounts} map — a count of 1 is "found", 0 is "none", and 2+ is
+ *  into a `prefix(8) -> how many tasks share it` map (see `Db.countTaskIdPrefixes`, which builds one for
+ *  just the candidates in hand rather than reading the board) — a count of 1 is "found", 0 is "none", and 2+ is
  *  "ambiguous" (dropped, never guessed), the same three outcomes `resolveIdPrefix` distinguishes. This
  *  is the false-match limiter the card's own DoD calls for: a candidate that is really a commit sha or
  *  other incidental hex never survives unless it happens to also be a genuine task id-prefix on THIS
@@ -144,11 +124,9 @@ export interface NoteReferences {
 }
 
 /**
- * Pure extraction, hot-path-safe: `prefixCounts` (see {@link buildCardIdPrefixCounts}) is built ONCE
- * per digest composition and handed to every note's extraction call here, instead of resolving each
- * candidate against the task list afresh per note. Use {@link extractNoteReferences} instead only for a
- * single ad hoc call where you merely have a raw task array (e.g. a unit test) — never in a loop over
- * many notes.
+ * Pure extraction: `prefixCounts` (`prefix(8) -> task count`, see `Db.countTaskIdPrefixes`) is built
+ * ONCE and handed to every note's extraction call here, instead of resolving each candidate against
+ * the task list afresh per note.
  */
 export function extractNoteReferencesUsingPrefixCounts(text: string, prefixCounts: Map<string, number>): NoteReferences {
   return {
@@ -156,17 +134,6 @@ export function extractNoteReferencesUsingPrefixCounts(text: string, prefixCount
     decisionIds: extractDecisionAnchorIds(text),
     paths: extractPathTokens(maskWikilinkSpans(text)).filter(isPlausiblePathToken),
   };
-}
-
-/**
- * Convenience wrapper over {@link extractNoteReferencesUsingPrefixCounts} for a single ad hoc call
- * (tests, or a genuinely one-off lookup) — builds its own {@link buildCardIdPrefixCounts} map from
- * `tasks` on every call. NEVER call this once per note in a loop over many notes — build the prefix map
- * (or call {@link findConnectedMentionsBulk}/{@link buildMentionsIndex}) ONCE instead; see the decision
- * record's "Round 2" section for the exact per-note blowup this guards against.
- */
-export function extractNoteReferences(text: string, tasks: Pick<Task, "id">[]): NoteReferences {
-  return extractNoteReferencesUsingPrefixCounts(text, buildCardIdPrefixCounts(tasks));
 }
 
 type ReferenceKind = "card" | "decision" | "path";
@@ -190,10 +157,8 @@ interface EntryWithRefs {
  * Card a140598a — corpus-bounded reverse index: entity (`kind:id`) -> set of note KEYS that mention it.
  * Built in ONE pass over the corpus — every note's references extracted exactly once, never once per
  * note per target — mirroring {@link import("./project-memory-backlinks.js").findInboundBacklinksBulk}'s
- * own shape. Still O(N²) overall once every note's mentions are cross-checked against every other's (see
- * {@link findConnectedMentionsBulk}), left unindexed on purpose, same as card d305f1a2's own backlinks
- * precedent: bounded by `memory.maxNotes`, not luck — re-measure before reaching for a real index if that
- * cap is ever raised meaningfully.
+ * own shape. {@link findConnectedMentions} builds it once per single-note read, so the cost is one pass
+ * over the corpus, bounded by `memory.maxNotes` — re-measure if that cap is ever raised meaningfully.
  */
 function buildReferenceIndex(withRefs: EntryWithRefs[]): Map<string, Set<string>> {
   const index = new Map<string, Set<string>>();
@@ -242,94 +207,41 @@ function connectedMentionsFor(
   return { matches: connected.slice(0, cap), totalFound: connected.length };
 }
 
-/** The digest-render cap — deliberately small, mirroring
- *  {@link import("./project-memory-backlinks.js").MAX_BACKLINKS_DIGEST}'s own "every digest-rendered note
- *  pays this sizing cost on every kickoff" reasoning. There is no separate larger on-demand cap the way
- *  backlinks has one for memory_read/memory_list (card e4e180ad's `MAX_BACKLINKS`): this feature has no
- *  on-demand surface of its own yet — see the card's own "stay in recall/backlink code" scope note — so a
- *  single cap, sized for the digest, is the only one that exists today. */
-export const MAX_MENTIONS_DIGEST = 5;
+/** The cap on the structured `mentions` list `memory_read` returns for one note. */
+export const MAX_MENTIONS = 10;
+
+/** Bound on how many bare-hex candidates from ONE note are resolved against the board — each costs one
+ *  indexed range probe, so this keeps a hex-heavy note (a pasted log) from turning a read into a scan. */
+const MAX_CARD_CANDIDATES = 64;
 
 /**
- * Bulk variant — resolves EVERY note's connected mentions in ONE pass over `corpus`, instead of one full
- * extraction pass per note per target. `tasks` is the project's own task list (for the card-id resolve
- * filter); both parameters are plain arrays, so this stays hermetically testable with fixture data, no
- * live `Db` required. Keyed by note `key`, with exactly one entry per note in `corpus`.
+ * The entities `target` mentions that at least one OTHER live note in the project also mentions —
+ * single-note, on-demand (`memory_read`). `totalFound` is the true count before the `cap`.
+ *
+ * Cost shape: one corpus fetch (the same one backlinks already makes) plus ONE indexed range probe per
+ * bare-hex candidate in the TARGET's own text (`Db.countTaskIdPrefixes`) — never a board read. Resolving
+ * only the target's candidates is sufficient: a card is "shared" only if another note cites the same hex
+ * token, and that token is in the target's candidate set by definition.
+ *
+ * @decision 57a91801 — an expired note is neither a mentioner nor a mentioned note, so an expired
+ * target reports nothing and an expired sharer never connects a live note.
+ *
+ * Full record: docs/decisions/a140598a-reference-extraction-false-match-limiting.md
  */
-export function findConnectedMentionsBulk(
-  corpus: Pick<ProjectMemoryEntry, "key" | "text">[],
-  tasks: Pick<Task, "id">[],
-  cap: number = MAX_MENTIONS_DIGEST,
-): Map<string, { matches: NoteMention[]; totalFound: number }> {
-  const prefixCounts = buildCardIdPrefixCounts(tasks);
-  const withRefs: EntryWithRefs[] = corpus.map((entry) => ({
-    key: entry.key,
-    refs: extractNoteReferencesUsingPrefixCounts(entry.text, prefixCounts),
-  }));
-  const index = buildReferenceIndex(withRefs);
-  const result = new Map<string, { matches: NoteMention[]; totalFound: number }>();
-  for (const { key, refs } of withRefs) {
-    result.set(key, connectedMentionsFor(key, refs, index, cap));
-  }
-  return result;
-}
-
-/**
- * Card a140598a round 2 — the ONE impure entry point real callers use: builds the corpus+task-derived
- * mentions map EXACTLY ONCE per digest composition / write-time status computation (never once per
- * note — see {@link annotateMentionsPrecomputed}).
- *
- * @decision a140598a — use `db.listTaskIds`, never `db.listTasks`, here: this module only ever reads
- * `id.slice(0,8)`, so the general read's per-row `toTask` conversion + its separate deferral-edges join
- * are pure waste it should never pay.
- *
- * @decision 57a91801 — excludes an expired note from the mentions corpus entirely (neither a mentioner
- * nor a mentioned note), matching card 57a91801's own exclusion of expired notes from every other
- * kickoff-rendering tier. See the decision record's "Round 4" section for why.
- *
- * Full record: docs/decisions/a140598a-reference-extraction-false-match-limiting.md ("Round 2"-"Round 4")
- */
-export function buildMentionsIndex(
+export function findConnectedMentions(
   db: Db,
   projectId: string,
-  cap: number = MAX_MENTIONS_DIGEST,
-): Map<string, { matches: NoteMention[]; totalFound: number }> {
-  const corpus = db.listProjectMemory(projectId).filter((m) => !isProjectMemoryExpired(m));
-  const tasks = db.listTaskIds(projectId).map((id): Pick<Task, "id"> => ({ id }));
-  return findConnectedMentionsBulk(corpus, tasks, cap);
-}
-
-function mentionLabel(m: NoteMention): string {
-  return `${m.kind} ${m.id}`;
-}
-
-/** Shared by {@link annotateMentionsPrecomputed} so the line shape lives in exactly one place. `[]`
- *  when nothing is connected — a MEASURED zero, same discipline as backlinks' own
- *  `linesForBacklinkResult`. */
-function linesForMentionsResult({ matches, totalFound }: { matches: NoteMention[]; totalFound: number }): string[] {
-  if (matches.length === 0) return [];
-  const lines = [`[mentions: ${matches.map(mentionLabel).join(", ")}]`];
-  if (totalFound > matches.length) {
-    lines.push(`[mentions: showing ${matches.length} of ${totalFound} cross-referenced entities]`);
-  }
-  return lines;
-}
-
-/**
- * Every "connected mention" annotation line for `targetKey` — an O(1) lookup into `precomputed` (built
- * ONCE per composition, see {@link buildMentionsIndex}), never a fresh corpus/task scan per note. Same
- * bracketed-line style `[backlink: ...]` used to render in. No production path calls it any more (the
- * kickoff digest stopped injecting mentions; there is no on-demand surface), so it is exercised by tests
- * only. `precomputed` is optional only so a caller with no map at all (e.g. a
- * hermetic test exercising request-links/backlinks alone) can omit it rather than pass an empty Map;
- * every real caller builds one via {@link buildMentionsIndex} first.
- */
-export function annotateMentionsPrecomputed(
-  precomputed: Map<string, { matches: NoteMention[]; totalFound: number }> | undefined,
-  targetKey: string,
-): string[] {
-  if (!precomputed) return [];
-  const result = precomputed.get(targetKey);
-  if (!result) return [];
-  return linesForMentionsResult(result);
+  target: Pick<ProjectMemoryEntry, "key" | "text" | "expiresAt">,
+  cap: number = MAX_MENTIONS,
+): { matches: NoteMention[]; totalFound: number } {
+  if (isProjectMemoryExpired(target)) return { matches: [], totalFound: 0 };
+  const candidates = extractCardIdCandidates(target.text).slice(0, MAX_CARD_CANDIDATES);
+  const prefixCounts = db.countTaskIdPrefixes(projectId, candidates);
+  const others = db.listProjectMemory(projectId).filter((m) => m.key !== target.key && !isProjectMemoryExpired(m));
+  const targetRefs = extractNoteReferencesUsingPrefixCounts(target.text, prefixCounts);
+  const withRefs: EntryWithRefs[] = [
+    { key: target.key, refs: targetRefs },
+    ...others.map((m) => ({ key: m.key, refs: extractNoteReferencesUsingPrefixCounts(m.text, prefixCounts) })),
+  ];
+  return connectedMentionsFor(target.key, targetRefs, buildReferenceIndex(withRefs), cap);
 }

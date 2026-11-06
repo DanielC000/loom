@@ -742,7 +742,13 @@ export class TaskMcpRouter {
           "exist in this project's memory store, resolved live at THIS read; `[]` is a measured zero " +
           "(every target resolves, or there are none), not an absent field. Never auto-stripped from " +
           "`text` — a target may be a typo, a note not written yet, or a deliberate reference into a " +
-          "different memory system this store has no visibility into. Also carries `expired` (" +
+          "different memory system this store has no visibility into. Also carries `mentions` — the " +
+          "cards (`{kind:\"card\",id}`), `@decision` anchors (`kind:\"decision\"`) and file paths " +
+          "(`kind:\"path\"`) THIS note cites that at least one OTHER live note also cites, found live at " +
+          "THIS read with no `[[wikilink]]` needed; capped at 10, with `mentionsTruncated:true` when more " +
+          "exist than are listed; `[]` is a measured zero. A bare 8-hex id only counts when it matches " +
+          "exactly one card on this project. Single-note read only — `memory_list` does not carry it. " +
+          "Also carries `expired` (" +
           "`expiresAt` set AND already past) — the note is still returned here in full either " +
           "way; `expired:true` just means it's currently excluded from every kickoff tier.",
         inputSchema: strictShape({ key: z.string() }),

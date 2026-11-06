@@ -41,19 +41,6 @@ export function extractWikilinkKeys(text: string): string[] {
  */
 export const MAX_BACKLINKS = 20;
 
-/**
- * A tighter cap sized for the KICKOFF DIGEST. NOTE: the digest no longer injects backlinks at all
- * (project-memory-annotations.ts's `annotateNote` returns linked-Request state only), so this cap is now
- * exercised only by {@link buildBacklinksIndex}'s callers in tests; it records the cap the digest used when
- * every packed note was sized against the shared budget on EVERY kickoff. `memory_read`/
- * `memory_list` keep the full {@link MAX_BACKLINKS}, since an on-demand pull isn't paying this cost on
- * every OTHER session's kickoff too.
- *
- * @decision e4e180ad — the line is DIGEST vs ON-DEMAND, not floor-tier vs ordinary — measured, ordinary
- * pinned notes cost as much as floor-tier ones at the general cap.
- */
-export const MAX_BACKLINKS_DIGEST = 5;
-
 /** One note that wikilinks to a target key. */
 export interface InboundBacklink {
   key: string;
@@ -189,37 +176,3 @@ export function annotateBacklinksBulk(corpus: ProjectMemoryEntry[], cap: number 
   return lines;
 }
 
-/**
- * Card 527ed4f0 — the ONE impure entry point real DIGEST callers use: fetches the corpus EXACTLY ONCE per
- * digest composition / write-time status computation, mirroring {@link buildMentionsIndex}'s own shape
- * (project-memory-references.ts) — never once per note, which is the exact per-note `annotateBacklinks`
- * cost this card measured and fixed (card d305f1a2's O(N²), confirmed via profiling to dominate both
- * `retrieveProjectMemoryForKickoff` and the `computeRestTierSignal`/`computeNeverDropStatus` write path).
- *
- * Deliberately its OWN raw `db.listProjectMemory` fetch, never {@link buildMentionsIndex}'s own
- * already-expiry-filtered corpus — backlinks stay expiry-agnostic, unchanged by this card. See
- * docs/decisions/a140598a-reference-extraction-false-match-limiting.md's "Do not (round 4)": whether an
- * expired note should count as an inbound wikilink-backlinker is a decision for THIS module's own card,
- * not a140598a's — and this card does not make that call either, it only amortizes the existing,
- * unchanged matching semantics ({@link matchesFor}) over one fetch instead of one-per-note.
- */
-export function buildBacklinksIndex(db: Db, projectId: string, cap: number = MAX_BACKLINKS_DIGEST): Map<string, string[]> {
-  return annotateBacklinksBulk(db.listProjectMemory(projectId), cap);
-}
-
-/**
- * Every inbound-backlink annotation line for `targetKey` — an O(1) lookup into `precomputed` (built ONCE
- * per composition, see {@link buildBacklinksIndex}), never a fresh per-note corpus scan via
- * {@link annotateBacklinks}. Mirrors `annotateMentionsPrecomputed`'s exact omit-safe shape
- * (project-memory-references.ts) — `precomputed` is optional only so a caller with no map at all (e.g. a
- * hermetic test exercising request-links/mentions alone) can omit it rather than pass an empty Map; every
- * real caller builds one via {@link buildBacklinksIndex} first. No production path calls it any more
- * (the kickoff digest stopped injecting backlinks); it is exercised by tests only.
- *
- * @decision 527ed4f0 — never let this diverge from {@link annotateBacklinks}'s own rendered output for
- * the same note; both must route through {@link matchesFor}/{@link linesForBacklinkResult}.
- */
-export function annotateBacklinksPrecomputed(precomputed: Map<string, string[]> | undefined, targetKey: string): string[] {
-  if (!precomputed) return [];
-  return precomputed.get(targetKey) ?? [];
-}
