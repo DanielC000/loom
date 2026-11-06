@@ -10649,7 +10649,9 @@ function reenterMergeQuarantinesAtBootImpl(
   // parseable tmp in-memory but DEFERS the disk write/unlink to a single per-key pass below, so the
   // final's own on-disk content is the FULL union, never "whichever tmp was processed last".
   const tmpsToUnlinkByKey = new Map<string, string[]>();
-  const deferredCorruptTmps: { f: string; matchedRepo: string }[] = [];
+  // @decision 0f58a09a — `byContent`: `matchedRepo` came from the file's own CONTENT, never its filename hash.
+  // `misfiled` (with byContent): the named repo's own hash differs from the file's, so "another repo's hash" is true.
+  const deferredCorruptTmps: { f: string; matchedRepo: string; byContent?: boolean; misfiled?: boolean }[] = [];
   // @decision f5c42043 — Site C's own twin of `deferredAncestorCorruptJsons`: resolved by its OWN,
   // simpler loop below that always divert-to-pending, never folds into another key's unlink list.
   const deferredAncestorCorruptTmps: { f: string; matchedRepo: string }[] = [];
@@ -10675,17 +10677,31 @@ function reenterMergeQuarantinesAtBootImpl(
       // already in `final`'s own tokens; a non-subset falls through to the normal recovery union below.
       const alreadyAccountedFor = byRepoKey.get(canonicalRepoLockKey(matchedRepo))?.tokens ?? [];
       const staleTmpSafety = orphanSweepSafeToDelete(f, alreadyAccountedFor);
-      if (staleTmpSafety.safe) {
+      // @decision 0f58a09a — a tokenless record trivially passes the subset test; one naming ANOTHER absolute
+      // repo is that repo's misfiled record, not stale residue of this one. Fall through to attribution.
+      const namesOtherRepo = staleTmpSafety.parsedRepoPath !== undefined && path.isAbsolute(staleTmpSafety.parsedRepoPath)
+        && canonicalRepoLockKey(staleTmpSafety.parsedRepoPath) !== canonicalRepoLockKey(matchedRepo);
+      if (staleTmpSafety.safe && !namesOtherRepo) {
         try { fs.unlinkSync(tmpPath); } catch { /* best-effort — a leftover tmp beside a good final write is harmless */ }
         continue;
       }
       // eslint-disable-next-line no-console
-      console.warn(`[merge-quarantine] boot-time tmp latch ${f} sits beside an already-clean final for registered repo ${matchedRepo}, but its own on-disk content is NOT a provable subset of that final's tokens — this may be a torn write stranded by a renameSync failure, not genuinely stale residue; falling through to the standard tmp-recovery union instead of deleting it blind.`);
+      console.warn(namesOtherRepo
+        ? `[merge-quarantine] boot-time tmp latch ${f} sits beside an already-clean final for registered repo ${matchedRepo}, but its content names a DIFFERENT repo (${staleTmpSafety.parsedRepoPath}) — not stale residue of ${matchedRepo}; falling through to attribution by content instead of deleting it.`
+        : `[merge-quarantine] boot-time tmp latch ${f} sits beside an already-clean final for registered repo ${matchedRepo}, but its own on-disk content is NOT a provable subset of that final's tokens — this may be a torn write stranded by a renameSync failure, not genuinely stale residue; falling through to the standard tmp-recovery union instead of deleting it blind.`);
     }
+    // @decision 0f58a09a — set once the content names an absolute repoPath, so an unarmable file is
+    // attributed to the repo it NAMES (like an armable one), never to the repo its filename hashes to.
+    let contentIdentity: string | undefined;
     try {
       const raw = fs.readFileSync(tmpPath, "utf8");
       const parsed = JSON.parse(raw) as Partial<MergeQuarantineEntry> & { token?: string };
       if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") {
+        // @decision 0f58a09a — scoped to THIS throw only: a later throw for an otherwise-armable record keeps
+        // the filename cascade.
+        if (isReadableLatchRecord(parsed) && typeof parsed.repoPath === "string" && parsed.repoPath.length > 0 && path.isAbsolute(parsed.repoPath)) {
+          contentIdentity = parsed.repoPath;
+        }
         throw new Error("tmp latch JSON is missing repoPath/branch/reason");
       }
       const rawTokens = Array.isArray(parsed.tokens) && parsed.tokens.length > 0 && parsed.tokens.every((t): t is string => typeof t === "string")
@@ -10826,7 +10842,15 @@ function reenterMergeQuarantinesAtBootImpl(
       // @decision 92c645cc (round 2, item 2b) — DEFER fail-closed handling: a sibling tmp for the SAME
       // key, read earlier or later in this loop, may carry real data an inline placeholder would clobber.
       // Unmatched joins the orphan sweep below, unaffected.
-      if (matchedRepo) {
+      if (contentIdentity !== undefined) {
+        // @decision 0f58a09a — the bytes parse and NAME a repo: fail closed to THAT repo, never to whichever
+        // repo the (possibly misfiled) filename hash happens to match.
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] boot-time tmp latch ${f} is UNARMABLE (${(e as Error).message}) but names repo ${contentIdentity} — attributing it by CONTENT to that repo, not to whichever repo its filename hash matches; deferring fail-closed handling until every sibling tmp has been read.`);
+        const misfiled = matchedRepo !== contentIdentity
+          && path.basename(quarantinePathForKey(canonicalRepoLockKey(contentIdentity))) !== `${hash}.json`;
+        deferredCorruptTmps.push({ f, matchedRepo: contentIdentity, byContent: true, misfiled });
+      } else if (matchedRepo) {
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable (${(e as Error).message}) but its filename hash matches registered repo ${matchedRepo} — deferring fail-closed handling until every sibling tmp for this repo has been read.`);
         deferredCorruptTmps.push({ f, matchedRepo });
@@ -11266,16 +11290,23 @@ function reenterMergeQuarantinesAtBootImpl(
   // @decision 92c645cc (round 2, item 2b) — a corrupt tmp's matched repo may ALREADY carry real
   // (non-placeholder) data from a sibling tmp read earlier OR later in the loop above; order must never
   // decide whether that real data survives, or whether the corrupt tmp's own placeholder gets written.
-  for (const { f, matchedRepo } of deferredCorruptTmps) {
+  for (const { f, matchedRepo, byContent, misfiled } of deferredCorruptTmps) {
     const tmpPath = path.join(MERGE_QUARANTINE_DIR, f);
+    // @decision 0f58a09a — byContent wording: the identity came from the file's CONTENT; only say it sat at
+    // ANOTHER repo's hash when `misfiled` is set (R's own branchless record at R's own hash is not misfiled).
+    const atOtherHash = misfiled === true ? " (the file sits at another repo's hash)" : "";
     // @decision 882d6cff — never recompute/arm at a degraded walked-up key here; keep the tmp untouched
     // and divert to pending instead. See the decision record for the repro.
     if (!isRepoPathCurrentlyResolvable(matchedRepo)) {
       // eslint-disable-next-line no-console
-      console.warn(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable and its filename hash matches registered repo ${matchedRepo}, but ${matchedRepo} does not currently resolve on disk — keeping the tmp AS WRITTEN rather than risk folding it into a different, degraded key's own unlink list; deferring to a lazy re-resolve on first query.`);
+      console.warn(byContent === true
+        ? `[merge-quarantine] boot-time tmp latch ${f} is UNARMABLE but its content names ${matchedRepo}${atOtherHash}, and ${matchedRepo} does not currently resolve on disk — keeping the tmp AS WRITTEN; deferring to a lazy re-resolve on first query.`
+        : `[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable and its filename hash matches registered repo ${matchedRepo}, but ${matchedRepo} does not currently resolve on disk — keeping the tmp AS WRITTEN rather than risk folding it into a different, degraded key's own unlink list; deferring to a lazy re-resolve on first query.`);
       const entry: MergeQuarantineEntry = {
         repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
-        reason: `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, while ${matchedRepo} did not currently resolve — fail-closed rather than risk discarding a real quarantine, but not armed under any walked-up key`,
+        reason: byContent === true
+          ? `boot found an UNARMABLE quarantine latch (${f}) whose content names this repo${atOtherHash}, while ${matchedRepo} did not currently resolve — fail-closed rather than risk discarding a real quarantine, but not armed under any walked-up key`
+          : `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, while ${matchedRepo} did not currently resolve — fail-closed rather than risk discarding a real quarantine, but not armed under any walked-up key`,
         enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
       };
       pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
@@ -11286,7 +11317,9 @@ function reenterMergeQuarantinesAtBootImpl(
     const hash = f.slice(0, f.indexOf(".json.tmp-"));
     // @decision 4783df46 — a walked-up LEGACY match still arms at `key` (never diverts); it only gains
     // `provenanceUnknown` below. See `legacyMatchStillResolvesToHash`'s own doc and the decision record.
-    const verified = legacyMatchStillResolvesToHash(key, hash);
+    // @decision 0f58a09a — a content-attributed file is verified by definition: the hash it sits under is
+    // irrelevant to which repo it names.
+    const verified = byContent === true || legacyMatchStillResolvesToHash(key, hash);
     if (existing && !isPlaceholderEntryShape(existing)) {
       // Real data already covers this key — the corrupt tmp carries nothing recoverable and is not a
       // fail-closed risk. Fold it into the SAME unlink list so it's swept once that key's real union
@@ -11298,7 +11331,9 @@ function reenterMergeQuarantinesAtBootImpl(
       if (!originalEntryBySource.has(path.basename(tmpPath))) {
         originalEntryBySource.set(path.basename(tmpPath), {
           repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
-          reason: `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, with real sibling data already covering the key — this is a standalone protective record for the residue itself, never armed under any key`,
+          reason: byContent === true
+            ? `boot found an UNARMABLE quarantine latch (${f}) whose content names this repo${atOtherHash}, with real sibling data already covering the key — this is a standalone protective record for the residue itself, never armed under any key`
+            : `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, with real sibling data already covering the key — this is a standalone protective record for the residue itself, never armed under any key`,
           enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
           provenanceUnknown: verified ? undefined : true,
         });
@@ -11314,7 +11349,9 @@ function reenterMergeQuarantinesAtBootImpl(
     }
     const entry: MergeQuarantineEntry = {
       repoPath: matchedRepo, branch: PLACEHOLDER_BRANCH_CORRUPT,
-      reason: verified
+      reason: byContent === true
+        ? `boot found an UNARMABLE quarantine latch (${f}) whose content names this repo${atOtherHash}, with no real sibling data — fail-closed rather than risk discarding a real quarantine`
+        : verified
         ? `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, with no real sibling data — fail-closed rather than risk discarding a real quarantine`
         : `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matched only by a legacy (direct-path) identity — ${matchedRepo}'s own direct-path identity matches this file's hash, but its current canonical key no longer does (walked up, or a pre-7673d096 subdir binding); fail-closed by arming its current key (${key}) anyway, but this is NOT a verified match for whatever currently owns it`,
       enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
@@ -11334,7 +11371,9 @@ function reenterMergeQuarantinesAtBootImpl(
       });
     }
     // eslint-disable-next-line no-console
-    console.error(`[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable with no real sibling data recovered for registered repo ${matchedRepo} — quarantining THAT repo rather than risk discarding a real quarantine (bootWriteLatch may still refuse — see its own log line above/below for why).`);
+    console.error(byContent === true
+      ? `[merge-quarantine] boot-time tmp latch ${f} is UNARMABLE and its content names ${matchedRepo}${atOtherHash} — quarantining THAT named repo${misfiled === true ? ", never the repo the filename hash matches" : ""} (bootWriteLatch may still refuse — see its own log line above/below for why).`
+      : `[merge-quarantine] boot-time tmp latch ${f} is CORRUPT/unparsable with no real sibling data recovered for registered repo ${matchedRepo} — quarantining THAT repo rather than risk discarding a real quarantine (bootWriteLatch may still refuse — see its own log line above/below for why).`);
     const bootWriteResult1 = bootWriteLatch(key, armed, NO_DROPS);
     if (bootWriteResult1 !== false) {
       armed = bootWriteResult1; // @decision 4e987303 — thread the ADOPTED entry forward

@@ -435,8 +435,9 @@ try {
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   // (UNARMABLE-NEG) -- a cross-hash residue that DOES match the freed key, but is genuinely UNARMABLE
-  // (content missing `branch`) must stay content-kept FOREVER -- never armed, never deleted -- and must
-  // never introduce a NEW in-process/reboot split for the unarmable shape either.
+  // (content missing `branch`) must stay content-kept FOREVER in-process -- never armed, never deleted. A
+  // REBOOT, however, now attributes it by CONTENT (0f58a09a) and arms a placeholder for X: a deliberate
+  // in-process content-kept / reboot-armed split, in the safe direction (follow-up card 63569b55).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
     const y = makeRepo("unarm-y");
@@ -454,7 +455,7 @@ try {
 
     const clearResult = mod.clearMergeQuarantine(y);
     check("(unarm-neg) X's own unarmable residue SURVIVES, untouched, on disk", fs.existsSync(xTmpAtRsHash));
-    check("*** THE FIX (unarm-neg) *** X stays contentKept FOREVER, never a routed co-occupant", !!clearResult.contentKeptRepoPaths?.includes(x) && !clearResult.stillBlockedCoOccupants?.some((c) => c.repoPath === x));
+    check("*** THE FIX (unarm-neg) *** X stays contentKept in-process (a reboot arms it, 0f58a09a), never a routed co-occupant", !!clearResult.contentKeptRepoPaths?.includes(x) && !clearResult.stillBlockedCoOccupants?.some((c) => c.repoPath === x));
 
     // @decision f8e11853 (round 2) — snapshot right after the clear's own mutations land, BEFORE any
     // further in-process verdict query — MAIN's own ordering (see snapshotDir's own doc above). The prior
@@ -471,8 +472,16 @@ try {
     fresh.reenterMergeQuarantinesAtBoot([y, r]);
     const rebootX = fresh.assertRepoNotQuarantined(x);
     const rebootEntry = fresh.stillBlockedEntryFor(x);
-    check("(unarm-neg) in-process === post-reboot for the genuinely-unarmable shape too (no NEW split introduced)", inProcessX.ok === rebootX.ok);
-    check("*** THE GOVERNING INVARIANT (unarm-neg) *** in-process stillBlockedEntryFor undefined-ness matches post-reboot (an absence match -- both sides are unarmed, so there is no real token set to compare)", (inProcessEntry === undefined) === (rebootEntry === undefined));
+    // @decision 0f58a09a — boot now attributes an unarmable file by the repo its CONTENT names, so a reboot
+    // fail-CLOSES X with a placeholder (previously it blocked the filename-hash claimant R and left X open).
+    // This is a deliberate in-process-open / reboot-closed split on X, in the SAFE direction; R stays open.
+    check("(unarm-neg) post-reboot X is fail-closed by CONTENT attribution (0f58a09a), not left open", rebootX.ok === false && rebootEntry?.repoPath === x);
+    check("*** THE GOVERNING INVARIANT (unarm-neg) *** the reboot never blocks the innocent filename claimant R", fresh.stillBlockedEntryFor(r) === undefined);
+    // X is a ghost SUBDIR of Y (same canonical key), so the reboot's X placeholder re-blocks Y via key(Y);
+    // one clear(y) lifts both, because they share that key.
+    check("(unarm-neg) the reboot re-blocks Y via key(Y) (X is a ghost subdir of Y)", fresh.stillBlockedEntryFor(y) !== undefined);
+    fresh.clearMergeQuarantine(y);
+    check("(unarm-neg) clear(y) lifts both Y and X (shared key)", fresh.stillBlockedEntryFor(y) === undefined && fresh.stillBlockedEntryFor(x) === undefined);
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
