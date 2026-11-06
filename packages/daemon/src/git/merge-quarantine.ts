@@ -2743,6 +2743,11 @@ function writeLatchAndAdopt(ownershipMap: Map<string, MergeQuarantineEntry>, cur
  */
 const SAFETY_TMP_RE = /\.json\.tmp-safety-\d+-[0-9a-f]+$/;
 
+/** @decision 4be98ac8 — full-basename safety-tmp shape, SHARED by every safety-tmp producer (not just the
+ *  divert fallback): match by identity + this shape, never shape alone or a substring. Producers and
+ *  why each is safe: the decision record. */
+const RELOCATED_SAFETY_TMP_RECORD_RE = /^[0-9a-f]{24}\.json\.tmp-safety-\d+-[0-9a-f]+$/;
+
 /**
  * Durably write `entry`'s own union as a `.json.tmp-safety-<pid>-<hex>` RESIDUE at `hash` directly — the
  * SAME tmp-write primitive `writeMergeQuarantineLatch` itself uses (open, write, fsync, close), but
@@ -4208,6 +4213,19 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
         .filter((f) => f !== finalBasename),
     }
     : toWriteFiltered;
+  // @decision 4be98ac8 — match relocated records by identity + exact safety-tmp name shape, never by
+  // `orphanLatchFiles`; fold into the write only (not `toWrite`), so the double-fault branch stays fail-closed.
+  const relocatedHits = pendingUnresolvedQuarantines.filter((p) =>
+    RELOCATED_SAFETY_TMP_RECORD_RE.test(p.sourceFile)
+    && directPathIdentity(p.entry.repoPath) === occupantIdentity);
+  const relocatedNames = new Set(relocatedHits.map((p) => p.sourceFile));
+  const toWriteMerged: MergeQuarantineEntry = relocatedHits.length === 0
+    ? toWrite
+    : (() => {
+      const u = relocatedHits.reduce((acc, p) => unionQuarantineEntries(acc, p.entry, { explicitResolvedKeyRule: true }), toWrite);
+      const orphans = (u.orphanLatchFiles ?? []).filter((f) => !relocatedNames.has(f));
+      return { ...u, orphanLatchFiles: orphans.length > 0 ? orphans : undefined };
+    })();
   // @decision 8db913e2 (Follow-up 4b06875f) — `toPersist`/`toWrite` carry `resolvedKey` ONLY as filtered by
   // `excludeLiftedResolvedKey` (never `armedKeys`) — including the in-memory entry a union below may
   // introduce; nothing here bypasses that filter. This keeps 82032b5c/c9114934's own invariant intact.
@@ -4217,7 +4235,7 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // @decision 2dd97aaa (Follow-up 535fd69d) — `toWrite` is a copy-aside of `occupantRepoPath`'s own content (already filtered
   // through `clearedTokens` at READ time, via `readSurvivingOnDiskTokens`), never a narrowing of a token
   // set this call itself decided to drop; `droppedTokens` is empty.
-  const written = writePendingDivertFile(filename, toWrite, new Set());
+  const written = writePendingDivertFile(filename, toWriteMerged, new Set());
   if (!written.ok) {
     // @decision 59e758e5 (round 3) — never unlink: `toWrite` can carry a memory-only token `final`'s
     // own bytes never received (round-1's "already duplicated" claim was false here). Keep the tmp.
@@ -4298,6 +4316,37 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     // never fold into a live entry's own `orphanLatchFiles` (round 2's now-removed
     // `liveEntrySupersettingTokens` branch resurrected a cleared token — see the decision record).
     pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
+  }
+  // @decision 4be98ac8 — the merged write above succeeded: fold each relocated record into it, drop its
+  // pending slot, and sweep its physical file via the ownership-aware sweep — but only when that file's
+  // surviving on-disk tokens are all in the entry just durably written (else keep it, fail closed).
+  // "Kept" means TRACKED: a file left on disk (unsafe/uncovered read, or a sweep that did not unlink) keeps
+  // its pending slot and entry exactly as they were, so something in memory still references it, and a
+  // reboot still recovers it by its safety-tmp name. Only a swept or already-gone file loses its slot.
+  for (const reloc of relocatedHits) {
+    const onDisk = readPendingDivertFileAt(path.join(MERGE_QUARANTINE_DIR, reloc.sourceFile));
+    let settled = onDisk.state === "enoent";
+    if (!settled && onDisk.state === "entry" && onDisk.entry.tokens.every((t) => written.entry.tokens.includes(t))) {
+      // Re-point first so the ownership check below never sees the old object as a rival owner.
+      replaceEntryEverywhere(activeQuarantines, reloc.entry, written.entry);
+      const slot = pendingUnresolvedQuarantines.findIndex((p) => p === reloc);
+      if (slot >= 0) pendingUnresolvedQuarantines.splice(slot, 1);
+      settled = !sweepOwnLatchFileUnlessOwnedElsewhere(reloc.sourceFile).kept;
+      if (!settled) {
+        // eslint-disable-next-line no-console
+        console.error(`[merge-quarantine] relocated safety-tmp record ${reloc.sourceFile} was folded into ${written.filename} but its file could not be swept — keeping it tracked as an orphan of ${written.filename}.`);
+        written.entry.orphanLatchFiles = [...new Set([...(written.entry.orphanLatchFiles ?? []), reloc.sourceFile])];
+      }
+      continue;
+    }
+    if (settled) {
+      replaceEntryEverywhere(activeQuarantines, reloc.entry, written.entry);
+      const slot = pendingUnresolvedQuarantines.findIndex((p) => p === reloc);
+      if (slot >= 0) pendingUnresolvedQuarantines.splice(slot, 1);
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(`[merge-quarantine] relocated safety-tmp record ${reloc.sourceFile} not swept (unsafe, unreadable, or tokens not covered by ${written.filename}) — left on disk and in its own pending slot.`);
+    }
   }
   // @decision 182c01cc — every branch above durably persists the occupant at `written.filename`; name it
   // once here rather than duplicating this at each branch. `toPersist.repoPath` (never toWrite's, which
