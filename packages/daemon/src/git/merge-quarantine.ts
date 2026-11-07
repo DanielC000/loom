@@ -1205,6 +1205,10 @@ function selfClearRefusesForStaleKeyContributors(entry: MergeQuarantineEntry): b
   let isActiveMapEntry = false;
   for (const v of activeQuarantines.values()) { if (v === entry) { isActiveMapEntry = true; break; } }
   if (!isActiveMapEntry) return false;
+  // @decision 398f476c — a contributor whose own latch file still occupies a live key must refuse a self-clear
+  // even for a MODERN winner (identityAtRaise === key, genuineContributorKeys []), which no arm below catches.
+  // Never for a provenanceUnknown union: clear-broad-union refuses those too, leaving only a manual delete.
+  if (!entry.provenanceUnknown && bootUnionOccupantContributors(entry).length > 0) return true;
   if (entry.identityAtRaise === undefined) return true; // LEGACY — fail CLOSED, see this function's own doc
   const identity = entry.identityAtRaise;
   const liveKeys = liveArmedKeysOf(entry);
@@ -1251,6 +1255,32 @@ function ambiguousIdentitiesForLatchId(entry: MergeQuarantineEntry, latchId: str
 // `"not-owned"` is not produced by {@link entryGenuinelyOwnsALiveArmedKeyOfItsOwn} today — nothing in the
 // current data model gives a confident negative — but the type stays exhaustive, never a bare boolean.
 type EntryOwnKeyOwnership = "owned" | "not-owned" | "unknown";
+
+function isBenignMigratedSourceReference(p: PendingUnresolvedQuarantine, union: MergeQuarantineEntry): boolean {
+  const e = p.entry;
+  if (e === union) return true; // boot's degraded-divert "same object, two structures" self-reference
+  return (union.orphanLatchFiles ?? []).includes(p.sourceFile)
+    && (e.contributorRepoPaths?.length ?? 0) === 0 && (e.reducedContributorRepoPaths?.length ?? 0) === 0
+    && !e.provenanceUnknown && e.tokens.every((t) => union.tokens.includes(t));
+}
+
+/** Contributors of `entry` whose OWN latch file physically occupies one of `entry`'s live armed keys — the
+ *  boot cross-identity union shape (card 398f476c). Feeds BOTH the refusal predicate
+ *  ({@link selfClearRefusesForStaleKeyContributors}) and the refusal wording. A corrupt or missing file
+ *  yields no occupant, so the predicate falls back to the disclosed lift. */
+function bootUnionOccupantContributors(entry: MergeQuarantineEntry): string[] {
+  const out: string[] = [];
+  for (const k of liveArmedKeysOf(entry)) {
+    try {
+      const rec: unknown = JSON.parse(fs.readFileSync(quarantinePathForKey(k), "utf8"));
+      if (!isReadableLatchRecord(rec) || typeof rec.repoPath !== "string") continue;
+      const id = directPathIdentity(rec.repoPath);
+      const c = (entry.contributorRepoPaths ?? []).find((p) => directPathIdentity(p) === id);
+      if (c && id !== directPathIdentity(entry.repoPath) && !out.includes(c)) out.push(c);
+    } catch { /* unreadable/absent file: no occupant to name */ }
+  }
+  return out;
+}
 
 /**
  * Resolves `repoPath`'s own identity to ONE target for `clear-broad-union` — BOTH the entry SELECTION and
@@ -1304,7 +1334,10 @@ function broadUnionTargetFor(repoPath: string):
       reason: `repoPath '${repoPath}' is still an unreadable boot-time placeholder — its real, on-disk content was never independently verified in memory, and clearing it can re-ingest and union in a genuine contributor this route cannot yet see. Restart the daemon first (that re-ingests the real record), then call this route with dryRun:true again.`,
     };
   }
-  const tiedPendingTwin = pendingUnresolvedQuarantines.find((p) => directPathIdentity(p.entry.repoPath) === identity);
+  // @decision 398f476c — boot's own self-divert reference to a migrated source (its file is in the union's
+  // orphanLatchFiles, no extra tokens/contributors) is not a "tied twin"; refusing on it strands the human.
+  const tiedPendingTwin = pendingUnresolvedQuarantines.find((p) => directPathIdentity(p.entry.repoPath) === identity
+    && !isBenignMigratedSourceReference(p, entry));
   if (tiedPendingTwin) {
     return {
       accepts: false, entry,
@@ -1748,7 +1781,16 @@ function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: str
       merged = { ...merged, resolvedKey: priorInformative ? prior!.resolvedKey : entry.resolvedKey };
     }
   }
-  const armed: MergeQuarantineEntry = { ...merged, armedKeys: [...new Set([...(merged.armedKeys ?? []), key])] };
+  let armed: MergeQuarantineEntry = { ...merged, armedKeys: [...new Set([...(merged.armedKeys ?? []), key])] };
+  // @decision 398f476c — stamp an unresolvable LOSER of a cross-identity union won by a RESOLVABLE identity
+  // into contributorRepoPaths (re-derived each boot); never for an unresolvable winner or a provenanceUnknown union.
+  if (prior && !armed.provenanceUnknown && isRepoPathCurrentlyResolvable(armed.repoPath)) {
+    const winnerIdentity = directPathIdentity(armed.repoPath);
+    const losing = [prior.repoPath, entry.repoPath].filter((p) => directPathIdentity(p) !== winnerIdentity && !isRepoPathCurrentlyResolvable(p));
+    if (losing.length > 0) {
+      armed = { ...armed, contributorRepoPaths: [...new Set([...(armed.contributorRepoPaths ?? []), ...losing])] };
+    }
+  }
   if (prior && directPathIdentity(prior.repoPath) === directPathIdentity(armed.repoPath)) {
     replaceEntryEverywhere(byRepoKey, prior, armed);
   }
@@ -8360,7 +8402,11 @@ function refuseSelfClearStaleKeyContributors(entry: MergeQuarantineEntry, key: s
   // `genuineContributorKeys` is absent (fired via the BROAD legacy fallback, not a verified per-key fact)
   // — same "Loom cannot tell" honesty 3be11be4's own Round-4 MINOR-2 gives a missing `identityAtRaise`.
   const entryOwnsKey = entry.identityAtRaise !== undefined && entry.identityAtRaise === key;
-  const ownershipClause = entry.identityAtRaise === undefined
+  // @decision 398f476c — boot-union shape: name the occupant whose own latch file sits at this key.
+  const bootOccupants = bootUnionOccupantContributors(entry);
+  const ownershipClause = bootOccupants.length > 0
+    ? `'${entry.repoPath}' was unioned with ${bootOccupants.map((p) => `'${p}'`).join(", ")}, a separate quarantine whose own latch file occupies this key (it cannot be cleared by its own path while unioned)`
+    : entry.identityAtRaise === undefined
     ? `'${entry.repoPath}' was raised before Loom recorded a raise-time identity for it, so Loom cannot tell whether it genuinely owns this key or not`
     : !entryOwnsKey
       ? `'${entry.repoPath}' is this union's own recorded name purely because it raised first — it does not own this key itself`
@@ -8374,7 +8420,7 @@ function refuseSelfClearStaleKeyContributors(entry: MergeQuarantineEntry, key: s
   return {
     wasQuarantined: true,
     reason: `${ownershipClause} — and ${contributors.length} other identit${contributors.length === 1 ? "y" : "ies"} ` +
-      `(${contributors.map((p) => `'${p}'`).join(", ")}) had their own, genuinely separate raise folded into this same union at runtime; clearing '${entry.repoPath}' here would destroy ` +
+      `(${contributors.map((p) => `'${p}'`).join(", ")}) had their own, genuinely separate raise folded into this same union${bootOccupants.length > 0 ? "" : " at runtime"}; clearing '${entry.repoPath}' here would destroy ` +
       `${contributors.length === 1 ? "that identity's" : "those identities'"} own quarantine too, with no way to release only '${entry.repoPath}'s own hold (tokens are not tracked per contributor). ` +
       `Nothing was cleared. ${remediationTextFor([entry.repoPath], ambiguous, false, ownKeyOwnership, broadUnionTargetFor(entry.repoPath).accepts)}.`,
     liftedRepoPaths: [],
