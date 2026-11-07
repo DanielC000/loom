@@ -239,9 +239,9 @@ try {
       clear(p, tok);
       const armed = mod.stillBlockedEntryFor(x);
       check(`(${route} order-a) the sweep armed foreign X`, armed !== undefined && armed.tokens.includes(xToken));
-      // The by-key route (`path`) withholds P's durable tombstone in this X-under-P fixture even with the new
-      // sweep disabled (reproduced), so it is excluded here; it is a separate, pre-existing behaviour.
-      if (route !== "path") check(`*** ORDER (${route} order-a) *** P's token IS durably tombstoned although the sweep armed X`, Object.prototype.hasOwnProperty.call(sidecar(), tok));
+      // The by-key route (`path`) used to withhold P's durable tombstone here (card 1fb27e46, fixed): its
+      // content keep for X named the leaving P as blocker, and is now re-derived before the tombstone decision.
+      check(`*** ORDER (${route} order-a) *** P's token IS durably tombstoned although the sweep armed X`, Object.prototype.hasOwnProperty.call(sidecar(), tok));
       const dirSnapshot = snapshotDir(mod.MERGE_QUARANTINE_DIR);
       const fresh = await freshBootModule();
       fresh.reenterMergeQuarantinesAtBoot([p, r]);

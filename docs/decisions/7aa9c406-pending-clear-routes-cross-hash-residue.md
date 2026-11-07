@@ -49,10 +49,10 @@ the by-key function it was moved up to just after the own-state reclassify; the 
 re-reclassified afterwards), and the recorded-path site no longer folds the sweep's `kept` into `pendingAnyKept`.
 A foreign residue's disposition says nothing about the cleared entry's own tokens.
 
-- What is and is not pinned: the by-key move is done for posture parity with by-id; it has NO observable effect
-  today and is not pinned by any test, because the by-path route's durable tombstone is withheld for the separate,
-  pre-existing reason in card 1fb27e46 (a mutant restoring the earlier order passes). It becomes observable only once
-  1fb27e46 is resolved. The ORDER test pins the recorded-path `kept` fold (a mutant that folds `kept` goes RED), not the
+- What is and is not pinned: the by-key move is done for posture parity with by-id. It was unobservable while the
+  by-path route's durable tombstone was withheld for the separate reason fixed by card 1fb27e46 (see
+  `1fb27e46-by-path-tombstone-foreign-residue.md`); the order-a durable assertion now covers the by-path route too, but
+  no mutant of the move itself has been run since, so the move is still not claimed as pinned. The ORDER test pins the recorded-path `kept` fold (a mutant that folds `kept` goes RED), not the
   move itself: a move-only mutant passes. The reason for the order is that a foreign residue's keep must never feed the
   cleared entry's own tombstone decision.
 - Slightly more conservative durable tombstone: the later sweep means P's own deletable same-hash tmp is still on disk
@@ -65,9 +65,9 @@ A foreign residue's disposition says nothing about the cleared entry's own token
   - "A foreign residue holding a just-cleared P token is not armed with it" is false even for by-id: such a residue
     still physically holds the token, so `tombstoneIfNotSurviving` correctly keeps it live, and by-id arms X with both
     tokens. The test pins in-process === post-reboot for that shape instead.
-  - The by-key route (`clearMergeQuarantine` on a resolvable path) withholds P's durable tombstone when X sits under
-    P, with the new sweep disabled too, so it is not caused by this card; the order-a durable assertion covers the
-    recorded and token routes only. Candidate follow-up card.
+  - The by-key route (`clearMergeQuarantine` on a resolvable path) withheld P's durable tombstone when X sat under
+    P, with the new sweep disabled too, so it was not caused by this card. Fixed by card 1fb27e46; the order-a
+    durable assertion now covers the path, recorded and token routes.
 
 ## Hash derivation
 

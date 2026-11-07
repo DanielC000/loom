@@ -3939,6 +3939,54 @@ function reclassifyNonLiveReferencing(
   }
 }
 
+/**
+ * Re-derives the content keeps a clear classified BEFORE its own pending entries were dropped, and
+ * RETRACTS the ones whose only stated blocker was the clearing identity itself. It only ever removes an
+ * entry from the two paired maps; it never adds a keep, a withhold or any other state.
+ *
+ * An entry is retracted only when ALL hold: (a) `blockedBy` names the clearing identity; (b) nothing of
+ * that identity survives (no own/contributor entry, active or pending); (c) the kept file
+ * is readable and holds none of `candidateTokens`. A keep with no `blockedBy`, any unreadable/unparsable
+ * file, or a file naming no token is left in place (fail-closed).
+ *
+ * Clause (c) is load-bearing: `identityHasAnyPhysicalRecordHoldingToken` only matches files whose recorded
+ * repoPath is the clearing identity and skips every basename it TRACKS, so a foreign residue (a different
+ * recorded repoPath, and tracked once armed) is invisible to that scan even when it holds a cleared token.
+ *
+ * @decision 1fb27e46 — returns the retracted repoPaths so a later caller (card 8596ddfb's stale-disclosure
+ * case) can reuse it. Do not add a retraction rule here that is not one of (a)-(c).
+ */
+function retractContentKeepsBlockedOnlyByClearedIdentity(
+  contentKept: Map<string, string>,
+  contentKeptBlockedBy: Map<string, ContentKeptBlockedBy>,
+  clearedIdentityRepoPath: string,
+  candidateTokens: readonly string[],
+): string[] {
+  const clearedIdentity = directPathIdentity(clearedIdentityRepoPath);
+  const retracted: string[] = [];
+  let survivorChecked = false;
+  let survivor = true;
+  for (const [rp, sourceFile] of [...contentKept]) {
+    const blockedBy = contentKeptBlockedBy.get(rp);
+    if (!blockedBy || directPathIdentity(blockedBy.repoPath) !== clearedIdentity) continue;
+    if (!survivorChecked) { survivor = ownIdentityEntryFor(clearedIdentityRepoPath) !== undefined; survivorChecked = true; }
+    if (survivor) continue;
+    let parsed: { tokens?: unknown; token?: unknown };
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, sourceFile), "utf8"));
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const onDisk = readSurvivingOnDiskTokens(parsed, directPathIdentity(rp)).raw;
+    if (onDisk.length === 0 || onDisk.some((t) => candidateTokens.includes(t))) continue;
+    contentKept.delete(rp);
+    contentKeptBlockedBy.delete(rp);
+    retracted.push(rp);
+  }
+  return retracted;
+}
+
 /** @decision 182c01cc (round 3, M1) — the SAME repoPath found both relocated (`relocatedSourceFile`,
  *  the PRIMARY route — clear it first) and kept under its old name (`keptSourceFile`, the SECOND,
  *  required route) in one clear. Never dedupe this down to one route — see this type's own doc.
@@ -7685,6 +7733,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   //
   // @decision 7aa9c406 — decided BEFORE the cross-hash tmp sweep below and never from its result: a
   // foreign residue's disposition says nothing about this identity's own tokens (by-id's ordering).
+  //
+  // @decision 1fb27e46 — re-derive keeps blocked only by this leaving identity BEFORE the one push-time
+  // decision (feeds immediate and deferred alike); never move it into the decider (keep sets cross sites).
+  retractContentKeepsBlockedOnlyByClearedIdentity(keptContentRepoPaths, keptContentBlockedBy, identityRepoPath, candidateTokens);
   const nonFailureOk = !anyWriteFailed && keptReferencingRepoPaths.size === 0 && orphanReferencingRepoPaths.size === 0 && !anyKeptUnattributed && keptContentRepoPaths.size === 0 && !identityHasAnyPhysicalRecordHoldingToken(identity, candidateTokens, trackedBasenamesForIdentity(identity));
   if (deferred) {
     if (anyWriteFailed) deferred.writeFailed.add(identity);
