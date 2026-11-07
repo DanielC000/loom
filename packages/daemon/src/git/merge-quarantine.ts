@@ -3332,7 +3332,9 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") unlinkConfirmed = false;
     }
-    if (!unlinkConfirmed) { ownFinalWriteFailed = true; unlinkFailedFiles.push(finalBasename); }
+    // @decision a6690287 — an unconfirmed unlink of `final` is an unattributed keep (latchKept), ENOENT is
+    // confirmed. Never widen to `anyWriteFailed => latchKept`: other write failures keep the clean return.
+    if (!unlinkConfirmed) { ownFinalWriteFailed = true; unattributedKept = true; unlinkFailedFiles.push(finalBasename); }
     if (provenCoverage) {
       if (unlinkConfirmed) {
         keptUnreadableLatchFiles.delete(finalBasename);

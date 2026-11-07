@@ -22,4 +22,4 @@ The sweeps already knew the failing basename; they kept only booleans. Each reco
 
 ## Not covered
 
-- A failed unlink of an active entry's OWN final file inside `deleteMergeQuarantineLatchByKey` records a name but sets no `unattributed`, so it does not by itself produce `latchKept`; the name is reported only when some other keep fires. Whether that case should report `latchKept` is a separate disposition question.
+- (Closed by `a6690287`: a failed unlink of an active entry's OWN final file now also sets `unattributed`, so it reports `latchKept` with the named file.) Previously it recorded a name but set no `unattributed`, so the name was reported only when some other keep fired.
