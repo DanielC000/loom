@@ -97,7 +97,7 @@ for (const route of ["clear", "by-path", "by-id"]) {
     const name = s.orphans[0];
     check(`(${route} FAULT) precondition: the orphan's unlink was forced to fail and it is still on disk`, inj.hits() >= 1 && fs.existsSync(path.join(MERGE_QUARANTINE_DIR, name)));
     check(`(${route} FAULT) 200 + latchKept (the kept shape this card is about)`, res.statusCode === 200 && body.latchKept === true);
-    check(`(${route} FAULT) *** THE FIX *** the reason names the stranded file and the next action`, typeof body.reason === "string" && body.reason.includes(`${CLAUSE} ${name}`) && body.reason.includes("remove it or retry the clear"));
+    check(`(${route} FAULT) *** THE FIX *** the reason names the stranded file and the next action`, typeof body.reason === "string" && body.reason.includes(`${CLAUSE} ${name}`) && body.reason.includes("remove it by hand, or restart the daemon and clear again"));
     check(`(${route} FAULT) the reason also keeps the generic unattributed sentence (the clause never hides another cause)`, typeof body.reason === "string" && body.reason.includes("a physical latch file it referenced is still on disk"));
     check(`(${route} FAULT) names only: no directory, no errno text`, typeof body.reason === "string" && !body.reason.includes(MERGE_QUARANTINE_DIR) && !body.reason.includes(loomHome) && !body.reason.includes("EPERM"));
   }
@@ -121,7 +121,7 @@ for (const route of ["clear", "by-path", "by-id"]) {
   const named = s.orphans.filter((o) => reason.includes(o));
   check("(cap) precondition: all 7 unlinks were forced to fail", inj.hits() >= 7);
   check("(cap) exactly 5 of the 7 basenames are named", named.length === 5);
-  check("(cap) the remainder is summarised as 'and 2 more'", reason.includes("and 2 more") && reason.includes("remove them or retry the clear"));
+  check("(cap) the remainder is summarised as 'and 2 more'", reason.includes("and 2 more") && reason.includes("remove them by hand, or restart the daemon and clear again"));
 }
 
 // ── S2a: the identity is STILL quarantined after the clear (a diverted nested entry still blocks it) AND a latch
@@ -178,7 +178,7 @@ for (const route of ["clear", "by-path"]) {
   try { real = clearBroadUnion(s, dry.victimPaths ?? [], false); } finally { inj.restore(); }
   check("(S2b) precondition: the broad-union route accepted the union and the unlink was forced to fail", real?.ok === true && inj.hits() >= 1 && fs.existsSync(path.join(MERGE_QUARANTINE_DIR, orphan)));
   check("(S2b) the kept latch is reported", real?.latchKept === true);
-  check("(S2b) *** THE FIX *** the real result's reason names the stranded file and the next action", typeof real?.reason === "string" && real.reason.includes(`${CLAUSE} ${orphan}`) && real.reason.includes("remove it or retry the clear"));
+  check("(S2b) *** THE FIX *** the real result's reason names the stranded file and the next action", typeof real?.reason === "string" && real.reason.includes(`${CLAUSE} ${orphan}`) && real.reason.includes("remove it by hand, or restart the daemon and clear again"));
 }
 
 // ── S3: the still-on-disk filter. A basename visited by TWO sweeps in one call whose FIRST unlink fails once

@@ -4142,7 +4142,7 @@ function contentKeptOnlyReasonFor(repoPaths: string[], blockedBy?: ReadonlyMap<s
  * latchKept branch can share it instead of hand-rolling a second copy.
  */
 function unattributedKeptReasonFor(): string {
-  return "this identity's own quarantine is lifted, but a physical latch file it referenced is still on disk — its content could not be durably confirmed removed or fully covered, so no specific other claimant can be named; it will re-divert on the next restart until a later successful clear resolves it.";
+  return "this identity's own quarantine is lifted, but a physical latch file it referenced is still on disk — its content could not be durably confirmed removed or fully covered, so no specific other claimant can be named; it will re-divert on the next restart until it is removed (by hand, or by a later successful clear, which may need a daemon restart first).";
 }
 
 /** Max latch basenames an unlink-failed clause names before collapsing the rest into "and N more". */
@@ -4168,12 +4168,14 @@ function liveUnlinkFailedNames(names: Iterable<string>): string[] {
  *  Empty string when there is nothing to name, so a caller can append it unconditionally.
  *
  * @decision b11056a9 — appended to (never substituted for) the base reason, so it cannot hide another cause.
+ *
+ * @decision dff9a607 — never advise an in-process retry: it can silently no-op, so only remove-by-hand or restart-and-clear is named.
  */
 function unlinkFailedClauseFor(names: readonly string[]): string {
   if (names.length === 0) return "";
   const shown = names.slice(0, UNLINK_FAILED_CLAUSE_MAX_NAMES).join(", ");
   const more = names.length > UNLINK_FAILED_CLAUSE_MAX_NAMES ? ` and ${names.length - UNLINK_FAILED_CLAUSE_MAX_NAMES} more` : "";
-  return `An unlink failed for ${shown}${more} (in the merge-quarantine directory); remove ${names.length === 1 ? "it" : "them"} or retry the clear.`;
+  return `An unlink failed for ${shown}${more} (in the merge-quarantine directory); remove ${names.length === 1 ? "it" : "them"} by hand, or restart the daemon and clear again once the cause is gone — a retry in the same process may not reach ${names.length === 1 ? "it" : "them"}.`;
 }
 
 /** `base` with the unlink-failed clause appended when `names` has any still-present file; else `base`
