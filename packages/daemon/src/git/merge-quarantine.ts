@@ -3992,6 +3992,40 @@ function retractContentKeepsBlockedOnlyByClearedIdentity(
   return retracted;
 }
 
+/** @decision 8596ddfb — folds ByKey's per-repoPath keep file into the identity-wide caller's out-map. */
+function recordContentKeptFiles(into: Map<string, Set<string>>, kept: ReadonlyMap<string, string>): void {
+  for (const [rp, sourceFile] of kept) noteContentKeptFile(into, rp, sourceFile);
+}
+function noteContentKeptFile(into: Map<string, Set<string>>, repoPath: string, sourceFile: string): void {
+  const files = into.get(repoPath);
+  if (files) files.add(sourceFile); else into.set(repoPath, new Set([sourceFile]));
+}
+
+/**
+ * The identity-wide route's own ghost drop (the 2dd97aaa rule, applied AFTER the pending branch's tmp sweep):
+ * removes a content keep from the paired set/map only when EVERY file recorded for it is gone from the
+ * quarantine dir. A keep with no recorded file, or any file still present, stays (fail-closed). It only
+ * removes; it never adds a keep or a withhold, and it never touches a tombstone decision.
+ *
+ * @decision 8596ddfb — do not make this feed `deferred.writeFailed` or a job's `nonFailureOk`; the tombstone half of the stale keep is a documented won't-fix.
+ */
+function dropContentKeepsWhoseFilesAreGone(
+  contentKept: Set<string>,
+  contentKeptBlockedBy: Map<string, ContentKeptBlockedBy>,
+  files: ReadonlyMap<string, Set<string>>,
+): string[] {
+  const dropped: string[] = [];
+  for (const rp of [...contentKept]) {
+    const recorded = files.get(rp);
+    if (!recorded || recorded.size === 0) continue;
+    if ([...recorded].some((f) => fs.existsSync(path.join(MERGE_QUARANTINE_DIR, f)))) continue;
+    contentKept.delete(rp);
+    contentKeptBlockedBy.delete(rp);
+    dropped.push(rp);
+  }
+  return dropped;
+}
+
 /** @decision 182c01cc (round 3, M1) — the SAME repoPath found both relocated (`relocatedSourceFile`,
  *  the PRIMARY route — clear it first) and kept under its old name (`keptSourceFile`, the SECOND,
  *  required route) in one clear. Never dedupe this down to one route — see this type's own doc.
@@ -7390,7 +7424,10 @@ export function ownedKeysIncluding(key: string, entry: MergeQuarantineEntry | un
  *  `stillQuarantined`/`reason` only where it is the addressed identity. Card 97516691/6ac1894a. */
 export type ReleasedStillBlockedEntry = { repoPath: string; blockedByRepoPath: string };
 type ClearByKeyResult = { wasQuarantined: boolean; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[]; provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; unattributed?: true; unlinkFailedFiles?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[]; anyWriteFailed: boolean };
-type DeferredClearContext = { writeFailed: Set<string>; sink: DeferredTombstoneJob[] };
+// @decision 8596ddfb — `contentKeptFiles`: an OUT-parameter (never a response field, so no public key-set changes)
+// where ByKey records, per content-kept repoPath, the physical file(s) that keep stands on, for the identity-wide
+// route's post-sweep ghost drop. Absent on every other caller.
+type DeferredClearContext = { writeFailed: Set<string>; sink: DeferredTombstoneJob[]; contentKeptFiles?: Map<string, Set<string>> };
 /**
  * @decision d2592cd5 (3rd fix round, card 3d4467cf) — `deferred`, used only by the token path: when given,
  * this function PUSHES a job instead of deciding+writing immediately. Every `identityWideHumanClear:true`
@@ -7736,6 +7773,8 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   for (const { sourceFile: f, tokens } of sourceFilesToSweep) {
     const result = sweepOwnLatchFileUnlessOwnedElsewhere(f, tokens);
     if (result.unlinkFailedFile) unlinkFailedFileNames.add(result.unlinkFailedFile);
+    // @decision 8596ddfb — a REAL failed unlink is a write failure here too, as in the pending branch of the identity-wide clear (identity-keyed withhold).
+    if (result.unlinkFailed) anyWriteFailed = true;
     if (result.kept) {
       if (result.referencingRepoPaths.length > 0) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.set(rp, f);
       else anyKeptUnattributed = true;
@@ -7819,6 +7858,8 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     }
     reclassifyNonLiveReferencing(keptReferencingRepoPaths, keptContentRepoPaths, keptContentBlockedBy, relocatedKeys);
   }
+  // @decision 8596ddfb — hand the identity-wide caller the file each surviving content keep stands on.
+  if (deferred?.contentKeptFiles) recordContentKeptFiles(deferred.contentKeptFiles, keptContentRepoPaths);
   // @decision 4b6c8d24 (round 2) — ONE final re-resolve, after every mutation above, never a
   // pre-computed guess; `excludeRepoPaths` is the explicit never-in-both guard. See the decision record.
   const excludeRepoPaths = new Set<string>([
@@ -8537,7 +8578,7 @@ function tryClearMergeQuarantineByOwnIdentity(
   // them (no tombstone). Never decide mid-call or in a `finally`.
   const writeFailedIdentitiesThisCall = new Set<string>();
   const deferredTombstoneJobs: DeferredTombstoneJob[] = [];
-  const out = tryClearMergeQuarantineByOwnIdentityBody(repoPath, pendingSweep, matchedOverride, { writeFailed: writeFailedIdentitiesThisCall, sink: deferredTombstoneJobs });
+  const out = tryClearMergeQuarantineByOwnIdentityBody(repoPath, pendingSweep, matchedOverride, { writeFailed: writeFailedIdentitiesThisCall, sink: deferredTombstoneJobs, contentKeptFiles: new Map() });
   decideDeferredTombstones(deferredTombstoneJobs, writeFailedIdentitiesThisCall);
   return out;
 }
@@ -8596,6 +8637,9 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   // @decision 25d0d45b (Round 4) — a disclosure for a content-kept repoPath genuinely refused right now
   // by a DIFFERENT identity's own entry — never a working route for the content-kept repoPath itself.
   const keptContentBlockedBy = new Map<string, ContentKeptBlockedBy>();
+  // @decision 8596ddfb — the file(s) each content keep above stands on (ByKey fills it for its own keeps; this
+  // body notes the pending branch's), so a keep whose file a LATER step of this same call deleted can be dropped.
+  const contentKeptFiles = deferred.contentKeptFiles!; // the sole caller (the wrapper) always supplies it
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — see the matching note at the matchedPending loop's own
   // sweepOwnLatchFileUnlessOwnedElsewhere call below: an unconfirmed EPERM/EBUSY unlink (or a
   // marked-but-unprovable-coverage keep) still means something was kept, with no repoPath to name.
@@ -8744,13 +8788,14 @@ function tryClearMergeQuarantineByOwnIdentityBody(
             keptReferencingRepoPaths.set(kc.repoPath, classification.coOccupant);
           } else {
             keptContentRepoPaths.add(kc.repoPath);
+            noteContentKeptFile(contentKeptFiles, kc.repoPath, kc.sourceFile);
             if (classification.blockedBy) keptContentBlockedBy.set(kc.repoPath, classification.blockedBy);
           }
         }
         for (const rc of r.relocated) relocatedCoOccupants.set(rc.repoPath, blockedCoOccupant(rc.repoPath, rc.sourceFile));
         // @decision 1fea8b15 (round 2, Code Review) — same fold as clearMergeQuarantineByKey's own two
         // loops: `contentKept` has no live entry backing it — `keptContentRepoPaths`, never the Map above.
-        for (const cc of r.contentKept) { keptContentRepoPaths.add(cc.repoPath); if (cc.blockedBy) keptContentBlockedBy.set(cc.repoPath, cc.blockedBy); }
+        for (const cc of r.contentKept) { keptContentRepoPaths.add(cc.repoPath); noteContentKeptFile(contentKeptFiles, cc.repoPath, cc.sourceFile); if (cc.blockedBy) keptContentBlockedBy.set(cc.repoPath, cc.blockedBy); }
         // @decision 702b4241 (round 2) — same fold as clearMergeQuarantineByKey's own two loops.
         if (r.unattributed) anyKeptUnattributed = true;
         for (const n of r.unlinkFailedFiles ?? []) unlinkFailedFileNames.add(n);
@@ -8786,7 +8831,8 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     // @decision 9f387d7e — ONE call over the whole set; see `sweepOrphanLatchFilesUnioned`'s own doc.
     const orphanSweepResult = sweepOrphanLatchFilesUnioned(orphanFilesToSweep, pendingCandidateTokens, excludeOwnIdentity);
     for (const { repoPath, sourceFile } of orphanSweepResult.referencingRepoPaths) keptReferencingRepoPaths.set(repoPath, blockedCoOccupantForReferencer(repoPath, sourceFile));
-    for (const { repoPath, blockedBy } of orphanSweepResult.contentKept) {
+    for (const { repoPath, sourceFile, blockedBy } of orphanSweepResult.contentKept) {
+      noteContentKeptFile(contentKeptFiles, repoPath, sourceFile);
       keptContentRepoPaths.add(repoPath);
       if (blockedBy) keptContentBlockedBy.set(repoPath, blockedBy);
     }
@@ -8811,7 +8857,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     // @decision 14bdcb2f — a failed tmp unlink withholds this identity's jobs (gated on `unlinkFailed` alone, as 59f4ebe8).
     if (tmpSweep.unlinkFailed) deferred.writeFailed.add(identity);
     for (const ke of tmpSweep.keptEntries) keptReferencingRepoPaths.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile));
-    for (const ke of tmpSweep.contentKeptEntries) { keptContentRepoPaths.add(ke.repoPath); if (ke.blockedBy) keptContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
+    for (const ke of tmpSweep.contentKeptEntries) { keptContentRepoPaths.add(ke.repoPath); noteContentKeptFile(contentKeptFiles, ke.repoPath, ke.sourceFile); if (ke.blockedBy) keptContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
     if (tmpSweep.anyUnattributed) anyKeptUnattributed = true;
     for (const n of tmpSweep.unlinkFailedFiles) unlinkFailedFileNames.add(n);
   }
@@ -8819,6 +8865,10 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   // identity-matched record in EITHER tier. The caller decides what happens next (see this function's own
   // doc + each caller's own doc) — this helper never guesses on their behalf.
   if (!wasQuarantined) return { matched: false };
+  // @decision 8596ddfb — ONCE, after the matched loop AND the pending branch: whichever step deleted a file that
+  // an earlier step content-kept (a later ByKey call's pending sweep, or this body's own), drop that ghost keep
+  // before the result is built. Never inside the pending branch alone. Identity-wide route only.
+  dropContentKeepsWhoseFilesAreGone(keptContentRepoPaths, keptContentBlockedBy, contentKeptFiles);
   // @decision 4b6c8d24 (round 2) — ONE final re-resolve, after every mutation above, never a
   // pre-computed guess — see resolveReleasedAndLiftedRepoPaths's own doc. `excludeRepoPaths` is every
   // repoPath this clear already knows is still blocked — the explicit never-in-both guard.
