@@ -3628,6 +3628,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // was lifted, but the SAME identity is still quarantined by an independent record. Surface it
       // explicitly rather than letting a bare `liftedRepoPaths` omission go unexplained.
       ...(result.stillQuarantined ? { stillQuarantined: true, reason: result.reason } : {}),
+      // @decision b11056a9 — a kept latch with a reason (e.g. naming the file whose unlink failed) must reach the
+      // human; the stillQuarantined spread above only forwards it for the still-blocked shape.
+      ...(result.latchKept && !result.stillQuarantined && result.reason ? { reason: result.reason } : {}),
       ...(result.latchKept ? { latchKept: true, referencingRepoPaths: result.referencingRepoPaths } : {}),
       // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep (no live entry) never joins
       // `referencingRepoPaths` above — its own, separately-gated field.

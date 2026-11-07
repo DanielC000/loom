@@ -3224,7 +3224,7 @@ export function reconcileClearedEntryIfPlaceholderTestOnly(entry: MergeQuarantin
  */
 // @decision 1fea8b15 — `clearIdentity` is REQUIRED, never optional: every current caller already passes
 // a real `directPathIdentity(...)` value, and the content-check protection above depends on it structurally.
-function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string, liftedKeys: ReadonlySet<string>, identityWideHumanClear: boolean): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }>; contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>; unattributed?: true; writeFailed?: true } {
+function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string, liftedKeys: ReadonlySet<string>, identityWideHumanClear: boolean): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }>; contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>; unattributed?: true; writeFailed?: true; unlinkFailedFiles?: string[] } {
   const final = quarantinePathForKey(key);
   // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — every key THIS clear is itself touching, never
   // `key` alone — the caller computes it (via `ownedKeysIncluding`/`keysToLift`) and must pass it
@@ -3324,6 +3324,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   // `final` still physically holds whatever tokens this clear meant to remove. Surfaced so every caller
   // can fold it into its own `anyWriteFailed`/`writeFailedIdentitiesThisCall` — see the decision record.
   let ownFinalWriteFailed = false;
+  const unlinkFailedFiles: string[] = [];
   if (finalProtectOk) {
     let unlinkConfirmed = true;
     try {
@@ -3331,7 +3332,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") unlinkConfirmed = false;
     }
-    if (!unlinkConfirmed) ownFinalWriteFailed = true;
+    if (!unlinkConfirmed) { ownFinalWriteFailed = true; unlinkFailedFiles.push(finalBasename); }
     if (provenCoverage) {
       if (unlinkConfirmed) {
         keptUnreadableLatchFiles.delete(finalBasename);
@@ -3403,6 +3404,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   if (trailingSweep.anyUnattributed) unattributedKept = true;
   // @decision 59f4ebe8 — a tmp residue whose unlink failed still holds tokens this clear meant to remove.
   if (trailingSweep.unlinkFailed) ownFinalWriteFailed = true;
+  unlinkFailedFiles.push(...trailingSweep.unlinkFailedFiles);
   // @decision 182c01cc (round 2/4) — two SEPARATE buckets, never merged: `kept` (never unlinked) and
   // `relocated` (moved to its own new sourceFile) are genuinely different physical outcomes.
   return {
@@ -3411,6 +3413,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
     contentKept,
     ...(unattributedKept ? { unattributed: true as const } : {}),
     ...(ownFinalWriteFailed ? { writeFailed: true as const } : {}),
+    ...(unlinkFailedFiles.length > 0 ? { unlinkFailedFiles } : {}),
   };
 }
 
@@ -4138,6 +4141,45 @@ function contentKeptOnlyReasonFor(repoPaths: string[], blockedBy?: ReadonlyMap<s
  */
 function unattributedKeptReasonFor(): string {
   return "this identity's own quarantine is lifted, but a physical latch file it referenced is still on disk — its content could not be durably confirmed removed or fully covered, so no specific other claimant can be named; it will re-divert on the next restart until a later successful clear resolves it.";
+}
+
+/** Max latch basenames an unlink-failed clause names before collapsing the rest into "and N more". */
+const UNLINK_FAILED_CLAUSE_MAX_NAMES = 5;
+
+/** The still-present subset of `names` (deduped, order kept): a file an LATER step of the same call
+ *  removed is not a failure the human can act on, so it is never named.
+ *
+ * @decision b11056a9 — names come ONLY from real failed-unlink events recorded next to the sweeps'
+ * existing `unlinkFailed` flags, never from a keep (a retracted content keep must never be named).
+ */
+function liveUnlinkFailedNames(names: Iterable<string>): string[] {
+  const out: string[] = [];
+  for (const n of names) {
+    if (out.includes(n)) continue;
+    if (fs.existsSync(path.join(MERGE_QUARANTINE_DIR, n))) out.push(n);
+  }
+  return out;
+}
+
+/** The actionable sentence for a clear that kept latch file(s) because an unlink FAILED — basenames only
+ *  (no directory, no errno text, no content), at most {@link UNLINK_FAILED_CLAUSE_MAX_NAMES} named.
+ *  Empty string when there is nothing to name, so a caller can append it unconditionally.
+ *
+ * @decision b11056a9 — appended to (never substituted for) the base reason, so it cannot hide another cause.
+ */
+function unlinkFailedClauseFor(names: readonly string[]): string {
+  if (names.length === 0) return "";
+  const shown = names.slice(0, UNLINK_FAILED_CLAUSE_MAX_NAMES).join(", ");
+  const more = names.length > UNLINK_FAILED_CLAUSE_MAX_NAMES ? ` and ${names.length - UNLINK_FAILED_CLAUSE_MAX_NAMES} more` : "";
+  return `An unlink failed for ${shown}${more} (in the merge-quarantine directory); remove ${names.length === 1 ? "it" : "them"} or retry the clear.`;
+}
+
+/** `base` with the unlink-failed clause appended when `names` has any still-present file; else `base`
+ *  unchanged. An empty `base` yields the clause alone (the by-id route has no base reason of its own). */
+function withUnlinkFailedClause(base: string | undefined, names: Iterable<string>): string | undefined {
+  const clause = unlinkFailedClauseFor(liveUnlinkFailedNames(names));
+  if (!clause) return base;
+  return base ? `${base} ${clause}` : clause;
 }
 
 /** @decision 4913e721 — `knownOccupant`, when given, is a pre-delete snapshot of whatever entry the
@@ -6521,11 +6563,13 @@ function sweepOrphanLatchFilesUnioned(files: Iterable<string>, candidateTokens: 
   contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>;
   anyUnattributed: boolean;
   unlinkFailed: boolean;
+  unlinkFailedFiles: string[];
 } {
   const referencingRepoPaths: Array<{ repoPath: string; sourceFile: string }> = [];
   const contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }> = [];
   let anyUnattributed = false;
   let unlinkFailed = false;
+  const unlinkFailedFiles: string[] = [];
   const armableByIdentity = new Map<string, { record: MergeQuarantineEntry; basenames: string[]; files: Array<{ basename: string; record: MergeQuarantineEntry }> }>();
   const deferredForeign: Array<{ repoPath: string; sourceFile: string }> = [];
   for (const f of files) {
@@ -6538,6 +6582,7 @@ function sweepOrphanLatchFilesUnioned(files: Iterable<string>, candidateTokens: 
       // @decision 59f4ebe8 — kept-but-nameless (like `unattributed`) AND a write failure.
       anyUnattributed = true;
       unlinkFailed = true;
+      unlinkFailedFiles.push(f);
     } else if (decision.outcome === "foreign") {
       deferredForeign.push({ repoPath: decision.repoPath, sourceFile: f });
       if (decision.armable) {
@@ -6575,7 +6620,7 @@ function sweepOrphanLatchFilesUnioned(files: Iterable<string>, candidateTokens: 
       console.error(`[merge-quarantine] keeping orphan latch ${sourceFile} UNTOUCHED (left stale) — no surviving entry references it, but its own on-disk content could not be positively proven to hold only token(s) this clear already accounts for (its own parsed content names repoPath '${repoPath}'); fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.${classification.blockedBy ? ` Its own content stays on disk and arms at the next boot; it is refused right now by a DIFFERENT identity's own entry (${classification.blockedBy.repoPath}) — clearing THAT identity does not release this one.` : ""}`);
     }
   }
-  return { referencingRepoPaths, contentKept, anyUnattributed, unlinkFailed };
+  return { referencingRepoPaths, contentKept, anyUnattributed, unlinkFailed, unlinkFailedFiles };
 }
 
 /**
@@ -6790,10 +6835,10 @@ function canonicalKeyOrUndefined(repoPath: string): string | undefined {
 // the decision record's own call-site census.
 // @decision cdcd55c2 — now a SET so the id-addressed PENDING-tier clear (which frees its entries' keys)
 // reuses the same cross-hash selection; the relevance predicate is the only thing that widened.
-function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: string[], clearedEntry: MergeQuarantineEntry | undefined, identityWideHumanClear: boolean, ownIdentityTokensByFile: ReadonlyArray<{ sourceFile: string; tokens: string[] }>, excludeIdentities?: ReadonlySet<string>, freedKeys?: ReadonlySet<string>): { kept: boolean; referencingRepoPaths: string[]; keptEntries: Array<{ repoPath: string; sourceFile: string }>; contentKeptEntries: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>; anyUnattributed: boolean; unlinkFailed: boolean } {
+function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: string[], clearedEntry: MergeQuarantineEntry | undefined, identityWideHumanClear: boolean, ownIdentityTokensByFile: ReadonlyArray<{ sourceFile: string; tokens: string[] }>, excludeIdentities?: ReadonlySet<string>, freedKeys?: ReadonlySet<string>): { kept: boolean; referencingRepoPaths: string[]; keptEntries: Array<{ repoPath: string; sourceFile: string }>; contentKeptEntries: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>; anyUnattributed: boolean; unlinkFailed: boolean; unlinkFailedFiles: string[] } {
   const prefix = `${hash}.json.tmp-`;
   let files: string[];
-  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept: false, referencingRepoPaths: [], keptEntries: [], contentKeptEntries: [], anyUnattributed: false, unlinkFailed: false }; }
+  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept: false, referencingRepoPaths: [], keptEntries: [], contentKeptEntries: [], anyUnattributed: false, unlinkFailed: false, unlinkFailedFiles: [] }; }
   const referencingRepoPaths = new Set<string>();
   const keptEntries: Array<{ repoPath: string; sourceFile: string }> = [];
   const contentKeptEntries: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }> = [];
@@ -6803,6 +6848,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
   // @decision 59f4ebe8 — set when a non-ENOENT unlink of a file judged safe to delete FAILED (either loop):
   // the file still physically holds tokens the caller meant to clear, so it is a WRITE failure, not a keep.
   let unlinkFailed = false;
+  const unlinkFailedFiles: string[] = [];
   // @decision 25d0d45b — collected across the WHOLE loop, armed ONCE per identity AFTER it ends (never
   // per-file inline) so several same-identity tmps at this hash union their tokens, mirroring boot's own
   // PASS 1b union. Still race-free — one synchronous call, no `await`/timer runs between any two files.
@@ -6896,6 +6942,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
     // @decision 59f4ebe8 — an unmarked file's failed unlink used to vanish here with no signal at all.
     if (!unlinkConfirmed) {
       unlinkFailed = true;
+      unlinkFailedFiles.push(f);
       anyUnattributed = true;
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] tmp residue ${f} could not be CONFIRMED removed (an EPERM/EBUSY-shaped unlink failure) — it may still physically hold tokens this clear meant to remove; treated as a write failure by every caller that tracks one (a caller that does not keeps it only as this log line and a nameless keep).`);
@@ -6968,6 +7015,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
       if (!unlinkConfirmed) {
         // @decision 59f4ebe8 — a write failure too (this file's tokens were all accounted for by the clear).
         unlinkFailed = true;
+        unlinkFailedFiles.push(f);
         anyUnattributed = true;
         // eslint-disable-next-line no-console
         console.error(`[merge-quarantine] cross-hash tmp residue ${f} could not be CONFIRMED removed (an EPERM/EBUSY-shaped unlink failure) — treated as a write failure by every caller that tracks one.`);
@@ -7001,7 +7049,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
       console.error(`[merge-quarantine] keeping tmp residue ${c.sourceFile} UNTOUCHED (left stale) — no surviving entry references it, its own parsed content names repoPath '${c.repoPath}', and could not be positively proven to hold only token(s) this write/clear already accounts for; fail-closed rather than risk destroying a foreign token nothing in memory currently owns or references.${classification.blockedBy ? ` Its own content stays on disk and arms at the next boot; it is refused right now by a DIFFERENT identity's own entry (${classification.blockedBy.repoPath}) — clearing THAT identity does not release this one.` : ""}`);
     }
   }
-  return { kept: referencingRepoPaths.size > 0 || contentKeptEntries.length > 0 || anyUnattributed, referencingRepoPaths: [...referencingRepoPaths], keptEntries, contentKeptEntries, anyUnattributed, unlinkFailed };
+  return { kept: referencingRepoPaths.size > 0 || contentKeptEntries.length > 0 || anyUnattributed, referencingRepoPaths: [...referencingRepoPaths], keptEntries, contentKeptEntries, anyUnattributed, unlinkFailed, unlinkFailedFiles };
 }
 
 /**
@@ -7047,7 +7095,7 @@ function ownLatchHashForClearedPending(p: PendingUnresolvedQuarantine): string |
  * @decision 7aa9c406 — an entry with no derivable hash skips its pass (logged); never guess one.
  */
 function sweepTmpResidueForClearedPendingEntries(removed: ReadonlyArray<PendingUnresolvedQuarantine>, candidateTokens: string[], excludeIdentities: ReadonlySet<string>): ReturnType<typeof sweepTmpResidueForHashIfUnreferenced> {
-  const agg = { kept: false, referencingRepoPaths: [] as string[], keptEntries: [] as Array<{ repoPath: string; sourceFile: string }>, contentKeptEntries: [] as Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>, anyUnattributed: false, unlinkFailed: false };
+  const agg = { kept: false, referencingRepoPaths: [] as string[], keptEntries: [] as Array<{ repoPath: string; sourceFile: string }>, contentKeptEntries: [] as Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>, anyUnattributed: false, unlinkFailed: false, unlinkFailedFiles: [] as string[] };
   const freedKeys = freedKeysForClearedPendingEntries(removed.map((p) => p.entry));
   const hashes = new Set<string>();
   for (const p of removed) {
@@ -7064,6 +7112,7 @@ function sweepTmpResidueForClearedPendingEntries(removed: ReadonlyArray<PendingU
     agg.kept = agg.kept || r.kept;
     agg.anyUnattributed = agg.anyUnattributed || r.anyUnattributed;
     agg.unlinkFailed = agg.unlinkFailed || r.unlinkFailed;
+    agg.unlinkFailedFiles.push(...r.unlinkFailedFiles);
     for (const rp of r.referencingRepoPaths) if (!agg.referencingRepoPaths.includes(rp)) agg.referencingRepoPaths.push(rp);
     agg.keptEntries.push(...r.keptEntries);
     agg.contentKeptEntries.push(...r.contentKeptEntries);
@@ -7082,7 +7131,7 @@ function sweepTmpResidueForClearedPendingEntries(removed: ReadonlyArray<PendingU
  * @decision 9cabd143 — never gate this on check (1) — a cleared quarantine's own file kept alive by some
  * OTHER entry's stale `orphanLatchFiles` reference re-arms on the next boot. See the decision record.
  */
-function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens?: string[]): { kept: boolean; referencingRepoPaths: string[]; unlinkFailed?: true } {
+function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens?: string[]): { kept: boolean; referencingRepoPaths: string[]; unlinkFailed?: true; unlinkFailedFile?: string } {
   // @decision 63e49ee2 (round 3) — same identity-less keep as {@link orphanLatchFileSweepDecision}.
   //
   // @decision 8db913e2 (Follow-up 95ea8d3f) — a stale mark must not outlive the resolved read failure that set it; see the
@@ -7106,12 +7155,12 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens
     if (unlinkConfirmed) keptUnreadableLatchFiles.delete(filename);
     // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — an unconfirmed unlink (EPERM/EBUSY) must be reported as
     // kept, never as plain success — the file is still physically there.
-    return { kept: !unlinkConfirmed, referencingRepoPaths: [], ...(unlinkConfirmed ? {} : { unlinkFailed: true as const }) };
+    return { kept: !unlinkConfirmed, referencingRepoPaths: [], ...(unlinkConfirmed ? {} : { unlinkFailed: true as const, unlinkFailedFile: filename }) };
   }
   const owners = physicalOwnerRepoPaths(filename);
   if (owners.length > 0) return { kept: true, referencingRepoPaths: owners };
   const unlinkConfirmed = unlinkLatchFileConfirmed(filename);
-  return { kept: !unlinkConfirmed, referencingRepoPaths: [], ...(unlinkConfirmed ? {} : { unlinkFailed: true as const }) };
+  return { kept: !unlinkConfirmed, referencingRepoPaths: [], ...(unlinkConfirmed ? {} : { unlinkFailed: true as const, unlinkFailedFile: filename }) };
 }
 
 /** `true` iff `key`'s CURRENT occupant in `activeQuarantines` is genuinely `entry` itself — either the
@@ -7336,7 +7385,7 @@ export function ownedKeysIncluding(key: string, entry: MergeQuarantineEntry | un
  *  /clear-by-id, /clear-broad-union); a SELF-blocked entry is NOT named in this list and is carried by
  *  `stillQuarantined`/`reason` only where it is the addressed identity. Card 97516691/6ac1894a. */
 export type ReleasedStillBlockedEntry = { repoPath: string; blockedByRepoPath: string };
-type ClearByKeyResult = { wasQuarantined: boolean; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[]; provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; unattributed?: true; stillBlockedCoOccupants: BlockedCoOccupant[]; anyWriteFailed: boolean };
+type ClearByKeyResult = { wasQuarantined: boolean; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[]; provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; unattributed?: true; unlinkFailedFiles?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[]; anyWriteFailed: boolean };
 type DeferredClearContext = { writeFailed: Set<string>; sink: DeferredTombstoneJob[] };
 /**
  * @decision d2592cd5 (3rd fix round, card 3d4467cf) — `deferred`, used only by the token path: when given,
@@ -7492,6 +7541,8 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   const keptContentBlockedBy = new Map<string, ContentKeptBlockedBy>();
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — see the matching note at this function's own sourceFilesToSweep loop below.
   let anyKeptUnattributed = false;
+  // @decision b11056a9 — basenames of files whose unlink really failed in THIS call (see liveUnlinkFailedNames).
+  const unlinkFailedFileNames = new Set<string>();
   // @decision d163aef5 (round 4) — neither protect pass below gates on resolvability anymore (round 3's
   // own gate let a RESOLVABLE eviction winner's clear destroy a foreign file at one of its OTHER armed
   // keys); the PRIMARY ownership check and the token-overlap BACKSTOP both run for every key, every clear.
@@ -7513,6 +7564,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     // @decision d2592cd5 (round 4, card 3d4467cf) — a failed unlink of `final` itself IS a write failure
     // too: fold it into `anyWriteFailed`, same as the reduce branch's own two write-failure branches below.
     if (r.writeFailed) anyWriteFailed = true;
+    for (const n of r.unlinkFailedFiles ?? []) unlinkFailedFileNames.add(n);
   }
   const orphanFilesToSweep = new Set<string>(entry?.orphanLatchFiles ?? []);
   // @decision 656fdf39 (CR 66fad7ed round 2) — paired with each pushed entry's OWN (already-reconciled)
@@ -7644,6 +7696,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       if (r.unattributed) anyKeptUnattributed = true;
       // @decision d2592cd5 (round 4, card 3d4467cf) — same fold as the active loop above.
       if (r.writeFailed) anyWriteFailed = true;
+      for (const n of r.unlinkFailedFiles ?? []) unlinkFailedFileNames.add(n);
     }
     sourceFilesToSweep.push({ sourceFile: p.sourceFile, tokens: p.entry.tokens });
     removedPendingForTmpSweep.push(p);
@@ -7678,6 +7731,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // never an identity-only shortcut.
   for (const { sourceFile: f, tokens } of sourceFilesToSweep) {
     const result = sweepOwnLatchFileUnlessOwnedElsewhere(f, tokens);
+    if (result.unlinkFailedFile) unlinkFailedFileNames.add(result.unlinkFailedFile);
     if (result.kept) {
       if (result.referencingRepoPaths.length > 0) for (const rp of result.referencingRepoPaths) keptReferencingRepoPaths.set(rp, f);
       else anyKeptUnattributed = true;
@@ -7702,6 +7756,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   if (orphanSweepResult.anyUnattributed) anyKeptUnattributed = true;
   // @decision 59f4ebe8 — an orphan whose unlink failed still physically holds a token of this clear.
   if (orphanSweepResult.unlinkFailed) anyWriteFailed = true;
+  for (const n of orphanSweepResult.unlinkFailedFiles) unlinkFailedFileNames.add(n);
   // @decision 8db913e2 (round 4) — THE ONE tombstone call for this clear, now that every mutation above
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
@@ -7751,6 +7806,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     for (const ke of tmpSweep.keptEntries) keptReferencingRepoPaths.set(ke.repoPath, ke.sourceFile);
     for (const ke of tmpSweep.contentKeptEntries) { keptContentRepoPaths.set(ke.repoPath, ke.sourceFile); if (ke.blockedBy) keptContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
     if (tmpSweep.anyUnattributed) anyKeptUnattributed = true;
+    for (const n of tmpSweep.unlinkFailedFiles) unlinkFailedFileNames.add(n);
     // @decision 59f4ebe8 — deferred (token) mode only: the job was pushed above, but its verdict is decided
     // at end-of-call from this set. Gated on `unlinkFailed` alone, never `kept` (a foreign keep never feeds it).
     if (deferred && tmpSweep.unlinkFailed) deferred.writeFailed.add(identity);
@@ -7785,6 +7841,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   const anyReferencing = keptReferencingRepoPaths.size > 0 || orphanReferencingRepoPaths.size > 0;
   // @decision d2592cd5 (fix round, card 3d4467cf) — `anyWriteFailed` surfaced on EVERY return path for a
   // caller's own backstop to AND in; never `anyReferencing`/`anyKeptUnattributed` (G1 overrides those).
+  const unlinkFailedLive = liveUnlinkFailedNames(unlinkFailedFileNames);
   if (anyReferencing || anyKeptUnattributed || relocatedCoOccupants.size > 0 || keptContentRepoPaths.size > 0) {
     return {
       wasQuarantined: anythingProcessed,
@@ -7806,6 +7863,9 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       // left for a caller to re-derive from an empty `referencingRepoPaths` (that misfires the instant
       // `latchKept` is true SOLELY because `contentKeptRepoPaths` fired).
       ...(anyKeptUnattributed ? { unattributed: true as const } : {}),
+      // @decision b11056a9 — only meaningful (and only computed) when a latch was kept; the still-present
+      // subset, so a name a later step of this call removed again is never reported.
+      ...(unlinkFailedLive.length > 0 ? { unlinkFailedFiles: unlinkFailedLive } : {}),
       // @decision 182c01cc (round 3, M1) — a repoPath BOTH kept and relocated is named ONCE, with BOTH
       // routes (never deduped down to one — see BlockedCoOccupant's own doc + the decision record).
       //
@@ -8030,7 +8090,7 @@ function anyLiftedCandidateProvenanceUnknown(released: readonly string[], proven
  * `referencingRepoPaths` when a shared latch survives); the resolvable branch's own result, when routed
  * through the shared helper (card 3b1944b6), can now ALSO carry `stillQuarantined` — never otherwise.
  */
-export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[];provenanceUnknown?: true; stillQuarantined?: true; refusedBeforeClear?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
+export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[];provenanceUnknown?: true; stillQuarantined?: true; refusedBeforeClear?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; unlinkFailedFiles?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } {
   if (!isRepoPathCurrentlyResolvable(repoPath)) {
     return clearMergeQuarantineByRecordedPath(repoPath);
   }
@@ -8482,7 +8542,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   pendingSweep: "broad" | "none" | "unreduced",
   matchedOverride: Array<{ key: string; repoPath: string; mustRun?: true }> | undefined,
   deferred: DeferredClearContext,
-): { matched: true; result: { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[];provenanceUnknown?: true; stillQuarantined?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } } | { matched: false } {
+): { matched: true; result: { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[];provenanceUnknown?: true; stillQuarantined?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; unlinkFailedFiles?: string[]; stillBlockedCoOccupants: BlockedCoOccupant[] } } | { matched: false } {
   // @decision 4b6c8d24 (round 2) — CANDIDATES only (never a final answer): a delegated call's own
   // `liftedRepoPaths` is already correctly re-resolved, but is re-verified again here too, since this
   // function's own later pending sweep can still mutate state after a given delegated call returns.
@@ -8536,6 +8596,8 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   // sweepOwnLatchFileUnlessOwnedElsewhere call below: an unconfirmed EPERM/EBUSY unlink (or a
   // marked-but-unprovable-coverage keep) still means something was kept, with no repoPath to name.
   let anyKeptUnattributed = false;
+  // @decision b11056a9 — basenames whose unlink really failed in THIS call (see liveUnlinkFailedNames).
+  const unlinkFailedFileNames = new Set<string>();
   let wasQuarantined = false;
   // @decision 3be11be4 — refuse the WHOLE call, before any mutation, when repoPath won a matched entry's
   // naming race by raise-order (never owns its key) and that entry still carries a separate contributor.
@@ -8575,6 +8637,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       // `unattributed` flag, never infer it from an empty `referencingRepoPaths`: `latchKept` can ALSO be
       // true purely because `contentKeptRepoPaths` fired, which is NOT the unattributed case.
       if (result?.unattributed) anyKeptUnattributed = true;
+      for (const n of result?.unlinkFailedFiles ?? []) unlinkFailedFileNames.add(n);
       for (const rp of result?.contentKeptRepoPaths ?? []) keptContentRepoPaths.add(rp);
       // @decision 25d0d45b (Round 5, MAJOR) — a delegated ByKey result's own `contentKeptBlockedBy` was
       // dropped here, silently losing the blocker disclosure for EVERY caller of this shared helper
@@ -8686,6 +8749,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
         for (const cc of r.contentKept) { keptContentRepoPaths.add(cc.repoPath); if (cc.blockedBy) keptContentBlockedBy.set(cc.repoPath, cc.blockedBy); }
         // @decision 702b4241 (round 2) — same fold as clearMergeQuarantineByKey's own two loops.
         if (r.unattributed) anyKeptUnattributed = true;
+        for (const n of r.unlinkFailedFiles ?? []) unlinkFailedFileNames.add(n);
         // @decision d2592cd5 (Follow-up) — this delete genuinely kept/relocated/content-kept something.
         if (r.kept.length > 0 || r.relocated.length > 0 || r.contentKept.length > 0 || r.unattributed) pendingAnyKept = true;
       }
@@ -8697,6 +8761,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       // @decision 8db913e2 (Follow-up 95ea8d3f) — `p.entry.tokens` as `candidateTokens`, so a stale mark
       // can't outlive it forever. `p.entry` was already re-ingested above (656fdf39) when still placeholder-shaped.
       const sweepResult = sweepOwnLatchFileUnlessOwnedElsewhere(p.sourceFile, p.entry.tokens);
+      if (sweepResult.unlinkFailedFile) unlinkFailedFileNames.add(sweepResult.unlinkFailedFile);
       if (sweepResult.kept) {
         if (sweepResult.referencingRepoPaths.length > 0) for (const rp of sweepResult.referencingRepoPaths) keptReferencingRepoPaths.set(rp, blockedCoOccupant(rp, p.sourceFile));
         else anyKeptUnattributed = true;
@@ -8722,6 +8787,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       if (blockedBy) keptContentBlockedBy.set(repoPath, blockedBy);
     }
     if (orphanSweepResult.anyUnattributed) anyKeptUnattributed = true;
+    for (const n of orphanSweepResult.unlinkFailedFiles) unlinkFailedFileNames.add(n);
     // @decision d2592cd5 (Follow-up) — the orphan sweep ALSO kept/relocated/content-kept something.
     if (orphanSweepResult.referencingRepoPaths.length > 0 || orphanSweepResult.contentKept.length > 0 || orphanSweepResult.anyUnattributed) pendingAnyKept = true;
     // @decision 0d3b64c6 (round 2, S1) — `repoPath` (this function's own RAW parameter), never the
@@ -8743,6 +8809,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     for (const ke of tmpSweep.keptEntries) keptReferencingRepoPaths.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile));
     for (const ke of tmpSweep.contentKeptEntries) { keptContentRepoPaths.add(ke.repoPath); if (ke.blockedBy) keptContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
     if (tmpSweep.anyUnattributed) anyKeptUnattributed = true;
+    for (const n of tmpSweep.unlinkFailedFiles) unlinkFailedFileNames.add(n);
   }
   // @decision 3b1944b6 — an EXPLICIT no-match signal, never an inferred one: `repoPath` has no
   // identity-matched record in EITHER tier. The caller decides what happens next (see this function's own
@@ -8780,11 +8847,13 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     // (97516691/6ac1894a: `releasedStillBlockedRepoPaths` needs no queried-identity filter — the helper took `[repoPath]` as addressed.)
     return { matched: true, result: {
       wasQuarantined: true, stillQuarantined: true,
-      reason: composeReasonWithRelocated(stillQuarantinedReason(after, repoPath), combinedRelocated),
+      reason: withUnlinkFailedClause(composeReasonWithRelocated(stillQuarantinedReason(after, repoPath), combinedRelocated), unlinkFailedFileNames),
       liftedRepoPaths: liftedExcludingQueried, releasedRepoPaths: releasedExcludingQueried, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       stillBlockedCoOccupants: [...combinedRelocated, ...[...keptReferencingRepoPaths.values()].filter((co) => !relocatedSet.has(co.repoPath))],
       ...(anyKept ? { latchKept: true as const } : {}),
+      // @decision b11056a9 — `clearMergeQuarantineReporting` rebuilds this branch's reason, so the names must ride the result.
+      ...((): { unlinkFailedFiles?: string[] } => { const live = liveUnlinkFailedNames(unlinkFailedFileNames); return live.length > 0 ? { unlinkFailedFiles: live } : {}; })(),
       ...(keptReferencingRepoPaths.size > 0 || anyKeptUnattributed ? { referencingRepoPaths: [...keptReferencingRepoPaths.keys()] } : {}),
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
       ...(keptContentBlockedBy.size > 0 ? { contentKeptBlockedBy: contentKeptBlockedByEntries(keptContentBlockedBy) } : {}),
@@ -8817,7 +8886,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
       ...(keptContentBlockedBy.size > 0 ? { contentKeptBlockedBy: contentKeptBlockedByEntries(keptContentBlockedBy) } : {}),
       stillBlockedCoOccupants: [...combinedRelocated, ...[...keptReferencingRepoPaths.values()].filter((co) => !relocatedSet.has(co.repoPath))],
-      reason: composeReasonWithRelocated(keptReason, combinedRelocated),
+      reason: withUnlinkFailedClause(composeReasonWithRelocated(keptReason, combinedRelocated), unlinkFailedFileNames),
     } };
   }
   // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — kept for an UNATTRIBUTED reason (an unconfirmed EPERM/EBUSY
@@ -8830,7 +8899,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
       ...(keptContentBlockedBy.size > 0 ? { contentKeptBlockedBy: contentKeptBlockedByEntries(keptContentBlockedBy) } : {}),
       stillBlockedCoOccupants: relocated,
-      reason: composeReasonWithRelocated(unattributedKeptReasonFor(), relocated),
+      reason: withUnlinkFailedClause(composeReasonWithRelocated(unattributedKeptReasonFor(), relocated), unlinkFailedFileNames),
     } };
   }
   // @decision 182c01cc (round 2, finding 1) — a PURE relocation (nothing kept at all) must still report
@@ -8858,7 +8927,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       ...(keptContentBlockedBy.size > 0 ? { contentKeptBlockedBy: contentKeptBlockedByEntries(keptContentBlockedBy) } : {}),
-      reason: contentKeptOnlyReasonFor([...keptContentRepoPaths], keptContentBlockedBy),
+      reason: withUnlinkFailedClause(contentKeptOnlyReasonFor([...keptContentRepoPaths], keptContentBlockedBy), unlinkFailedFileNames),
     } };
   }
   return { matched: true, result: {
@@ -8971,7 +9040,7 @@ export function computeBroadUnionVictimSet(entry: MergeQuarantineEntry): string[
 type BroadUnionRealResult = {
   wasQuarantined: boolean; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[];
   provenanceUnknown?: true; latchKept?: true; referencingRepoPaths?: string[];
-  contentKeptRepoPaths?: string[]; unattributed?: true;
+  contentKeptRepoPaths?: string[]; unattributed?: true; unlinkFailedFiles?: string[];
 };
 
 /**
@@ -8988,10 +9057,16 @@ function composeBroadUnionClearResult(result: BroadUnionRealResult, confirmedSet
   // (the shared helper omits it), so its own still-blocked state MUST ride `stillQuarantined`/`reason` here,
   // in the same shape the other clear routes use — moving it out of that list must not make it vanish.
   const stillBlockedAfter = addressedRepoPath !== undefined ? stillBlockedEntryFor(addressedRepoPath) : undefined;
+  // @decision b11056a9 — a kept latch whose unlink failed names the file via the shared clause; with no
+  // still-blocked reason to extend, the generic unattributed sentence is the base, so the clause never stands alone.
+  const unlinkNames = result.unlinkFailedFiles ?? [];
+  const keptBase = stillBlockedAfter ? stillQuarantinedReason(stillBlockedAfter, addressedRepoPath!) : (result.unattributed && liveUnlinkFailedNames(unlinkNames).length > 0 ? unattributedKeptReasonFor() : "");
+  const keptReason = withUnlinkFailedClause(keptBase, unlinkNames);
   return {
     ok: true as const, dryRun: false as const,
     wasQuarantined: result.wasQuarantined, liftedRepoPaths: result.liftedRepoPaths,
-    ...(stillBlockedAfter ? { stillQuarantined: true as const, reason: stillQuarantinedReason(stillBlockedAfter, addressedRepoPath!) } : {}),
+    ...(stillBlockedAfter ? { stillQuarantined: true as const } : {}),
+    ...(keptReason ? { reason: keptReason } : {}),
     // 97516691: same release-vs-admission disclosure as the three other clear routes.
     releasedStillBlockedRepoPaths: result.releasedStillBlockedRepoPaths ?? [],
     stillBlockedCoOccupants: result.stillBlockedCoOccupants,
@@ -9597,7 +9672,7 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
     // clearMergeQuarantineLatchFile's own still-quarantined branch — this used to drop it silently.
     return {
       wasQuarantined: true,
-      reason: composeReasonWithRelocated(stillQuarantinedReason(after, repoPath), splitCoOccupants(stillBlocked, clearResult?.referencingRepoPaths).relocated),
+      reason: withUnlinkFailedClause(composeReasonWithRelocated(stillQuarantinedReason(after, repoPath), splitCoOccupants(stillBlocked, clearResult?.referencingRepoPaths).relocated), clearResult?.unlinkFailedFiles ?? []),
       liftedRepoPaths, ...provenanceUnknownFields,
       stillBlockedCoOccupants: stillBlocked,
     };
@@ -9628,7 +9703,7 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
       // reason by WHICH kind of keep actually fired, never `keptOnlyReasonFor` unconditionally.
       reason: clearResult.reason !== undefined
         ? clearResult.reason
-        : composeReasonWithRelocated(
+        : withUnlinkFailedClause(composeReasonWithRelocated(
             (clearResult.referencingRepoPaths?.length ?? 0) > 0
               ? keptOnlyReasonFor(clearResult.referencingRepoPaths ?? [])
               : (clearResult.contentKeptRepoPaths?.length ?? 0) > 0
@@ -9637,7 +9712,7 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
                 ? contentKeptOnlyReasonFor(clearResult.contentKeptRepoPaths ?? [], new Map(clearResult.contentKeptBlockedBy?.map((e) => [e.repoPath, e.blockedBy])))
                 : unattributedKeptReasonFor(),
             splitCoOccupants(stillBlocked, clearResult.referencingRepoPaths).relocated,
-          ),
+          ), clearResult.unlinkFailedFiles ?? []),
     };
   }
   if (stillBlocked.length > 0) {
@@ -9784,7 +9859,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
         // 6ac1894a: the id's own (addressed) entry is reported via `stillQuarantined`/`reason`, never here.
         releasedStillBlockedRepoPaths: [],
         addressedRepoPaths: [activeMatch.entry.repoPath],
-        reason: composeReasonWithRelocated(stillQuarantinedReason(after, activeMatch.entry.repoPath), activeRelocated),
+        reason: withUnlinkFailedClause(composeReasonWithRelocated(stillQuarantinedReason(after, activeMatch.entry.repoPath), activeRelocated), activeClearResult?.unlinkFailedFiles ?? []),
         stillBlockedCoOccupants: activeStillBlocked, ...activeLatchKeptFields,
       };
     }
@@ -9795,7 +9870,13 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       // own key), never `liftedRepoPaths` itself — passing a field against itself made the disclosure dead.
       addressedRepoPaths: [activeMatch.entry.repoPath],
       stillBlockedCoOccupants: activeStillBlocked,
-      ...(activeRelocated.length > 0 ? { reason: relocatedCoOccupantsReason(activeRelocated) } : {}),
+      // @decision b11056a9 — the generic unattributed sentence rides along whenever the unlink clause does
+      // and nothing more specific was already said, so the clause can never stand in for another cause.
+      ...((): { reason?: string } => {
+        const base = activeRelocated.length > 0 ? relocatedCoOccupantsReason(activeRelocated) : (activeClearResult?.unattributed && (activeClearResult.unlinkFailedFiles?.length ?? 0) > 0 ? unattributedKeptReasonFor() : "");
+        const reason = withUnlinkFailedClause(base, activeClearResult?.unlinkFailedFiles ?? []);
+        return reason ? { reason } : {};
+      })(),
       ...activeLatchKeptFields,
     };
   }
@@ -9864,6 +9945,8 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // now by a DIFFERENT identity's own entry — never a working route for the content-kept repoPath.
     const keptContentBlockedBy = new Map<string, ContentKeptBlockedBy>();
     let anyKeptUnattributed = false;
+    // @decision b11056a9 — basenames whose unlink really failed in THIS call (see liveUnlinkFailedNames).
+    const unlinkFailedFileNames = new Set<string>();
     // @decision d2592cd5 (Follow-up) — this branch's own write-success signal for the durable tombstone
     // below, mirroring clearMergeQuarantineByKey's own anyWriteFailed-combined gate.
     let pendingAnyKept = false;
@@ -9892,7 +9975,9 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       for (const f of pending.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
       // @decision 656fdf39 (CR 66fad7ed round 2) — `pending.entry` was already re-ingested at the top of
       // this function when still placeholder-shaped, so `.tokens` here is the real, reconciled set.
-      const ownFolded = foldOrphanSweepResult(sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile, pending.entry.tokens), pending.sourceFile, new Map());
+      const ownSwept = sweepOwnLatchFileUnlessOwnedElsewhere(pending.sourceFile, pending.entry.tokens);
+      if (ownSwept.unlinkFailedFile) unlinkFailedFileNames.add(ownSwept.unlinkFailedFile);
+      const ownFolded = foldOrphanSweepResult(ownSwept, pending.sourceFile, new Map());
       for (const rp of ownFolded.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupant(rp, pending.sourceFile)); }
       if (ownFolded.unattributed) anyKeptUnattributed = true;
       // @decision d2592cd5 (Follow-up) — this entry's own sourceFile sweep kept something too.
@@ -9925,6 +10010,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       if (blockedBy) keptContentBlockedBy.set(repoPath, blockedBy);
     }
     if (orphanSweepResult.anyUnattributed) anyKeptUnattributed = true;
+    for (const n of orphanSweepResult.unlinkFailedFiles) unlinkFailedFileNames.add(n);
     // @decision d2592cd5 (Follow-up) — the orphan sweep ALSO kept/content-kept something.
     if (orphanSweepResult.referencingRepoPaths.length > 0 || orphanSweepResult.contentKept.length > 0 || orphanSweepResult.anyUnattributed) pendingAnyKept = true;
     // @decision 9f387d7e — `${id}.json` IS itself one of the matched pending entries' own sourceFile:
@@ -9932,7 +10018,9 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // SAME own-latch path every matched pending entry's own sourceFile already went through above.
     if (idJsonIsMatchedSourceFile) {
       // @decision 656fdf39 (CR 66fad7ed round 2) — the matched entry's OWN (already-reconciled) tokens.
-      const finalFolded = foldOrphanSweepResult(sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`, matchedSourceFileEntry.entry.tokens), `${id}.json`, new Map());
+      const finalSwept = sweepOwnLatchFileUnlessOwnedElsewhere(`${id}.json`, matchedSourceFileEntry.entry.tokens);
+      if (finalSwept.unlinkFailedFile) unlinkFailedFileNames.add(finalSwept.unlinkFailedFile);
+      const finalFolded = foldOrphanSweepResult(finalSwept, `${id}.json`, new Map());
       for (const rp of finalFolded.referencingRepoPaths) { keptRepoPaths.add(rp); keptCoOccupants.set(rp, blockedCoOccupantForReferencer(rp, `${id}.json`)); }
       if (finalFolded.unattributed) anyKeptUnattributed = true;
       // @decision d2592cd5 (Follow-up) — same signal, for this matched-source-file sweep.
@@ -9967,6 +10055,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // (no live entry backs it to clear by id) — only `keptContentRepoPaths`, mirroring the `.json` sweep.
     for (const ke of tmpSweep.contentKeptEntries) { keptContentRepoPaths.add(ke.repoPath); if (ke.blockedBy) keptContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
     if (tmpSweep.anyUnattributed) anyKeptUnattributed = true;
+    for (const n of tmpSweep.unlinkFailedFiles) unlinkFailedFileNames.add(n);
     // @decision 64283e06 — mirrors the active-match branch's truthful-liftedRepoPaths rule:
     // `matchedPending` can span MULTIPLE DISTINCT identities (882d6cff's multi-claimant shape) — re-resolve
     // EACH one; a repoPath still quarantined elsewhere is left OUT, never assumed fully freed.
@@ -9996,7 +10085,13 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       releasedRepoPaths: matchedRepoPaths, releasedStillBlockedRepoPaths,
       ...(firstMatchedRepoPath !== undefined ? { addressedRepoPaths: [firstMatchedRepoPath] } : {}),
       stillBlockedCoOccupants: [...keptCoOccupants.values()],
-      ...(stillBlockedReasons.length > 0 ? { stillQuarantined: true, reason: stillBlockedReasons.join(" ") } : {}),
+      ...(stillBlockedReasons.length > 0 ? { stillQuarantined: true, reason: withUnlinkFailedClause(stillBlockedReasons.join(" "), unlinkFailedFileNames) } : {}),
+      // @decision b11056a9 — no still-blocked reason to extend: the generic unattributed sentence rides along
+      // with the unlink clause, so the clause can never stand in for another cause.
+      ...(stillBlockedReasons.length === 0 ? ((): { reason?: string } => {
+        const reason = withUnlinkFailedClause(anyKeptUnattributed && liveUnlinkFailedNames(unlinkFailedFileNames).length > 0 ? unattributedKeptReasonFor() : "", unlinkFailedFileNames);
+        return reason ? { reason } : {};
+      })() : {}),
       ...(keptRepoPaths.size > 0 || anyKeptUnattributed || keptContentRepoPaths.size > 0 ? { latchKept: true as const } : {}),
       ...(keptRepoPaths.size > 0 || anyKeptUnattributed ? { referencingRepoPaths: [...keptRepoPaths] } : {}),
       // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep names no live entry, so it never
@@ -10040,9 +10135,14 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // @decision 8db913e2 (Follow-up f2cc5f18) — a KEPT sweep with no attributable repoPath must still
   // surface as `latchKept`, mirroring `clearMergeQuarantineByKey`'s own `anyKeptUnattributed`.
   const anyKeptUnattributed = ownSweepResult.anyUnattributed || tmpSweep.anyUnattributed;
+  // @decision b11056a9 — the raw fallback has no base reason, so a failed unlink's clause (still-present
+  // basenames only) is the whole reason; the generic unattributed sentence rides along when that keep fired.
+  const rawUnlinkFailed = liveUnlinkFailedNames([...ownSweepResult.unlinkFailedFiles, ...tmpSweep.unlinkFailedFiles]);
+  const rawReason = withUnlinkFailedClause(anyKeptUnattributed && rawUnlinkFailed.length > 0 ? unattributedKeptReasonFor() : "", rawUnlinkFailed);
   // @decision 182c01cc (round 2/4) — this raw fallback's own sweeps never relocate anything, but a kept
   // one is real (round 4 fix).
   return {
+    ...(rawReason ? { reason: rawReason } : {}),
     ok: true, wasQuarantined: false, liftedRepoPaths: [], releasedRepoPaths: [], releasedStillBlockedRepoPaths: [], stillBlockedCoOccupants: [...keptCoOccupants.values()],
     ...(keptRepoPaths.size > 0 || anyKeptUnattributed || ownContentKept.size > 0 ? { latchKept: true as const } : {}),
     ...(keptRepoPaths.size > 0 || anyKeptUnattributed ? { referencingRepoPaths: [...keptRepoPaths] } : {}),
