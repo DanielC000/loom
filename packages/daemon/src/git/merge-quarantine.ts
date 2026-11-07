@@ -881,7 +881,17 @@ function decideDeferredTombstones(jobs: readonly DeferredTombstoneJob[], writeFa
 }
 
 /**
- * Re-verifies BY CONTENT that no physical `.json`/`.json.tmp-*` file left in `MERGE_QUARANTINE_DIR`
+ * Every filename shape this module itself writes a latch record under: a `.json` final (canonical,
+ * `pending-<hash>`, or a collision name), an ordinary `.json.tmp-<pid>[-<hex>]` residue of one, or a
+ * `.json.tmp-safety-<pid>-<hex>` safety residue. A hand-placed name outside these (e.g. `<hash>.json.tmp-foo`)
+ * is ignored by boot, so the physical-record re-verifications below must not let it withhold a tombstone.
+ */
+function isPhysicalLatchRecordName(f: string): boolean {
+  return f.endsWith(".json") || isTmpResidueFilename(f, true);
+}
+
+/**
+ * Re-verifies BY CONTENT that no physical latch record file left in `MERGE_QUARANTINE_DIR`
  * right now still names `identity` — the last-chance guard a PENDING-tier identity-wide clear needs
  * before durably tombstoning, because a wholly separate on-disk sibling for the same identity (one never
  * folded into this entry's own `orphanLatchFiles`, e.g. a `BlockedCoOccupant.alsoClear` kept file a prior,
@@ -902,7 +912,7 @@ function identityHasAnyPhysicalRecordOnDisk(identity: string): boolean {
     return true;
   }
   for (const f of names) {
-    if (!f.endsWith(".json") && !/\.json\.tmp-/.test(f)) continue;
+    if (!isPhysicalLatchRecordName(f)) continue;
     let raw: string;
     try {
       raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8");
@@ -981,7 +991,7 @@ function identityHasAnyPhysicalRecordHoldingToken(identity: string, tokens: read
   }
   for (const f of names) {
     if (excludeBasenames.has(f)) continue;
-    if (!f.endsWith(".json") && !/\.json\.tmp-/.test(f)) continue;
+    if (!isPhysicalLatchRecordName(f)) continue;
     let raw: string;
     try {
       raw = fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8");
@@ -6746,7 +6756,7 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string,
   let files: string[];
   try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return { kept, relocated, ownTokensByFile }; }
   for (const f of files) {
-    if (!f.startsWith(prefix)) continue;
+    if (!f.startsWith(prefix) || !isTmpResidueFilename(f, true)) continue;
     // @decision 63e49ee2 (round 3) — also honour the identity-less ownership set, never only
     // `orphanLatchFiles` — see {@link keptUnreadableLatchFiles}.
     const alreadyOwned = [...activeQuarantines.values()].some((e) => e.orphanLatchFiles?.includes(f))
@@ -6794,6 +6804,22 @@ function protectForeignTmpResidueBeforeSweep(key: string, clearIdentity: string,
  * @decision f8e11853 — used ONLY by {@link sweepTmpResidueForHashIfUnreferenced}'s own cross-hash branch.
  */
 const TMP_RESIDUE_FILENAME_RE = /\.json\.tmp-\d+(-[0-9a-f]+)?$/;
+
+/**
+ * THE one predicate for "is this filename a tmp residue Loom itself could have written" — boot's tmp
+ * collection, the cross-hash scan and the same-hash scans all route through it, so a hand-placed name
+ * such as `<hash>.json.tmp-foo` is ignored identically in-process and after a reboot (parity for the
+ * ORDINARY shape).
+ *
+ * `includeSafetyTmp` is for the SAME-hash scans (and the physical-record re-verification) only. A
+ * `.tmp-safety-<pid>-<hex>` residue (see {@link SAFETY_TMP_RE}) is armed BY CONTENT at boot, in a pass of
+ * its own disjoint from the ordinary shape, so the same-hash scans keep treating it as a candidate. The
+ * cross-hash loop deliberately EXCLUDES it (`includeSafetyTmp=false`; f8e11853's Do-not list) — do not
+ * widen it.
+ */
+function isTmpResidueFilename(f: string, includeSafetyTmp = false): boolean {
+  return TMP_RESIDUE_FILENAME_RE.test(f) || (includeSafetyTmp && SAFETY_TMP_RE.test(f));
+}
 
 /**
  * `repoPath`'s own freshly-recomputed {@link canonicalRepoLockKey}, or `undefined` when the walk itself
@@ -6899,7 +6925,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
   // runs, never from this file's own armable-ness (see the decision record's "Round 3" section).
   const deferredAttributedKept: Array<{ repoPath: string; sourceFile: string }> = [];
   for (const f of files) {
-    if (!f.startsWith(prefix)) continue;
+    if (!f.startsWith(prefix) || !isTmpResidueFilename(f, true)) continue;
     // @decision 1fea8b15 — captured here (never only inside the branch below) so the content-check
     // further down can use it too: a `reconciled` entry's own tokens were just read from THIS SAME file,
     // so they are real, verified coverage for it, never a guess — see that call site's own comment.
@@ -6999,7 +7025,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
   if (freedKeys !== undefined && freedKeys.size > 0) {
     for (const f of files) {
       if (f.startsWith(prefix)) continue; // already handled by the loop above
-      if (!TMP_RESIDUE_FILENAME_RE.test(f)) continue; // not a tmp-residue-shaped filename at all
+      if (!isTmpResidueFilename(f)) continue; // not a tmp-residue-shaped filename at all
       // The relevance gate (does this file's own content even belong to `freedKeys`) runs FIRST, before
       // any ownership check: unlike the same-hash loop above (where every candidate is, by
       // construction, this call's own business), a cross-hash file "owned" by some unrelated entry can
@@ -10461,7 +10487,7 @@ function reenterMergeQuarantinesAtBootImpl(
     // @decision 97cff6db — this pattern requires DIGITS immediately after `.tmp-`, so it never matches a
     // safety-tmp's own `.tmp-safety-...` infix; the two sets are disjoint by construction, not by a
     // separately-maintained exclusion.
-    tmpFiles = all.filter((f) => /\.json\.tmp-\d+(-[0-9a-f]+)?$/.test(f));
+    tmpFiles = all.filter((f) => isTmpResidueFilename(f));
     safetyTmpFiles = all.filter((f) => SAFETY_TMP_RE.test(f));
   } catch (e) {
     return quarantineAllRegisteredFailClosed(

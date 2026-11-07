@@ -177,7 +177,7 @@ try {
     enterMergeQuarantine(r, "r-branch", "r's own real raise");
 
     // D's OWN foreign tmp, holding ONLY its own token.
-    const dTmp = path.join(MERGE_QUARANTINE_DIR, `${hash}.json.tmp-88888-leakd01`);
+    const dTmp = path.join(MERGE_QUARANTINE_DIR, `${hash}.json.tmp-88888-1eadd001`);
     fs.writeFileSync(dTmp, JSON.stringify({
       repoPath: d, branch: "d-branch", reason: "D's own foreign tmp", enteredAt: Date.now() - 1000, tokens: ["D-ONLY"],
     }, null, 2) + "\n");
@@ -189,7 +189,7 @@ try {
     check("(ownleak) precondition: D is resolvable, still shares R's key", fs.existsSync(d) && canonicalRepoLockKey(d) === key);
 
     // R's OWN stray tmp (same identity as the clearer) — coincidentally ALSO names D's own token.
-    const rStrayTmp = path.join(MERGE_QUARANTINE_DIR, `${hash}.json.tmp-88889-leakr02`);
+    const rStrayTmp = path.join(MERGE_QUARANTINE_DIR, `${hash}.json.tmp-88889-1eadc002`);
     fs.writeFileSync(rStrayTmp, JSON.stringify({
       repoPath: r, branch: "r-stray-branch", reason: "R's own stray tmp (coincidentally also naming D's token)",
       enteredAt: Date.now() - 1000, tokens: ["R-STRAY", "D-ONLY"],

@@ -2793,7 +2793,7 @@ function hashKey(key) {
     fs.mkdirSync(x, { recursive: true });
     enterMergeQuarantine(y, "loom/y-branch", `y's own real, independent raise (${tag})`);
     enterMergeQuarantine(r, "loom/r-branch", `r's own real, UNRELATED raise (${tag})`);
-    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(keyR)}.json.tmp-88950-cafed0${tag}`), JSON.stringify({
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashKey(keyR)}.json.tmp-88950-cafed0${tag.replace(/r/g, "a")}`), JSON.stringify({
       repoPath: x, branch: "loom/x-branch", reason: `X's own stray tmp, mismatched onto R's own hash (${tag})`,
       enteredAt: Date.now(), tokens: [createHash("sha256").update(`${tag}-token-${sfx}`).digest("hex")],
     }, null, 2) + "\n");

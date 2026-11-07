@@ -350,7 +350,7 @@ function sidecarContents() {
 
   const zTmp = path.join(os.tmpdir(), `loom-mq3d4467cf-e-ztmp-never-exists-${freshSfx()}`);
   const tZt = "ztmp-disjoint-token-0001";
-  const tmpPath = path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(key)}.json.tmp-${freshSfx()}`);
+  const tmpPath = path.join(MERGE_QUARANTINE_DIR, `${quarantineHashForKeyTest(key)}.json.tmp-${Date.now()}-${(Math.random().toString(16) + "000000").slice(2, 8)}`); // boot's strict `.tmp-<pid>-<hex>` shape (base36 freshSfx would not match it)
   fs.writeFileSync(tmpPath, JSON.stringify({
     repoPath: zTmp, branch: "zt-branch", reason: "a genuinely foreign, unresolvable tmp residue sharing e's own key hash",
     enteredAt: Date.now() - 1000, tokens: [tZt],
