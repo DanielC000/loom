@@ -7034,7 +7034,7 @@ function sweepTmpResidueForClearedPendingEntries(removed: ReadonlyArray<PendingU
  * @decision 9cabd143 — never gate this on check (1) — a cleared quarantine's own file kept alive by some
  * OTHER entry's stale `orphanLatchFiles` reference re-arms on the next boot. See the decision record.
  */
-function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens?: string[]): { kept: boolean; referencingRepoPaths: string[] } {
+function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens?: string[]): { kept: boolean; referencingRepoPaths: string[]; unlinkFailed?: true } {
   // @decision 63e49ee2 (round 3) — same identity-less keep as {@link orphanLatchFileSweepDecision}.
   //
   // @decision 8db913e2 (Follow-up 95ea8d3f) — a stale mark must not outlive the resolved read failure that set it; see the
@@ -7046,6 +7046,8 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens
   // once-unreachable coverage proof can now genuinely succeed — never an identity-only shortcut here.
   if (keptUnreadableLatchFiles.has(filename)) {
     const provenCoverage = !!candidateTokens && markedFinalFullyCoveredByClear(path.join(MERGE_QUARANTINE_DIR, filename), candidateTokens);
+    // @decision 14bdcb2f — this keep attempts NO unlink, so it carries no `unlinkFailed`; only a REAL failed
+    // unlink (the returns below) may, since that flag feeds the human clear's write-failed set.
     if (!provenCoverage) return { kept: true, referencingRepoPaths: [] };
     // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, Critical) — proven coverage may settle ONLY the active-armed-key/
     // fresh-write-target half of physicalOwnerRepoPaths below, NEVER a surviving pending entry's own
@@ -7056,12 +7058,12 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens
     if (unlinkConfirmed) keptUnreadableLatchFiles.delete(filename);
     // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — an unconfirmed unlink (EPERM/EBUSY) must be reported as
     // kept, never as plain success — the file is still physically there.
-    return { kept: !unlinkConfirmed, referencingRepoPaths: [] };
+    return { kept: !unlinkConfirmed, referencingRepoPaths: [], ...(unlinkConfirmed ? {} : { unlinkFailed: true as const }) };
   }
   const owners = physicalOwnerRepoPaths(filename);
   if (owners.length > 0) return { kept: true, referencingRepoPaths: owners };
   const unlinkConfirmed = unlinkLatchFileConfirmed(filename);
-  return { kept: !unlinkConfirmed, referencingRepoPaths: [] };
+  return { kept: !unlinkConfirmed, referencingRepoPaths: [], ...(unlinkConfirmed ? {} : { unlinkFailed: true as const }) };
 }
 
 /** `true` iff `key`'s CURRENT occupant in `activeQuarantines` is genuinely `entry` itself — either the
@@ -7298,7 +7300,7 @@ type DeferredClearContext = { writeFailed: Set<string>; sink: DeferredTombstoneJ
  * REQUIRES `deferred` at COMPILE time — a call site that forgets it can no longer compile.
  */
 export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys: ReadonlySet<string> | undefined, identityWideHumanClear: false, deferred: DeferredClearContext): ClearByKeyResult;
-export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys: ReadonlySet<string> | undefined, identityWideHumanClear: true): ClearByKeyResult;
+export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys: ReadonlySet<string> | undefined, identityWideHumanClear: true, deferred?: DeferredClearContext): ClearByKeyResult;
 export function clearMergeQuarantineByKey(key: string, identityRepoPath: string, externalLiftedKeys: ReadonlySet<string> | undefined, identityWideHumanClear: boolean, deferred?: DeferredClearContext): ClearByKeyResult {
   let entry = activeQuarantines.get(key);
   // @decision 656fdf39 (CR 66fad7ed round 2) — re-ingest BEFORE anything below reads `entry.tokens`, so
@@ -8414,6 +8416,20 @@ function tryClearMergeQuarantineByOwnIdentity(
   repoPath: string,
   pendingSweep: "broad" | "none" | "unreduced",
   matchedOverride?: Array<{ key: string; repoPath: string; mustRun?: true }>,
+): ReturnType<typeof tryClearMergeQuarantineByOwnIdentityBody> {
+  // @decision 14bdcb2f — jobs are PUSHED by the body and decided ONCE here, after every phase; a THROW drops
+  // them (no tombstone). Never decide mid-call or in a `finally`.
+  const writeFailedIdentitiesThisCall = new Set<string>();
+  const deferredTombstoneJobs: DeferredTombstoneJob[] = [];
+  const out = tryClearMergeQuarantineByOwnIdentityBody(repoPath, pendingSweep, matchedOverride, { writeFailed: writeFailedIdentitiesThisCall, sink: deferredTombstoneJobs });
+  decideDeferredTombstones(deferredTombstoneJobs, writeFailedIdentitiesThisCall);
+  return out;
+}
+function tryClearMergeQuarantineByOwnIdentityBody(
+  repoPath: string,
+  pendingSweep: "broad" | "none" | "unreduced",
+  matchedOverride: Array<{ key: string; repoPath: string; mustRun?: true }> | undefined,
+  deferred: DeferredClearContext,
 ): { matched: true; result: { wasQuarantined: boolean; reason?: string; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[];provenanceUnknown?: true; stillQuarantined?: true; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } } | { matched: false } {
   // @decision 4b6c8d24 (round 2) — CANDIDATES only (never a final answer): a delegated call's own
   // `liftedRepoPaths` is already correctly re-resolved, but is re-verified again here too, since this
@@ -8494,7 +8510,9 @@ function tryClearMergeQuarantineByOwnIdentity(
       // decision record for why its own broad semantic must stay genuinely byte-identical to before.
       if (matchedOverride && !("mustRun" in m) && !activeQuarantines.has(m.key)) continue;
       // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
-      const result = clearMergeQuarantineByKey(m.key, m.repoPath, L, true);
+      // @decision 14bdcb2f — `deferred`: ByKey PUSHES its tombstone job (nonFailureOk computed at its push site,
+      // `const nonFailureOk` near the end of ByKey); decided by the wrapper after the pending sweep below.
+      const result = clearMergeQuarantineByKey(m.key, m.repoPath, L, true, deferred);
       // @decision 182c01cc (round 2) — split EVERY result's own stillBlockedCoOccupants by whether it's
       // also named in referencingRepoPaths (kept) or not (relocated) — never assume "has latchKept" means
       // "every entry here is kept"; a single delegated call can carry BOTH kinds at once.
@@ -8570,6 +8588,8 @@ function tryClearMergeQuarantineByOwnIdentity(
     // @decision d2592cd5 (Follow-up) — this branch's own write-success signal for the durable tombstone
     // below, mirroring clearMergeQuarantineByKey's own anyWriteFailed-combined gate.
     let pendingAnyKept = false;
+    // @decision 14bdcb2f — WRITE/UNLINK failures only (never a foreign keep); feeds `deferred.writeFailed`.
+    let pendingWriteFailed = false;
     // @decision 882d6cff (round 4) — capture whether this claimant's own sourceFile survived because a
     // DIFFERENT, still-pending claimant shares it (never surfaced before this round) — see the decision
     // record for why this is expected, not a bug, and how to lift it durably.
@@ -8596,6 +8616,7 @@ function tryClearMergeQuarantineByOwnIdentity(
         // @decision d163aef5 (round 4) — same ownership + token-overlap protection as clearMergeQuarantineByKey.
         // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
         const r = deleteMergeQuarantineLatchByKey(k, undefined, p.entry, identity, L, true);
+        if (r.writeFailed) pendingWriteFailed = true;
         // @decision 25d0d45b (Round 4) — classify EACH `r.kept` entry before deciding its disposition,
         // never the bare `blockedCoOccupant` (wrongly assumes `kc.sourceFile` is always its own file).
         for (const kc of r.kept) {
@@ -8627,6 +8648,7 @@ function tryClearMergeQuarantineByOwnIdentity(
       if (sweepResult.kept) {
         if (sweepResult.referencingRepoPaths.length > 0) for (const rp of sweepResult.referencingRepoPaths) keptReferencingRepoPaths.set(rp, blockedCoOccupant(rp, p.sourceFile));
         else anyKeptUnattributed = true;
+        if (sweepResult.unlinkFailed) pendingWriteFailed = true;
         // @decision d2592cd5 (Follow-up) — this entry's own sourceFile sweep kept something too.
         pendingAnyKept = true;
       }
@@ -8656,10 +8678,16 @@ function tryClearMergeQuarantineByOwnIdentity(
     // @decision d2592cd5 (Follow-up, AE scenario) — gated on this branch's own write-success signal AND
     // a fresh disk re-verification (never trust sweep tracking alone — see identityHasAnyPhysicalRecordOnDisk's
     // own doc for the wholly-separate-sibling gap it closes).
-    tombstoneDurablyIfConfirmed(!pendingAnyKept && !identityHasAnyPhysicalRecordOnDisk(identity), pendingCandidateTokens, repoPath);
+    //
+    // @decision 14bdcb2f — PUSHED, not written: decided once at the end of the public call (see the wrapper).
+    if (orphanSweepResult.unlinkFailed) pendingWriteFailed = true;
+    if (pendingWriteFailed) deferred.writeFailed.add(identity);
+    deferred.sink.push({ identity, tokens: pendingCandidateTokens, repoPath, nonFailureOk: !pendingAnyKept && !identityHasAnyPhysicalRecordOnDisk(identity) });
     // @decision 7aa9c406 — by-id's cross-hash tmp arming, AFTER the tombstones above: a foreign residue's
     // keep must never feed `pendingAnyKept` / this identity's own tombstone decision (by-id parity).
     const tmpSweep = sweepTmpResidueForClearedPendingEntries(matchedPending, pendingCandidateTokens, new Set(matchedPending.map((p) => directPathIdentity(p.entry.repoPath))));
+    // @decision 14bdcb2f — a failed tmp unlink withholds this identity's jobs (gated on `unlinkFailed` alone, as 59f4ebe8).
+    if (tmpSweep.unlinkFailed) deferred.writeFailed.add(identity);
     for (const ke of tmpSweep.keptEntries) keptReferencingRepoPaths.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile));
     for (const ke of tmpSweep.contentKeptEntries) { keptContentRepoPaths.add(ke.repoPath); if (ke.blockedBy) keptContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
     if (tmpSweep.anyUnattributed) anyKeptUnattributed = true;
