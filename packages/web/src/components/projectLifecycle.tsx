@@ -147,17 +147,27 @@ export function ProjectManage(
               column, which read as two more controls belonging to "Registered repos"; a destructive
               pair must not inherit a heading it has nothing to do with. */}
           <div data-testid="project-retire" style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.line}`, paddingTop: 8 }}>
-            <div>
-              <SectionLabel style={{ margin: 0 }}>Retire</SectionLabel>
-              <span style={{ fontSize: fs.sm, color: color.text3 }}>archive is reversible · delete is not</span>
+            {/* A compact, right-aligned pair beside the heading (card eb516fba, audit I-07) rather than
+                two full-width bars: Archive is the normal way out and reads as an ordinary button;
+                the permanent delete stays QUIET (`loom-btn-quietdanger`) until hovered or focused, so the
+                irreversible action is never the loudest thing on the settings page. */}
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <div style={{ minWidth: 0 }}>
+                <SectionLabel style={{ margin: 0 }}>Retire</SectionLabel>
+                <span style={{ fontSize: fs.sm, color: color.text3 }}>archive is reversible · delete is not</span>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+                <Button disabled={live || archiving} title={liveTitle}
+                  onClick={() => { if (window.confirm(`Archive "${project.name}"? It moves to the Archived section and can be restored later.`)) onArchive(); }}>
+                  {archiving ? "Archiving…" : "Archive (reversible)"}
+                </Button>
+                {!showDelete && (
+                  <Button variant="ghost" className="loom-btn-quietdanger" disabled={live} title={liveTitle}
+                    onClick={() => { setShowDelete(true); setConfirmText(""); }}>Delete permanently…</Button>
+                )}
+              </div>
             </div>
-            <Button disabled={live || archiving} title={liveTitle}
-              onClick={() => { if (window.confirm(`Archive "${project.name}"? It moves to the Archived section and can be restored later.`)) onArchive(); }}>
-              {archiving ? "Archiving…" : "Archive (reversible)"}
-            </Button>
-            {!showDelete
-              ? <Button variant="danger" disabled={live} title={liveTitle} onClick={() => { setShowDelete(true); setConfirmText(""); }}>Delete permanently…</Button>
-              : (
+            {showDelete && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, border: `1px solid ${color.danger}`, borderRadius: radius.sm, padding: 8 }}>
                   <span style={{ fontSize: fs.sm, color: color.danger }}>
                     Permanently delete this project and ALL of it — agents, sessions, tasks, schedules, keys, runs, transcripts. Cannot be undone. Type <strong>{project.name}</strong> to confirm:

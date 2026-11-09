@@ -15,6 +15,7 @@ import {
   AUTO_GRID_TEMPLATE, DEFAULT_TILE_LAYOUT, GRID_COLUMN_CHOICES, applyTileOrder, gridTemplateColumns,
   moveTileInOrder, readTileLayout, writeTileLayout, type GridColumns, type TileLayout,
 } from "../lib/terminalLayout";
+import { maxPinnedCols, usePinnedCols } from "../lib/pinnedGeometry";
 import { color, font, fs, radius } from "../theme";
 
 // Tiles flow horizontally then wrap; reused per manager row and the catch-all rows. alignItems:"start" so
@@ -56,8 +57,9 @@ type SessionRow = SessionRowGroup<SessionListItem>;
 //
 // `projectName` is that pre-selection, made a prop by card 25c08fba so the Atlas project node can
 // mount this page as its "Sessions" tab at project depth. The classic shell passes nothing, so its
-// filter still starts at "" (= all) and the page is byte-identical there. The filter control itself
-// stays — a reader who pre-selected a project may still widen it, and every tile carries its project.
+// filter still starts at "" (= all) and the page is byte-identical there.
+// @decision eb516fba — inside a project node the filter is LOCKED to that node's project; never put a
+// picker back there, it could point the grid away from the node it sits under.
 //
 // `projectId` (card f3b18f27) is the SECOND half of that same pre-selection, and the one the quick-
 // start needs: a roster is read by project id, never by name. It is what gates the control rather
@@ -180,6 +182,9 @@ export default function Terminals({ projectId, projectName, layoutKey }: {
   const queues = useSessionQueuesBulk(shownIds);
   const wakes = useSessionWakesBulk(shownIds);
   const { invalidateQueues, invalidateWakes } = useInvalidateSessionQueueWakesBulk();
+  // Each tile's pinned column count, as its pane learned it from the daemon (card eb516fba). `auto`
+  // widens its tile floor for a row whose grid is too wide to stay readable two-up; see autoGridTemplate.
+  const pinnedCols = usePinnedCols();
 
   // The slim bound-task bar is fetched + rendered by TerminalTile itself (per-session), so no task
   // lookup or prop pass is needed here — every tile shows it automatically, identically to Overview.
@@ -205,10 +210,19 @@ export default function Terminals({ projectId, projectName, layoutKey }: {
       <div className="loom-sessionbar" data-testid="sessions-bar">
         <div className="loom-sessionbar-group">
           <span style={barLabelStyle}>Project</span>
-          <Select value={filter} onChange={(e) => setFilter(e.target.value)}>
-            <option value="">All ({live.length})</option>
-            {projectNames.map((n) => <option key={n} value={n}>{n}</option>)}
-          </Select>
+          {/* Locked inside a project node (see the signature note): the node already names its project,
+              so the bar states it rather than offering a way to point the grid somewhere else. */}
+          {projectId && projectName ? (
+            <span data-testid="sessions-project-locked" title="This tab always shows its own project's sessions"
+              style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text, fontWeight: 500 }}>
+              {projectName}
+            </span>
+          ) : (
+            <Select value={filter} onChange={(e) => setFilter(e.target.value)}>
+              <option value="">All ({live.length})</option>
+              {projectNames.map((n) => <option key={n} value={n}>{n}</option>)}
+            </Select>
+          )}
         </div>
         {/* Only where there IS one project to start in — see the `projectId` note on the signature.
             The label lives here, with the filter's own, so the bar's two groups are typographically
@@ -260,7 +274,7 @@ export default function Terminals({ projectId, projectName, layoutKey }: {
         return (
           <section key={row.key} style={{ marginBottom: 20 }}>
             <RowHeader row={row} />
-            <div style={{ ...gridStyle, gridTemplateColumns: gridTemplateColumns(layout.columns) }}
+            <div style={{ ...gridStyle, gridTemplateColumns: gridTemplateColumns(layout.columns, maxPinnedCols(pinnedCols, row.list.map((s) => s.id))) }}
               data-testid={`sessions-grid-${row.key}`} data-columns={layout.columns}>
               {row.list.map((s, i) => renderTile(s, reorderable && i >= firstMovable ? (
                 <TileMoveControls id={s.id} canEarlier={i > firstMovable} canLater={i < row.list.length - 1}
@@ -311,12 +325,21 @@ function RowHeader({ row }: { row: SessionRow }) {
     const m = row.list[0]!; // a manager row is built as [manager, ...workers], so [0] always exists
     const workers = row.list.length - 1;
     return (
-      <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <StatusPill tone={m.busy ? "work" : "live"} glow={m.busy} label="manager" />
-        <span>
-          {m.projectName} · {m.agentName} · <span style={{ fontFamily: font.mono }}>{m.id.slice(0, 8)}</span>
+      // One line at any width (card eb516fba, audit A-20): the identity ellipsises, and the pill and the
+      // worker count never shrink, so a long project + agent name can no longer squeeze "(1 worker)"
+      // into a two-line column at the row's edge. The full identity rides the title.
+      <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+        <StatusPill tone={m.busy ? "work" : "live"} glow={m.busy} label="manager" style={{ flexShrink: 0 }} />
+        {/* Split like a tile's own identity (TerminalCard's TileTitle): the names ellipsise, and the short
+            id that actually tells two rows apart is the last thing to go. */}
+        <span title={`${m.projectName} · ${m.agentName} · ${m.id.slice(0, 8)}`}
+          style={{ display: "inline-flex", minWidth: 0 }}>
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {m.projectName} · {m.agentName}
+          </span>
+          <span style={{ flexShrink: 0, whiteSpace: "pre", fontFamily: font.mono }}>{` · ${m.id.slice(0, 8)}`}</span>
         </span>
-        <span style={{ color: color.text3, fontWeight: 400 }}>({workers} worker{workers === 1 ? "" : "s"})</span>
+        <span style={{ color: color.text3, fontWeight: 400, flexShrink: 0, whiteSpace: "nowrap" }}>({workers} worker{workers === 1 ? "" : "s"})</span>
       </SectionLabel>
     );
   }

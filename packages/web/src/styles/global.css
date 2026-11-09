@@ -647,6 +647,18 @@ body {
   background: var(--loom-pressed);
   color: var(--loom-accent-fg);
 }
+/* A destructive action that must not be the loudest thing on its page (card eb516fba — a project's
+   permanent delete). Composed with `ghost`: muted text and no edge at rest, then the danger voice on
+   hover AND keyboard focus, so a keyboard reader sees exactly what a pointer reader sees before acting. */
+.loom-btn-quietdanger {
+  color: var(--loom-text-3);
+}
+.loom-btn-quietdanger:not(:disabled):hover,
+.loom-btn-quietdanger:not(:disabled):focus-visible {
+  background: var(--loom-danger-soft);
+  border-color: var(--loom-danger-line);
+  color: var(--loom-danger-text);
+}
 
 /* Field: chrome lives here, not inline on the kit Input/Select, for the same reason as .loom-btn's
    (decision db040811): an inline border beat the :hover and :focus border rules below and left them
@@ -1757,6 +1769,31 @@ button.loom-atlas-node.is-branch.is-open {
   color: var(--loom-text-2);
   font-size: 11px;
 }
+/* A project row whose name the counts would clip (card eb516fba — AtlasTree's `useNameWinsWidth`):
+   the counts give way, never the name. The live count keeps its dot, the attention badge becomes a dot
+   in its own hue; both numbers stay in the row's screen-reader text and each mark's `title`. */
+.loom-atlas-node.is-compact .loom-atlas-livenum {
+  display: none;
+}
+/* Dots need less air than numbers: 4px before each (not the row's 7px), and a 6px tail. The icon-to-
+   label gap is untouched, so the label keeps the text origin every other row shares. */
+.loom-atlas-node.is-compact {
+  padding-right: 6px;
+}
+.loom-atlas-node.is-compact > .loom-atlas-nodebadge,
+.loom-atlas-node.is-compact > .loom-atlas-live {
+  margin-left: -3px;
+}
+.loom-atlas-node.is-compact .loom-atlas-nodebadge {
+  min-width: 0;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border-radius: 8px;
+  background: var(--loom-attn);
+  font-size: 0;
+  line-height: 0;
+}
 .loom-atlas-livedot {
   width: 7px;
   height: 7px;
@@ -1780,6 +1817,12 @@ button.loom-atlas-node.is-branch.is-open {
   text-overflow: ellipsis;
   white-space: nowrap;
   letter-spacing: 0.02em;
+}
+/* What tells two same-named session rows apart (card eb516fba): quieter than the agent name it
+   qualifies, and inside the label so one ellipsis truncates the pair. */
+.loom-atlas-lblsub {
+  color: var(--loom-text-3);
+  letter-spacing: 0;
 }
 /* No scope marker here on purpose — depth carries it. See the note in AtlasTree.tsx's TreeNode. */
 
@@ -2103,6 +2146,11 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-atlas-headpill.is-danger {
   background: var(--loom-danger-soft);
   color: var(--loom-danger-text);
+}
+/* A pill still loading (card eb516fba): its box, at its placeholder text's width, with the text itself
+   invisible — so the row is already the width it will be and nothing shifts when the reading lands. */
+.loom-atlas-headpill.is-pending .loom-atlas-headpill-text {
+  visibility: hidden;
 }
 .loom-atlas-content {
   flex: 1;

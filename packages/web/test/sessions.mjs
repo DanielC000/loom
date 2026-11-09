@@ -7,7 +7,7 @@
 // wired into @loom/web's `build` script (which CI runs via `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/sessions.mjs
 import assert from "node:assert/strict";
-import { groupSessionRows, canResumeSession, goLiveHeldControl, goLiveSessionPill, holdsGoLiveSlot, projectFilterOptions } from "../src/lib/sessions.ts";
+import { groupSessionRows, canResumeSession, goLiveHeldControl, goLiveSessionPill, holdsGoLiveSlot, projectFilterOptions, sessionRowSuffixes, shortCardTitle } from "../src/lib/sessions.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -185,6 +185,32 @@ check("projectFilterOptions: a FILTER value whose last session exited stays offe
 check("projectFilterOptions: the default `held` keeps a one-argument call working", () => {
   // The signature stays usable by any caller that has no selection to preserve.
   assert.deepEqual(projectFilterOptions([P("Loom")]), ["Loom"]);
+});
+
+// ── sessionRowSuffixes (card eb516fba, audit B-22): two "Dev" rows in the tree must read differently ──
+check("only same-named sessions get a suffix: card title first, then branch tail, then short id", () => {
+  const titles = new Map([["t1", "fix(daemon): stop double-charging on retried webhooks"]]);
+  const rows = [
+    { id: "dev1-aaaaaaaa", agentName: "Dev", taskId: "t1", branch: "loom/aaaa1111bbbb" },
+    { id: "dev2-bbbbbbbb", agentName: "Dev", taskId: "t2", branch: "loom/cccc2222dddd" },
+    { id: "dev3-cccccccc", agentName: "Dev", taskId: null, branch: null },
+    { id: "qa-11111111", agentName: "QA Tester", taskId: "t1", branch: "loom/eeee" },
+  ];
+  const s = sessionRowSuffixes(rows, titles);
+  assert.equal(s.get("dev1-aaaaaaaa"), "stop double-charging on retried webhooks", "the card title, commit-type lead dropped");
+  assert.equal(s.get("dev2-bbbbbbbb"), "cccc2222", "no title known yet: the branch's own tail");
+  assert.equal(s.get("dev3-cccccccc"), "dev3-ccc", "no branch either: the short id the tile and node head show");
+  // The control: a uniquely named row is left EXACTLY as it was, even though it holds a titled card.
+  assert.equal(s.has("qa-11111111"), false);
+  assert.equal(sessionRowSuffixes([rows[0], rows[3]], titles).size, 0, "no repeated name, no suffix at all");
+});
+
+check("shortCardTitle drops only a Conventional Commits lead", () => {
+  assert.equal(shortCardTitle("feat(web): remember steps"), "remember steps");
+  assert.equal(shortCardTitle("fix!: hotfix"), "hotfix");
+  // The control: a title that merely STARTS with a word and a colon is not a commit lead and is kept.
+  assert.equal(shortCardTitle("Deploy: the new gateway"), "Deploy: the new gateway");
+  assert.equal(shortCardTitle("Plain title: with a colon"), "Plain title: with a colon");
 });
 
 console.log(`\n${pass} passed`);

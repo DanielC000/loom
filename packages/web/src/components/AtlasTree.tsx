@@ -38,7 +38,7 @@ import {
   type FocusEvent, type KeyboardEvent, type ReactNode,
 } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { CONTEXT_WARN_RATIO, contextWindowForModel, type Project, type SessionListItem } from "@loom/shared";
 import {
   ATLAS_HOMES, PROJECT_NODE_PATH, PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt,
@@ -53,7 +53,7 @@ import { useAttention } from "../lib/attention";
 import { isLiveSession, liveCountsByProject } from "../lib/atlasHome";
 import { sortProjectsRunningFirst } from "../lib/projectOrder";
 import { standingOperators } from "../lib/atlasAgents";
-import { groupSessionRows } from "../lib/sessions";
+import { groupSessionRows, isCompanionSession, sessionRowSuffixes } from "../lib/sessions";
 import { workspaceRunningSessions } from "../lib/workspaceSessions";
 import { api } from "../lib/api";
 import { color, fs } from "../theme";
@@ -289,11 +289,13 @@ function TreeNode({ page, activeTo, active = true, testId, metric, onNavigate, c
  * (`● Web Designer 10%`): a destination is a place and has a shape, an entity is a thing and has a
  * state.
  */
-function EntityRow({ entity, to, testId, label, title, dot, metric, active, activeTo, twist, onNavigate, children }: {
+function EntityRow({ entity, to, testId, label, sub, title, dot, metric, active, activeTo, twist, onNavigate, children }: {
   entity: "session";
   to: string;
   testId: string;
   label: string;
+  /** What tells this row apart from a same-named sibling (lib/sessions' `sessionRowSuffixes`), muted. */
+  sub?: string;
   /** The row's full identity on hover — the rail ellipsises hard at 244px. */
   title: string;
   dot: ReactNode;
@@ -309,7 +311,9 @@ function EntityRow({ entity, to, testId, label, title, dot, metric, active, acti
     <>
       <span className="loom-atlas-twist" aria-hidden />
       <span className="loom-atlas-ico" aria-hidden>{dot}</span>
-      <span className="loom-atlas-lbl">{label}</span>
+      {/* The suffix rides INSIDE the label so the one ellipsis truncates the pair as a phrase, and it
+          is part of the link's accessible name — a screen reader needs the difference as much as an eye. */}
+      <span className="loom-atlas-lbl">{label}{sub && <span className="loom-atlas-lblsub"> · {sub}</span>}</span>
       {metric}
     </>
   );
@@ -453,17 +457,53 @@ const WORKSPACE_TERMINALS = ATLAS_HOMES.find((h) => h.key === "workspace-termina
 // outside the flex row or it would be laid out as a further column beside the buttons.
 //
 // @decision 318b5a21 — never nest the `＋` inside the selector button. Siblings in a flex row.
-function ProjectNode({ project, selected, expanded, metrics, onSelect, onToggle, children }: {
+/**
+ * The project name wins width over the row's counts (card eb516fba, audit B-22): a project row whose
+ * name the counts would clip goes `is-compact`, where the live count shows its dot alone and the
+ * "needs you" badge becomes a small attention dot. The numbers are never lost — both stay in the
+ * row's screen-reader text and each mark's own `title`.
+ *
+ * Measured, not guessed, and one-way per input: the row is drawn in FULL mode, and only if its label
+ * is then clipped does it flip to compact. It is re-measured (from full) only when its name, its counts
+ * or the BUTTON's width change — and the button's width does not depend on the mode, so going compact
+ * can never feed back into the measurement that chose it.
+ */
+function useNameWinsWidth(name: string, metricsKey: string) {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const labelRef = useRef<HTMLSpanElement>(null);
+  const [width, setWidth] = useState(0);
+  const [compactFor, setCompactFor] = useState<string | null>(null);
+  const key = `${name}|${metricsKey}|${width}`;
+  useEffect(() => {
+    const el = buttonRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setWidth(Math.round(el.clientWidth)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  useLayoutEffect(() => {
+    if (compactFor === key) return;
+    const lbl = labelRef.current;
+    if (!lbl || width === 0) return;
+    if (lbl.scrollWidth > lbl.clientWidth + 1) setCompactFor(key);
+  }, [key, compactFor, width]);
+  return { buttonRef, labelRef, on: compactFor === key };
+}
+
+function ProjectNode({ project, selected, expanded, metrics, metricsKey = "", onSelect, onToggle, children }: {
   project: Project;
   selected: boolean;
   expanded: boolean;
   metrics?: ReactNode;
+  /** What the counts in `metrics` currently say — a change re-measures whether the name still fits. */
+  metricsKey?: string;
   onSelect: (id: string) => void;
   onToggle: (id: string) => void;
   children?: ReactNode;
 }) {
   const twistLabel = `${expanded ? "Collapse" : "Expand"} ${project.name}`;
   const item = useTreeItem(`project:${project.id}`);
+  const compact = useNameWinsWidth(project.name, metricsKey);
   return (
     <li>
       {/* `is-open` is mirrored onto the ROW as well as the selector: the phosphor edge has to sit at
@@ -480,14 +520,14 @@ function ProjectNode({ project, selected, expanded, metrics, onSelect, onToggle,
         {/* `data-testid` marks only the SELECTED row: "the project node you are under" stays a single
             element, so P1-1's own structural assertion keeps meaning what it meant. The other rows are
             addressed by their accessible name (the project's own), which is what a reader clicks. */}
-        <button type="button"
-          className={`loom-atlas-node is-branch${selected ? " is-open" : ""}`}
+        <button type="button" ref={compact.buttonRef}
+          className={`loom-atlas-node is-branch${selected ? " is-open" : ""}${compact.on ? " is-compact" : ""}`}
           data-testid={selected ? "atlas-project-node" : undefined}
           aria-current={selected ? "true" : undefined}
           title={selected ? project.name : `Scope to ${project.name}`}
           onClick={() => onSelect(project.id)} {...item}>
           <span className="loom-atlas-ico" aria-hidden><NavIcon to="/projects" /></span>
-          <span className="loom-atlas-lbl">{project.name}</span>
+          <span className="loom-atlas-lbl" ref={compact.labelRef}>{project.name}</span>
           {metrics}
         </button>
         {/* On EVERY project row, selected or not — spawning into a project you are not scoped to
@@ -724,6 +764,23 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
     [projects, liveByProject],
   );
 
+  // Two rows of one agent ("Dev", "Dev") get a suffix that tells them apart (card eb516fba, audit
+  // B-22) — preferably the title of the card each one is working. Those titles are read ONLY for an
+  // OPEN branch that actually has such a pair, through the same `["tasks", projectId]` entry the
+  // terminal tiles' bound-task bar already reads, so a workspace of distinct agents costs no request.
+  const companionFree = (pid: string) => (liveByProjectId.get(pid) ?? []).filter((s) => !isCompanionSession(s));
+  const titleProjectIds = orderedProjects
+    .filter((p) => isExpanded(p.id) && companionFree(p.id).some((s, _i, all) =>
+      !!s.taskId && all.some((o) => o.id !== s.id && o.agentName === s.agentName)))
+    .map((p) => p.id);
+  const cardTitleQs = useQueries({
+    queries: titleProjectIds.map((pid) => ({
+      queryKey: ["tasks", pid], queryFn: ({ signal }: { signal: AbortSignal }) => api.tasks(pid, signal), staleTime: 30_000,
+    })),
+  });
+  const cardTitles = new Map<string, string>();
+  for (const q of cardTitleQs) for (const t of q.data ?? []) cardTitles.set(t.id, t.title);
+
   const platformNodes = workspace.filter((p) => WORKSPACE_TIER_NODES.includes(p.to));
 
   /**
@@ -746,9 +803,11 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
     // entity never is. The qualification rule is kept where its reason holds, and dropped where it
     // does not, rather than applied as a ritual that would make every spec carry a project id it
     // has no use for.
+    const suffixes = sessionRowSuffixes(companionFree(p.id), cardTitles);
     const sessionRow = (s: SessionListItem, twist?: Twist, children?: ReactNode) => (
       <EntityRow key={s.id} entity="session" to={`/session/${s.id}`} testId={`atlas-session-${s.id}`}
-        label={s.agentName} title={`${s.agentName}${s.role ? ` · ${s.role}` : ""} · ${s.id.slice(0, 8)}`}
+        label={s.agentName} sub={suffixes.get(s.id)}
+        title={`${s.agentName}${s.role ? ` · ${s.role}` : ""} · ${s.id.slice(0, 8)}${s.taskId && cardTitles.get(s.taskId) ? `\n${cardTitles.get(s.taskId)}` : ""}`}
         dot={<SessionDot s={s} />} metric={sessionMetric(s)}
         active={selected} activeTo={activeTo} onNavigate={scopeFirst} twist={twist}>
         {children}
@@ -877,6 +936,7 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
               return (
                 <ProjectNode key={p.id} project={p} selected={selected} expanded={isExpanded(p.id)}
                   onSelect={selectAndOpenProject} onToggle={toggleBranch}
+                  metricsKey={`${needs}|${live}`}
                   metrics={
                     <>
                       {needs > 0 && (
@@ -889,7 +949,7 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
                       {live > 0 && (
                         <>
                           <span className="loom-atlas-live" title={`${live} live session${live === 1 ? "" : "s"}`} aria-hidden>
-                            {live}
+                            <span className="loom-atlas-livenum">{live}</span>
                             <span className="loom-atlas-livedot" aria-hidden />
                           </span>
                           <SrPart>{`${live} live`}</SrPart>

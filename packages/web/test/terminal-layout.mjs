@@ -11,8 +11,8 @@
 // Run it with: node --experimental-strip-types packages/web/test/terminal-layout.mjs
 import assert from "node:assert/strict";
 import {
-  AUTO_GRID_TEMPLATE, DEFAULT_TILE_LAYOUT, GRID_COLUMN_CHOICES, applyTileOrder, gridTemplateColumns,
-  moveTileInOrder, parseTileLayout, readTileLayout, tileLayoutStorageKey, writeTileLayout,
+  AUTO_GRID_TEMPLATE, DEFAULT_TILE_LAYOUT, GRID_COLUMN_CHOICES, MIN_READABLE_FONT_PX, applyTileOrder, autoGridTemplate,
+  gridTemplateColumns, moveTileInOrder, parseTileLayout, readTileLayout, readableTileFloorPx, tileLayoutStorageKey, writeTileLayout,
 } from "../src/lib/terminalLayout.ts";
 
 /** A minimal tile — the shape the derivation reads (an id, and nothing else). */
@@ -38,6 +38,25 @@ check("an explicit count shares the row N ways; auto gives the unchanged auto-fi
   // matched on `max(` — `minmax(` contains it, which would make the check pass for the wrong reason.)
   assert.match(AUTO_GRID_TEMPLATE, /minmax\(560px, 1fr\)/);
   assert.doesNotMatch(AUTO_GRID_TEMPLATE, /320px|calc\(/);
+});
+
+// 1b) Card eb516fba (audit B-23): `auto` keeps a tile READABLE for a wide pinned grid. At the default
+//     80 columns nothing changes; at 120 the floor rises past 560px so two tiles no longer share a row
+//     too narrow to read; and with no geometry reported yet `auto` is exactly its old template.
+check("auto raises its tile floor for a wide pinned grid, and only then", () => {
+  assert.equal(gridTemplateColumns("auto", undefined), AUTO_GRID_TEMPLATE, "no geometry yet: unchanged");
+  assert.equal(gridTemplateColumns("auto", 80), AUTO_GRID_TEMPLATE, "the default 80 columns: unchanged");
+  assert.equal(readableTileFloorPx(80), 80 * 6 + 22);
+  const wide = gridTemplateColumns("auto", 120);
+  assert.equal(readableTileFloorPx(120), 742);
+  assert.equal(wide, "repeat(auto-fill, minmax(min(100%, 742px), 1fr))");
+  // The positive control for the arithmetic: 742px at a 10px floor means the font a 742px tile solves to
+  // for 120 columns is at least MIN_READABLE_FONT_PX (chrome off first, 0.6 cell width per px of font).
+  assert.ok((742 - 22) / (120 * 0.6) >= MIN_READABLE_FONT_PX);
+  // An explicit count is the reader's own choice and is never overridden by the pinned grid.
+  assert.equal(gridTemplateColumns("2", 120), gridTemplateColumns("2"));
+  // Junk geometry is treated as "not reported", never as a floor of NaN/0.
+  for (const bad of [0, -1, Number.NaN]) assert.equal(autoGridTemplate(bad), AUTO_GRID_TEMPLATE);
 });
 
 // 2) THE GAP ALLOWANCE SCALES WITH N. The share has to subtract the (N-1) gaps BETWEEN the tracks

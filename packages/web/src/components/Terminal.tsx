@@ -10,6 +10,7 @@ import { isCredentialSocketFailure, noteCredentialLock } from "../lib/loopbackCr
 import { useIsCompanionSession } from "../lib/companionGuard";
 import { getResolvedTheme, subscribeResolvedTheme } from "../lib/themePref";
 import { xtermTheme } from "../lib/xtermTheme";
+import { publishPinnedCols } from "../lib/pinnedGeometry";
 import { Dot } from "./ui";
 import { color, font, space, fs } from "../theme";
 import "@xterm/xterm/css/xterm.css";
@@ -476,6 +477,8 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
             if (msg.cols !== cols || msg.rows !== rows) gridWidthRef.current?.(null);
             cols = msg.cols;
             rows = msg.rows;
+            // Tell the grid around this pane how wide its pinned grid is, so `auto` can keep it readable.
+            publishPinnedCols(sessionId, cols);
             term.resize(cols, rows);
             applyFontSize();
             // Force a clean repaint on attach: Claude runs main-screen (no alt-screen), so the daemon's

@@ -2,6 +2,8 @@
 
 Anchored at `packages/web/src/lib/sessions.ts` › `projectFilterOptions`. Found by the `f3b18f27` worker (the Atlas Sessions quick-start) and filed as out of its scope.
 
+**Since card `eb516fba`** the Atlas project node's Sessions tab no longer renders this picker at all: it is locked to the node's project and names it as plain text (`docs/decisions/eb516fba-atlas-tree-rows-and-terminal-tiles.md`). The project-node bullets below describe the state this card fixed; the derivation itself still serves the god-eye mounts (the workspace Terminals node and the classic `/terminals`), where the `filter` half of `held` is the live one.
+
 ## The defect
 
 `pages/Terminals.tsx` built its Project `<select>`'s options from the live session list:

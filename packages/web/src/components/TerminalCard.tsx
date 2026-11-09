@@ -442,7 +442,9 @@ export function TerminalCard({
 
   const header = (
     <div className={atlasNode ? "loom-atlas-nodehead-row loom-atlas-sessionhead-row" : undefined}
-      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: atlasNode ? 0 : 4 }}>
+      // A tile's own gap (card eb516fba, audit A-20): with none, the short id butted straight into Fork
+      // and read as overlapping it. The Atlas session node's row carries its own gap in global.css.
+      style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: atlasNode ? 0 : 4, gap: atlasNode ? undefined : 8 }}>
       {title ?? <TileTitle s={session} showProject={showProject} />}
       {/* Never compresses — the identity prefix beside it is the element that gives up space (ad3157b9). */}
       <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>

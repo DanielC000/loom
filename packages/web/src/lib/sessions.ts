@@ -275,6 +275,36 @@ export function isCompanionSession(s: { role?: SessionRole | null } | null | und
   return s?.role === COMPANION_ROLE;
 }
 
+/** A card title as a narrow row wants it: the Conventional Commits `type(scope): ` lead dropped. */
+export function shortCardTitle(title: string): string {
+  return title.replace(/^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]*\))?!?:\s+/, "").trim() || title;
+}
+
+/**
+ * What tells two same-named session rows apart (card eb516fba, audit B-22): two workers of one agent
+ * both read "Dev" in the tree, with only their context % to choose between them.
+ *
+ * Only a session whose agent name REPEATS among `sessions` gets a suffix, so a branch of distinct
+ * agents keeps its rows exactly as they were. The suffix is the most human answer available: the
+ * card the session is working (its title, without the commit-type lead), else its own branch's tail,
+ * else its short id — the same 8 characters the session node's head and every terminal tile show.
+ */
+export function sessionRowSuffixes(
+  sessions: readonly Pick<SessionListItem, "id" | "agentName" | "taskId" | "branch">[],
+  cardTitles: ReadonlyMap<string, string>,
+): Map<string, string> {
+  const byName = new Map<string, number>();
+  for (const s of sessions) byName.set(s.agentName, (byName.get(s.agentName) ?? 0) + 1);
+  const out = new Map<string, string>();
+  for (const s of sessions) {
+    if ((byName.get(s.agentName) ?? 0) < 2) continue;
+    const title = s.taskId ? cardTitles.get(s.taskId) : undefined;
+    const branchTail = s.branch ? s.branch.replace(/^.*\//, "").slice(0, 8) : "";
+    out.set(s.id, title ? shortCardTitle(title) : branchTail || s.id.slice(0, 8));
+  }
+  return out;
+}
+
 /**
  * A model id as a reader wants it: `"claude-opus-4-8[1m]"` → `"opus-4-8[1m]"`. Drops the vendor
  * prefix only — the tail is the part that distinguishes one model from another, and a window

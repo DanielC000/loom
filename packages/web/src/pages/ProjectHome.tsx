@@ -436,7 +436,13 @@ export default function ProjectHome() {
     // Omitted entirely rather than guessed when either read fails: no repo bound, or no commit yet.
     ...(headBranch && headSha
       ? [{ key: "head", text: `${headBranch} ${headSha.slice(0, 8)}`, title: `${headBranch} at ${headSha}` } as NodeHeadPill]
-      : []),
+      // While either read is still in flight, hold the pill's place (card eb516fba, audit B-25) so the
+      // head row does not shift when it lands. Its own key, so `atlas-nodehead-pill-head` still means
+      // "the head is known". A settled failure renders nothing, exactly as before.
+      // `isLoading`, not `isPending`: a disabled query (no project yet) is pending forever.
+      : branchesQ.isLoading || gitLogQ.isLoading
+        ? [{ key: "head-pending", text: "main 00000000", pending: true } as NodeHeadPill]
+        : []),
   ];
 
   // The eight re-homed tab bodies. Each is the EXISTING page component, mounted verbatim — this card

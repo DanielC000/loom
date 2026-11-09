@@ -38,6 +38,42 @@ export const AUTO_GRID_TEMPLATE = "repeat(auto-fill, minmax(560px, 1fr))";
 const MIN_EXPLICIT_TILE_PX = 320;
 const GRID_GAP_PX = 12;
 
+/**
+ * The smallest scaled font `auto` will lay a tile out at (card eb516fba, audit B-23). A pane scales its
+ * font to fit the daemon's PINNED column count, so the same 560px tile that reads at ~11px for the
+ * default 80 columns drops to ~7px for a project that raised `pty.cols` to 120. `auto` exists to keep
+ * tiles comfortable, so for a wide grid it raises its own floor to the width that keeps this font, and
+ * `auto-fill` then gives up a column instead of shrinking the text.
+ */
+export const MIN_READABLE_FONT_PX = 10;
+/** Monospace cell width per px of font: the same fallback ratio the pane's own font solver uses. */
+const MONO_CELL_W_PER_PX = 0.6;
+/** A tile's horizontal chrome around its pane (border + padding), measured on the shared card. */
+const TILE_CHROME_PX = 22;
+
+/**
+ * The tile width `auto` needs so a grid of `pinnedCols` columns still renders at `MIN_READABLE_FONT_PX`,
+ * or null while no pane has reported its pinned grid yet (the pane learns it from the daemon's first
+ * geometry frame). The result is a function of the COLUMN COUNT only, never of the font a pane is
+ * currently at, so dropping to one column cannot feed back into the next layout.
+ */
+export function readableTileFloorPx(pinnedCols: number | undefined): number | null {
+  if (!pinnedCols || !Number.isFinite(pinnedCols) || pinnedCols <= 0) return null;
+  return Math.ceil(pinnedCols * MONO_CELL_W_PER_PX * MIN_READABLE_FONT_PX) + TILE_CHROME_PX;
+}
+
+/**
+ * `auto`'s template for a row whose widest pinned grid is `pinnedCols` columns. Unchanged
+ * (`AUTO_GRID_TEMPLATE`) until that grid needs more than its 560px floor; past it, the floor rises so a
+ * tile is never narrower than readable, and a row that cannot fit two such tiles draws one. `min(100%, …)`
+ * keeps a narrow container from scrolling sideways — there the single tile simply takes the row.
+ */
+export function autoGridTemplate(pinnedCols?: number): string {
+  const floor = readableTileFloorPx(pinnedCols);
+  if (floor == null || floor <= 560) return AUTO_GRID_TEMPLATE;
+  return `repeat(auto-fill, minmax(min(100%, ${floor}px), 1fr))`;
+}
+
 export interface TileLayout {
   columns: GridColumns;
   /** Session ids, most-preferred first. Empty ⇒ no reader order; the derived one stands. */
@@ -98,8 +134,8 @@ export function parseTileLayout(raw: string | null | undefined): TileLayout {
  * tile width the shared card can actually draw, so `auto-fill` gives up a column rather than drawing
  * one too narrow; no media query can express it (the rail's own fold moves the row width under it).
  */
-export function gridTemplateColumns(columns: GridColumns): string {
-  if (columns === "auto") return AUTO_GRID_TEMPLATE;
+export function gridTemplateColumns(columns: GridColumns, pinnedCols?: number): string {
+  if (columns === "auto") return autoGridTemplate(pinnedCols);
   const n = Number(columns);
   // An exact 1/N share of the row, gaps taken out first. While it clears the floor, `auto-fill` fits
   // exactly N; once it does not, the floor wins and `auto-fill` fits however many DO clear it.

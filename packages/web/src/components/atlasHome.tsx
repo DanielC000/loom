@@ -417,6 +417,8 @@ export interface NodeHeadPill {
   tone?: Tone;
   /** The hover that expands a compressed reading (a short sha, an abbreviated branch). */
   title?: string;
+  /** Still loading: draw an empty pill at `text`'s width so the row does not shift when it lands. */
+  pending?: boolean;
 }
 
 /**
@@ -429,14 +431,17 @@ export interface NodeHeadPill {
  * expresses its separator IN the text — `genReadout`'s `" · "` — rather than as sibling elements,
  * which the pill's `gap` would space but the ellipsis could no longer treat as one truncatable run.
  */
-export function HeadPill({ children, tone: t, title, testId }: {
+export function HeadPill({ children, tone: t, title, testId, pending }: {
   children: ReactNode;
   tone?: Tone;
   title?: string;
   testId?: string;
+  /** A placeholder: the pill's box at its text's width, the text itself invisible and unannounced. */
+  pending?: boolean;
 }) {
   return (
-    <span className={`loom-atlas-headpill is-${t ?? "muted"}`} data-testid={testId} title={title}>
+    <span className={`loom-atlas-headpill is-${t ?? "muted"}${pending ? " is-pending" : ""}`} data-testid={testId}
+      title={pending ? undefined : title} aria-hidden={pending || undefined}>
       <span className="loom-atlas-headpill-text">{children}</span>
     </span>
   );
@@ -458,7 +463,7 @@ export function AtlasNodeHead({ pills, actions }: { pills: NodeHeadPill[]; actio
       style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
       <div className="loom-atlas-headpills" data-testid="atlas-nodehead-pills">
         {pills.map((p) => (
-          <HeadPill key={p.key} tone={p.tone} title={p.title} testId={`atlas-nodehead-pill-${p.key}`}>
+          <HeadPill key={p.key} tone={p.tone} title={p.title} testId={`atlas-nodehead-pill-${p.key}`} pending={p.pending}>
             {p.text}
           </HeadPill>
         ))}
