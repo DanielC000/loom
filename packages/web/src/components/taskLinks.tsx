@@ -51,7 +51,7 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
         </span>
       )}
       {h.childCount > 0 && (
-        <span style={{ ...metaItem, color: complete ? color.live : color.text2 }}
+        <span style={{ ...metaItem, color: complete ? color.liveFg : color.text2 }}
           title={`${h.childDone} of ${h.childCount} child ${h.childCount === 1 ? "card" : "cards"} done`}>
           <span aria-hidden style={{ fontFamily: font.mono }}>⊞</span>
           <span style={{ fontFamily: font.mono }}>{h.childDone}/{h.childCount}</span>
@@ -128,7 +128,7 @@ export function TaskLinksBlock({ links, columns, titleById, onOpenTask }: {
       {links.children.total > 0 && row("Children", `${links.children.done} of ${links.children.total} done`,
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: fs.mono,
-            color: allDone ? color.live : color.text2 }}>
+            color: allDone ? color.liveFg : color.text2 }}>
             <span>{links.children.done}/{links.children.total} done</span>
             <Meter value={links.children.done} max={links.children.total} width={56} tone={allDone ? "live" : "muted"} />
           </div>

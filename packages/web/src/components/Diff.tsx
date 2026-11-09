@@ -7,7 +7,7 @@ import { Dot } from "./ui";
 // file headers. The classifier differs per caller (FileHunks: hunkLineKind, header-stripped content;
 // DiffView: rawPatchLineKind, raw patch with real headers) — this map does not.
 const KIND_COLOR: Record<DiffLineKind, string> = {
-  add: color.live,
+  add: color.liveFg,
   del: color.danger,
   hunk: color.text2,
   context: color.text2,
@@ -71,7 +71,7 @@ export function FileDiffBlock({ file, open, onToggle, anchorId }: { file: FileDi
         <span style={{ color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}>
           {file.oldPath ? <><span style={{ color: color.text3 }}>{file.oldPath} → </span>{file.path}</> : file.path}
         </span>
-        {file.insertions > 0 && <span style={{ color: color.live, flexShrink: 0 }}>+{file.insertions}</span>}
+        {file.insertions > 0 && <span style={{ color: color.liveFg, flexShrink: 0 }}>+{file.insertions}</span>}
         {file.deletions > 0 && <span style={{ color: color.danger, flexShrink: 0 }}>−{file.deletions}</span>}
       </button>
       {open && <FileHunks file={file} />}
@@ -81,7 +81,7 @@ export function FileDiffBlock({ file, open, onToggle, anchorId }: { file: FileDi
 
 // A/D/R/M status tag, tinted by meaning (added=phosphor, deleted=red, renamed=cyan, modified=dim).
 export function StatusGlyph({ status }: { status: FileDiff["status"] }) {
-  const c = status === "added" ? color.live : status === "deleted" ? color.danger : color.text2;
+  const c = status === "added" ? color.liveFg : status === "deleted" ? color.danger : color.text2;
   return (
     <span title={status} style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: c, width: 12, textAlign: "center", flexShrink: 0 }}>
       {statusGlyph(status)}
@@ -107,7 +107,7 @@ export function FileOverviewRow({ file, onJump }: { file: FileDiff; onJump: () =
       <Dot tone={t} glow={file.risk === "high"} />
       <StatusGlyph status={file.status} />
       <span style={{ color: color.text2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{file.path}</span>
-      {file.insertions > 0 && <span style={{ color: color.live, flexShrink: 0 }}>+{file.insertions}</span>}
+      {file.insertions > 0 && <span style={{ color: color.liveFg, flexShrink: 0 }}>+{file.insertions}</span>}
       {file.deletions > 0 && <span style={{ color: color.danger, flexShrink: 0 }}>−{file.deletions}</span>}
       {file.risk !== "low" && (
         <span style={{ color: tone[t], fontSize: fs.xs, flexShrink: 0 }}>{file.risk}</span>

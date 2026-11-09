@@ -130,7 +130,7 @@ export default function EventTriggers() {
                       aria-pressed={t.enabled}
                       style={{
                         cursor: "pointer", background: "transparent", border: `1px solid ${t.enabled ? color.live : color.lineStrong}`,
-                        color: t.enabled ? color.live : color.text3, borderRadius: radius.sm,
+                        color: t.enabled ? color.liveFg : color.text3, borderRadius: radius.sm,
                         fontSize: fs.sm, padding: "2px 8px",
                       }}>{t.enabled ? "On" : "Off"}</button>
                   </td>

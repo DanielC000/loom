@@ -169,7 +169,7 @@ export default function Schedules() {
                       aria-pressed={s.enabled}
                       style={{
                         cursor: "pointer", background: "transparent", border: `1px solid ${s.enabled ? color.live : color.lineStrong}`,
-                        color: s.enabled ? color.live : color.text3, borderRadius: radius.sm,
+                        color: s.enabled ? color.liveFg : color.text3, borderRadius: radius.sm,
                         fontSize: fs.sm, padding: "2px 8px",
                       }}>{s.enabled ? "On" : "Off"}</button>
                   </td>
@@ -220,7 +220,7 @@ const OUTCOME_TABS: { key: "all" | "fired" | "deferred" | "failed" | "missed"; l
 // DIFFERENT thing — a boot-time reconcile finding a schedule's next_fire_at already in the past (the
 // daemon was down across it) — so it gets its own outcome rather than folding into "deferred".
 const OUTCOME_STYLE: Record<ScheduleHistoryEntry["kind"], { label: string; color: string; dot: string }> = {
-  schedule_fired: { label: "fired", color: color.live, dot: color.live },
+  schedule_fired: { label: "fired", color: color.liveFg, dot: color.live },
   schedule_fire_deferred: { label: "deferred", color: color.attnText, dot: color.attn },
   schedule_fire_failed: { label: "failed", color: color.danger, dot: color.danger },
   schedule_fire_missed: { label: "missed", color: color.text3, dot: color.text3 },

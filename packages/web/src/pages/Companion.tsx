@@ -1772,7 +1772,7 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
             onChange={(e) => save.mutate(e.target.checked)} style={{ marginTop: 3 }} data-testid="companion-restricted-tools" />
           <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <span style={{ ...fieldLabel, color: color.text }}>
-              Restricted tools <span style={{ fontWeight: 400, letterSpacing: 0, color: on ? color.live : color.text3 }}>· {on ? "on" : "off"}</span>
+              Restricted tools <span style={{ fontWeight: 400, letterSpacing: 0, color: on ? color.liveFg : color.text3 }}>· {on ? "on" : "off"}</span>
             </span>
             <span style={{ ...hint, margin: 0 }}>
               Remove the dangerous native tools — shell (Bash), host writes (Edit / Write / NotebookEdit /

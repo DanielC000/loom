@@ -19,7 +19,7 @@ export function LineDiff({ base, shipped }: { base: string; shipped: string }) {
       background: color.surface, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 8 }}>
       {rows.map((r, i) => {
         if (r.t === "fold") return <div key={i} style={{ color: color.text3 }}>{`  ⋯ ${r.n} unchanged ${r.n === 1 ? "line" : "lines"}`}</div>;
-        const c = r.t === "+" ? color.live : r.t === "-" ? color.danger : color.text2;
+        const c = r.t === "+" ? color.liveFg : r.t === "-" ? color.danger : color.text2;
         const text = r.text.replace(/\r$/, "");
         return <div key={i} style={{ color: c }}>{`${r.t} ${text}`}</div>;
       })}

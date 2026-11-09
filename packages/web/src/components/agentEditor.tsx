@@ -362,7 +362,7 @@ export function AgentEditor(
           onClick={savePrompt}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
           ? <Button onClick={() => setPrompt(seed)}>Reset</Button>
-          : promptShowsSaved && <span data-testid={`agent-prompt-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+          : promptShowsSaved && <span data-testid={`agent-prompt-saved-${agent.id}`} style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
         {conflict && (
           <span data-testid="agent-prompt-conflict" style={{ color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
             This prompt changed elsewhere since you opened it — Save replaces it with your version, Reset takes theirs.
@@ -451,7 +451,7 @@ export function AgentEditor(
           onClick={saveGrantsNow}>{savingGrants ? "Saving…" : "Save grants"}</Button>
         {grantsDirty
           ? <Button onClick={() => { setConnections(grantSync.seed.connections); setCapabilities(grantSync.seed.capabilities); }}>Reset</Button>
-          : grantsShowSaved && <span data-testid={`agent-grants-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+          : grantsShowSaved && <span data-testid={`agent-grants-saved-${agent.id}`} style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
         {grantsConflict && (
           <span data-testid={`agent-grants-conflict-${agent.id}`} style={{ color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
             Grants changed elsewhere since you opened this — Save replaces them with your version, Reset takes theirs.

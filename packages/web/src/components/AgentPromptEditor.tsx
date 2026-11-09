@@ -103,7 +103,7 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
               ? <span style={{ color: color.text3, fontSize: fs.sm }}>read-only in this preview</span>
               : dirty
                 ? <span style={{ color: color.attnText, fontSize: fs.sm }}>unsaved changes</span>
-                : <span style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+                : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
             <span style={{ flex: 1 }} />
             {save.isError && (
               <span style={{ color: color.danger, fontSize: fs.sm, textAlign: "right" }}>

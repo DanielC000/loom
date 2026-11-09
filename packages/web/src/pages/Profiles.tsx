@@ -909,7 +909,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         </Button>
         {dirty
           ? <Button onClick={reset}>Reset</Button>
-          : <span style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+          : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
         <span style={{ flex: 1 }} />
         {bundled && (confirmRevert ? (
           <>

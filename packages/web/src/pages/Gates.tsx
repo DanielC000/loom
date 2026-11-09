@@ -795,7 +795,7 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
     <tr className="loom-gate-row">
       <td style={tdStyle}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: fs.sm, color: outC }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: fs.sm, color: row.outcome === "pass" ? color.liveFg : outC }}>
             <span style={{ width: 7, height: 7, borderRadius: radius.base, background: outC, ...(OUTCOME_GLOW[row.outcome] ? { boxShadow: `0 0 5px ${outC}` } : null) }} />
             {row.outcome}
           </span>

@@ -37,6 +37,8 @@ export const color = {
   live: "var(--loom-live)",
   liveText: "var(--loom-live-text)",
   liveSoft: "var(--loom-live-soft)",
+  // Live green for bare small text / glyphs on a page surface. Same as `live` in dark; text-safe in light.
+  liveFg: "var(--loom-live-fg)",
   work: "var(--loom-work)",
   workText: "var(--loom-work-text)",
   workSoft: "var(--loom-work-soft)",

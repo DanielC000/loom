@@ -184,7 +184,7 @@ export function ReviewSurface({ workerId, embedded = false }: {
           <p style={{ color: color.text3, fontSize: fs.sm, marginTop: 8 }}>
             Approve runs the project's build/DoD gate in the worktree (fail-closed) before squash-merging; on green the worktree is removed and the task closed. Request changes sends your note to the worker as a turn.
           </p>
-          {result && <div style={{ marginTop: 8, fontSize: fs.body, color: result.startsWith("✓") ? color.live : result.startsWith("error") || result.startsWith("rejected") ? color.danger : result.startsWith("still running") ? color.workText : color.attnText }}>{result}</div>}
+          {result && <div style={{ marginTop: 8, fontSize: fs.body, color: result.startsWith("✓") ? color.liveFg : result.startsWith("error") || result.startsWith("rejected") ? color.danger : result.startsWith("still running") ? color.workText : color.attnText }}>{result}</div>}
         </Panel>
       )}
 

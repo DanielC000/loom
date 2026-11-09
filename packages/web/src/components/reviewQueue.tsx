@@ -110,7 +110,7 @@ export function MergeOutcome({ merge }: { merge: WorkerMerge }) {
     return <span style={{ fontSize: fs.sm, color: color.danger }}>rejected — {merge.data.reason}</span>;
   }
   if (merge.data && !merge.data.pending && merge.data.merged === true) {
-    return <span style={{ fontSize: fs.sm, color: color.live }}>
+    return <span style={{ fontSize: fs.sm, color: color.liveFg }}>
       {merge.data.commitSubject ? `merged — ${merge.data.commitSubject}` : "merged"}
     </span>;
   }
@@ -179,12 +179,12 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
           <div style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.45 }}>{analysis.headline}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: fs.mono }}>
             <span style={{ color: color.text }}>{analysis.files.length} file{analysis.files.length === 1 ? "" : "s"}</span>
-            {analysis.totalInsertions > 0 && <span style={{ color: color.live }}>+{analysis.totalInsertions}</span>}
+            {analysis.totalInsertions > 0 && <span style={{ color: color.liveFg }}>+{analysis.totalInsertions}</span>}
             {analysis.totalDeletions > 0 && <span style={{ color: color.danger }}>−{analysis.totalDeletions}</span>}
             <span style={{ flex: 1 }} />
             {analysis.highRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.danger }}><Dot tone="danger" glow />{analysis.highRisk} high-risk</span>}
             {analysis.highRisk === 0 && analysis.mediumRisk > 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.attnText }}><Dot tone="attn" />{analysis.mediumRisk} to watch</span>}
-            {analysis.highRisk === 0 && analysis.mediumRisk === 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.live }}><Dot tone="live" />low risk</span>}
+            {analysis.highRisk === 0 && analysis.mediumRisk === 0 && <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: color.liveFg }}><Dot tone="live" />low risk</span>}
           </div>
 
           {/* top risk files inline */}

@@ -1694,8 +1694,8 @@ function shipRepoLabel(mergedRepoKey: string | null | undefined, repos: RepoRegi
 // is the byte-identical default every pre-existing "✓ sha" render already had before this field existed.
 function shipVerificationStyle(verification: Task["mergedVerification"]): { color: string; suffix: string } {
   if (verification === "trailer-only") return { color: color.text3, suffix: " (unverified content — pre-dates path-set verification)" };
-  if (verification === "ledger") return { color: color.live, suffix: " (verified when Loom landed it; branch since deleted)" };
-  return { color: color.live, suffix: "" };
+  if (verification === "ledger") return { color: color.liveFg, suffix: " (verified when Loom landed it; branch since deleted)" };
+  return { color: color.liveFg, suffix: "" };
 }
 
 // Centered modal detail dialog: view + edit a task's title and description (the `body` field that the
@@ -2291,7 +2291,7 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
           })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
             ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); setParentDraft(null); setParentEditing(false); setRelationDraft(null); }}>Reset</Button>
-            : <span style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+            : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
           {/* The catch-all failure line. A refusal the Relations section has already placed at the row
               (or section) it names is suppressed HERE rather than printed twice — one message, shown at
               the control the human has to go fix. `relationErrorTarget` returning null (anything it does
@@ -2507,7 +2507,7 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
     const authorized = q.chosenOption === "authorize";
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <span style={{ fontSize: fs.sm, color: authorized ? color.live : color.danger }}>{authorized ? "authorized" : "denied"}</span>
+        <span style={{ fontSize: fs.sm, color: authorized ? color.liveFg : color.danger }}>{authorized ? "authorized" : "denied"}</span>
         {q.note && <span style={{ fontSize: fs.sm, color: color.text2, whiteSpace: "pre-wrap" }}>{q.note}</span>}
       </div>
     );

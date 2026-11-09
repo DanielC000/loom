@@ -357,7 +357,7 @@ function SkillEditor({
         <Button variant="primary" disabled={!dirty || saving} onClick={() => { setSavedText(text); onSave(text); }}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
           ? <Button onClick={() => setText(content)}>Discard changes</Button>
-          : showSaved && <span data-testid="skill-saved" style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+          : showSaved && <span data-testid="skill-saved" style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
         {/* Re-save WITHOUT an edit, purely to re-stamp "human" — the ordinary Save button above is
             disabled with nothing dirty, so without this a skill with no pending edit has no way to earn
             the "human" stamp it needs to reach a locked role. Hidden while dirty: Save already covers it. */}

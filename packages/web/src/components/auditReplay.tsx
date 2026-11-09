@@ -152,14 +152,14 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
         <Button variant="ghost" onClick={onClose}>Close</Button>
       </div>
 
-      {!d.summary.changed && <span style={{ fontSize: fs.sm, color: color.live }}>Identical event sequences.</span>}
+      {!d.summary.changed && <span style={{ fontSize: fs.sm, color: color.liveFg }}>Identical event sequences.</span>}
 
       {changedKinds.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {changedKinds.map((k) => (
             <span key={k.kind} title={`A:${k.a} B:${k.b}`} style={{
               fontFamily: font.mono, fontSize: fs.mono, padding: "1px 6px", borderRadius: radius.sm,
-              border: `1px solid ${color.line}`, color: k.delta > 0 ? color.live : color.danger,
+              border: `1px solid ${color.line}`, color: k.delta > 0 ? color.liveFg : color.danger,
             }}>
               {k.kind} {k.delta > 0 ? "+" : ""}{k.delta}
             </span>
@@ -174,7 +174,7 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
             const added = s.op === "added";
             return (
               <div key={i} style={{ display: "flex", gap: 8, fontFamily: font.mono, fontSize: fs.mono, alignItems: "baseline" }}>
-                <span style={{ color: added ? color.live : color.danger, width: 14, flexShrink: 0 }}>{added ? "+B" : "−A"}</span>
+                <span style={{ color: added ? color.liveFg : color.danger, width: 14, flexShrink: 0 }}>{added ? "+B" : "−A"}</span>
                 <span style={{ color: color.text2 }}>{s.signature}</span>
                 <span style={{ color: color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detailLine(ev)}</span>
               </div>

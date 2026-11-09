@@ -56,6 +56,9 @@
   --loom-live: oklch(0.8 0.21 148);
   --loom-live-text: oklch(0.84 0.19 148);
   --loom-live-soft: oklch(0.3 0.09 148);
+  /* Live green as bare small text or a glyph on a page surface (diff +N/A, "ON", ticks). Dark keeps the
+     fill value byte-for-byte; light drops to a shade that clears 4.5:1 (card 92d197ed). */
+  --loom-live-fg: oklch(0.8 0.21 148);
   --loom-work: oklch(0.7 0.17 252);
   --loom-work-text: oklch(0.79 0.13 252);
   --loom-work-soft: oklch(0.3 0.09 256);
@@ -124,6 +127,7 @@
   --loom-live: oklch(0.62 0.2 148);
   --loom-live-text: oklch(0.46 0.15 148);
   --loom-live-soft: oklch(0.93 0.09 148);
+  --loom-live-fg: oklch(0.46 0.15 148);
   --loom-work: oklch(0.55 0.2 255);
   --loom-work-text: oklch(0.48 0.19 258);
   --loom-work-soft: oklch(0.94 0.04 255);
@@ -2622,7 +2626,7 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-tail { color: var(--loom-text-2); }
 .loom-mcp-meta { font-size: 11px; color: var(--loom-text-3); flex-shrink: 0; }
 .loom-mcp-ocx { font-size: 12px; font-weight: 600; flex-shrink: 0; }
-.loom-mcp-ocx.ok { color: var(--loom-live); }
+.loom-mcp-ocx.ok { color: var(--loom-live-fg); }
 .loom-mcp-ocx.error { color: var(--loom-danger); }
 .loom-mcp-ocx.pending { color: var(--loom-text-3); }
 .loom-mcp-ocx.refused { color: var(--loom-attn); cursor: help; }

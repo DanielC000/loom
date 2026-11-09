@@ -1017,7 +1017,7 @@ function AnsweredReadout({ q }: { q: QuestionInboxItem }) {
       {q.type === "credential" ? (
         <div style={{ fontSize: fs.body, color: color.text2 }}>provided · encrypted, not shown</div>
       ) : q.type === "permission" ? (
-        <div style={{ fontSize: fs.body, color: q.chosenOption === "authorize" ? color.live : color.danger }}>{requestOutcome(q)}</div>
+        <div style={{ fontSize: fs.body, color: q.chosenOption === "authorize" ? color.liveFg : color.danger }}>{requestOutcome(q)}</div>
       ) : (
         <>
           {q.chosenOption && <div style={{ fontSize: fs.body, color: color.text }}>Chose: <span style={{ color: color.text2 }}>{q.chosenOption}</span></div>}
@@ -1206,7 +1206,7 @@ function PermissionControl({ q }: { q: QuestionInboxItem }) {
           <Button variant="danger" disabled={pending} onClick={() => deny.mutate()}>{deny.isPending ? "Denying…" : "Deny"}</Button>
           <span style={{ fontSize: fs.sm, color: color.text3 }}>Sends your decision to agent <span style={{ fontFamily: font.mono }}>{q.sessionId.slice(0, 8)}</span>.</span>
         </div>
-        {(authorize.isSuccess || deny.isSuccess) && <span style={{ fontSize: fs.sm, color: color.live }}>✓ answered — the manager was nudged to pull it.</span>}
+        {(authorize.isSuccess || deny.isSuccess) && <span style={{ fontSize: fs.sm, color: color.liveFg }}>✓ answered — the manager was nudged to pull it.</span>}
       </Panel>
     </div>
   );
@@ -1259,7 +1259,7 @@ function CredentialControl({ q }: { q: QuestionInboxItem }) {
           </Button>
           <span style={{ fontSize: fs.sm, color: color.text3 }}>Encrypted at rest · never returned.</span>
         </div>
-        {answer.isSuccess && <span style={{ fontSize: fs.sm, color: color.live }}>✓ stored — encrypted, and the manager was nudged to pull it.</span>}
+        {answer.isSuccess && <span style={{ fontSize: fs.sm, color: color.liveFg }}>✓ stored — encrypted, and the manager was nudged to pull it.</span>}
       </Panel>
     </div>
   );
@@ -1274,7 +1274,7 @@ function SubmitRow({ label, disabled, pending, success, onSubmit }:
         <Button variant="primary" disabled={disabled || pending} onClick={onSubmit}>{pending ? "Submitting…" : label}</Button>
         <span style={{ fontSize: fs.sm, color: color.text3 }}>Records your answer and nudges the manager to pull it.</span>
       </div>
-      {success && <span style={{ fontSize: fs.sm, color: color.live }}>✓ answered — the manager was nudged to pull it.</span>}
+      {success && <span style={{ fontSize: fs.sm, color: color.liveFg }}>✓ answered — the manager was nudged to pull it.</span>}
     </>
   );
 }

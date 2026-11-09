@@ -765,7 +765,7 @@ function AuditorScheduleRow({ s, onToggle, onRemove, busy }:
       <span style={{ color: color.text2, fontFamily: font.mono, fontSize: fs.mono }}>{s.cron}</span>
       <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>kind:{s.kind}</span>
       <span style={{ flex: 1 }}>next · {fmt(s.nextFireAt)}</span>
-      <span style={{ fontSize: fs.xs, color: s.enabled ? color.live : color.text3 }}>{s.enabled ? "ON" : "OFF"}</span>
+      <span style={{ fontSize: fs.xs, color: s.enabled ? color.liveFg : color.text3 }}>{s.enabled ? "ON" : "OFF"}</span>
       <Button style={{ padding: "0 8px" }} disabled={busy} onClick={() => onToggle(!s.enabled)}>{s.enabled ? "Disable" : "Enable"}</Button>
       <Button variant="danger" style={{ padding: "0 8px" }} disabled={busy} onClick={onRemove}>Delete</Button>
     </div>

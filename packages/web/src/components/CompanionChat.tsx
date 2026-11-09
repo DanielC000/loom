@@ -769,7 +769,7 @@ function MessageRow({ msg, title, grouped, groupEnd, time, delivery }: {
         <Bubble msg={msg} you={you} groupEnd={groupEnd} />
         {you && groupEnd && delivery && (
           <div style={{ display: "flex", flexDirection: "row-reverse", alignItems: "center", gap: 6, margin: "4px 5px 0", fontSize: fs.sm, color: color.text3 }}>
-            <span style={{ fontFamily: font.mono, color: color.live, letterSpacing: "-1px" }} aria-hidden>{delivery === "delivered" ? "✓✓" : "✓"}</span>
+            <span style={{ fontFamily: font.mono, color: color.liveFg, letterSpacing: "-1px" }} aria-hidden>{delivery === "delivered" ? "✓✓" : "✓"}</span>
             <span>{(badge ? `via ${badge}` : "in-app")} · {delivery}</span>
           </div>
         )}
