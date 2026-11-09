@@ -117,7 +117,7 @@ test.describe("profiles & agents", () => {
     // the project form's button reads "Create project".
     await page.getByRole("button", { name: /new agent/i }).click();
     await page.getByPlaceholder("agent name").fill(newName);
-    await page.getByPlaceholder("startup prompt (injected as the first turn of each new session)")
+    await page.getByTestId("agent-create-form").getByLabel("Startup prompt")
       .fill("Verify the assigned task end-to-end and report with evidence.");
     const create = page.getByRole("button", { name: "Create", exact: true });
     await expect(create).toBeEnabled();

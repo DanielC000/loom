@@ -10,7 +10,7 @@
 // the Agents node's dialog) and supplies the callbacks; the writes come from `useAgentWrites`.
 //
 // @decision 318b5a21 — one editor. A second copy of this form drifts from the first within one card.
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { profileRoleBindsAsPlainSession, type Agent, type SessionRole, type CapabilityGrant } from "@loom/shared";
 import { api } from "../lib/api";
@@ -19,7 +19,7 @@ import { isDevLayerRole } from "../lib/roleDisplay";
 import { modEnterSubmit } from "../lib/modEnter";
 import { useFormSync } from "../lib/useFormSync";
 import { errorText } from "../lib/loopbackCredential";
-import { color, font, radius, fs } from "../theme";
+import { color, font, radius, fs, toneText } from "../theme";
 
 // The one wording for a profile whose role the spawn would clamp away — stated as the consequence ("what
 // do I get"), not the mechanism. One constant so all three places that disclose it can never word it
@@ -37,6 +37,45 @@ const PROMPT_FIELD_SIZE = {
   flex: "1 0 auto", height: "min(360px, 40vh)", minHeight: 160,
   width: "100%", boxSizing: "border-box", resize: "vertical",
 } as const;
+
+/** The startup-prompt field's placeholder, shared by the create form and the editor (card dd83149f):
+ *  an empty field should teach what belongs in it, not sit there as a blank box. */
+const PROMPT_PLACEHOLDER =
+  "First turn of every new session. Describe the role, the repo's conventions, and what done means.";
+
+/**
+ * The inline "you have unsaved work" bar a FRAME shows when a close is requested over a dirty draft
+ * (card dd83149f). Same shape as the board card dialog's dirty-close confirm (pages/Board.tsx): the
+ * dialog stays open, the draft stays in the field, and leaving takes an explicit Discard.
+ *
+ * @decision dd83149f — a dirty draft blocks the close; it is never silently dropped and never parked
+ * in hidden state to reappear later. A draft kept across close would survive only until the next
+ * reload and give no sign it exists, which is a slower way to lose it.
+ */
+export function UnsavedCloseBar({ what, onSave, saveDisabled, onDiscard, onKeepEditing }: {
+  /** What is unsaved, as a noun phrase: "prompt", "prompt and grants", "new agent". */
+  what: string;
+  /** Omitted where there is nothing a single click can save (the create form needs a name first). */
+  onSave?: () => void;
+  saveDisabled?: boolean;
+  onDiscard: () => void;
+  onKeepEditing: () => void;
+}) {
+  return (
+    <div role="alert" data-testid="agent-unsaved-bar"
+      style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", padding: "6px 8px",
+        borderRadius: radius.base, background: color.attnSoft }}>
+      <span style={{ flex: 1, minWidth: 160, color: toneText.attn, fontSize: fs.sm, fontFamily: font.ui }}>
+        Unsaved {what}. Save it, or discard it and close?
+      </span>
+      {onSave && (
+        <Button variant="primary" disabled={saveDisabled} data-testid="agent-unsaved-save" onClick={onSave}>Save</Button>
+      )}
+      <Button variant="danger" data-testid="agent-unsaved-discard" onClick={onDiscard}>Discard and close</Button>
+      <Button data-testid="agent-unsaved-keep" onClick={onKeepEditing}>Keep editing</Button>
+    </div>
+  );
+}
 
 /** The profile shape this editor's bind dropdown needs. `ProfileSummary` satisfies it. */
 export type EditorProfile = { id: string; name: string; role: string | null; icon: string | null };
@@ -105,8 +144,14 @@ const capsJson = (xs: readonly CapabilityGrant[]) =>
  * editor below, not here: asking which capabilities to bind before the agent exists puts that choice
  * in front of someone who has not yet said what the agent is for.
  */
-export function AgentForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: string; startupPrompt: string }) => void; pending: boolean; onCancel: () => void }) {
+export function AgentForm({ onCreate, pending, onCancel, onDirtyChange }: {
+  onCreate: (b: { name: string; startupPrompt: string }) => void; pending: boolean; onCancel: () => void;
+  /** Lets a closable frame guard its close while anything has been typed (card dd83149f). */
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const [name, setName] = useState(""), [startupPrompt, setPrompt] = useState("");
+  const dirty = name !== "" || startupPrompt !== "";
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
   // Fills its host's `fill` body: name at natural height, the prompt textarea grows (`flex:1`) to take
   // the rest of the pane so a roomy frame is actually used, buttons pinned below.
   return (
@@ -114,7 +159,7 @@ export function AgentForm({ onCreate, pending, onCancel }: { onCreate: (b: { nam
       <Input placeholder="agent name" value={name} onChange={(e) => setName(e.target.value)} aria-label="Agent name" />
       <textarea
         style={{ ...PROMPT_FIELD_SIZE, background: color.inset, color: color.text, border: `1px solid ${color.lineStrong}`, borderRadius: radius.sm, padding: 8, fontFamily: font.ui, fontSize: fs.body, lineHeight: 1.5 }}
-        placeholder="startup prompt (injected as the first turn of each new session)"
+        placeholder={`Startup prompt. ${PROMPT_PLACEHOLDER}`} aria-label="Startup prompt"
         value={startupPrompt} onChange={(e) => setPrompt(e.target.value)} />
       <div style={{ display: "flex", gap: 8 }}>
         <Button variant="primary" disabled={!name || pending} data-testid="agent-create-submit"
@@ -129,7 +174,8 @@ export function AgentForm({ onCreate, pending, onCancel }: { onCreate: (b: { nam
 // the old cramped rail) over the roomy startup-prompt editor. Remounted per agent (key=agent.id) so the
 // textarea + assignment reset on switch; after Save the query refetches and `dirty` clears.
 export function AgentEditor(
-  { agent, profiles, isDev, liveCount, onAssignProfile, onSavePrompt, onSaveGrants, onDelete, saving, savingGrants, grantsError, grantsErrorAgentId, deleting }:
+  { agent, profiles, isDev, liveCount, onAssignProfile, onSavePrompt, onSaveGrants, onDelete, saving, savingGrants, grantsError, grantsErrorAgentId, deleting,
+    onDirtyChange, closeArmed = false, onDiscardClose, onKeepEditing }:
   { agent: Agent; profiles: EditorProfile[]; isDev: boolean;
     liveCount: number; onAssignProfile: (profileId: string | null) => void; onSavePrompt: (startupPrompt: string) => void;
     onSaveGrants: (patch: { connections: string[]; capabilities: CapabilityGrant[] }) => void;
@@ -137,7 +183,12 @@ export function AgentEditor(
     // @decision caca806c (round 3, item 5) — `grantsError` is the SHARED `saveGrants` mutation's error,
     // not one scoped to this agent; `grantsErrorAgentId` (its `variables?.id`) scopes it IN HERE, by
     // construction, so every host (Projects.tsx, atlasAgents.tsx) gets this for free on agent switch.
-    grantsError: Error | null; grantsErrorAgentId: string | undefined; deleting: boolean },
+    grantsError: Error | null; grantsErrorAgentId: string | undefined; deleting: boolean;
+    // A CLOSABLE frame's dirty-close guard (card dd83149f). The frame owns the close request (it hears
+    // Escape / the scrim / ×) and arms `closeArmed`; the editor owns the bar, because only it holds the
+    // draft a Save would write. A frame with no close (Projects' third pane) passes none of these.
+    onDirtyChange?: (dirty: boolean) => void; closeArmed?: boolean;
+    onDiscardClose?: () => void; onKeepEditing?: () => void },
 ) {
   const scopedGrantsError = grantsErrorAgentId === agent.id ? grantsError : null;
   const [prompt, setPrompt] = useState(agent.startupPrompt);
@@ -180,6 +231,21 @@ export function AgentEditor(
   );
   const grantsDirty = grantSync.dirty;
   const grantsConflict = grantSync.conflicts.length > 0;
+  useEffect(() => { onDirtyChange?.(dirty || grantsDirty); }, [dirty, grantsDirty, onDirtyChange]);
+
+  // "saved" is a claim about a save THIS session made (card dd83149f, audit A-12) — not "nothing is
+  // dirty", which is also true of a field nobody has touched. Each Save records the value it wrote; the
+  // notice shows only once the persisted value (the seed) has caught up to it. A refused write never
+  // reaches the seed, so it can never read "saved", and Reset after a failed Save cannot either.
+  const [savedPrompt, setSavedPrompt] = useState<string | null>(null);
+  const [savedGrants, setSavedGrants] = useState<string | null>(null);
+  const grantsKey = (v: { connections: string[]; capabilities: CapabilityGrant[] }) =>
+    `${sortedJson(v.connections)}|${capsJson(v.capabilities)}`;
+  const promptShowsSaved = !dirty && !saving && savedPrompt !== null && savedPrompt === seed;
+  const grantsShowSaved = !grantsDirty && !savingGrants && savedGrants !== null && savedGrants === grantsKey(grantSync.seed);
+  const savePrompt = () => { setSavedPrompt(prompt); onSavePrompt(prompt); };
+  const saveGrantsNow = () => { setSavedGrants(grantsKey({ connections, capabilities })); onSaveGrants({ connections, capabilities }); };
+  const unsavedWhat = dirty && grantsDirty ? "prompt and grants" : dirty ? "prompt" : "grants";
   // The P1 credential store's connections — the menu of what this agent's egress allowlist can grant.
   // Filtered to what THIS agent could actually be granted (mirrors the daemon's own write-time
   // agentCredentialGrantCrossProjectError / connections/store.ts's isConnectionUsableByProject): a GLOBAL
@@ -232,6 +298,14 @@ export function AgentEditor(
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, padding: 8, gap: 10 }}
       data-testid={`agent-editor-${agent.id}`}>
+      {/* The frame asked to close over unsaved work: keep the draft, say so, let the reader choose. Save
+          writes and dismisses the bar (the dialog stays, now clean, showing "saved"), so a refused write
+          is never followed by a close that throws the draft away. */}
+      {closeArmed && (dirty || grantsDirty) && onDiscardClose && onKeepEditing && (
+        <UnsavedCloseBar what={unsavedWhat} saveDisabled={saving || savingGrants}
+          onSave={() => { if (dirty) savePrompt(); if (grantsDirty) saveGrantsNow(); onKeepEditing(); }}
+          onDiscard={onDiscardClose} onKeepEditing={onKeepEditing} />
+      )}
       {/* Editor header: identity + profile assignment + delete */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <span style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>{agent.name}</span>
@@ -275,8 +349,8 @@ export function AgentEditor(
       {/* ⌘/Ctrl+Enter saves, from the one shared handler AgentPromptEditor uses (lib/modEnter.ts) — the
           same gate as the Save button beside it, so the keyboard can never write what the button won't. */}
       <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} spellCheck={false}
-        onKeyDown={modEnterSubmit(dirty && !saving, () => onSavePrompt(prompt))}
-        data-testid={`agent-prompt-${agent.id}`}
+        onKeyDown={modEnterSubmit(dirty && !saving, savePrompt)}
+        data-testid={`agent-prompt-${agent.id}`} aria-label="Startup prompt" placeholder={PROMPT_PLACEHOLDER}
         style={{
           ...PROMPT_FIELD_SIZE,
           fontFamily: font.ui, fontSize: fs.body, lineHeight: 1.5,
@@ -285,10 +359,10 @@ export function AgentEditor(
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!dirty || saving} data-testid={`agent-save-${agent.id}`}
           title="Save the startup prompt (⌘/Ctrl+Enter)"
-          onClick={() => onSavePrompt(prompt)}>{saving ? "Saving…" : "Save"}</Button>
+          onClick={savePrompt}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
           ? <Button onClick={() => setPrompt(seed)}>Reset</Button>
-          : <span data-testid={`agent-prompt-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+          : promptShowsSaved && <span data-testid={`agent-prompt-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
         {conflict && (
           <span data-testid="agent-prompt-conflict" style={{ color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
             This prompt changed elsewhere since you opened it — Save replaces it with your version, Reset takes theirs.
@@ -374,10 +448,10 @@ export function AgentEditor(
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <Button variant="primary" disabled={!grantsDirty || savingGrants} data-testid={`agent-grants-save-${agent.id}`}
-          onClick={() => onSaveGrants({ connections, capabilities })}>{savingGrants ? "Saving…" : "Save grants"}</Button>
+          onClick={saveGrantsNow}>{savingGrants ? "Saving…" : "Save grants"}</Button>
         {grantsDirty
           ? <Button onClick={() => { setConnections(grantSync.seed.connections); setCapabilities(grantSync.seed.capabilities); }}>Reset</Button>
-          : <span data-testid={`agent-grants-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+          : grantsShowSaved && <span data-testid={`agent-grants-saved-${agent.id}`} style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
         {grantsConflict && (
           <span data-testid={`agent-grants-conflict-${agent.id}`} style={{ color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
             Grants changed elsewhere since you opened this — Save replaces them with your version, Reset takes theirs.

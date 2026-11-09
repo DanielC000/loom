@@ -438,4 +438,94 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
         .toBeGreaterThan(before.height + 100);
     });
   }
+
+  // Card dd83149f (Atlas audit A-04 + A-12): a typed, unsaved prompt survives Escape, a scrim click and
+  // the ×. Each exit arms an inline "Unsaved prompt" bar and keeps the dialog and the draft. Leaving
+  // takes an explicit Discard. "saved" shows only after a real save, never on an untouched field.
+  // Measured against the pre-fix web build: this test goes red at its first A-12 check (no placeholder).
+  // The Escape and scrim draft loss on that build was confirmed by hand in a browser, not by this test.
+  test("switch ON: an unsaved prompt survives Escape, a scrim click and ×, and 'saved' needs a real save", async ({ page, loomDaemon }) => {
+    test.setTimeout(90_000);
+    const seeded = await seedRoster(loomDaemon);
+    const agentUrl = `${loomDaemon.baseURL}/api/projects/${seeded.project.id}/agents`;
+    const storedPrompt = async () =>
+      (await apiJson<Array<SeededAgent & { startupPrompt: string }>>(agentUrl)).find((a) => a.id === seeded.plain.id)!.startupPrompt;
+    await seedAtlasOn(page);
+    await pinProject(page, seeded.project.id);
+    await page.goto(loomDaemon.baseURL + "/agents");
+
+    const card = page.getByTestId(`atlas-agent-card-${seeded.plain.id}`);
+    await card.getByTestId(`atlas-agent-edit-${seeded.plain.id}`).click();
+    const dialog = page.getByTestId("atlas-agent-editor");
+    const prompt = dialog.getByTestId(`agent-prompt-${seeded.plain.id}`);
+    const bar = dialog.getByTestId("agent-unsaved-bar");
+    const saved = dialog.getByTestId(`agent-prompt-saved-${seeded.plain.id}`);
+    await expect(prompt).toBeVisible();
+
+    // A-12: the empty field teaches itself, and nothing claims "saved" before a save has happened.
+    await expect(prompt).toHaveAttribute("placeholder", /First turn of every new session/);
+    await expect(dialog.getByTestId(`agent-save-${seeded.plain.id}`)).toBeDisabled();
+    await expect(saved).toHaveCount(0);
+    await expect(dialog.getByTestId(`agent-grants-saved-${seeded.plain.id}`)).toHaveCount(0);
+
+    const draft = "You reconcile billing ledgers.";
+    await prompt.fill(draft);
+
+    // Each exit path in turn. After each one: the dialog is still open, the bar names the unsaved prompt,
+    // and the draft is untouched. "Keep editing" dismisses the bar for the next leg.
+    const exits: Array<[string, () => Promise<void>]> = [
+      ["Escape", () => page.keyboard.press("Escape")],
+      // The scrim is the dialog's own outer element; (5,5) is padding, outside the panel.
+      ["scrim click", () => dialog.click({ position: { x: 5, y: 5 } })],
+      ["× button", () => page.getByTestId("atlas-agent-editor-close").click()],
+    ];
+    for (const [how, exit] of exits) {
+      await exit();
+      await expect(bar, `${how} over a dirty draft must arm the bar`).toBeVisible();
+      await expect(dialog, `${how} closed the dialog over a dirty draft`).toBeVisible();
+      await expect(bar).toContainText("Unsaved prompt");
+      await expect(prompt).toHaveValue(draft);
+      await dialog.getByTestId("agent-unsaved-keep").click();
+      await expect(bar).toHaveCount(0);
+      await expect(prompt).toHaveValue(draft);
+    }
+    // Nothing above wrote anything.
+    expect(await storedPrompt()).toBe("");
+
+    // The bar's Save really writes, the bar retires, and only NOW does "saved" appear. A clean close
+    // afterwards needs no confirmation.
+    await page.keyboard.press("Escape");
+    await expect(bar).toBeVisible();
+    await dialog.getByTestId("agent-unsaved-save").click();
+    await expect.poll(storedPrompt, { message: "the bar's Save never reached the daemon" }).toBe(draft);
+    await expect(saved).toHaveText("saved");
+    await expect(bar).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    // Reopen: the stored value is back, and "saved" is a THIS-session claim, so a fresh editor shows none.
+    await card.getByTestId(`atlas-agent-edit-${seeded.plain.id}`).click();
+    await expect(prompt).toHaveValue(draft);
+    await expect(saved).toHaveCount(0);
+
+    // Discard is the one way out over a dirty draft, and it really discards.
+    await prompt.fill("a second draft nobody keeps");
+    await page.keyboard.press("Escape");
+    await dialog.getByTestId("agent-unsaved-discard").click();
+    await expect(dialog).toHaveCount(0);
+    expect(await storedPrompt()).toBe(draft);
+    await card.getByTestId(`atlas-agent-edit-${seeded.plain.id}`).click();
+    await expect(prompt).toHaveValue(draft);
+
+    // The create form is guarded too: a typed name is a draft.
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await page.getByTestId("atlas-agents-new").click();
+    await dialog.getByLabel("Agent name").fill("half-made agent");
+    await page.keyboard.press("Escape");
+    await expect(bar).toContainText("Unsaved new agent");
+    await expect(dialog.getByLabel("Agent name")).toHaveValue("half-made agent");
+    await dialog.getByTestId("agent-unsaved-discard").click();
+    await expect(dialog).toHaveCount(0);
+  });
 });

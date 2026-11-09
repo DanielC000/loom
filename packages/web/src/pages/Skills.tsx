@@ -263,6 +263,12 @@ function SkillEditor({
   const [confirmPublish, setConfirmPublish] = useState(false);
   const [resolver, setResolver] = useState<(SkillMergePreview & { clean: false }) | null>(null);
   const dirty = text !== content;
+  // "saved" only after a Save in this session has actually landed (card dd83149f, audit A-12): the text
+  // this Save wrote must be what the server now serves. A refused write never becomes `content`. The
+  // "Save to trust" re-save deliberately does not set it: it writes what is already served, so a refused
+  // one would read as saved.
+  const [savedText, setSavedText] = useState<string | null>(null);
+  const showSaved = !dirty && !saving && savedText !== null && savedText === content;
   // card 509176c8: a user skill not stamped "human" is withheld from every locked-role session (Companion,
   // Setup, …) under their deliver-all default — surface it, and give a way to re-stamp it WITHOUT
   // requiring an edit (the ordinary Save button is disabled with nothing dirty to save).
@@ -346,10 +352,10 @@ function SkillEditor({
           background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 10,
         }} />
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave(text)}>{saving ? "Saving…" : "Save"}</Button>
+        <Button variant="primary" disabled={!dirty || saving} onClick={() => { setSavedText(text); onSave(text); }}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
           ? <Button onClick={() => setText(content)}>Discard changes</Button>
-          : <span style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+          : showSaved && <span data-testid="skill-saved" style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
         {/* Re-save WITHOUT an edit, purely to re-stamp "human" — the ordinary Save button above is
             disabled with nothing dirty, so without this a skill with no pending edit has no way to earn
             the "human" stamp it needs to reach a locked role. Hidden while dirty: Save already covers it. */}

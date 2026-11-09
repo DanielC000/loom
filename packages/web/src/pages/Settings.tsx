@@ -367,9 +367,11 @@ function RepoPathEditor({ project }: { project: Project }) {
         <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : "Rebind"}
         </Button>
+        {/* "saved" only after a rebind in this session succeeded (card dd83149f, audit A-12), never on an
+            untouched field. `isSuccess` resets on the next attempt, so a refused rebind can't read saved. */}
         {dirty
           ? <span style={{ color: color.attnText, fontSize: fs.sm }}>unsaved changes</span>
-          : <span style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
+          : save.isSuccess && <span data-testid="repo-rebind-saved" style={{ color: color.live, fontSize: fs.sm }}>saved</span>}
         <span style={{ flex: 1 }} />
         {save.isError && (
           <span style={{ color: color.danger, fontSize: fs.sm, textAlign: "right" }}>

@@ -10,11 +10,11 @@
 // ⛔ Nothing here fetches a roster. lib/atlasAgents.ts composes it off existing `api.*` calls and the
 // mounts hand these components finished rows. The two MUTATIONS do live here — they are the actions,
 // and `api.startSession`/`api.stopSession` are the same two calls pages/Overview.tsx already fires.
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
-import { AgentEditor, AgentForm, useAgentWrites } from "./agentEditor";
+import { AgentEditor, AgentForm, UnsavedCloseBar, useAgentWrites } from "./agentEditor";
 import { SpawnControls } from "./SpawnControls";
 import { RepinGrantsControl } from "./RepinGrants";
 import { Button, Panel, SectionLabel, Select, StatusPill } from "./ui";
@@ -513,7 +513,8 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
   const platformHomeQ = useQuery({ queryKey: ["platformHome"], queryFn: ({ signal }) => api.platformHome(signal), retry: false });
   const isDev = platformHomeQ.isSuccess && !!platformHomeQ.data?.project;
   const { create, update, saveGrants, remove } = useAgentWrites(projectId, {
-    onCreated: (agent) => setEditing(agent.id),
+    // The create form's draft is now the agent, so nothing is unsaved until the editor says otherwise.
+    onCreated: (agent) => { setDirty(false); setCloseArmed(false); setEditing(agent.id); },
     onDeleted: onClose,
   });
   const agent = editing ? agentsQ.data?.find((a) => a.id === editing) ?? null : null;
@@ -523,24 +524,38 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
   const liveCount = (sessionsQ.data ?? []).filter((s) => s.agentId === editing && s.processState === "live").length;
   const creating = editing === null;
   const title = creating ? "New agent" : "Edit agent";
+  // Every exit (Escape, the scrim, ×) goes through `requestClose` (card dd83149f, audit A-04): clean
+  // closes at once, dirty arms the editor's "Unsaved …" bar instead. Same two-step as the board card
+  // dialog (pages/Board.tsx `requestClose`). Delete still closes directly: it is already behind its own
+  // confirm, and the draft belongs to the agent it deletes.
+  //
+  // @decision dd83149f — never close this dialog over a dirty draft without an explicit Discard.
+  const [dirty, setDirty] = useState(false);
+  const [closeArmed, setCloseArmed] = useState(false);
+  const requestClose = useCallback(() => { if (dirty) setCloseArmed(true); else onClose(); }, [dirty, onClose]);
+  const keepEditing = useCallback(() => setCloseArmed(false), []);
   return (
     // Near full-viewport (owner wish, card 5e628a76): a FIXED height, not a content-sized cap, so the
     // prompt field below has real room to grow into. Capped so a wide monitor still reads as a dialog.
     <AtlasAgentDialog testId="atlas-agent-editor" label={title} width="min(1280px, 100%)"
       height="min(1000px, calc(100dvh - 48px))" maxHeight="calc(100dvh - 48px)" scrimPadding="24px clamp(8px, 2vw, 24px)"
-      onClose={onClose}>
+      onClose={requestClose}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <SectionLabel style={{ margin: 0 }}>{title}</SectionLabel>
         <span style={{ flex: 1 }} />
         <Button variant="ghost" data-testid="atlas-agent-editor-close" aria-label="Close the agent editor"
-          title="Close" onClick={onClose} style={{ padding: "0 8px", lineHeight: 1.2 }}>×</Button>
+          title="Close (Esc)" onClick={requestClose} style={{ padding: "0 8px", lineHeight: 1.2 }}>×</Button>
       </div>
+      {/* The create form has no one-click save (it needs a name), so its bar offers only the way out. */}
+      {creating && closeArmed && dirty && (
+        <UnsavedCloseBar what="new agent" onDiscard={onClose} onKeepEditing={keepEditing} />
+      )}
       {/* `flex:1` + `minHeight:0` inside the panel's FIXED height: this body takes everything below the
           header and scrolls itself, and AgentEditor's prompt textarea grows into it. (A content-sized
           panel is what once collapsed the textarea to one line; the fixed height above prevents that.) */}
       <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1, overflowY: "auto" }}>
         {creating ? (
-          <AgentForm onCreate={(b) => create.mutate(b)} pending={create.isPending} onCancel={onClose} />
+          <AgentForm onCreate={(b) => create.mutate(b)} pending={create.isPending} onCancel={onClose} onDirtyChange={setDirty} />
         ) : agent ? (
           <AgentEditor key={agent.id} agent={agent} profiles={profilesQ.data ?? []} isDev={isDev}
             liveCount={liveCount}
@@ -550,7 +565,8 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
             onDelete={() => remove.mutate(agent.id)}
             saving={update.isPending} savingGrants={saveGrants.isPending} grantsError={saveGrants.error as Error | null}
             grantsErrorAgentId={saveGrants.variables?.id}
-            deleting={remove.isPending} />
+            deleting={remove.isPending}
+            onDirtyChange={setDirty} closeArmed={closeArmed} onDiscardClose={onClose} onKeepEditing={keepEditing} />
         ) : (
           // Not "loading": the agent may equally have been deleted from another surface while this
           // was open, and the editor has nothing to show either way.
