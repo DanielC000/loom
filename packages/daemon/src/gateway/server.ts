@@ -32,7 +32,7 @@ import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESS
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
-import { toBoardTasks, resolveMergedInfo, computeDeferralReleasePatch, taskPolicyView } from "../mcp/tasks.js";
+import { toBoardTasks, resolveMergedInfo, computeDeferralReleasePatch, taskPolicyView, invalidTaskPositionError } from "../mcp/tasks.js";
 import { boardRollup, buildRelationView, planTaskStructure, applyTaskPlan, resolveDeferralInput, hasStructureInput, type TaskStructureInput, type StructurePlan } from "../tasks/relations.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
@@ -6565,6 +6565,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
     if (b.held !== undefined && typeof b.held !== "boolean") return reply.code(400).send({ error: "held must be a boolean" });
     if (b.deferred !== undefined && typeof b.deferred !== "boolean") return reply.code(400).send({ error: "deferred must be a boolean" });
+    if (b.position !== undefined) {
+      const positionError = invalidTaskPositionError(b.position);
+      if (positionError) return reply.code(400).send({ error: positionError });
+    }
     // Card 0b36702e: `baseVersion` is OPTIONAL here, unlike the agent-facing surfaces (d0978321), where an
     // omitted base on an existing row is rejected outright. The human keeps override authority — see the
     // gate below for why omission is deliberately NOT treated as staleness on this route.

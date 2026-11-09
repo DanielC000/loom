@@ -1470,6 +1470,15 @@ export interface PendingRequestWarning {
   title: string;
 }
 
+/**
+ * Refusal text for a `position` write that is not a finite number, else null. `tasks.position` is a REAL
+ * NOT NULL column, so a string/NaN/Infinity/null must never reach `db.updateTask` (null would be a constraint
+ * throw, not a "clear"). Shared by the REST route and `updateProjectTask`.
+ */
+export function invalidTaskPositionError(position: unknown): string | null {
+  return typeof position === "number" && Number.isFinite(position) ? null : "position must be a finite number";
+}
+
 export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
   patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId" | "deferredReason" | "deferredUntilEvent" | "heldRequestId">> & TaskStructureInput,
@@ -1522,6 +1531,11 @@ export async function updateProjectTask(
   // an exact id, so a prefix must never be written straight through.
   let owned = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in owned) return owned;
+  // A non-finite `position` rejects the WHOLE patch (nothing written), like every other guard here.
+  if (patch.position !== undefined) {
+    const positionError = invalidTaskPositionError(patch.position);
+    if (positionError) return { error: positionError };
+  }
   // Card 267fd215 — checked BEFORE the appendBody/column/repoKey guards below (same whole-patch-reject
   // convention as every other guard in this function): a `title` write carrying an HTML entity would
   // become a permanent, unrewritable commit subject on a solo merge. `appendBody` never touches `title`,
