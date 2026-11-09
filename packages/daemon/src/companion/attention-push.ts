@@ -30,7 +30,7 @@
  * per session that resolves a grant at all (see controller.ts's `rearmAttentionPushFor`).
  */
 import { randomUUID } from "node:crypto";
-import type { OrchestrationEvent } from "@loom/shared";
+import { columnKeyForRole, resolveConfig as resolveLoomConfig, type OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { HeartbeatPty } from "./heartbeat.js";
 import { resolveCompanionGrant, type ResolvedGrantScope } from "./capabilities.js";
@@ -107,6 +107,34 @@ const SKILL_WARNING_PROJECT_NAME_MAX_CHARS = 40;
  *  from dominating the fleet_resume_failed/manager_crash_resume_failed line before the overall
  *  ALERT_LINE_MAX_CHARS cap even applies. */
 const ALERT_RESUME_REASON_MAX_CHARS = 60;
+/** Cap on `projectName` for the title-bearing lines (question_asked/amended, request_escalated,
+ *  platform_escalate), same precedent as SKILL_WARNING_PROJECT_NAME_MAX_CHARS. The worst-case fixed part of
+ *  those lines (verb, a task ref with two full UUIDs, the cut flag, separators, the `(m:…)` suffix) is ~160
+ *  chars before the name, so an uncapped name used to leave the title no room and let the final end-trim
+ *  chop the flag / suffix. 30 keeps the worst case under ALERT_LINE_MAX_CHARS with room for a title stub. */
+const TITLED_ALERT_PROJECT_NAME_MAX_CHARS = 30;
+
+/** Assemble `${head} [flag] — "title"${tail}` within ALERT_LINE_MAX_CHARS BY CONSTRUCTION: `head` (verb, refs,
+ *  capped project name) and `tail` (the `(m:…)` suffix) are never trimmed; only the title shrinks to what
+ *  room remains, and when it is cut (by ALERT_TITLE_MAX_CHARS or by lack of room) `hint` is inserted. The
+ *  caller's final end-trim therefore never removes the flag or suffix. "≤200 by construction" assumes
+ *  daemon-stamped UUID-length ids in `head` (and the 30-char project-name cap); a pathologically long
+ *  head can still leave the title no room, and only then does the caller's end-trim apply.
+ *
+ *  `optionals` are droppable suffixes rendered after `tail`, in the given order, LOWEST priority FIRST:
+ *  over budget they are dropped from the front of the array (one at a time) BEFORE the title is shrunk, so
+ *  priority is head + hint + tail > title > optionals (last element highest). */
+function fitTitledLine(head: string, rawTitle: string, hint: string, tail: string, optionals: string[] = []): string {
+  const wrap = (t: string, flag: string, sfx: string): string => `${head}${flag} — "${t}"${tail}${sfx}`;
+  const plain = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
+  const flag = plain === rawTitle ? "" : hint;
+  for (let k = 0; k <= optionals.length; k++) {
+    const candidate = wrap(plain, flag, optionals.slice(k).join(""));
+    if (candidate.length <= ALERT_LINE_MAX_CHARS) return candidate;
+  }
+  const room = ALERT_LINE_MAX_CHARS - wrap("", hint, "").length;
+  return wrap(truncateText(rawTitle, Math.min(ALERT_TITLE_MAX_CHARS, Math.max(room, 1))), hint, "");
+}
 
 /** Truncate `s` to at most `maxChars`, appending an ellipsis marker when cut. A no-op when already short
  *  enough — never lengthens or otherwise mutates a line that's already within bounds. */
@@ -327,6 +355,9 @@ export interface AlertLineOpts {
   /** The recipient holds a decisions-relay grant covering the event's project, so naming `decision_get`
    *  is actionable. Default false: the hint is omitted (a tool the recipient lacks is noise). */
   canFetchDecision?: boolean;
+  /** `platform_escalate` only: the escalation card is in its home project's terminal column AS OF DELIVERY
+   *  (a fresh re-read, not the enqueue-time stamp). Absent when the card can't be read. */
+  taskTerminalNow?: boolean;
 }
 
 export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass, projectName: string, taskIdResolvable = true, opts: AlertLineOpts = {}): string {
@@ -413,8 +444,7 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     }
     case "question_asked": {
       const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
-      const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
-      const title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
+      const pn = truncateText(projectName, TITLED_ALERT_PROJECT_NAME_MAX_CHARS);
       // Card e9688b1b: generalizes the platform_escalate fold-in below — carry the FULL questionId (not
       // an 8-char slice) so a decisions-relay-granted recipient can decisions_list() to resolve the full
       // title/body/options/recommendation; a truncated slice can't resolve. Placed BEFORE the (unbounded)
@@ -424,11 +454,10 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // exactly like a genuinely short question, and the measured incident (a Companion answering from
       // half a sentence, then retracting) is exactly this ambiguity turning into a wrong decision.
       const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
-      const cutFlag = titleTruncated ? truncHint : "";
       // Card 68f27faf: a notice needs no answer — "decision needed" would be actively wrong wording for it.
-      line = alertClass === "notice"
-        ? `${projectName}: FYI${qRef}${cutFlag} — "${title}" (${m8})`
-        : `${projectName}: decision needed${qRef}${cutFlag} — "${title}" (${m8})`;
+      line = fitTitledLine(
+        alertClass === "notice" ? `${pn}: FYI${qRef}` : `${pn}: decision needed${qRef}`,
+        rawTitle, truncHint, ` (${m8})`);
       break;
     }
     case "question_amended": {
@@ -437,11 +466,9 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // Worded "amended", not "needed", so a recipient who already saw the original ask doesn't read this
       // as a duplicate — it is the SAME decision, updated wording, never a new row.
       const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
-      const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
-      const title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
       const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
-      const cutFlag = titleTruncated ? truncHint : "";
-      line = `${projectName}: pending decision amended${qRef}${cutFlag} — "${title}" (${m8})`;
+      line = fitTitledLine(`${truncateText(projectName, TITLED_ALERT_PROJECT_NAME_MAX_CHARS)}: pending decision amended${qRef}`,
+        rawTitle, truncHint, ` (${m8})`);
       break;
     }
     case "request_escalated": {
@@ -452,8 +479,6 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // title — degrading this escalation to exactly the contentless passive signal the card exists to
       // defeat: live, but nothing a human could act on from the push alone.
       const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
-      const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
-      let title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
       const qRef = typeof detail.questionId === "string" ? ` (question:${detail.questionId})` : "";
       const ageDays = typeof detail.ageMinutes === "number" ? Math.floor(detail.ageMinutes / 1440) : null;
       const ageStr = ageDays !== null
@@ -463,22 +488,13 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // only says the decision was LISTED before — never that this recipient read or acted on it. Shown
       // only to a recipient that can list/fetch decisions, and placed LAST (after the title) so the final
       // trim can only ever eat the note, never the title.
-      let listedNote = canFetch && opts.lastReadAt ? ` [listed before at ${opts.lastReadAt}]` : "";
-      let tail = " — please answer or dismiss it";
-      const build = (t: string, flag: string, n: string): string =>
-        `${projectName}: Request pending ${ageStr}, unanswered${qRef}${flag} — "${t}"${tail}${n}`;
-      let cutFlag = titleTruncated ? truncHint : "";
-      // Priority when the line is over budget: title > note > the boilerplate tail. Drop the tail first
-      // (the note carries the nudge), then the note itself; only if the line is STILL too long shrink the
-      // title (with the marker) — the final trim must never be what silently chops the title.
-      if (build(title, cutFlag, listedNote).length > ALERT_LINE_MAX_CHARS && listedNote) tail = "";
-      if (build(title, cutFlag, listedNote).length > ALERT_LINE_MAX_CHARS) { listedNote = ""; tail = " — please answer or dismiss it"; }
-      if (build(title, cutFlag, listedNote).length > ALERT_LINE_MAX_CHARS) {
-        const room = ALERT_LINE_MAX_CHARS - build("", truncHint, "").length;
-        const fitted = truncateText(rawTitle, Math.max(room, 12));
-        if (fitted !== rawTitle) { title = fitted; cutFlag = truncHint; }
-      }
-      line = build(title, cutFlag, listedNote);
+      const listedNote = canFetch && opts.lastReadAt ? ` [listed before at ${opts.lastReadAt}]` : "";
+      // Priority when over budget: verb + question ref + truncation hint > title > note > boilerplate tail.
+      // fitTitledLine drops the optionals lowest-priority first (tail, then note) BEFORE shrinking the
+      // title, so the final ALERT_LINE_MAX_CHARS end-trim is never what keeps the line in bounds.
+      line = fitTitledLine(
+        `${truncateText(projectName, TITLED_ALERT_PROJECT_NAME_MAX_CHARS)}: Request pending ${ageStr}, unanswered${qRef}`,
+        rawTitle, truncHint, "", [" — please answer or dismiss it", listedNote]);
       break;
     }
     case "idle_escalated":
@@ -495,8 +511,6 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       break;
     case "platform_escalate": {
       const rawTitle = typeof detail.title === "string" ? detail.title : "untitled";
-      const titleTruncated = rawTitle.length > ALERT_TITLE_MAX_CHARS;
-      const title = truncateText(rawTitle, ALERT_TITLE_MAX_CHARS);
       // CR fold-in (companion re-delivery card): the FULL taskId (not the 8-char `task8` slice every other
       // case uses for human display) — a board-reach-granted companion (e.g. lead mode, which grants
       // board-reach act-mode on every project incl. the reserved Platform home) needs the EXACT id to
@@ -510,12 +524,27 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       // by the caller BEFORE this render) is false exactly when neither this session's own project nor its
       // `board-reach` grant can reach the home project — in that case the id is dropped from the line
       // rather than naming an id this recipient is structurally forbidden to resolve.
-      const taskRef = e.taskId && taskIdResolvable ? ` (task:${e.taskId})` : "";
+      const homeId = typeof detail.platformProjectId === "string" && detail.platformProjectId ? `@${detail.platformProjectId}` : "";
+      const taskRef = e.taskId && taskIdResolvable ? ` (task:${e.taskId}${homeId})` : "";
+      // Card f8abb6fb: `@<homeProjectId>` is the id platformEscalate stamped from its resolved Platform
+      // home (never a name compare); it renders only with the task ref and is absent if never stamped.
       // Card e9688b1b DoD-3: when the title itself was cut, say so explicitly (same discipline applied to
       // question_asked above) — the bare "…" a plain truncateText() leaves behind reads exactly like a
       // genuinely short title, not a cut one.
-      const cutFlag = titleTruncated ? " [title TRUNCATED]" : "";
-      line = `${projectName}: escalated to platform${taskRef}${cutFlag} — "${title}" (${m8})`;
+      const escCutHint = " [title TRUNCATED]";
+      // Card 16cf2365: a follow-up on a closed card is an UPDATE, not a fresh escalation. Closed = the
+      // enqueue-time stamp OR the delivery-time re-read (`opts.taskTerminalNow`; undefined = card not
+      // found ⇒ the stamp alone decides, never a crash).
+      const followedUp = detail.followedUp === true;
+      const closed = detail.targetWasTerminal === true || opts.taskTerminalNow === true;
+      const verb = followedUp && closed
+        ? "update on a closed platform escalation"
+        : closed ? "escalated to platform (card since closed)" : "escalated to platform";
+      // Size the title against the room LEFT after the prefix (verb, task ref, home id) and the `(m:…)`
+      // suffix, same as request_escalated above — the final ALERT_LINE_MAX_CHARS end-trim must never be what
+      // silently chops the title (and the flag / `(m:…)` with it).
+      line = fitTitledLine(`${truncateText(projectName, TITLED_ALERT_PROJECT_NAME_MAX_CHARS)}: ${verb}${taskRef}`,
+        rawTitle, escCutHint, ` (${m8})`);
       break;
     }
     case "session_rate_limited":
@@ -733,12 +762,33 @@ export class AttentionPushWatcher {
 
   /** Deterministic "as of this event" fingerprint for an escalation (mirrors decisionSurfaceSignature's
    *  doc): title+severity are set once at `platform_escalate` filing time and never mutated afterward, so
-   *  this can only change across a GENUINELY new/re-escalated occurrence, never a re-read of the same one. */
-  private escalationSignature(detail: Record<string, unknown> | undefined): string {
-    const d = detail ?? {};
+   *  this can only change across a GENUINELY new/re-escalated occurrence, never a re-read of the same one.
+   *  The closed-follow-up variant keys on the filing-time `targetWasTerminal` STAMP ONLY — never a live
+   *  re-read of the card, which would flip a suppressed open-time follow-up to `|closed-followup` once its
+   *  card later closes (restart reseed, held digest) and deliver it as a false "update on a closed" item.
+   *  The live re-read is for RENDERING only (`alertOptsFor`). */
+  private escalationSignature(e: { taskId?: string | null; detail?: Record<string, unknown> }): string {
+    const d = e.detail ?? {};
     const title = typeof d.title === "string" ? d.title : "";
     const severity = typeof d.severity === "string" ? d.severity : "";
-    return `${title}|${severity}`;
+    // Card 16cf2365 (owner decision): a follow-up on a CLOSED card is a distinct state — it must reach the
+    // owner as "update on a closed platform escalation" even when an earlier OPEN escalation with the same
+    // title|severity was already surfaced. Ordinary repeats of an open escalation keep the bare signature.
+    const closedFollowUp = d.followedUp === true && d.targetWasTerminal === true;
+    return closedFollowUp ? `${title}|${severity}|closed-followup` : `${title}|${severity}`;
+  }
+
+  /** Delivery-time re-read of an escalation card's column (same terminal-role test as
+   *  `SessionService.columnEscalationStatus`). Any failure / missing card ⇒ undefined ⇒ the safe form. */
+  private taskTerminalNow(taskId: string | null | undefined): boolean | undefined {
+    if (!taskId) return undefined;
+    try {
+      const task = this.deps.db.getTask(taskId);
+      if (!task) return undefined;
+      const home = this.deps.db.getProject(task.projectId);
+      const terminalKey = columnKeyForRole(resolveLoomConfig(home?.config).kanbanColumns, "terminal");
+      return terminalKey !== undefined && task.columnKey === terminalKey;
+    } catch { return undefined; }
   }
 
   /**
@@ -810,7 +860,7 @@ export class AttentionPushWatcher {
       // `cls` let a worker's FIRST boot-stuck episode stamp taskId→"|" and silently suppress every LATER
       // episode for that same task forever. `platform_escalate` is the only kind this title+severity
       // signature was ever designed to fingerprint.
-      if (e.kind === "platform_escalate" && e.taskId && this.escalationSurfaced.get(e.taskId) === this.escalationSignature(e.detail)) {
+      if (e.kind === "platform_escalate" && e.taskId && this.escalationSurfaced.get(e.taskId) === this.escalationSignature(e)) {
         continue;
       }
       // Card 4775165f: per-lineage dedupe, checked here (classification time), STAMPED only at actual push
@@ -1050,7 +1100,10 @@ export class AttentionPushWatcher {
         try { lastReadAt = this.deps.db.getQuestionLastSurfacedAt(qid); } catch { lastReadAt = null; }
       }
     }
-    return { canFetchDecision, lastReadAt };
+    // Card 16cf2365: delivery-time re-read of the escalation card's column (same terminal-role test as
+    // `SessionService.columnEscalationStatus`). Any failure / missing card ⇒ undefined ⇒ the safe form.
+    const taskTerminalNow = e.kind === "platform_escalate" ? this.taskTerminalNow(e.taskId) : undefined;
+    return { canFetchDecision, lastReadAt, ...(taskTerminalNow !== undefined ? { taskTerminalNow } : {}) };
   }
 
   /** Stamps `escalationSurfaced` at the moment a `platform_escalate` event is ACTUALLY pushed (never at
@@ -1062,7 +1115,7 @@ export class AttentionPushWatcher {
    *  a taskId-less event. */
   private stampEscalation(e: EventWithSeq): { escalationTaskId?: string; escalationSignature?: string } {
     if (e.kind !== "platform_escalate" || !e.taskId) return {};
-    const signature = this.escalationSignature(e.detail);
+    const signature = this.escalationSignature(e);
     this.escalationSurfaced.set(e.taskId, signature);
     return { escalationTaskId: e.taskId, escalationSignature: signature };
   }

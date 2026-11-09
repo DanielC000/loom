@@ -22,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
+import { columnKeyForRole, resolveConfig } from "@loom/shared";
 import { Db } from "../dist/db.js";
 import { AttentionPushWatcher, ALERT_TAG, classify, alertLine } from "../dist/companion/attention-push.js";
 
@@ -816,6 +817,226 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   fire(e, "platform_escalate", e.mgrA, { originProjectId: e.projA, severity: "high", platformProjectId: homeProjectId, title: "board-reach-resolvable escalation" }, { taskId: "task-reachable" });
   e.watcher.tick(new Date());
   check("91b9105e board-reach: the pushed turn carries the taskId once the grant can resolve it", e.enqueued.length === 1 && e.enqueued[0].text.includes("task:task-reachable"));
+  cleanupEnv(e);
+}
+
+// --- 19d. CARD f8abb6fb — the rendered ref names the board: `task:<id>@<homeProjectId>`. Only where the
+//     task ref itself renders (unreachable home ⇒ neither id nor board); no stamped home ⇒ bare id. ---
+{
+  const mk = (detail, taskId) => alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", taskId, kind: "platform_escalate", detail }, "escalation", "Proj A");
+  const l1 = mk({ title: "t", platformProjectId: "home-proj-1234" }, "task-full-1");
+  check("f8abb6fb: line carries task:<id>@<homeProjectId>", l1.includes("(task:task-full-1@home-proj-1234)"));
+  const l2 = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", taskId: "task-full-1", kind: "platform_escalate", detail: { title: "t", platformProjectId: "home-proj-1234" } }, "escalation", "Proj A", false);
+  check("f8abb6fb: unreachable id ⇒ neither task id nor board rendered", !l2.includes("task:") && !l2.includes("home-proj-1234"));
+  const l3 = mk({ title: "t" }, "task-full-1");
+  check("f8abb6fb: no stamped home id ⇒ bare task id, no '@'", l3.includes("(task:task-full-1)") && !l3.includes("@"));
+  const l4 = mk({ title: "t", platformProjectId: "home-proj-1234" }, undefined);
+  check("f8abb6fb: no taskId ⇒ no board either", !l4.includes("home-proj-1234"));
+}
+
+// --- 19e. CARD 16cf2365 — fresh / follow-up-open / follow-up-terminal (stamp), plus the delivery-time
+//     re-read: a card that went terminal AFTER the event was stamped is downgraded when delivered; a
+//     card that is gone at delivery renders the safe form. Negative controls: fresh + open follow-up must
+//     keep the plain "escalated to platform" wording. ---
+{
+  const termKey = columnKeyForRole(resolveConfig(undefined).kanbanColumns, "terminal");
+  const landKey = columnKeyForRole(resolveConfig(undefined).kanbanColumns, "defaultLanding");
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  const mkTask = (id, columnKey) => { const now = new Date().toISOString(); e.db.insertTask({ id, projectId: e.projA, title: id, body: "", columnKey, position: 1, priority: "p2", createdAt: now, updatedAt: now, version: 1 }); };
+  mkTask("t-open", landKey); mkTask("t-closed-later", termKey);
+  e.watcher.start(); e.watcher.stop();
+  const base = { originProjectId: e.projA, severity: "high", platformProjectId: e.projA };
+  fire(e, "platform_escalate", e.mgrA, { ...base, title: "fresh one" }, { taskId: "t-open" });
+  fire(e, "platform_escalate", e.mgrA, { ...base, title: "follow-up open", followedUp: true }, { taskId: "t-open" });
+  fire(e, "platform_escalate", e.mgrA, { ...base, title: "follow-up stamped terminal", followedUp: true, targetWasTerminal: true }, { taskId: "t-open" });
+  fire(e, "platform_escalate", e.mgrA, { ...base, title: "queued then closed", followedUp: true }, { taskId: "t-closed-later" });
+  fire(e, "platform_escalate", e.mgrA, { ...base, title: "card vanished", followedUp: true }, { taskId: "t-gone" });
+  e.watcher.tick(new Date());
+  const txt = (needle) => (e.enqueued.map((x) => x.text).find((t) => t.includes(needle)) ?? "");
+  check("16cf2365: all five delivered (immediate mode, ≤ burst cap)", e.enqueued.length === 5);
+  check("16cf2365 fresh: plain 'escalated to platform'", /escalated to platform \(task:/.test(txt("fresh one")) && !/closed/.test(txt("fresh one")));
+  check("16cf2365 follow-up on OPEN card: still plain 'escalated to platform'", /escalated to platform \(task:/.test(txt("follow-up open")) && !/closed/.test(txt("follow-up open")));
+  check("16cf2365 follow-up stamped terminal: 'update on a closed platform escalation'", txt("stamped terminal").includes("update on a closed platform escalation") && !txt("stamped terminal").includes("escalated to platform"));
+  check("16cf2365 delivery-time re-read: card terminal NOW (no stamp) ⇒ downgraded", txt("queued then closed").includes("update on a closed platform escalation"));
+  check("16cf2365 card not found at delivery ⇒ safe plain form, no crash", /escalated to platform \(task:t-gone/.test(txt("card vanished")));
+  cleanupEnv(e);
+}
+
+// --- 19f. CARD f8abb6fb/16cf2365 round 2 — the title is sized against the room LEFT after the longer prefix
+//     (verb + task ref + @home id) and the `(m:…)` suffix, so a title UNDER the 100-char title cap is never
+//     silently chopped by the 200-char line cap: a cut title carries the flag, and `(m:` always survives.
+//     Also: non-follow-up closed-at-delivery branch, a THROWING db read (⇒ plain form), the re-read through
+//     the digest and burst-cap call sites, and the closed-follow-up dedup signature (owner decision). ---
+{
+  const mgr = "mgr-abcdef01";
+  const taskId = randomUUID(), homeId = randomUUID();
+  const title90 = "T".repeat(88) + "XY"; // 90 chars: under the 100-char title cap
+  const mk = (detail, opts) => alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: mgr, taskId, kind: "platform_escalate", detail: { severity: "high", platformProjectId: homeId, title: title90, ...detail } }, "escalation", "Fire Studio", true, { canFetchDecision: false, lastReadAt: null, ...(opts ?? {}) });
+  const forms = {
+    "open @home form": mk({}),
+    "closed non-follow-up form": mk({}, { taskTerminalNow: true }),
+    "closed follow-up form": mk({ followedUp: true }, { taskTerminalNow: true }),
+    "closed follow-up (stamped) form": mk({ followedUp: true, targetWasTerminal: true }),
+  };
+  for (const [name, line] of Object.entries(forms)) {
+    check(`f8abb6fb room [${name}]: line ≤ 200 chars`, line.length <= 200);
+    check(`f8abb6fb room [${name}]: a cut title carries [title TRUNCATED] (never a silent cut)`, line.includes("[title TRUNCATED]"));
+    check(`f8abb6fb room [${name}]: the trailing (m:…) survives`, line.includes("(m:mgr-abcd"));
+    check(`f8abb6fb room [${name}]: task ref + home id survive`, line.includes(`(task:${taskId}@${homeId})`));
+  }
+  const shortLine = mk({ title: "short title" });
+  check("f8abb6fb room: a title that fits is NOT flagged and is intact", !shortLine.includes("TRUNCATED") && shortLine.includes('"short title"') && shortLine.includes("(m:mgr-abcd"));
+}
+{
+  const termKey = columnKeyForRole(resolveConfig(undefined).kanbanColumns, "terminal");
+  const landKey = columnKeyForRole(resolveConfig(undefined).kanbanColumns, "defaultLanding");
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  const mkTask = (id, columnKey) => { const now = new Date().toISOString(); e.db.insertTask({ id, projectId: e.projA, title: id, body: "", columnKey, position: 1, priority: "p2", createdAt: now, updatedAt: now, version: 1 }); };
+  mkTask("t-closed-fresh", termKey); mkTask("t-throws", termKey);
+  e.watcher.start(); e.watcher.stop();
+  const base = { originProjectId: e.projA, severity: "high", platformProjectId: e.projA };
+  const txt = (needle) => (e.enqueued.map((x) => x.text).find((t) => t.includes(needle)) ?? "");
+  // (a) a FRESH (non-follow-up) event whose card is terminal at delivery.
+  fire(e, "platform_escalate", e.mgrA, { ...base, title: "fresh but closed now" }, { taskId: "t-closed-fresh" });
+  e.watcher.tick(new Date());
+  check("16cf2365 non-follow-up, card terminal at delivery ⇒ 'escalated to platform (card since closed)'",
+    txt("fresh but closed now").includes("escalated to platform (card since closed)") && !txt("fresh but closed now").includes("update on a closed"));
+  e.clearPending();
+  // (b) a db whose getTask THROWS ⇒ plain form, tick does not crash.
+  const realGetTask = e.db.getTask.bind(e.db);
+  e.db.getTask = () => { throw new Error("boom"); };
+  fire(e, "platform_escalate", e.mgrA, { ...base, title: "reader throws", followedUp: true }, { taskId: "t-throws" });
+  let threw = false;
+  try { e.watcher.tick(new Date()); } catch { threw = true; }
+  e.db.getTask = realGetTask;
+  check("16cf2365 throwing getTask: tick does not crash and delivers the plain form",
+    !threw && /escalated to platform \(task:t-throws/.test(txt("reader throws")) && !/closed/.test(txt("reader throws")));
+  cleanupEnv(e);
+}
+{
+  // The re-read also runs through the DIGEST call site and the BURST-CAP call site.
+  const termKey = columnKeyForRole(resolveConfig(undefined).kanbanColumns, "terminal");
+  const mkEnv = (cfg) => {
+    const e = makeEnv({ configA: cfg });
+    const now = new Date().toISOString();
+    e.db.insertTask({ id: "t-dg", projectId: e.projA, title: "t-dg", body: "", columnKey: termKey, position: 1, priority: "p2", createdAt: now, updatedAt: now, version: 1 });
+    e.watcher.start(); e.watcher.stop();
+    return e;
+  };
+  const base = (e) => ({ originProjectId: e.projA, severity: "high", platformProjectId: e.projA });
+  const d = mkEnv({ alertClasses: ["escalation"], digestMinutes: 10 });
+  fire(d, "platform_escalate", d.mgrA, { ...base(d), title: "digest closed follow-up", followedUp: true }, { taskId: "t-dg" });
+  d.watcher.tick(new Date());
+  check("16cf2365 digest call site: delivery-time re-read ⇒ 'update on a closed platform escalation'",
+    d.enqueued.length === 1 && d.enqueued[0].text.includes("update on a closed platform escalation"));
+  cleanupEnv(d);
+  const b2 = mkEnv({ alertClasses: ["escalation"] });
+  const now2 = new Date().toISOString();
+  for (let i = 0; i < 11; i++) {
+    b2.db.insertTask({ id: `t-bc-${i}`, projectId: b2.projA, title: `t-bc-${i}`, body: "", columnKey: termKey, position: 1, priority: "p2", createdAt: now2, updatedAt: now2, version: 1 });
+    fire(b2, "platform_escalate", b2.mgrA, { ...base(b2), title: `burst closed ${i}`, followedUp: true }, { taskId: `t-bc-${i}` });
+  }
+  b2.watcher.tick(new Date());
+  check("16cf2365 burst-cap call site: 11 distinct closed follow-ups ⇒ ONE coalesced turn with all 11 lines re-read as closed",
+    b2.enqueued.length === 1 && (b2.enqueued[0].text.match(/update on a closed platform escalation/g) ?? []).length === 11);
+  cleanupEnv(b2);
+}
+{
+  // ROUND 3 — structural fit: for every project-name length the verb, FULL task ref + home id, the cut flag
+  // (whenever the title was cut) and the `(m:…)` suffix survive, and the line is ≤ 200 BY CONSTRUCTION.
+  const mgr = "mgr-abcdef01";
+  const taskId = randomUUID(), homeId = randomUUID(), qid = randomUUID();
+  const mkEv = (kind, detail) => ({ id: "x", ts: new Date().toISOString(), managerSessionId: mgr, taskId, kind, detail });
+  const escForms = {
+    "open": [{}, {}],
+    "card since closed": [{}, { taskTerminalNow: true }],
+    "closed follow-up (live)": [{ followedUp: true }, { taskTerminalNow: true }],
+    "closed follow-up (stamped)": [{ followedUp: true, targetWasTerminal: true }, {}],
+  };
+  for (const n of [11, 30, 40, 60, 300]) {
+    const pname = "P".repeat(n);
+    for (const tlen of [5, 90, 400]) {
+      const title = "T".repeat(tlen);
+      const cut = tlen > 100;
+      const verify = (label, line, hasM, ref) => {
+        check(`r3 fit [${label}, name ${n}, title ${tlen}]: ≤ 200`, line.length <= 200);
+        if (hasM) check(`r3 fit [${label}, name ${n}, title ${tlen}]: (m: survives`, line.includes("(m:mgr-abcd)") || line.includes("(m:mgr-abcd"));
+        if (ref) check(`r3 fit [${label}, name ${n}, title ${tlen}]: full ref intact`, line.includes(ref));
+        if (cut) check(`r3 fit [${label}, name ${n}, title ${tlen}]: cut ⇒ flag present`, line.includes("[title TRUNCATED"));
+        if (!cut && tlen === 5) check(`r3 fit [${label}, name ${n}, title ${tlen}]: short title intact, unflagged`, line.includes(`"${title}"`) && !line.includes("TRUNCATED"));
+      };
+      for (const [name, [d, o]] of Object.entries(escForms)) {
+        const line = alertLine(mkEv("platform_escalate", { severity: "high", platformProjectId: homeId, title, ...d }), "escalation", pname, true, { canFetchDecision: false, lastReadAt: null, ...o });
+        verify(`escalate ${name}`, line, true, `(task:${taskId}@${homeId})`);
+        const verb = name === "open" ? "escalated to platform" : name === "card since closed" ? "escalated to platform (card since closed)" : "update on a closed platform escalation";
+        check(`r3 fit [escalate ${name}, name ${n}, title ${tlen}]: verb intact`, line.includes(`: ${verb}`));
+      }
+      verify("question_asked", alertLine(mkEv("question_asked", { title, questionId: qid }), "decision-pending", pname, true, { canFetchDecision: true }), true, `(question:${qid})`);
+      verify("question_asked notice", alertLine(mkEv("question_asked", { title, questionId: qid }), "notice", pname), true, `(question:${qid})`);
+      verify("request_escalated", alertLine(mkEv("request_escalated", { title, questionId: qid, ageMinutes: 3000 }), "escalation", pname, true, { canFetchDecision: true, lastReadAt: "2026-11-09T10:00:00Z" }), false, `(question:${qid})`);
+    }
+  }
+}
+{
+  // ROUND 3 — escalationSignature keys on the filing-time STAMP only. An open-time follow-up (no stamp)
+  // suppressed against its earlier delivery must STAY suppressed once the card is terminal at a later scan
+  // (incl. a restart reseed) — the live re-read is for rendering, not for the dedup signature.
+  const termKey = columnKeyForRole(resolveConfig(undefined).kanbanColumns, "terminal");
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  const now = new Date().toISOString();
+  e.db.insertTask({ id: "t-sigstamp", projectId: e.projA, title: "t", body: "", columnKey: termKey, position: 1, priority: "p2", createdAt: now, updatedAt: now, version: 1 });
+  e.watcher.start(); e.watcher.stop();
+  const detail = { originProjectId: e.projA, severity: "high", platformProjectId: e.projA, title: "open-time recurrence" };
+  const t = { taskId: "t-sigstamp" };
+  fire(e, "platform_escalate", e.mgrA, detail, t);
+  e.watcher.tick(new Date());
+  check("r3 sig: first escalation delivered", e.enqueued.length === 1);
+  e.clearPending();
+  fire(e, "platform_escalate", e.mgrA, { ...detail, followedUp: true }, t); // filed while OPEN (no stamp); card is terminal NOW
+  e.watcher.tick(new Date());
+  check("r3 sig: unstamped follow-up stays suppressed although the card is terminal at scan time", e.enqueued.length === 1);
+  const fresh = e.freshWatcher();
+  fresh.start(); fresh.stop();
+  fire(e, "platform_escalate", e.mgrA, { ...detail, followedUp: true }, t);
+  fresh.tick(new Date());
+  check("r3 sig: ...and after a restart reseed", e.enqueued.length === 1);
+  fire(e, "platform_escalate", e.mgrA, { ...detail, followedUp: true, targetWasTerminal: true }, t);
+  fresh.tick(new Date());
+  check("r3 sig: a stamp-terminal follow-up is still delivered once", e.enqueued.length === 2 && e.enqueued[1].text.includes("update on a closed platform escalation"));
+  e.clearPending();
+  fire(e, "platform_escalate", e.mgrA, { ...detail, followedUp: true, targetWasTerminal: true }, t);
+  fresh.tick(new Date());
+  check("r3 sig: ...then deduped", e.enqueued.length === 2);
+  cleanupEnv(e);
+}
+{
+  // Owner decision: a follow-up on a CLOSED card is NOT suppressed by an earlier OPEN escalation with the
+  // same title|severity — but ordinary repeats of an open escalation stay suppressed, and a repeated closed
+  // follow-up is itself deduped after its first delivery.
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  e.watcher.start(); e.watcher.stop();
+  const detail = { originProjectId: e.projA, severity: "high", platformProjectId: "pHome", title: "recurring issue" };
+  const t = { taskId: "task-closed-sig" };
+  fire(e, "platform_escalate", e.mgrA, detail, t);
+  e.watcher.tick(new Date());
+  check("closed-followup-sig: first open escalation pushes", e.enqueued.length === 1);
+  e.clearPending(); // no-stacking: a prior unconsumed [loom:alert] would defer the next tick
+  fire(e, "platform_escalate", e.mgrA, detail, t);
+  e.watcher.tick(new Date());
+  check("closed-followup-sig: ordinary repeat of an OPEN escalation stays suppressed", e.enqueued.length === 1);
+  fire(e, "platform_escalate", e.mgrA, { ...detail, followedUp: true, targetWasTerminal: true }, t);
+  e.watcher.tick(new Date());
+  check("closed-followup-sig: follow-up on a CLOSED card (same title|severity) is NOT suppressed",
+    e.enqueued.length === 2 && e.enqueued[1].text.includes("update on a closed platform escalation"));
+  e.clearPending();
+  fire(e, "platform_escalate", e.mgrA, { ...detail, followedUp: true, targetWasTerminal: true }, t);
+  e.watcher.tick(new Date());
+  check("closed-followup-sig: a repeat of the closed follow-up is suppressed after its first delivery", e.enqueued.length === 2);
+  const fresh = e.freshWatcher();
+  fresh.start(); fresh.stop();
+  fire(e, "platform_escalate", e.mgrA, { ...detail, followedUp: true, targetWasTerminal: true }, t);
+  fresh.tick(new Date());
+  check("closed-followup-sig: restart reseed keeps the closed-follow-up signature (still suppressed)", e.enqueued.length === 2);
   cleanupEnv(e);
 }
 
@@ -1614,6 +1835,43 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   check("granted + cut title: marker names decision_get", granted.includes("with decision_get"));
   const notice = alertLine(ev("N".repeat(150), "question_asked"), "notice", "Proj A", true, { canFetchDecision: true });
   check("notice alert: marker present but decision_get NOT named (it refuses notices)", notice.includes("[title TRUNCATED]") && !notice.includes("decision_get"));
+}
+
+// --- round 4 (cards f8abb6fb + 16cf2365): request_escalated over-budget priority is hint+ref > TITLE > note > tail,
+// and the final end-trim is never what keeps the line <= 200 (UUID question id, name at/over the 30-char cap) ---
+{
+  const qid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const tailTxt = " — please answer or dismiss it";
+  let bad = [];
+  let minTitleChars = Infinity;
+  let n = 0;
+  for (const nameLen of [30, 45]) for (const tl of [60, 90, 400]) for (const ageMinutes of [5, 3000, 600000]) for (const lastReadAt of [null, "2026-11-05T10:00:00.000Z"]) {
+    const rawTitle = "W".repeat(tl);
+    const line = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "request_escalated", detail: { questionId: qid, title: rawTitle, ageMinutes } },
+      "decision-pending", "N".repeat(nameLen), true, { canFetchDecision: true, lastReadAt });
+    n++;
+    const tag = `name${nameLen}/title${tl}/age${ageMinutes}/read${lastReadAt ? 1 : 0}`;
+    const m = line.match(/ — "(W*…?)"/);
+    const survived = m ? m[1].replace("…", "").length : 0;
+    minTitleChars = Math.min(minTitleChars, survived);
+    const wellEnded = line.endsWith('"') || line.endsWith(tailTxt) || line.endsWith("]");
+    // the end-trim is a plain slice, so a line that was cut by it ends exactly at the cap; ours must be inside it with the structure intact
+    if (line.length > 200) bad.push(`${tag}: over cap (${line.length})`);
+    if (!wellEnded) bad.push(`${tag}: ends mid-word`);
+    if (survived < 18 && !(tl <= 60 && survived === tl)) bad.push(`${tag}: only ${survived} title chars (<18 + ellipsis)`);
+    if (!line.includes(`(question:${qid})`)) bad.push(`${tag}: question ref damaged`);
+    if (tl > 60 || survived < tl) { if (!line.includes("[title TRUNCATED — fetch it with decision_get before answering]")) bad.push(`${tag}: hint missing`); }
+    if (!/ — "W+…?"/.test(line)) bad.push(`${tag}: title missing`);
+    // priority: a line that dropped the note must not have kept the boilerplate tail while the title was cut
+    if (line.includes("TRUNCATED") && line.endsWith(tailTxt)) bad.push(`${tag}: tail kept ahead of a cut title`);
+  }
+  check(`request_escalated over-budget matrix (${n} cases): <=200, well-ended, >=18 title chars + ellipsis, hint + ref intact, tail never ahead of a cut title`, bad.length === 0);
+  if (bad.length) console.log(bad.slice(0, 8).join("\n"));
+  console.log(`  (min title chars surviving: ${minTitleChars})`);
+  // The worst case is genuinely over budget (proves the matrix exercises the drop path, not just fits-whole lines)
+  const worst = alertLine({ id: "x", ts: "t", managerSessionId: "mgr-12345678", kind: "request_escalated", detail: { questionId: qid, title: "W".repeat(400), ageMinutes: 600000 } },
+    "decision-pending", "N".repeat(30), true, { canFetchDecision: true, lastReadAt: "2026-11-05T10:00:00.000Z" });
+  check("worst case drops BOTH the tail and the note (title kept instead)", !worst.includes("please answer") && !worst.includes("listed before") && worst.endsWith('…"'));
 }
 
 // --- card c64c1e7d: watcher wiring of the per-event alert options on all delivery paths + degrade ---
