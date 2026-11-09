@@ -27,7 +27,7 @@
 //
 // Presence-first everywhere (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that is
 // merely still loading, so every pair asserts what must BE there first.
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
@@ -139,9 +139,10 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
     const bar = page.getByTestId("atlas-fleet-controls-bar");
     const hold = bar.getByTestId("fleet-clear-hold");
     await expect(hold).toHaveText(/Clear usage hold/i);
-    // DEMOTED, NOT HIDDEN (card 73b41b5d): no session is parked here, only the latch is armed, and the
-    // web cannot see the latch. So this is the quiet variant, and the click below still has to work.
-    await expect(hold).toHaveAttribute("data-hold", "none-visible");
+    // LATCH-ONLY (card 3221d0d9): no session is parked here, only the latch is armed, and
+    // GET /api/usage/limits reports `usageHoldArmed`. So this is the FULL-weight button.
+    await expect(hold).toHaveAttribute("data-hold", "latch");
+    await expect(hold).toHaveClass(/loom-btn-default/);
 
     await hold.click();
 
@@ -154,6 +155,21 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
     }).toBe(false);
   });
 
+  // Card 3221d0d9: with NO latch and NO parked session the button is absent altogether. The latch file is
+  // removed explicitly (the daemon is shared across specs), and the bar's presence is asserted first so
+  // a page that is merely still loading cannot satisfy the zero-count.
+  test("switch ON: clear usage hold is hidden when no latch is armed and no session is parked", async ({ page, loomDaemon }) => {
+    rmSync(latchPath(loomDaemon.loomHome), { force: true });
+    await seedAtlasOn(page);
+    const usage = page.waitForResponse((r) => r.url().endsWith("/api/usage/limits") && r.request().method() === "GET");
+    await page.goto(loomDaemon.baseURL + "/home");
+    const bar = page.getByTestId("atlas-fleet-controls-bar");
+    await expect(bar.getByTestId("fleet-pause")).toBeVisible();
+    const body = (await (await usage).json()) as { usageHoldArmed?: unknown };
+    expect(body.usageHoldArmed, "the daemon must have reported the latch as not armed").toBe(false);
+    await expect(bar.getByTestId("fleet-clear-hold")).toHaveCount(0);
+  });
+
   // Card 73b41b5d (Atlas audit A-13): Clear usage hold stood as a full peer of Pause and Kill all even
   // with nothing held. It now carries full weight only while a session is parked or bailed.
   //
@@ -162,6 +178,7 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
   // stops the moment the button is clicked, so the AFTER state is the daemon's own unparked list: the
   // same session, read back without the mark, is what turns the button quiet again.
   test("switch ON: clear usage hold is full weight only while a session is parked", async ({ page, loomDaemon }) => {
+    rmSync(latchPath(loomDaemon.loomHome), { force: true }); // the BEFORE state must be latch-free whatever ran earlier
     const project = await loomDaemon.createProject(uniq("fleethold"));
     const parked = await loomDaemon.seedLiveSession({ project, role: "worker", agentName: "Dev" });
 
@@ -178,15 +195,16 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
     await page.goto(loomDaemon.baseURL + "/home");
     const hold = page.getByTestId("atlas-fleet-controls-bar").getByTestId("fleet-clear-hold");
 
-    // BEFORE: the seeded session is on screen (fixture identity) and nothing is parked, so it is quiet.
+    // BEFORE: the seeded session is on screen (fixture identity) and nothing is parked and no latch is
+    // armed (card 3221d0d9), so the button is absent.
     await expect(page.getByTestId(`atlas-session-row-${parked.sessionId}`)).toBeVisible();
-    await expect(hold).toHaveAttribute("data-hold", "none-visible");
-    await expect(hold).toHaveClass(/loom-btn-ghost/);
+    await expect(page.getByTestId("atlas-fleet-controls-bar").getByTestId("fleet-pause")).toBeVisible();
+    await expect(hold).toHaveCount(0);
 
     // PARKED: the same page, re-read with the mark on. Full weight.
     inject = true;
     await page.reload();
-    await expect(hold).toHaveAttribute("data-hold", "sessions-held");
+    await expect(hold).toHaveAttribute("data-hold", "sessions");
     await expect(hold).toHaveClass(/loom-btn-default/);
 
     // CLEAR: the real POST, then the daemon's own (unparked) list comes back and it goes quiet again.
@@ -195,7 +213,8 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
     await hold.click();
     expect((await cleared).status(), "the click must reach the daemon's clear-hold route").toBe(200);
     await expect(hold).toHaveText(/hold cleared/i);
-    await expect(hold).toHaveAttribute("data-hold", "none-visible");
+    // …and once the 4 s confirmation is over the daemon's own answer (nothing held) hides it again.
+    await expect(hold).toHaveCount(0, { timeout: 8_000 });
   });
 
   test("switch ON: kill all is a real two-step — cancel and Escape fire nothing, Confirm fires once and the daemon acts", async ({ page, loomDaemon }) => {

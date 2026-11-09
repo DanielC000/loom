@@ -156,6 +156,12 @@ export type UsageLimitsStatus =
       fetchedAt: string | null; // ISO of the last attempt, null if never tried
     };
 
+/**
+ * The `GET /api/usage/limits` response: the cached plan-usage status plus `usageHoldArmed`, whether the
+ * daemon's GLOBAL usage-hold latch is armed (the predicate `worker_spawn` refuses on). A boolean only.
+ */
+export type UsageLimitsResponse = UsageLimitsStatus & { usageHoldArmed: boolean };
+
 // ── Historical run-usage aggregation (GET /api/usage/history) ──────────────────────────────────
 // Timespan + project-scoped HISTORICAL token/cost usage, aggregated read-only from the `runs` table
 // (the only persisted time-series usage data in Loom — interactive sessions keep no history). Each run

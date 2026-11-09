@@ -39,18 +39,29 @@ function useLiveWorkerCount(): number {
   return (sessions.data ?? []).filter((s) => s.role === "worker" && s.processState === "live").length;
 }
 
+/** What holds the usage limit, as far as the web can see. `unknown` = the latch read has not landed (or failed). */
+type UsageHold = "sessions" | "latch" | "unknown" | "none";
+
 /**
- * Whether any session is visibly held on the usage limit: parked (`rateLimitedUntil` still ahead) or
- * bailed. Drives the Clear usage hold button's weight in the fleet cluster (card 73b41b5d, Atlas audit
- * A-13): it no longer stands as a full peer of Pause and Kill all when nothing is held.
+ * What is holding the usage limit: a session parked (`rateLimitedUntil` still ahead) or bailed, and/or
+ * the daemon's GLOBAL awareness latch (`usageHoldArmed` on `GET /api/usage/limits`, card 3221d0d9 — the
+ * same predicate `worker_spawn` refuses on). Drives the Clear usage hold button in the fleet cluster
+ * (cards 73b41b5d, 3221d0d9; Atlas audit A-13): full weight when either holds, absent when neither does.
  *
- * ⛔ DEMOTE, NEVER HIDE, on a false here. The button also drops the daemon's GLOBAL latch, and no REST
- * read exposes that latch, so "no session held" is not "no hold". Hiding the button would strand a
- * latch-only hold (worker_spawn blocked, nothing parked) with no way to clear it from the UI.
+ * @decision 3221d0d9 — hide only on a positive "none"; never on an unloaded/failed read or an omitted field.
+ *
+ * ⛔ HIDE ONLY ON A POSITIVE "NONE". The button is the only UI route to drop the latch, so an unloaded or
+ * failed latch read is `unknown` and keeps the quiet button visible; and a daemon that omits the field
+ * (`!== false`) reads as armed. Hiding on "I could not tell" would strand a latch-only hold (worker_spawn
+ * blocked, nothing parked) with no way to clear it. Same `["usageLimits"]` entry (and 30 s cadence) the
+ * Workspace page and the classic strip already read, so this adds no new request shape.
  */
-function useSessionHold(): boolean {
+function useUsageHold(): UsageHold {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
-  return (sessions.data ?? []).some((s) => isRateLimited(s) || isBailed(s));
+  const usage = useQuery({ queryKey: ["usageLimits"], queryFn: ({ signal }) => api.usageLimits(signal), refetchInterval: 30_000 });
+  if ((sessions.data ?? []).some((s) => isRateLimited(s) || isBailed(s))) return "sessions";
+  if (!usage.data) return "unknown";
+  return usage.data.usageHoldArmed !== false ? "latch" : "none";
 }
 
 /**
@@ -63,22 +74,28 @@ function useSessionHold(): boolean {
  * implementation of it — the four-second confirmation window included. Failures surface through the
  * app-wide MutationCache handler (main.tsx); a call-site `onError` here would show a second modal.
  */
-export function ClearUsageHoldButton({ onCleared, quiet = false }: {
+export function ClearUsageHoldButton({ onCleared, hold }: {
   onCleared: () => void;
-  /** Demote to a ghost button: no session is parked, so there is nothing visibly held (see `useSessionHold`). */
-  quiet?: boolean;
+  /** Absent (Mission Control) = full weight. `unknown` demotes to a ghost button (see `useUsageHold`). */
+  hold?: UsageHold;
 }) {
   const [done, setDone] = useState(false);
+  const quiet = hold === "unknown";
   const clear = useMutation({
     mutationFn: () => api.clearUsageHold(),
     onSuccess: () => { setDone(true); onCleared(); window.setTimeout(() => setDone(false), 4000); },
   });
+  // `none` hides the button — except through the 4 s "✓ hold cleared" window, since a successful clear is
+  // exactly what flips the hold to `none` and the confirmation must not vanish with it.
+  if (hold === "none" && !done && !clear.isPending) return null;
   return (
     <Button variant={quiet && !done ? "ghost" : "default"} disabled={clear.isPending} data-testid="fleet-clear-hold"
-      data-hold={quiet ? "none-visible" : "sessions-held"}
+      data-hold={hold ?? "sessions"}
       title={quiet
-        ? "No session is parked on the usage limit. This still clears the GLOBAL usage hold (the worker_spawn block) if one is armed."
-        : "Clear the GLOBAL usage hold (the worker_spawn block) and resume the parked sessions, for a transient overload"}
+        ? "Could not tell whether a usage hold is armed. This still clears the GLOBAL usage hold (the worker_spawn block) if one is."
+        : hold === "latch"
+          ? "The GLOBAL usage hold is armed (new worker_spawn is blocked). Clear it for a transient overload"
+          : "Clear the GLOBAL usage hold (the worker_spawn block) and resume the parked sessions, for a transient overload"}
       onClick={() => clear.mutate()}>
       {done ? "✓ hold cleared" : clear.isPending ? "Clearing…" : "Clear usage hold"}
     </Button>
@@ -102,10 +119,14 @@ export function FleetControls({ variant }: { variant: "bar" | "pop" }) {
   const qc = useQueryClient();
   const paused = useOrchestrationPaused();
   const liveWorkers = useLiveWorkerCount();
-  const sessionHold = useSessionHold();
+  const usageHold = useUsageHold();
   const [arming, setArming] = useState(false);
 
   const refreshStatus = () => qc.invalidateQueries({ queryKey: orchStatusQuery().queryKey });
+  const refreshHold = () => {
+    qc.invalidateQueries({ queryKey: ["allSessions"] });
+    qc.invalidateQueries({ queryKey: ["usageLimits"] });
+  };
   const refreshSessions = () => qc.invalidateQueries({ queryKey: ["allSessions"] });
   const pause = useMutation({ mutationFn: () => api.pauseOrchestration(), onSuccess: refreshStatus });
   const resume = useMutation({ mutationFn: () => api.resumeOrchestration(), onSuccess: refreshStatus });
@@ -122,7 +143,7 @@ export function FleetControls({ variant }: { variant: "bar" | "pop" }) {
         {paused ? "orchestration: paused" : "orchestration: running"}
       </Badge>
 
-      <ClearUsageHoldButton onCleared={refreshSessions} quiet={!sessionHold} />
+      <ClearUsageHoldButton onCleared={refreshHold} hold={usageHold} />
 
       {paused ? (
         <Button variant="default" disabled={resume.isPending} data-testid="fleet-resume"

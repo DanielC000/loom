@@ -97,6 +97,27 @@ export function isLikelyNearClaudeUsageLimit(now: Date = new Date(), recencyWind
 }
 
 /**
+ * Whether the GLOBAL usage hold latch is armed, for the read-only `usageHoldArmed` boolean on
+ * `GET /api/usage/limits` (card 3221d0d9). It is `isLikelyNearClaudeUsageLimit` — the SAME predicate
+ * `worker_spawn` refuses on — OR a latch file that exists but cannot be read or parsed.
+ *
+ * ⛔ The corrupt-file arm fails VISIBLE, deliberately. `readClaudeUsageState` swallows a corrupt file to
+ * `{}` (so `worker_spawn` is not blocked by it), but the web hides "Clear usage hold" when this is
+ * false, and clearing is what removes the file. Reading a corrupt file as "not armed" would make it
+ * unclearable from the UI. Only a boolean leaves here — never a timestamp, a path or the file's content.
+ */
+export function isUsageHoldArmed(now: Date = new Date(), recencyWindowMs: number = RECENCY_WINDOW_MS): boolean {
+  if (isLikelyNearClaudeUsageLimit(now, recencyWindowMs)) return true;
+  try {
+    if (!fs.existsSync(STATE_PATH)) return false;
+    const parsed: unknown = JSON.parse(fs.readFileSync(STATE_PATH, "utf-8"));
+    return !(parsed && typeof parsed === "object");
+  } catch {
+    return true;
+  }
+}
+
+/**
  * The instant the current usage limit is expected to clear — the RETRY-AFTER deadline. Derived from the
  * SAME boundary `isLikelyNearClaudeUsageLimit` uses to decide "still limited", surfaced as a Date so a
  * spawn-blocked manager can compute when to retry instead of guessing: a KNOWN future reset wins;

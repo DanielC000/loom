@@ -68,7 +68,7 @@ import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { requestAnsweredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
-import { clearClaudeRateLimit, readClaudeUsageState } from "../orchestration/usage-awareness.js";
+import { clearClaudeRateLimit, isUsageHoldArmed, readClaudeUsageState } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter, gitError } from "../git/writer.js";
 import { readMainlineHead, parseMainlineWatermark, mainlineWatermarkKey } from "../git/mainline-watch.js";
@@ -1162,7 +1162,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- God-eye read of the user's REAL Claude plan-usage (5h / 7d rate-limit windows). Served from a
   // single daemon-side cached poller (NOT fetched per-request; NOT an MCP tool; NOT a write surface).
   // Always 200: `available:false`+reason when the token is missing/expired or the upstream call failed. ---
-  app.get("/api/usage/limits", async () => deps.usageStatus.getStatus());
+  //
+  // `usageHoldArmed` (card 3221d0d9) rides the same response: whether the GLOBAL awareness latch is armed
+  // (the same predicate worker_spawn refuses on, same live `recencyWindowMs`), so the web can show the
+  // Clear usage hold button when only the latch is held. A boolean only — never a timestamp or a path.
+  app.get("/api/usage/limits", async () => {
+    const recencyWindowMs = resolveConfig(undefined, deps.db.getPlatformConfig()).platform.rateLimit.recencyWindowMs;
+    return { ...deps.usageStatus.getStatus(), usageHoldArmed: isUsageHoldArmed(new Date(), recencyWindowMs) };
+  });
   // Manual GLOBAL hold clear (HUMAN/REST only — trust boundary like the git/vault writers; NEVER an
   // MCP tool). Drops the global usage-awareness latch (~/.loom/tmp/claude-usage.json) so new
   // worker_spawn is unblocked. ADDITIVE: detection re-arms the latch on the next real cap.

@@ -1,4 +1,5 @@
 import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, OrchestrationEvent, OrchestrationEventKind, Wake, SkillSummary, SkillPermissionVector, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionReplyStatus, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, CapabilityGrant, ConnectionMetadata, ConnectionAuthScheme, SshCommandRule, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, ProjectMemoryEntryWithBacklinks, GatesActive, GateHistoryPage, StalePromptWarning, ProfileGrantReach, PolicyRequirementKind, SessionGrantDrift } from "@loom/shared";
+import type { UsageLimitsResponse } from "@loom/shared";
 import type { CardPolicyVerdict, CardPolicyCardStatus } from "./cardPolicies";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
@@ -1144,7 +1145,7 @@ export const api = {
   triggerUpdate: () => postErr<{ ok: boolean; updating?: boolean }>("/internal/update"),
   // The user's REAL Claude plan-usage (account-wide rate-limit headroom) — one daemon-side cached
   // poll of the OAuth usage endpoint. Always 200; `available:false`+reason when the daemon can't fetch it.
-  usageLimits: (signal?: AbortSignal) => get<UsageLimitsStatus>("/api/usage/limits", signal),
+  usageLimits: (signal?: AbortSignal) => get<UsageLimitsResponse>("/api/usage/limits", signal),
   // HISTORICAL run usage (GET /api/usage/history) — timespan + project-scoped token/cost totals
   // aggregated from the `runs` table (Loom's only persisted time-series usage; interactive sessions
   // keep none). `sinceIso` is the window cutoff (server-clamped to (now-1yr, now]); `projectId` omitted
