@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useState, useEffect, useId, useLayoutEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, DragOverlay, useDraggable, useDroppable, type DragEndEvent, type DragOverEvent, type DragStartEvent, type Announcements } from "@dnd-kit/core";
@@ -35,6 +35,7 @@ import { useVoiceLang } from "../lib/useVoiceLang";
 import { isDoneColumn } from "../lib/columnSort";
 import { useResolvedTheme, type ResolvedTheme } from "../lib/themePref";
 import { taskMatchesSearch } from "../lib/taskFilter";
+import { laneOverflow, scrollTargetFor, type LaneOverflow, type LaneSpan } from "../lib/laneOverflow";
 import {
   CARD_STATES, OTHER_TYPE, commitType, descendantCounts, hasState, isUnderEpic, pendingRequestTaskIds, sortTypes,
   type CardState, type StateContext,
@@ -672,6 +673,9 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+  // Re-subscribed whenever the set of lanes or their collapse changes (new lane elements to observe).
+  const laneEdges = useLaneOverflow(gridRef,
+    board.data ? `${columnKeys.join(",")}|${[...collapsedLanes].sort().join(",")}` : "");
 
   return (
     <div ref={rootRef}>
@@ -696,14 +700,17 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
               typed title is safe (card a1ec70a6). It still surfaces the failure inline via create.error. */}
           <NewTask repos={repos} onCreate={(title, repoKey) => create.mutateAsync({ title, repoKey })}
             error={create.error ? errorText(create.error) : null} />
-          <FilterBar search={search} onSearch={setSearch} counts={counts}
+          {/* An empty board has nothing to filter (card c315f579): the bar, with every chip at zero, only
+              pushed the lanes down. It comes back with the first card. A filter still ON (a search typed
+              before the last card went) keeps it, so the active filter is never left without a control. */}
+          {(allTasks.length + unfetchedDone > 0 || filterActive) && <FilterBar search={search} onSearch={setSearch} counts={counts}
             priFilter={priFilter} onTogglePri={togglePri}
             types={sortTypes(counts.type.keys())} typeFilter={typeFilter} onToggleType={toggleType}
             stateFilter={stateFilter} onToggleState={toggleState}
             epics={epicOptions} epicFilter={epicFilter} onEpic={setEpicFilter}
             repos={multiRepo ? repos : null} repoFilter={repoFilter} onRepo={setRepoFilter}
             shown={shownTasks.length + unfetchedDone} total={allTasks.length + unfetchedDone}
-            active={filterActive} onClear={clearFilters} />
+            active={filterActive} onClear={clearFilters} />}
           {/* A failed policy-status read must not look like "nothing is blocking": say so, quietly (404 stays null = no badges). */}
           {policyStatus.isError && (
             <div data-testid="card-policy-status-unavailable" title="The unmet-requirement badges could not be loaded; open a card to see its policy."
@@ -718,7 +725,15 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
               <Button variant="ghost" onClick={() => setLaneError(null)}>Dismiss</Button>
             </div>
           )}
-          <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "stretch" }}>
+          {/* Lanes behind an edge (card c315f579): a row of its own, only while some lane is cut off. */}
+          {(laneEdges.before.length > 0 || laneEdges.after.length > 0) && (
+            <div className="loom-lane-more-row" data-testid="lane-overflow-row">
+              <LaneOverflowChip side="before" keys={laneEdges.before} columns={board.data.columns} gridRef={gridRef} />
+              <span style={{ flex: 1 }} />
+              <LaneOverflowChip side="after" keys={laneEdges.after} columns={board.data.columns} gridRef={gridRef} />
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, marginTop: laneEdges.before.length > 0 || laneEdges.after.length > 0 ? 6 : 10, alignItems: "stretch" }}>
             <DndContext onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={clearLaneDrag}
               collisionDetection={boardCollision} accessibility={{ announcements }}>
               {/* Responsive lane grid (.loom-board-grid): equal 1fr lanes when they fit, horizontal
@@ -728,6 +743,8 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                   board keeps the stylesheet's auto tracks untouched. */}
               <BoardNavContext.Provider value={nav}>
               <div className="loom-board-grid" ref={gridRef} onFocus={onGridFocus} onBlur={onGridBlur} onKeyDown={onGridKey}
+                data-more-left={laneEdges.before.length > 0 ? "true" : undefined}
+                data-more-right={laneEdges.after.length > 0 ? "true" : undefined}
                 style={board.data.columns.some((c) => collapsedLanes.has(c.key))
                   ? { gridTemplateColumns: board.data.columns.map((c) => (collapsedLanes.has(c.key) ? "44px" : "minmax(var(--loom-lane-min), 1fr)")).join(" ") }
                   : undefined}>
@@ -1217,15 +1234,23 @@ function FilterBar({ search, onSearch, counts, priFilter, onTogglePri, types, ty
     epics: { id: string; title: string; count: number }[]; epicFilter: string | null; onEpic: (id: string | null) => void;
     repos: RepoRegistryEntry[] | null; repoFilter: string | null; onRepo: (key: string | null) => void;
     shown: number; total: number; active: boolean; onClear: () => void }) {
+  // Narrow widths (card c315f579): the two facet rows fold behind a "Filters" toggle, so the first card
+  // is not pushed most of the way down a phone screen. Search stays out, it is the filter people reach
+  // for first. The toggle's count says how many facet filters are on while the rows are folded away.
+  const narrow = useNarrowViewport(FILTER_FOLD_BELOW);
+  const [open, setOpen] = useState(false);
+  const facetCount = priFilter.size + typeFilter.size + stateFilter.size + (epicFilter !== null ? 1 : 0) + (repoFilter !== null ? 1 : 0);
+  const showFacets = !narrow || open;
+  const facetsId = useId();
   return (
-    <div style={{ marginTop: 10, background: color.surface, borderRadius: radius.lg, boxShadow: shadow.panel,
-      padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
-      {/* Row 1: search + live result count + clear-all */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ position: "relative", display: "flex", alignItems: "center", flex: "1 1 240px", maxWidth: 460 }}>
+    <div data-testid="board-filter-bar" style={{ marginTop: 10, background: color.surface, borderRadius: radius.lg, boxShadow: shadow.panel,
+      padding: narrow ? "8px 10px" : "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
+      {/* Row 1: search + live result count + clear-all (+ the facet toggle at narrow widths) */}
+      <div style={{ display: "flex", alignItems: "center", gap: narrow ? 8 : 10, flexWrap: "wrap" }}>
+        <div style={{ position: "relative", display: "flex", alignItems: "center", flex: narrow ? "1 1 140px" : "1 1 240px", maxWidth: 460 }}>
           <span aria-hidden style={{ position: "absolute", left: 8, color: color.text3, fontSize: fs.body, pointerEvents: "none" }}>⌕</span>
           <Input value={search} onChange={(e) => onSearch(e.target.value)}
-            aria-label="Search tasks by id, title, or description" placeholder="search tasks by id or text…"
+            aria-label="Search tasks by id, title, or description" placeholder={narrow ? "search tasks…" : "search tasks by id or text…"}
             onKeyDown={(e) => { if (e.key === "Escape" && search) { e.stopPropagation(); onSearch(""); } }}
             style={{ width: "100%", paddingLeft: 26, paddingRight: search ? 26 : 8 }} />
           {search && (
@@ -1238,8 +1263,20 @@ function FilterBar({ search, onSearch, counts, priFilter, onTogglePri, types, ty
           color: active ? color.accentFg : color.text3 }}>
           {shown} of {total} shown
         </span>
+        {narrow && (
+          <button type="button" className={`loom-toggle${facetCount > 0 ? " is-active" : ""}`} data-testid="board-filter-toggle"
+            aria-expanded={open} aria-controls={facetsId} onClick={() => setOpen((v) => !v)}
+            style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: facetCount > 0 ? 600 : 500, padding: "3px 10px",
+              borderRadius: radius.pill, lineHeight: "16px", cursor: "pointer", whiteSpace: "nowrap",
+              color: facetCount > 0 ? color.accentFg : color.text2, background: "transparent",
+              border: `1px solid ${facetCount > 0 ? color.accentEdge : color.line}` }}>
+            {facetCount > 0 ? `Filters (${facetCount})` : "Filters"}
+            <span aria-hidden style={{ marginLeft: 5, color: color.text3 }}>{open ? "▴" : "▾"}</span>
+          </button>
+        )}
         {active && <Button variant="ghost" onClick={onClear} style={{ marginLeft: "auto" }}>Clear filters</Button>}
       </div>
+      {showFacets && <div id={facetsId} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {/* Row 2: what the card IS — priority + the title's commit type. */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
         <FilterGroup label="Priority">
@@ -1291,9 +1328,12 @@ function FilterBar({ search, onSearch, counts, priFilter, onTogglePri, types, ty
           </FilterGroup>
         )}
       </div>
+      </div>}
     </div>
   );
 }
+// Below this width the facet rows fold behind the "Filters" toggle (card c315f579).
+const FILTER_FOLD_BELOW = 820;
 
 // A State chip's "on" tone matches the badge the card itself wears for that state, so the chip and the
 // cards it keeps read as the same thing.
@@ -2381,6 +2421,67 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
   );
 }
 
+// ── Lanes past the grid's edges (card c315f579) ──────────────────────────────────────────────────
+// Seven lanes at their floor are wider than most windows, and the grid's own scrollbar sits below the
+// fold, so the lanes behind an edge were simply invisible. This reads which lanes are cut off on each
+// side, live: on scroll, and whenever the grid or any lane changes size (a resize, a collapse). The
+// result drives the edge fade (data-more-* on the grid) and the "N more lanes" chips.
+const LANE_FADE_AFTER = 48;
+const LANE_FADE_BEFORE = 32;
+// Each lane's span in the grid's SCROLL coordinates (what scrollLeft is measured in).
+const laneSpans = (grid: HTMLElement): LaneSpan[] => {
+  const origin = grid.getBoundingClientRect().left + grid.clientLeft - grid.scrollLeft;
+  return [...grid.querySelectorAll<HTMLElement>(":scope > [data-lane-key]")].map((el) => {
+    const r = el.getBoundingClientRect();
+    return { key: el.dataset.laneKey!, left: r.left - origin, right: r.right - origin };
+  });
+};
+function useLaneOverflow(gridRef: React.RefObject<HTMLDivElement | null>, layoutKey: string): LaneOverflow {
+  const [o, setO] = useState<LaneOverflow>({ before: [], after: [] });
+  // Layout effect: the first read lands before paint, so the chip row doesn't pop in a frame late.
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid) return;
+    const read = () => {
+      const next = laneOverflow(laneSpans(grid), grid.scrollLeft, grid.scrollLeft + grid.clientWidth);
+      setO((p) => (p.before.join() === next.before.join() && p.after.join() === next.after.join() ? p : next));
+    };
+    read();
+    grid.addEventListener("scroll", read, { passive: true });
+    const ro = typeof ResizeObserver === "function" ? new ResizeObserver(read) : null;
+    ro?.observe(grid);
+    for (const el of grid.querySelectorAll(":scope > [data-lane-key]")) ro?.observe(el);
+    return () => { grid.removeEventListener("scroll", read); ro?.disconnect(); };
+  }, [gridRef, layoutKey]);
+  return o;
+}
+
+// The chip on an edge with lanes behind it: says how many, names them in its tooltip, and scrolls the
+// nearest one fully into view. Lanes are never hidden by this, only reached.
+function LaneOverflowChip({ side, keys, columns, gridRef }:
+  { side: "before" | "after"; keys: string[]; columns: KanbanColumn[]; gridRef: React.RefObject<HTMLDivElement | null> }) {
+  if (keys.length === 0) return null;
+  const names = keys.map((k) => columns.find((c) => c.key === k)?.label ?? k);
+  const n = keys.length;
+  const text = side === "after" ? `${n} more ${n === 1 ? "lane" : "lanes"} →` : `← ${n} ${n === 1 ? "lane" : "lanes"}`;
+  const scroll = () => {
+    const grid = gridRef.current;
+    if (!grid) return;
+    const to = scrollTargetFor(laneSpans(grid), grid.scrollLeft, grid.scrollLeft + grid.clientWidth, side,
+      side === "after" ? LANE_FADE_AFTER : LANE_FADE_BEFORE);
+    if (to === null) return;
+    const reduce = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    grid.scrollTo({ left: to, behavior: reduce ? "auto" : "smooth" });
+  };
+  const label = `Scroll ${side === "after" ? "right" : "left"} to ${n === 1 ? "the" : n} ${n === 1 ? "lane" : "lanes"} out of view: ${names.join(", ")}`;
+  return (
+    <button type="button" className="loom-lane-more-chip" data-testid={`lane-overflow-${side}`} data-count={n}
+      aria-label={label} title={names.join(", ")} onClick={scroll}>
+      {text}
+    </button>
+  );
+}
+
 // Below `px` wide? Live, via matchMedia, so a rotate or resize re-lays the dialog without a reopen.
 function useNarrowViewport(px: number): boolean {
   const query = `(max-width: ${px - 1}px)`;
@@ -2760,11 +2861,12 @@ function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCre
       updateDraft: setTitle,
     });
   };
-  // flexWrap + a shrinkable, growing input: on a narrow viewport the button wraps below instead of
-  // forcing the row (and the page) to overflow horizontally. Enter submits (keyboard parity with the button).
+  // ONE row at every width (card c315f579): the input and repo picker shrink (min-width 0) and the button
+  // keeps its size, so a phone no longer spends a second row on the button. Nothing can overflow the page:
+  // every flexible item can shrink to zero. Enter submits (keyboard parity with the button).
   return (
     <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <div data-testid="board-new-task-row" style={{ display: "flex", gap: 6, flexWrap: "nowrap", minWidth: 0 }}>
         {/* `data-board-new-task` is the board's `n` shortcut target (card 591fe6ed); the placeholder
             advertises it the way the session composer advertises Ctrl/Cmd+Enter. */}
         <Input placeholder="new task title  (N)" aria-label="New task title" aria-keyshortcuts="N" data-board-new-task=""
@@ -2782,7 +2884,7 @@ function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCre
             {repos.map((r) => <option key={r.key} value={r.key}>{r.key}</option>)}
           </Select>
         )}
-        <Button variant="primary" disabled={!title.trim() || creating} onClick={submit}>
+        <Button variant="primary" disabled={!title.trim() || creating} onClick={submit} style={{ flexShrink: 0, whiteSpace: "nowrap" }}>
           {creating ? "Adding…" : "Add to Inbox"}
         </Button>
       </div>

@@ -1,7 +1,7 @@
 // Board-hierarchy presentation (card 1ae4f88c — the UI half; the daemon/REST half is card 3df86c87).
 //
 // Two surfaces, deliberately asymmetric in weight:
-//   · BoardCardHierarchy — ONE optional 10px meta line on a board card. The owner's primary board is the
+//   · BoardCardHierarchy — ONE optional 12px meta row (at most two lines) on a board card. The owner's primary board is the
 //     Overview-embedded one, so this surface must NOT grow: it renders nothing at all unless the card
 //     genuinely has a parent, children or an open blocker — which most cards don't.
 //   · TaskLinksBlock — the card's read-only CONTEXT in the drawer: children with progress, plus the
@@ -35,10 +35,13 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
   // All children done is the one state worth a positive signal; anything else stays context-weight.
   const complete = h.childCount > 0 && h.childDone >= h.childCount;
   return (
+    // 12px, not 11 (card c315f579): this was the smallest text on the board. Each item may take the card's
+    // full width and wraps onto its own line before it truncates, so a card with a blocker AND a parent
+    // runs to at most two lines. The full titles stay in the tooltips.
     <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", alignItems: "baseline", columnGap: 8, rowGap: 2,
-      fontSize: fs.xs, lineHeight: 1.4 }}>
+      fontSize: fs.sm, lineHeight: 1.4 }}>
       {h.blockedByOpen > 0 && (
-        <span style={{ ...metaItem, maxWidth: 150, color: color.attnText }}
+        <span style={{ ...metaItem, maxWidth: "100%", color: color.attnText }}
           title={h.blockedByFirst
             ? `Blocked by "${h.blockedByFirst.title}"${h.blockedByOpen > 1 ? ` and ${h.blockedByOpen - 1} more` : ""} — open the card for the full list`
             : `Blocked by ${h.blockedByOpen} unresolved ${h.blockedByOpen === 1 ? "card" : "cards"}`}>
@@ -58,7 +61,7 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
         </span>
       )}
       {h.parentId && (
-        <span style={{ ...metaItem, maxWidth: 140, color: color.text3 }}
+        <span style={{ ...metaItem, maxWidth: "100%", color: color.text3 }}
           title={parentTitle
             ? `Child of "${parentTitle}"`
             : `Child of card ${h.parentId.slice(0, 8)} — that card isn't on this board (archived, or in another project)`}>

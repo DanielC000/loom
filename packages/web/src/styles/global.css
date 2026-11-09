@@ -281,6 +281,45 @@ body {
     --loom-lane-min: 200px;
   }
 }
+@media (min-width: 1280px) {
+  /* Desktop (card c315f579): 224px lets a 7-lane board fit a 1920 window (7 × 224 + 6 gaps = 1628px
+     of the 1636 available beside the tree). Measured floor: below ~215px a card's title drops under its
+     priority chip and every card grows a line, so do not go lower than that. */
+  .loom-board-grid {
+    --loom-lane-min: 224px;
+  }
+}
+/* Lanes past an edge (card c315f579). A partly-clipped lane used to just stop mid-word, with the grid's
+   only scroll cue (its scrollbar) below the fold. The edge that has more lanes behind it fades out, and
+   the "N more lanes" chip (LaneOverflowChip, Board.tsx) scrolls them in. A mask, not a painted gradient,
+   so it works over whatever surface the board sits on (the /board page, the Overview embed). */
+.loom-board-grid[data-more-right="true"] {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+}
+.loom-board-grid[data-more-left="true"] {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 32px);
+  mask-image: linear-gradient(to right, transparent, #000 32px);
+}
+.loom-board-grid[data-more-left="true"][data-more-right="true"] {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 48px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 48px), transparent);
+}
+/* The chips sit in their own row above the lanes, never over them: overlaid, the right chip covered the
+   last visible lane's count and ⋯ menu. */
+.loom-lane-more-row {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px; min-height: 26px;
+}
+.loom-lane-more-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: var(--loom-radius-pill);
+  background: var(--loom-surface); border: 1px solid var(--loom-line-strong);
+  box-shadow: var(--loom-panel-shadow);
+  color: var(--loom-text-2); font-size: var(--loom-fs-sm); font-weight: 500; line-height: 16px;
+  white-space: nowrap; cursor: pointer;
+}
+.loom-lane-more-chip:hover { color: var(--loom-text); border-color: var(--loom-accent-edge); }
+.loom-lane-more-chip:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: 1px; color: var(--loom-text); }
 
 /* ── Board lane controls (card 67c43038) ─────────────────────────────────────────
    The header is the drag handle (grip + label); the grip is revealed on hover / keyboard focus inside the
