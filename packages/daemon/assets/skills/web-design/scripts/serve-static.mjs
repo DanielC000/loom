@@ -28,10 +28,10 @@
 //
 // SAFETY (the reason start/stop exist): `stop` only ever acts on the pid THIS SAME HELPER recorded in
 // `start` for that exact <dir> — never a name/port/netstat search. It never touches any process it
-// didn't itself spawn. ACCEPTED RISK: if the tracked pid has since exited and the OS reused that number
-// for an unrelated process, `stop` would signal that unrelated process instead — a generic pid-reuse
-// race any pid-tracking scheme has; judged acceptable given the short intended lifetime of a tracked
-// eyeball server. Mirrors dev-server.mjs in this same scripts/ dir (single-purpose, no deps, tracked-pid
+// didn't itself spawn. PID REUSE: if the tracked pid has since exited and the OS reused that number for an
+// unrelated process, `stop` does not signal it — before killing, it re-reads that ONE pid's command line
+// and requires the tracking-file path (passed to the server as `--track <file>`, unique to this <dir>) as a
+// WHOLE argument; otherwise it refuses (nonzero exit, tracking file kept). Mirrors dev-server.mjs in this same scripts/ dir (single-purpose, no deps, tracked-pid
 // start/stop, one printed line to act on) — keep the two in sync if either changes.
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -78,6 +78,61 @@ function removeTracked(absDir) {
 
 function isAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+// The command line of a live pid as `{ raw, argv }` (both null when gone/unreadable). `argv` is set only
+// when it is an unambiguous argument array (linux /proc, win32's quoted command line); the unquoted POSIX
+// `ps` text is `raw` only. Used ONLY to re-check a recorded pid before a kill — never to search for one.
+function commandLineOf(pid) {
+  const none = { raw: null, argv: null };
+  try {
+    if (process.platform === "win32") {
+      const r = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8", timeout: 20000 });
+      const raw = (r.stdout || "").trim() || null;
+      if (!raw) return none;
+      const argv = [];
+      const re = /"([^"]*)"|(\S+)/g;
+      let m;
+      while ((m = re.exec(raw)) !== null) argv.push(m[1] !== undefined ? m[1] : m[2]);
+      return { raw, argv };
+    }
+    if (process.platform === "linux") {
+      try {
+        const argv = fs.readFileSync(`/proc/${Number(pid)}/cmdline`).toString("utf8").split("\0").filter((s) => s.length > 0);
+        return argv.length ? { raw: argv.join(" "), argv } : none;
+      } catch { return none; }
+    }
+    const r = spawnSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 10000 });
+    const raw = (r.stdout || "").trim() || null;
+    return raw ? { raw, argv: null } : none;
+  } catch {
+    return none;
+  }
+}
+
+const normPath = (s) => {
+  const c = s.replace(/[\\/]+/g, "/");
+  return process.platform === "win32" ? c.toLowerCase() : c;
+};
+
+// True iff the live command line carries `marker` as a WHOLE argument — never a substring, so a lookalike
+// (`<marker>.bak`, `/elsewhere/<marker>`) does not match. Exact argv token when we have an argv array;
+// otherwise a space-bounded match on the raw text; otherwise (unreadable) false.
+function commandLineHasToken(info, marker) {
+  const want = normPath(marker);
+  if (info.argv) return info.argv.some((t) => normPath(t) === want);
+  if (!info.raw) return false;
+  const raw = normPath(info.raw);
+  for (let i = raw.indexOf(want); i !== -1; i = raw.indexOf(want, i + 1)) {
+    if ((i === 0 || raw[i - 1] === " ") && (i + want.length === raw.length || raw[i + want.length] === " ")) return true;
+  }
+  return false;
+}
+
+// True iff `pid` is still the server `start` launched for `absDir`: its command line carries this dir's
+// tracking-file path as its own argument. Called immediately before any kill.
+function isTrackedServer(pid, absDir) {
+  return commandLineHasToken(commandLineOf(pid), trackingFilePath(absDir));
 }
 
 // Kill exactly `pid` by that exact handle — never a name/port search. `taskkill /T /F` on win32 kills
@@ -236,7 +291,9 @@ async function start(dirArg, portArg) {
     } else {
       console.error(`start: server did not come up within ${waitedMs}ms — still waiting on ${trackFile} from pid ${child.pid} for ${absDir}`);
     }
-    try { killTracked(child.pid); } catch { /* best effort */ }
+    // Only a child that is still alive AND still carries our marker is ours to kill: a child that already
+    // exited may have had its pid reused.
+    if (!childDied && isTrackedServer(child.pid, absDir)) { try { killTracked(child.pid); } catch { /* best effort */ } }
     process.exit(1);
   }
   console.log(`Serving ${absDir} at http://127.0.0.1:${record.port}/ (pid ${record.pid})`);
@@ -251,7 +308,15 @@ function stop(dirArg) {
     console.log(`stop: no tracked static server for ${absDir} (nothing to do)`);
     return;
   }
-  killTracked(tracked.pid);
+  if (isAlive(tracked.pid)) {
+    // Re-verify identity right before the kill: the OS may have reused this pid for an unrelated process
+    // since `start`. Refuse and leave the tracking file so nothing else is touched.
+    if (!isTrackedServer(tracked.pid, absDir)) {
+      console.error(`stop: REFUSED — pid ${tracked.pid} is alive but its command line is not the static server this helper launched for ${absDir} (the pid was likely reused by an unrelated process, or its command line could not be read). Nothing was killed. Remove the stale tracking file ${trackingFilePath(absDir)} once you have confirmed the server is gone.`);
+      process.exit(1);
+    }
+    killTracked(tracked.pid);
+  }
   removeTracked(absDir);
   console.log(`Stopped pid ${tracked.pid} tracked for ${absDir}`);
 }

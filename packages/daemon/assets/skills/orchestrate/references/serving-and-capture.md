@@ -64,7 +64,11 @@ port. A dev server left running makes `worker_merge_confirm`'s `git worktree rem
 (the live process holds the dir open). **Scope any process match to its worktree path and nothing
 else: not image name (`taskkill /IM node.exe`), not port, not a session id, not a project id** (an id
 looks precise but matches every worktree it ever touched). A host-wide by-name kill has taken down an
-entire self-hosting daemon, and a killed peer reads as an unrelated failure.
+entire self-hosting daemon, and a killed peer reads as an unrelated failure. **A captured pid is only
+good until that process exits:** the OS reuses pid numbers (quickly on Windows), so after any delay (a
+graceful-shutdown wait, a retry) re-read that one pid's command line (or image path) immediately before a
+force-kill and confirm it still matches what you launched; on a mismatch, refuse and log instead of
+killing. The bundled helpers do this for you; a hand-rolled stop script must too.
 
 ## Printing served HTML to PDF
 

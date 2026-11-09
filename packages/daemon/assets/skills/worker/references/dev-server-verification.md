@@ -89,6 +89,11 @@ For UI/visual work: if your session **mounts
    hold a clean pid to stop: `node .claude/skills/orchestrate/scripts/dev-server.mjs start
    <your-worktree-dir> -- <command...>` to start, `... stop <your-worktree-dir>` to stop — otherwise just
    stop the child process you spawned directly. Don't re-discover a lost handle by process name or port.
+   **A captured pid is only good until that process exits.** The OS reuses pid numbers (quickly on
+   Windows), so after ANY delay (a graceful-shutdown wait, a retry, a long-running job) a force-kill
+   of a stored pid can land on an unrelated process. Immediately before a force-kill, re-read that one
+   pid's command line (or image path) and confirm it still matches what you launched; on a mismatch,
+   refuse and log it instead of killing. The bundled helpers already do this.
    **If you ever do need to find a stray process to stop it, scope the match to its WORKTREE PATH and
    nothing else — not bare image name (every `node`/`esbuild`), not port, not a session id, not a project
    id.** Image name and port are obviously broad, so they're easy to reject; an id LOOKS precise, which is

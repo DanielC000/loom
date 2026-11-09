@@ -170,7 +170,8 @@ MCP — spawns with one), use it:
    .claude/skills/web-design/scripts/serve-static.mjs start <dir>` prints the URL + the exact tracked
    pid and returns immediately (the server keeps running); eyeball via Playwright at the printed URL,
    then `node .claude/skills/web-design/scripts/serve-static.mjs stop <dir>` tears down EXACTLY that
-   tracked pid; never a `netstat`/`taskkill` port hunt.
+   tracked pid, after re-checking that pid's command line still matches (pids get reused); never a
+   `netstat`/`taskkill` port hunt.
 2. **Screenshot it and actually look**: squint test, hierarchy, spacing rhythm, contrast, the eight
    states, dark mode, a narrow (mobile) viewport.
    - For a **throwaway** shot, pass **no filename/path**; the screenshot tool auto-names it into your

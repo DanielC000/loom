@@ -100,7 +100,8 @@
 // Windows is the shell's pid, not the real listener). It never touches any process it didn't itself
 // spawn. PID REUSE: if the tracked pid has since exited and the OS reused that number, `stop` does not
 // signal it — before killing it re-reads that ONE pid's command line and requires it to carry the
-// record's own log path (unique to this <dir>, handed to the supervisor at spawn); otherwise it refuses.
+// record's own log path (unique to this <dir>, handed to the supervisor at spawn) as a WHOLE argument,
+// not a substring; otherwise it refuses.
 // That reads a single recorded pid, never enumerates processes, so it needs no per-process cwd (which
 // win32 does not expose).
 import { spawn, spawnSync } from "node:child_process";
@@ -306,6 +307,9 @@ const SUPERVISOR_CODE = [
   "child.on('exit', (code) => { out.end(); process.exit(code == null ? 1 : code); });",
 ].join("\n");
 
+// Flag whose following argument is the identity marker (the record's log path) on the supervisor's command line.
+const LOG_MARKER_FLAG = "--dev-server-log";
+
 function readTracked(absDir) {
   try {
     const parsed = JSON.parse(fs.readFileSync(trackingFilePath(absDir), "utf8"));
@@ -389,7 +393,9 @@ async function start(dir, cmdArgs) {
   // not `cmd` directly. No shell here — `process.execPath` is spawned directly (a real, directly
   // executable path), so Windows launches it via a normal argv-array CreateProcess call that needs no
   // manual quoting even though the path itself commonly contains spaces.
-  const child = spawn(process.execPath, ["-e", SUPERVISOR_CODE, payload], {
+  // The trailing `--dev-server-log <logPath>` pair is the identity marker `stop` re-checks (as its own
+  // argv token) before a force-kill; the supervisor ignores it (it reads only argv[1]).
+  const child = spawn(process.execPath, ["-e", SUPERVISOR_CODE, payload, LOG_MARKER_FLAG, logPath], {
     // detached: own process group on POSIX (so the group-kill in killTracked reaches the supervisor's
     // own non-detached child too, which inherits that same group), and lets the whole thing outlive this
     // launcher process either way. `stdio: "ignore"` for the supervisor itself — it writes the real
@@ -434,30 +440,63 @@ async function start(dir, cmdArgs) {
   }
 }
 
-// The command line of a live pid, or null when it is gone/unreadable. Used ONLY to re-check that a
-// recorded pid is still the supervisor `start` launched (pid reuse) — never to search for a process.
+// The command line of a live pid as `{ raw, argv }` (both null when it is gone/unreadable). `argv` is set
+// only when we have a real, unambiguous argument array (linux /proc, or win32's quoted command line);
+// the unquoted POSIX `ps` text is `raw` only. Used ONLY to re-check that a recorded pid is still the
+// process `start` launched (pid reuse) — never to search for a process.
 function commandLineOf(pid) {
+  const none = { raw: null, argv: null };
   try {
     if (process.platform === "win32") {
       const r = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8", timeout: 20000 });
-      const out = (r.stdout || "").trim();
-      return out || null;
+      const raw = (r.stdout || "").trim() || null;
+      if (!raw) return none;
+      const argv = [];
+      const re = /"([^"]*)"|(\S+)/g;
+      let m;
+      while ((m = re.exec(raw)) !== null) argv.push(m[1] !== undefined ? m[1] : m[2]);
+      return { raw, argv };
     }
-    const r = spawnSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 10000 });
-    const out = (r.stdout || "").trim();
-    return out || null;
+    if (process.platform === "linux") {
+      try {
+        const argv = fs.readFileSync(`/proc/${Number(pid)}/cmdline`).toString("utf8").split("\0").filter((s) => s.length > 0);
+        return argv.length ? { raw: argv.join(" "), argv } : none;
+      } catch { return none; }
+    }
+    const r = spawnSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 10000 });
+    const raw = (r.stdout || "").trim() || null;
+    return raw ? { raw, argv: null } : none;
   } catch {
-    return null;
+    return none;
   }
 }
 
-// True iff `pid` is still the supervisor this helper launched for the record: its command line carries
-// the record's own log path, which is unique to that <dir> and is passed to the supervisor as JSON (so a
-// win32 backslash appears doubled on the command line — match the JSON-escaped form).
+const normPath = (s) => {
+  const c = s.replace(/[\\/]+/g, "/");
+  return process.platform === "win32" ? c.toLowerCase() : c;
+};
+
+// True iff the live command line carries `marker` as a WHOLE argument — never a substring, so a lookalike
+// (`<marker>.bak`, `/elsewhere/<marker>`) does not match. Exact argv token when we have an argv array;
+// otherwise a space-bounded match on the raw text; otherwise (unreadable) false.
+function commandLineHasToken(info, marker) {
+  const want = normPath(marker);
+  if (info.argv) return info.argv.some((t) => normPath(t) === want);
+  if (!info.raw) return false;
+  const raw = normPath(info.raw);
+  for (let i = raw.indexOf(want); i !== -1; i = raw.indexOf(want, i + 1)) {
+    if ((i === 0 || raw[i - 1] === " ") && (i + want.length === raw.length || raw[i + want.length] === " ")) return true;
+  }
+  return false;
+}
+
+// True iff `pid` is still the supervisor this helper launched for the record: its command line carries the
+// record's own log path (unique to that <dir>) as its own argument, right after LOG_MARKER_FLAG.
 function isRecordedSupervisor(tracked) {
-  const cmdline = commandLineOf(tracked.pid);
-  if (cmdline == null || typeof tracked.logFile !== "string") return false;
-  return cmdline.includes(JSON.stringify(tracked.logFile).slice(1, -1));
+  if (typeof tracked.logFile !== "string") return false;
+  const info = commandLineOf(tracked.pid);
+  const marked = info.argv ? info.argv.includes(LOG_MARKER_FLAG) : (info.raw || "").includes(LOG_MARKER_FLAG);
+  return marked && commandLineHasToken(info, tracked.logFile);
 }
 
 async function waitDead(pid, timeoutMs) {

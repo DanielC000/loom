@@ -505,7 +505,9 @@ Workers are yours to direct; their one channel up, `worker_report`, reaches **yo
    not image name (`taskkill /IM node.exe`), not port, not a session id, not a project id** (an id
    LOOKS precise, which is why it's dangerous: a shared session or project id segment can match every
    worktree it ever touched). A host-wide by-name kill has taken down an entire self-hosting daemon,
-   and a killed peer doesn't announce itself: it reads as an unrelated failure. Pass screenshot calls
+   and a killed peer doesn't announce itself: it reads as an unrelated failure. **A captured pid is
+   also only valid until that process exits** (the OS reuses pids, fast on Windows): after any delay,
+   re-read that pid's command line right before a force-kill and refuse on a mismatch. Pass screenshot calls
    an **ABSOLUTE path under an allowed root** (the per-session scratch dir, the project's vault path,
    or, when set, `LOOM_PROJECT_WORK_DIR`) or no path at all; a bare filename lands in the repo working
    tree.
