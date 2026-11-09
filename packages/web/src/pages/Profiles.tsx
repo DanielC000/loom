@@ -9,7 +9,7 @@ import {
   PROVISION_STATE_META, capabilityNeedsNetwork, capabilityReportsProvisioning, provisionReasonText,
   provisioningSourceOf, type CapabilityProvisioning as CapabilityProvisioningStatus,
 } from "../lib/capabilityProvisioning";
-import { Panel, Button, Input, Select, SectionLabel, Badge } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Badge, Explainer } from "../components/ui";
 import { color, font, radius, tone, toneFill, type Tone, fs } from "../theme";
 import { agentProfiles } from "../lib/profileRoles";
 import { RolePicker } from "../components/RolePicker";
@@ -120,11 +120,11 @@ export default function Profiles() {
       <div className="loom-actor-split">
         <Panel style={{ alignSelf: "start" }}>
           <SectionLabel>Profiles</SectionLabel>
-          <p style={{ color: color.text3, fontSize: fs.sm, margin: "0 0 10px", lineHeight: 1.5 }}>
+          <Explainer style={{ marginBottom: 10 }}>
             Reusable, cross-project rig — role, model, permission deltas, skill subset, icon, plus a
             description blurb. An agent runs under one to drive how its sessions spawn; the injected
             prompt comes from the agent. Human-managed only; edits apply on the next spawn.
-          </p>
+          </Explainer>
           {/* Same filter shape as the Projects rail (audit A-32): name, description and role label. */}
           {allRigs.length > 0 && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>

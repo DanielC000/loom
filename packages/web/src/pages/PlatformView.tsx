@@ -8,7 +8,7 @@ import { PlatformSessionTile } from "../components/PlatformSessionTile";
 import { AgentPromptEditor } from "../components/AgentPromptEditor";
 import { RunHistory } from "../components/RunHistory";
 import { CollapsibleHistory } from "../components/CollapsibleHistory";
-import { Panel, Button, Input, SectionLabel, StatusPill, Badge } from "../components/ui";
+import { Panel, Button, Input, SectionLabel, StatusPill, Badge, Explainer } from "../components/ui";
 import { AtlasNodeHead, NodeTabs, type NodeHeadPill } from "../components/atlasHome";
 import { SetupWizard } from "../components/SetupWizard";
 import { LogoMark } from "../components/Logo";
@@ -351,11 +351,9 @@ function AtlasPlatformLayout({
                   ⛔ HOME ONLY, and exactly once on the node. All five panels stay mounted (see the note
                   at the Panels call site), so a copy on a second tab would be a second live match in the
                   DOM, not an alternative placement. Muted body copy, NOT a heading: the node head above
-                  owns the identity, this only explains it. */}
-              <p data-testid="platform-explainer"
-                style={{ color: color.text3, fontSize: fs.sm, margin: 0, lineHeight: 1.5, maxWidth: 760 }}>
-                {edition.copy.header.paragraph}
-              </p>
+                  owns the identity, this only explains it. Folded to one line plus "More" by the kit
+                  Explainer (audit A-39); the whole text stays in the DOM, still one <p>. */}
+              <Explainer data-testid="platform-explainer">{edition.copy.header.paragraph}</Explainer>
               <GuidedSetupLauncher onStart={() => setWizardOpen(true)} />
               <SetupWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
               <PlatformAgentsSection edition={edition} previewOnly={previewOnly} operator={operator} auditor={auditor}

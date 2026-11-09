@@ -175,7 +175,8 @@
   --loom-font-ui: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
   --loom-font-mono: "Geist Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
 
-  /* Type scale (Graphite). xs is for the densest mono ids only, so those rows don't grow and wrap. */
+  /* Type scale (Graphite). xs is the floor: the one size for dense meta, small labels and mono ids. No
+     text is set below it and there are no in-between steps (audit A-23 folded 9 to 11.5px into it). */
   --loom-fs-xs: 11px;
   --loom-fs-sm: 12px;
   --loom-fs-mono: 12.5px;
@@ -365,13 +366,13 @@ body {
 .loom-lane-menu-item:focus-visible { outline: var(--loom-focus-ring); outline-offset: -2px; }
 .loom-lane-menu-item[aria-disabled="true"] { color: var(--loom-text-3); cursor: default; }
 .loom-lane-menu-item[aria-disabled="true"]:hover { background: transparent; }
-.loom-lane-menu-hint { margin-left: auto; color: var(--loom-text-3); font-family: var(--loom-font-mono); font-size: 10px; }
+.loom-lane-menu-hint { margin-left: auto; color: var(--loom-text-3); font-family: var(--loom-font-mono); font-size: var(--loom-fs-xs); }
 .loom-lane-menu-sep { height: 1px; margin: 4px 2px; background: var(--loom-line); }
 /* A collapsed lane: the whole slim rail is the expand button, label running bottom-to-top. */
 .loom-lane-rail {
   flex: 1; display: flex; justify-content: center; padding: 10px 0; width: 100%;
   background: transparent; border: 0; cursor: pointer;
-  font-family: var(--loom-font-ui); font-size: 11px; font-weight: 700;
+  font-family: var(--loom-font-ui); font-size: var(--loom-fs-xs); font-weight: 700;
 }
 .loom-lane-rail:hover { background: var(--loom-inset); }
 .loom-lane-rail:focus-visible { outline: var(--loom-focus-ring); outline-offset: -2px; }
@@ -664,6 +665,22 @@ body {
   border-color: var(--loom-danger-line);
   color: var(--loom-danger-text);
 }
+/* The COMMIT step of an armed destructive confirm (audit A-41: Kill all's "Confirm"). Composed with
+   `danger`: the solid danger fill with its on-danger label, so the one irreversible click is the loudest
+   thing in the row and never reads as a normal button beside Cancel. Reserved for that second step;
+   the arming button stays the quieter `danger` outline. */
+.loom-btn-dangerfill {
+  background: var(--loom-danger-fill);
+  border-color: var(--loom-danger-fill);
+  color: var(--loom-on-danger);
+}
+.loom-btn-dangerfill:not(:disabled):hover {
+  background: color-mix(in oklab, var(--loom-danger-fill) 88%, black);
+  color: var(--loom-on-danger);
+}
+.loom-btn-dangerfill:not(:disabled):active {
+  background: color-mix(in oklab, var(--loom-danger-fill) 78%, black);
+}
 
 /* Field: chrome lives here, not inline on the kit Input/Select, for the same reason as .loom-btn's
    (decision db040811): an inline border beat the :hover and :focus border rules below and left them
@@ -686,6 +703,164 @@ body {
   border-color: var(--loom-ring);
   box-shadow: 0 0 0 1px var(--loom-ring), 0 0 0 4px var(--loom-ring-soft);
   outline: none;
+}
+/* A select draws the kit's own chevron instead of the OS one, so it matches the field's tokens in both
+   themes (audit A-24). The chevron is two small gradient triangles in text-2, sat in the right padding
+   the kit Select reserves inline. A caller must not set an inline `background` shorthand on a Select,
+   which would wipe this image; set `backgroundColor` instead. */
+select.loom-field {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--loom-text-2) 50%),
+    linear-gradient(135deg, var(--loom-text-2) 50%, transparent 50%);
+  background-position: right 14px center, right 9px center;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+select.loom-field:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Explainer (kit `Explainer`): a tab's lead-in folded to one line plus "More" (audit A-39). Folded, the
+   text is clamped to one ellipsised line; open, it wraps at a 75ch measure. The toggle sits on the line's baseline
+   at the end, so it reads as the paragraph's own continuation, not a separate control row.
+   `contain: inline-size` is load-bearing: without it the folded line's full unwrapped length is the
+   block's intrinsic width, and a panel or wrapping row that sizes to content grows to that length and
+   runs off the page (measured on Automation's Schedules head). With it, the block only ever takes the
+   width its container gives it. */
+.loom-explainer {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  contain: inline-size;
+}
+.loom-explainer-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
+  line-height: 1.5;
+  color: var(--loom-text-3);
+  /* A one-line CLAMP, not a nowrap ellipsis: the text wraps as usual and the lines after the first are
+     hidden below, so nothing inside it (an inline <code>) is laid out past the right edge of the page,
+     which a nowrap line does even while clipped (actors-narrow-viewport.spec.ts measures exactly that). */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+}
+.loom-explainer.is-open {
+  align-items: flex-end;
+}
+.loom-explainer.is-open .loom-explainer-text {
+  display: block;
+  -webkit-line-clamp: none;
+  line-clamp: none;
+  max-width: 75ch;
+}
+.loom-explainer-more {
+  flex: none;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--loom-text-2);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.loom-explainer-more:hover {
+  color: var(--loom-text);
+}
+.loom-explainer-more:focus-visible {
+  outline: var(--loom-focus-ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Workspace Settings: the 820px column plus a sticky "On this page" index in the empty right third
+   (audit A-33). Hidden below 1280px, where there is no spare third and the page stays one column.
+   `scroll-margin-top` keeps a jumped-to section's label clear of the top edge of the scroll area. */
+.loom-settings-section {
+  scroll-margin-top: 16px;
+}
+.loom-settings-indexed {
+  display: grid;
+  grid-template-columns: minmax(0, 820px) 200px;
+  gap: 48px;
+  align-items: start;
+}
+.loom-settings-index {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 1px solid var(--loom-line);
+}
+.loom-settings-index-lbl {
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-xs);
+  font-weight: 600;
+  color: var(--loom-text-3);
+}
+.loom-settings-index ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.loom-settings-index button {
+  display: block;
+  width: 100%;
+  padding: 3px 8px;
+  margin-left: -8px;
+  border: none;
+  border-radius: var(--loom-radius-sm);
+  background: transparent;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
+  line-height: 1.5;
+  text-align: left;
+  color: var(--loom-text-2);
+  cursor: pointer;
+  transition: background var(--loom-dur-1) var(--loom-ease), color var(--loom-dur-1) var(--loom-ease);
+}
+.loom-settings-index button:hover {
+  background: var(--loom-hover);
+  color: var(--loom-text);
+}
+.loom-settings-index button.is-current {
+  color: var(--loom-text);
+  font-weight: 600;
+}
+.loom-settings-index button:focus-visible {
+  outline: var(--loom-focus-ring);
+  outline-offset: -2px;
+}
+@media (max-width: 1279px) {
+  .loom-settings-indexed {
+    display: block;
+  }
+  .loom-settings-index {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .loom-settings-index button {
+    transition: none;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   .loom-field {
@@ -1111,7 +1286,7 @@ button.loom-cardtab:focus-visible {
 }
 .loom-rail-eyebrow {
   font-family: var(--loom-font-ui);
-  font-size: 9px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
 }
 .loom-rail-proj-name {
@@ -1124,7 +1299,7 @@ button.loom-cardtab:focus-visible {
 .loom-rail-caret {
   margin-left: auto;
   color: var(--loom-text-3);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   flex: none;
 }
 
@@ -1138,7 +1313,7 @@ button.loom-cardtab:focus-visible {
 .loom-rail-grp {
   padding: 10px 16px 4px;
   font-family: var(--loom-font-ui);
-  font-size: 9px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   color: var(--loom-text-3);
   height: 24px;
@@ -1222,7 +1397,7 @@ button.loom-cardtab:focus-visible {
   border-radius: 9px;
   background: var(--loom-attn);
   color: var(--loom-on-attn);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   display: inline-flex;
   align-items: center;
@@ -1241,7 +1416,7 @@ button.loom-cardtab:focus-visible {
   border-radius: 8px;
   background: var(--loom-line-strong);
   color: var(--loom-text-3);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   display: inline-flex;
   align-items: center;
@@ -1322,7 +1497,7 @@ button.loom-cardtab:focus-visible {
   display: inline-flex;
   align-items: center;
   font-family: var(--loom-font-mono);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-live-text);
   border: 1px solid var(--loom-live);
   border-radius: var(--loom-radius-sm);
@@ -1330,7 +1505,7 @@ button.loom-cardtab:focus-visible {
 }
 .loom-rail-ver {
   padding: 6px 16px 2px;
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   letter-spacing: 0.04em;
 }
@@ -1523,7 +1698,7 @@ button.loom-cardtab:focus-visible {
 }
 .loom-chat-day span {
   font-family: var(--loom-font-ui);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   color: var(--loom-text-3);
   padding: 3px 11px;
@@ -1548,7 +1723,7 @@ button.loom-cardtab:focus-visible {
 }
 .loom-chat-reset span {
   font-family: var(--loom-font-mono);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   white-space: nowrap;
 }
@@ -1703,7 +1878,7 @@ button.loom-cardtab:focus-visible {
   border-left: 2px solid transparent;
   color: var(--loom-text-3);
   font-family: var(--loom-font-mono);
-  font-size: 11.5px;
+  font-size: var(--loom-fs-xs);
   font-style: italic;
 }
 .loom-atlas-node {
@@ -1817,7 +1992,7 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-atlas-node.is-branch .loom-atlas-twist {
   display: grid;
   place-items: center;
-  font-size: 9px;
+  font-size: var(--loom-fs-xs);
   line-height: 1;
   color: var(--loom-text-3);
   transition:
@@ -1836,7 +2011,7 @@ button.loom-atlas-node.is-branch.is-open {
   gap: 5px;
   flex: none;
   color: var(--loom-text-2);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
 }
 /* A project row whose name the counts would clip (card eb516fba — AtlasTree's `useNameWinsWidth`):
    the counts give way, never the name. The live count keeps its dot, the attention badge becomes a dot
@@ -1939,7 +2114,7 @@ button.loom-atlas-node.is-branch.is-open {
   border: none;
   color: var(--loom-text-3);
   font-family: var(--loom-font-mono);
-  font-size: 9px;
+  font-size: var(--loom-fs-xs);
   line-height: 1;
   cursor: pointer;
   transition:
@@ -2014,7 +2189,7 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-atlas-nodemeta {
   flex: none;
   color: var(--loom-text-3);
-  font-size: 10.5px;
+  font-size: var(--loom-fs-xs);
   font-variant-numeric: tabular-nums;
 }
 .loom-atlas-nodemeta.is-attn {
@@ -2040,7 +2215,7 @@ button.loom-atlas-node.is-branch.is-open {
   border-radius: 7px;
   background: color-mix(in oklab, var(--loom-attn) 14%, transparent);
   color: var(--loom-attn-text);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   line-height: 15px;
   text-align: center;
   font-variant-numeric: tabular-nums;
@@ -2809,7 +2984,7 @@ button.loom-atlas-node.is-branch.is-open {
 }
 .loom-mcp-lab {
   font-family: var(--loom-font-ui);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   flex-shrink: 0;
 }
@@ -2819,7 +2994,7 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: baseline;
   gap: 10px;
   padding: 8px 12px;
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-2);
 }
 .loom-mcp-bar {
@@ -2843,12 +3018,12 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  font-size: 10.5px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   white-space: nowrap;
 }
 .loom-mcp-beads { display: inline-flex; gap: 3px; align-items: center; min-width: 0; overflow: hidden; }
-.loom-mcp-more { font-size: 10px; color: var(--loom-text-3); margin-right: 2px; }
+.loom-mcp-more { font-size: var(--loom-fs-xs); color: var(--loom-text-3); margin-right: 2px; }
 .loom-mcp-bead {
   width: 14px;
   height: 14px;
@@ -2890,7 +3065,7 @@ button.loom-atlas-node.is-branch.is-open {
 }
 .loom-mcp-say b { font-size: 13px; }
 .loom-mcp-tail { color: var(--loom-text-2); }
-.loom-mcp-meta { font-size: 11px; color: var(--loom-text-3); flex-shrink: 0; }
+.loom-mcp-meta { font-size: var(--loom-fs-xs); color: var(--loom-text-3); flex-shrink: 0; }
 .loom-mcp-ocx { font-size: 12px; font-weight: 600; flex-shrink: 0; }
 .loom-mcp-ocx.ok { color: var(--loom-live-fg); }
 .loom-mcp-ocx.error { color: var(--loom-danger); }
@@ -2902,7 +3077,7 @@ button.loom-atlas-node.is-branch.is-open {
   display: flex;
   align-items: center;
   gap: 2px;
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-2);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -2950,7 +3125,7 @@ button.loom-atlas-node.is-branch.is-open {
   align-items: baseline;
   margin-bottom: 6px;
   font-family: var(--loom-font-ui);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
 }
 .loom-mcp-fh button {
@@ -2959,7 +3134,7 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 0;
   cursor: pointer;
   font-family: var(--loom-font-mono);
-  font-size: 10.5px;
+  font-size: var(--loom-fs-xs);
   letter-spacing: 0;
   text-transform: none;
   color: var(--loom-accent-fg);
@@ -2974,7 +3149,7 @@ button.loom-atlas-node.is-branch.is-open {
   border-radius: var(--loom-radius);
   color: var(--loom-text);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   padding: 4px 8px;
 }
 .loom-mcp-search::placeholder { color: var(--loom-text-3); }
@@ -2993,7 +3168,7 @@ button.loom-atlas-node.is-branch.is-open {
   cursor: pointer;
   color: var(--loom-text-2);
   font: inherit;
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   text-align: left;
 }
 .loom-mcp-fr:hover { background: var(--loom-surface); color: var(--loom-text); }
@@ -3015,16 +3190,16 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-legend {
   margin: 6px 0 0;
   font-family: var(--loom-font-ui);
-  font-size: 10.5px;
+  font-size: var(--loom-fs-xs);
   line-height: 1.45;
   color: var(--loom-text-3);
 }
-.loom-mcp-legend .loom-mcp-ocx { font-size: 10.5px; margin-right: 2px; cursor: default; }
+.loom-mcp-legend .loom-mcp-ocx { font-size: var(--loom-fs-xs); margin-right: 2px; cursor: default; }
 .loom-mcp-legend b { font-family: var(--loom-font-mono); font-weight: 500; color: var(--loom-text-2); }
 .loom-mcp-stack i.pending { background: none; outline: 1px dashed var(--loom-text-3); outline-offset: -1px; }
 
 .loom-mcp-log { min-width: 0; max-height: 520px; overflow: auto; padding-bottom: 6px; }
-.loom-mcp-none { margin: 0; padding: 18px 12px; color: var(--loom-text-3); font-size: 11.5px; }
+.loom-mcp-none { margin: 0; padding: 18px 12px; color: var(--loom-text-3); font-size: var(--loom-fs-xs); }
 .loom-mcp-turnh {
   position: sticky;
   top: 0;
@@ -3035,7 +3210,7 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 7px 12px 6px;
   background: var(--loom-inset);
   border-bottom: 1px solid var(--loom-line);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   white-space: nowrap;
 }
@@ -3045,14 +3220,14 @@ button.loom-atlas-node.is-branch.is-open {
    the first thing to give way when the row runs out of room. */
 .loom-mcp-why {
   font-family: var(--loom-font-ui);
-  font-size: 11.5px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-2);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.loom-mcp-l1 .loom-mcp-why { font-size: 11px; color: inherit; }
+.loom-mcp-l1 .loom-mcp-why { font-size: var(--loom-fs-xs); color: inherit; }
 .loom-mcp-l1 .loom-mcp-why b { color: var(--loom-text-2); }
 .loom-mcp-why b { font-family: var(--loom-font-mono); font-weight: 500; font-size: 0.95em; color: var(--loom-text); }
 .loom-mcp-whymore { font-family: var(--loom-font-mono); font-size: 0.95em; color: var(--loom-text-3); }
@@ -3073,7 +3248,7 @@ button.loom-atlas-node.is-branch.is-open {
   border-bottom: 1px solid var(--loom-line);
   color: var(--loom-text-2);
   font: inherit;
-  font-size: 11.5px;
+  font-size: var(--loom-fs-xs);
   text-align: left;
   cursor: pointer;
 }
@@ -3090,11 +3265,11 @@ button.loom-atlas-node.is-branch.is-open {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.loom-mcp-s b { font-size: 11.5px; }
+.loom-mcp-s b { font-size: var(--loom-fs-xs); }
 .loom-mcp-tool { color: var(--loom-text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
 .loom-mcp-log.timed .loom-mcp-ent { grid-template-columns: 56px 16px minmax(0, 1fr) minmax(0, 150px) 96px 16px; }
 .loom-mcp-log:not(.timed) .loom-mcp-t { display: none; }
-.loom-mcp-t, .loom-mcp-tat { color: var(--loom-text-3); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.loom-mcp-t, .loom-mcp-tat { color: var(--loom-text-3); font-size: var(--loom-fs-xs); font-variant-numeric: tabular-nums; }
 .loom-mcp-tat { flex-shrink: 0; }
 .loom-mcp-dur {
   display: flex;
@@ -3102,7 +3277,7 @@ button.loom-atlas-node.is-branch.is-open {
   justify-content: flex-end;
   gap: 6px;
   color: var(--loom-text-3);
-  font-size: 10.5px;
+  font-size: var(--loom-fs-xs);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   min-width: 0;
@@ -3127,14 +3302,14 @@ button.loom-atlas-node.is-branch.is-open {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 16px;
-  font-size: 10.5px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
 }
 .loom-mcp-obmeta b { color: var(--loom-text-2); font-weight: 500; }
 .loom-mcp-subh {
   margin-bottom: 4px;
   font-family: var(--loom-font-ui);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
 }
 .loom-mcp-blk {
@@ -3146,7 +3321,7 @@ button.loom-atlas-node.is-branch.is-open {
   border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius);
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -3155,12 +3330,12 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-blk.error { color: var(--loom-danger); border-color: color-mix(in oklab, var(--loom-danger) 40%, var(--loom-line)); }
 .loom-mcp-blk.pending { color: var(--loom-text-3); }
 .loom-mcp-blk.refused { color: var(--loom-attn-fg); border-color: color-mix(in oklab, var(--loom-attn) 40%, var(--loom-line)); }
-.loom-mcp-hint { margin: 5px 0 0; font-family: var(--loom-font-ui); font-size: 11px; color: var(--loom-text-3); }
+.loom-mcp-hint { margin: 5px 0 0; font-family: var(--loom-font-ui); font-size: var(--loom-fs-xs); color: var(--loom-text-3); }
 .loom-mcp-hint.refused { color: color-mix(in oklab, var(--loom-attn-fg) 70%, var(--loom-text-2)); }
 /* A recorded (codex) call's detail: no Asked/Answered columns, so its note spans the row (card d4d3481e). */
 .loom-mcp-obnote { grid-column: 1 / -1; }
 .loom-mcp-obnote > .loom-mcp-hint:first-child { margin-top: 0; }
-.loom-mcp-links { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11px; }
+.loom-mcp-links { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: var(--loom-fs-xs); }
 .loom-mcp-links .loom-mcp-subh { margin: 0; }
 .loom-mcp-lk {
   display: inline-flex;
@@ -3275,7 +3450,7 @@ button.loom-atlas-node.is-branch.is-open {
   margin: 0;
   max-width: 68ch;
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   line-height: 1.5;
   color: var(--loom-text-3);
 }
@@ -3348,7 +3523,7 @@ button.loom-kpi.is-open {
 }
 .loom-kpi-label {
   font-family: var(--loom-font-ui);
-  font-size: 10px;
+  font-size: var(--loom-fs-xs);
   font-weight: 600;
   color: var(--loom-text-2);
 }
@@ -3360,9 +3535,12 @@ button.loom-kpi.is-open {
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
 }
+/* A KPI subtitle is a short phrase ("2 active · 1 idle", "nothing landed yet"), so it is the sans,
+   with tabular figures for the counts in it (audit A-25: mono is for ids, counts in tables and paths). */
 .loom-kpi-sub {
-  font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-family: var(--loom-font-ui);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-2);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3429,14 +3607,14 @@ button.loom-kpi.is-open {
   border: 1px solid var(--loom-line);
   border-radius: var(--loom-radius-sm);
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
 }
 .loom-kpipill-v {
   font-variant-numeric: tabular-nums;
 }
 .loom-kpipill-l {
   color: var(--loom-text-3);
-  font-size: 9.5px;
+  font-size: var(--loom-fs-xs);
 }
 
 /* ── Dashboard band ────────────────────────────────────────────────────────────────────
@@ -3536,7 +3714,7 @@ button.loom-kpi.is-open {
   display: grid;
   place-items: center;
   width: 12px;
-  font-size: 9px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   transition: transform 110ms cubic-bezier(0.2, 0, 0, 1);
 }
@@ -3546,7 +3724,7 @@ button.loom-kpi.is-open {
 .loom-banddisc-lbl {
   flex: none;
   font-family: var(--loom-font-ui);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   color: var(--loom-text-2);
 }
@@ -3562,7 +3740,7 @@ button.loom-kpi.is-open {
 }
 .loom-banddisc-hint {
   flex: none;
-  font-size: 10.5px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
 }
 .loom-bandpanel {
@@ -3620,7 +3798,7 @@ button.loom-kpi.is-open {
 }
 .loom-bandcount {
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -3633,7 +3811,7 @@ button.loom-kpi.is-open {
 .loom-bandlink {
   padding: 2px 8px;
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   text-decoration: none;
   flex: none;
 }
@@ -3656,7 +3834,7 @@ button.loom-kpi.is-open {
 }
 .loom-bandfoot {
   margin-top: 8px;
-  font-size: 10.5px;
+  font-size: var(--loom-fs-xs);
   line-height: 1.6;
   color: var(--loom-text-3);
 }
@@ -3677,8 +3855,8 @@ button.loom-kpi.is-open {
   flex-wrap: wrap;
 }
 .loom-fleetbar-note {
-  font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   white-space: nowrap;
 }
@@ -3693,10 +3871,13 @@ button.loom-kpi.is-open {
 .loom-fleetctl.is-pop {
   margin-top: 12px;
 }
+/* The armed question is a sentence, so the sans at the body-small step in the danger TEXT shade (the
+   text-safe one in light); the solid Confirm beside it carries the alarm (audit A-41). */
 .loom-fleetctl-ask {
-  font-family: var(--loom-font-mono);
-  font-size: 11.5px;
-  color: var(--loom-danger);
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
+  font-weight: 500;
+  color: var(--loom-danger-text);
   white-space: nowrap;
 }
 
@@ -3710,7 +3891,7 @@ button.loom-kpi.is-open {
   gap: 5px;
   cursor: pointer;
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   background: transparent;
   border: 1px solid var(--loom-line);
@@ -3750,7 +3931,7 @@ button.loom-kpi.is-open {
   min-width: 0;
   padding: 3px 0;
   font-family: var(--loom-font-mono);
-  font-size: 11.5px;
+  font-size: var(--loom-fs-xs);
 }
 .loom-datarow-l,
 .loom-meterrow-l {
@@ -3843,7 +4024,7 @@ button.loom-kpi.is-open {
 }
 .loom-atlas-primarylbl {
   font-family: var(--loom-font-ui);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   color: var(--loom-text-2);
 }
@@ -3935,7 +4116,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-ovbrief-l {
   font-family: var(--loom-font-ui);
-  font-size: 9.5px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   color: var(--loom-text-3);
   white-space: nowrap;
@@ -3951,7 +4132,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-ovbrief-v em {
   font-style: normal;
-  font-size: 11.5px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   margin-left: 6px;
 }
@@ -4028,7 +4209,7 @@ button.loom-ovbrief-cell.is-open {
   padding: 0 0 7px;
   border-bottom: 1px solid var(--loom-line);
   font-family: var(--loom-font-ui);
-  font-size: 9.5px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   color: var(--loom-text-3);
 }
@@ -4067,7 +4248,7 @@ button.loom-ovbrief-cell.is-open {
   flex: none;
   font-style: normal;
   font-family: var(--loom-font-ui);
-  font-size: 9px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   color: var(--loom-text-3);
 }
@@ -4078,7 +4259,7 @@ button.loom-ovbrief-cell.is-open {
   display: block;
   min-width: 0;
   font-family: var(--loom-font-mono);
-  font-size: 11.5px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-2);
   white-space: nowrap;
   overflow: hidden;
@@ -4090,7 +4271,7 @@ button.loom-ovbrief-cell.is-open {
   gap: 8px;
   min-width: 0;
   font-family: var(--loom-font-mono);
-  font-size: 11.5px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-2);
 }
 .loom-ovroster-track {
@@ -4107,7 +4288,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-ovroster-pct {
   flex: none;
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   font-variant-numeric: tabular-nums;
 }
 .loom-ovroster-open {
@@ -4160,7 +4341,7 @@ button.loom-ovbrief-cell.is-open {
   padding: 3px 6px;
   border-radius: var(--loom-radius-sm);
   font-family: var(--loom-font-mono);
-  font-size: 11.5px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-2);
   text-decoration: none;
   transition: background 80ms linear, color 80ms linear;
@@ -4242,7 +4423,7 @@ button.loom-ovbrief-cell.is-open {
     display: inline-block;
     flex: none;
     font-family: var(--loom-font-ui);
-    font-size: 9px;
+    font-size: var(--loom-fs-xs);
     font-weight: 700;
     color: var(--loom-text-3);
   }
@@ -4359,7 +4540,7 @@ button.loom-ovbrief-cell.is-open {
   display: grid;
   place-items: center;
   width: 12px;
-  font-size: 9px;
+  font-size: var(--loom-fs-xs);
   line-height: 1;
   color: var(--loom-text-3);
   transition:
@@ -4441,7 +4622,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-wsession-up {
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   font-variant-numeric: tabular-nums;
 }
@@ -4541,7 +4722,7 @@ button.loom-ovbrief-cell.is-open {
 .loom-projcard-meta,
 .loom-projcard-foot {
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-2);
 }
 .loom-projcard-foot {
@@ -4649,7 +4830,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-agentrow-meta {
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   line-height: 1.5;
   color: var(--loom-text-3);
   overflow: hidden;
@@ -4666,7 +4847,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-agentrow-err {
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   line-height: 1.5;
   color: var(--loom-danger);
 }
@@ -4678,7 +4859,7 @@ button.loom-ovbrief-cell.is-open {
 .loom-agentnote {
   margin: 8px 0 0;
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   line-height: 1.6;
   color: var(--loom-text-3);
 }
@@ -4809,15 +4990,15 @@ button.loom-ovbrief-cell.is-open {
 .loom-baygroup-why {
   flex: 1 1 auto;
   min-width: 0;
-  font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-xs);
   line-height: 1.6;
   color: var(--loom-text-2);
 }
 .loom-baygroup-n {
   flex: none;
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-3);
   font-variant-numeric: tabular-nums;
 }
@@ -4834,6 +5015,7 @@ button.loom-ovbrief-cell.is-open {
 /* The node head's count carries a project NAME, so it shrinks and ellipsises instead of pushing
    the head's own button out of the column — unlike the band's bare-number counts. */
 .loom-agentscount {
+  font-family: var(--loom-font-ui);
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -4902,7 +5084,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-baycard-role {
   font-family: var(--loom-font-ui);
-  font-size: 9.5px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
 }
 .loom-baycard-tier {
@@ -4926,8 +5108,8 @@ button.loom-ovbrief-cell.is-open {
 .loom-baymission {
   margin: 0 0 10px;
   padding: 0 12px;
-  font-family: var(--loom-font-mono);
-  font-size: 11.5px;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-xs);
   line-height: 1.6;
   color: var(--loom-text-2);
   display: -webkit-box;
@@ -4949,7 +5131,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-bayfacts dt {
   font-family: var(--loom-font-ui);
-  font-size: 9px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   color: var(--loom-text-3);
   padding-top: 3px;
@@ -4963,7 +5145,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-bayfact {
   font-family: var(--loom-font-mono);
-  font-size: 11.5px;
+  font-size: var(--loom-fs-xs);
   line-height: 1.5;
   color: var(--loom-text-2);
   min-width: 0;
@@ -4973,7 +5155,7 @@ button.loom-ovbrief-cell.is-open {
 }
 .loom-baychip {
   font-family: var(--loom-font-mono);
-  font-size: 10.5px;
+  font-size: var(--loom-fs-xs);
   line-height: 1.5;
   padding: 1px 6px;
   border-radius: var(--loom-radius-sm);
@@ -5011,7 +5193,7 @@ button.loom-ovbrief-cell.is-open {
   border-radius: var(--loom-radius);
   background: var(--loom-surface-2);
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-text-2);
   font-variant-numeric: tabular-nums;
 }
@@ -5039,7 +5221,7 @@ button.loom-ovbrief-cell.is-open {
    render — which is what an empty gap there would say. */
 .loom-baystamp {
   font-family: var(--loom-font-ui);
-  font-size: 9.5px;
+  font-size: var(--loom-fs-xs);
   font-weight: 700;
   color: var(--loom-text-3);
 }
@@ -5073,7 +5255,7 @@ button.loom-ovbrief-cell.is-open {
 .loom-inlinelink {
   flex: none;
   font-family: var(--loom-font-mono);
-  font-size: 11px;
+  font-size: var(--loom-fs-xs);
   color: var(--loom-accent-fg);
   text-decoration: underline;
   text-underline-offset: 2px;

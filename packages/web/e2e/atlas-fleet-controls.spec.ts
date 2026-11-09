@@ -262,6 +262,10 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
     // shared daemon this reads 3 and fails loudly — which is the correct outcome, not a flake to paper over.
     await expect(ask).toHaveText("Kill all 2 live workers?");
     await expect(bar.getByTestId("fleet-kill-confirm")).toBeVisible();
+    // Audit A-41 (card 1fe4b596): the commit step carries the SOLID danger fill, so it never reads as a
+    // normal button beside Cancel, and the armed question is a sentence in the sans, not red mono.
+    await expect(bar.getByTestId("fleet-kill-confirm")).toHaveClass(/\bloom-btn-dangerfill\b/);
+    expect(await ask.evaluate((el) => getComputedStyle(el).fontFamily)).toMatch(/^"?Instrument Sans/);
     // Presence-first: the armed pair is there (above) before claiming the plain button is not.
     await expect(bar.getByTestId("fleet-kill")).toHaveCount(0);
     expect(killPosts, "arming the confirm must not call the kill endpoint").toBe(0);

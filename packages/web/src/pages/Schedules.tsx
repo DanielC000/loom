@@ -7,7 +7,7 @@ import { cronFromBuilder, describeCron, parseCronToBuilder, defaultBuilderState 
 import { api, orchStatusQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAllAgentLabels } from "../lib/useAllAgents";
-import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill, Explainer } from "../components/ui";
 import { color, font, radius, wash, fs } from "../theme";
 
 // A 5-field cron is the daemon's contract (Schedule.cron). Cheap client-side gate for the raw-cron
@@ -88,11 +88,11 @@ export default function Schedules() {
         {orch.data?.schedulerEnabled && (
           <StatusPill tone="live" label="scheduler active" glow />
         )}
-        <p style={{ color: color.text3, fontSize: fs.sm, margin: 0, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
+        <Explainer style={{ flex: 1, minWidth: 240 }}>
           Cron triggers. On each due boundary the daemon boots a manager session in the target agent —
           the agent's startup prompt is the kickoff, optionally followed by this schedule's own task
           prompt. Human-managed; changes apply on the next tick.
-        </p>
+        </Explainer>
         <Button variant="primary" onClick={() => setModal({ mode: "create" })}>+ New schedule</Button>
       </div>
 

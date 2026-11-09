@@ -6,7 +6,7 @@ import { EVENT_TRIGGER_EVENT_KINDS } from "@loom/shared";
 import { api } from "../lib/api";
 import { eventKindLabel } from "../lib/eventLabels";
 import { useAllAgentLabels } from "../lib/useAllAgents";
-import { Panel, Button, Select, SectionLabel, Badge, Chip, StatusPill } from "../components/ui";
+import { Panel, Button, Select, SectionLabel, Badge, Chip, StatusPill, Explainer } from "../components/ui";
 import { color, font, radius, fs } from "../theme";
 
 function fmt(iso: string | null): string {
@@ -79,11 +79,11 @@ export default function EventTriggers() {
       <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
         <SectionLabel style={{ margin: 0 }}>Event Triggers</SectionLabel>
         <StatusPill tone="live" label="dispatcher active" glow />
-        <p style={{ color: color.text3, fontSize: fs.sm, margin: 0, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
+        <Explainer style={{ flex: 1, minWidth: 240 }}>
           React to internal orchestration events. When an event of the chosen kind fires — optionally
           scoped to one project — the trigger wakes an existing session or spawns a fresh agent. The
           dispatcher is always on; changes apply on the next matching event.
-        </p>
+        </Explainer>
         <Button variant="primary" onClick={() => setModal({ mode: "create" })}>+ New trigger</Button>
       </div>
 

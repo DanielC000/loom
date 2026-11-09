@@ -5,7 +5,7 @@
 // primitive follows the light/dark theme. Interaction states (button hover/press, field focus,
 // segmented thumb) live as .loom-* classes in global.css.
 
-import { useRef } from "react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import type {
   AnchorHTMLAttributes,
   ButtonHTMLAttributes,
@@ -128,9 +128,11 @@ export function Input({ style, className, mono, ...rest }: InputHTMLAttributes<H
   return <input {...rest} className={`loom-field${className ? ` ${className}` : ""}`} style={{ ...fieldStyle(mono ?? rest.spellCheck === false), ...style }} />;
 }
 
+// The right padding is set LAST, after the caller's style, because it is the room `select.loom-field`'s
+// chevron sits in: a caller's `padding` shorthand may size the rest of the box, never cover the chevron.
 export function Select({ style, className, mono, children, ...rest }: SelectHTMLAttributes<HTMLSelectElement> & FieldFontProps) {
   return (
-    <select {...rest} className={`loom-field${className ? ` ${className}` : ""}`} style={{ ...fieldStyle(mono), ...style }}>
+    <select {...rest} className={`loom-field${className ? ` ${className}` : ""}`} style={{ ...fieldStyle(mono), ...style, paddingRight: 26 }}>
       {children}
     </select>
   );
@@ -333,6 +335,40 @@ export function Segmented<T extends string>({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// ── Explainer ──────────────────────────────────────────────────────────────────
+// A tab's lead-in paragraph, folded to ONE line with a "More" toggle, so the working UI below it is
+// not pushed down by four to six lines of prose on every visit (audit A-39). Expanded, it wraps at a
+// 75ch measure. The whole text is always in the DOM (only clipped), so a reader can search the page
+// for it and nothing below reflows when it opens. The toggle only renders while the folded line is
+// actually cut off: when the text fits, there is nothing more to show. Props other than `style` land
+// on the <p> (a test id, an aria hook), and `style` lands on the wrapper, which is what a caller's
+// flex placement needs.
+export function Explainer({ children, style, className, ...rest }: HTMLAttributes<HTMLParagraphElement>) {
+  const [open, setOpen] = useState(false);
+  const [clipped, setClipped] = useState(false);
+  const textRef = useRef<HTMLParagraphElement | null>(null);
+  const id = useId();
+  useLayoutEffect(() => {
+    const el = textRef.current;
+    if (!el || open) return;
+    // Folded, the <p> is a one-line clamp, so anything past that line is hidden BELOW it.
+    const measure = () => setClipped(el.scrollHeight > el.clientHeight + 1);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [open, children]);
+  return (
+    <div className={`loom-explainer${open ? " is-open" : ""}${className ? ` ${className}` : ""}`} style={style}>
+      <p {...rest} id={rest.id ?? id} ref={textRef} className="loom-explainer-text">{children}</p>
+      {(clipped || open) && (
+        <button type="button" className="loom-explainer-more" aria-expanded={open} aria-controls={rest.id ?? id}
+          onClick={() => setOpen((o) => !o)}>{open ? "Less" : "More"}</button>
+      )}
     </div>
   );
 }

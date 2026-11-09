@@ -524,7 +524,7 @@ function ProjectNode({ project, selected, expanded, metrics, metricsKey = "", on
           className={`loom-atlas-node is-branch${selected ? " is-open" : ""}${compact.on ? " is-compact" : ""}`}
           data-testid={selected ? "atlas-project-node" : undefined}
           aria-current={selected ? "true" : undefined}
-          title={selected ? project.name : `Scope to ${project.name}`}
+          title={selected ? `${project.name} · active project` : `Scope to ${project.name}`}
           onClick={() => onSelect(project.id)} {...item}>
           <span className="loom-atlas-ico" aria-hidden><NavIcon to="/projects" /></span>
           <span className="loom-atlas-lbl" ref={compact.labelRef}>{project.name}</span>

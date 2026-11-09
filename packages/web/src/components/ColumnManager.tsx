@@ -365,9 +365,14 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
           placeholder="Column label" style={{ flex: 1, minWidth: 120 }} />
 
         {/* Role badge (read) + assignment (write). The badge is the at-a-glance state; the select edits it. */}
-        {meta
-          ? <Badge tone={meta.t}>{meta.short}{meta.required ? "" : ""}</Badge>
-          : <span style={{ fontSize: fs.sm, color: color.text3, padding: "2px 8px", border: `1px dashed ${color.line}`, borderRadius: radius.sm }}>NO ROLE</span>}
+        {/* A fixed-width, centred cell, so every row's label input ends at the same x whatever the chip
+            says (INTAKE vs LANDING vs NO ROLE, audit A-17). */}
+        <span data-testid="column-role-chip-cell"
+          style={{ width: 84, flexShrink: 0, display: "inline-flex", justifyContent: "center" }}>
+          {meta
+            ? <Badge tone={meta.t}>{meta.short}{meta.required ? "" : ""}</Badge>
+            : <span style={{ fontSize: fs.sm, color: color.text3, padding: "2px 8px", border: `1px dashed ${color.line}`, borderRadius: radius.sm, whiteSpace: "nowrap" }}>NO ROLE</span>}
+        </span>
         <Select value={row.role ?? ""} onChange={(e) => onRole((e.target.value || undefined) as ColumnRole | undefined)}
           aria-label="Lifecycle role" style={{ width: 150 }}>
           <option value="">— no role —</option>
@@ -400,7 +405,7 @@ function ColumnRowView({ row, cards, landingLabel, onLabel, onKey, onRole, onAcc
             onWip(v === "" || Number.isNaN(n!) ? undefined : n);
           }}
           type="number" min={0} inputMode="numeric" aria-label="WIP limit" placeholder="WIP" title="Soft WIP limit (advisory; empty = none)"
-          style={{ width: 56, flexShrink: 0, textAlign: "right" }} />
+          style={{ width: 68, flexShrink: 0, textAlign: "right" }} />
 
         {/*
           @decision 6cefdf25 — do not carry this toggle's open/closed tone in an inline `color`: it

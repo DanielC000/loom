@@ -162,7 +162,7 @@ export function FleetControls({ variant }: { variant: "bar" | "pop" }) {
           <span className="loom-fleetctl-ask" data-testid="fleet-kill-ask">
             Kill all {plural(liveWorkers, "live worker")}?
           </span>
-          <Button variant="danger" disabled={kill.isPending} data-testid="fleet-kill-confirm"
+          <Button variant="danger" className="loom-btn-dangerfill" disabled={kill.isPending} data-testid="fleet-kill-confirm"
             title="Hard-stop every live worker across every project, and pause orchestration"
             onClick={() => kill.mutate()}>
             {kill.isPending ? "Killing…" : "Confirm"}

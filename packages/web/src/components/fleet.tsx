@@ -13,7 +13,7 @@ import { sentenceCase } from "../lib/textCase";
 import { DecisionStateChip } from "./decisions";
 import { HarnessTag } from "./HarnessPicker";
 import { useOpenRequest } from "./requests";
-import { Panel, StatusPill, Chip, Meter, Button, Dot } from "./ui";
+import { Panel, StatusPill, Chip, Meter, Button, Dot, Select } from "./ui";
 import { color, font, radius, tone, toneFill, type Tone, fs } from "../theme";
 
 // The pure roll-up math lives in lib/fleet.ts (JSX-free, so the hermetic node test can import it); the
@@ -343,20 +343,19 @@ function SnoozeButton({ questionId }: { questionId: string }) {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["openQuestions"] }),
   });
   return (
-    <select disabled={snooze.isPending} defaultValue=""
+    <Select disabled={snooze.isPending} defaultValue=""
       title="Snooze — hides this STALE flag for a while; the request itself stays pending and answerable, and it re-reddens on its own if still unanswered once the snooze ends"
       onChange={(e) => {
         const ms = SNOOZE_MS[e.target.value];
         if (ms) snooze.mutate(ms);
         e.target.value = "";
       }}
-      style={{ fontFamily: font.ui, fontSize: fs.sm, background: color.surface, color: color.text,
-        border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "2px 4px", cursor: "pointer" }}>
+      style={{ fontSize: fs.sm, padding: "2px 6px" }}>
       <option value="" disabled>Snooze…</option>
       <option value="1d">1 day</option>
       <option value="3d">3 days</option>
       <option value="7d">7 days</option>
-    </select>
+    </Select>
   );
 }
 

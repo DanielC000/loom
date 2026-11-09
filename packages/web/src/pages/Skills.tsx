@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SkillPermissionVector } from "@loom/shared";
 import { api, type SkillMergePreview, type SkillFileState } from "../lib/api";
 import { LineDiff } from "../components/LineDiff";
-import { Panel, Button, Input, SectionLabel, Badge, Segmented } from "../components/ui";
+import { Panel, Button, Input, SectionLabel, Badge, Segmented, Explainer } from "../components/ui";
 import Markdown from "../components/Markdown";
 import { DotLegend, GuideList, RowDescription, matchesFilter } from "../components/actorList";
 import { color, font, radius, toneFill, type Tone, fs } from "../theme";
@@ -106,11 +106,11 @@ export default function Skills() {
     <div className="loom-actor-split">
       <Panel style={{ alignSelf: "start" }}>
         <SectionLabel>Skills</SectionLabel>
-        <p style={{ color: color.text3, fontSize: fs.sm, margin: "0 0 10px", lineHeight: 1.5 }}>
+        <Explainer style={{ marginBottom: 10 }}>
           Loom's own skills, injected into every session as project-local — your personal
           <code> ~/.claude/skills</code> is untouched and takes precedence, so Loom's names are chosen
           not to collide. Edits apply on the next spawn.
-        </p>
+        </Explainer>
         {/* Same filter shape as the Projects rail (audit A-32): one Input, matching name + description. */}
         {!!skills.data?.length && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>

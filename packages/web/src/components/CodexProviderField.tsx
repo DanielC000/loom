@@ -1,6 +1,6 @@
 import type { CodexProvider } from "@loom/shared";
 import { color, font, radius, fs } from "../theme";
-import { Input } from "./ui";
+import { Input, Select } from "./ui";
 
 // The codex model-provider endpoint editor (card 2ef54430), shown on the Profiles editor only while the
 // harness is codex. HUMAN-only: `codexProvider` is on the daemon's AGENT_FORBIDDEN_PROFILE_KEYS, so this
@@ -21,7 +21,7 @@ export function CodexProviderField({ value, onChange, connections }: {
   const mode = modeOf(value);
   const usable = connections.filter((c) => c.authScheme === undefined || c.authScheme === "api-key" || c.authScheme === "bearer");
   const label = { fontFamily: font.ui as string, fontSize: fs.sm, fontWeight: 700, color: color.text2 };
-  const select = { background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 8px", fontFamily: font.ui, fontSize: fs.sm };
+  const select = { padding: "6px 8px", fontSize: fs.sm };
   const setMode = (m: Mode) => {
     if (m === "default") return onChange(null);
     if (m === "custom") return onChange({ id: value && modeOf(value) === "custom" ? value.id : "", baseUrl: "", connectionId: "" });
@@ -30,12 +30,12 @@ export function CodexProviderField({ value, onChange, connections }: {
   return (
     <div data-testid="codex-provider-field" style={{ display: "flex", flexDirection: "column", gap: 8, border: `1px solid ${color.line}`, borderRadius: radius.base, padding: "9px 11px", background: color.inset }}>
       <span style={label}>Codex model provider</span>
-      <select aria-label="Codex model provider" data-testid="codex-provider-mode" value={mode} onChange={(e) => setMode(e.target.value as Mode)} style={select}>
+      <Select aria-label="Codex model provider" data-testid="codex-provider-mode" value={mode} onChange={(e) => setMode(e.target.value as Mode)} style={select}>
         <option value="default">codex default (no custom endpoint)</option>
         <option value="ollama">ollama — local, no key</option>
         <option value="lmstudio">lmstudio — local, no key</option>
         <option value="custom">custom endpoint (Responses API)…</option>
-      </select>
+      </Select>
       {mode === "custom" && value && (
         <>
           <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
@@ -48,10 +48,10 @@ export function CodexProviderField({ value, onChange, connections }: {
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
             <span style={label}>API-key connection</span>
-            <select aria-label="API-key connection" data-testid="codex-provider-connection" value={value.connectionId ?? ""} onChange={(e) => onChange({ ...value, connectionId: e.target.value })} style={select}>
+            <Select aria-label="API-key connection" data-testid="codex-provider-connection" value={value.connectionId ?? ""} onChange={(e) => onChange({ ...value, connectionId: e.target.value })} style={select}>
               <option value="">— choose a stored connection —</option>
               {usable.map((c) => <option key={c.id} value={c.id}>{c.name} · {c.host}</option>)}
-            </select>
+            </Select>
           </label>
           <span style={{ fontSize: fs.sm, lineHeight: 1.5, color: color.attnText }}>
             Spend surface: sessions under this rig send their work to that endpoint and bill the connection's key.

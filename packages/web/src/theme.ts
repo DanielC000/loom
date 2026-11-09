@@ -80,7 +80,7 @@ export const font = {
 
 // Graphite type scale, as CSS lengths: `fontSize: fs.body`. Mirrors the --loom-fs-* tokens.
 export const fs = {
-  xs: "var(--loom-fs-xs)", // 11 — densest mono ids only
+  xs: "var(--loom-fs-xs)", // 11 — the floor: dense meta, small labels, mono ids; nothing smaller
   sm: "var(--loom-fs-sm)", // 12 — small text, labels
   mono: "var(--loom-fs-mono)", // 12.5 — data
   body: "var(--loom-fs-body)", // 14

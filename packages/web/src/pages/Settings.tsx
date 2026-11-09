@@ -212,7 +212,8 @@ function SettingsColumn({ sections, project }: { sections: SettingsSection[]; pr
   return (
     <div style={{ maxWidth: 820, display: "flex", flexDirection: "column", gap: 28 }}>
       {sections.map((section) => (
-        <div key={section.key} data-testid={`settings-section-${section.key}`}>
+        <div key={section.key} id={sectionAnchor(section.key)} data-testid={`settings-section-${section.key}`}
+          className="loom-settings-section">
           <SectionLabel>{section.label}</SectionLabel>
           {section.render(project)}
         </div>
@@ -249,7 +250,67 @@ export default function Settings() {
 // of its own — being rendered at all already means Atlas is on.
 export function WorkspaceSettings() {
   const project = useActiveProjectRow();
-  return <SettingsColumn sections={SETTINGS_SECTIONS.filter((s) => s.scope === "workspace")} project={project} />;
+  const sections = SETTINGS_SECTIONS.filter((s) => s.scope === "workspace");
+  // The column is capped at 820px, which leaves the right third of a wide screen empty while the
+  // sections run past 3,000px of scroll (audit A-33). A sticky index sits in that empty third and jumps
+  // to a section; below 1280px it is hidden and the page is the single column it always was.
+  return (
+    <div className="loom-settings-indexed">
+      <SettingsColumn sections={sections} project={project} />
+      <SettingsIndex sections={sections} />
+    </div>
+  );
+}
+
+const sectionAnchor = (key: string) => `settings-${key}`;
+
+// The in-page index for the Workspace Settings node. Buttons, not hash links: the app's router owns the
+// URL, and a `#fragment` would add a history entry per jump. The CURRENT section is the last one whose
+// top has scrolled above a line a little below the top of the scroll area, read from the sections
+// themselves on scroll, so the marker follows a reader who scrolls by hand as well as one who clicks.
+// A click pins its own section for a moment: the last sections are too short to scroll to the top,
+// so the scroll that the jump itself causes would otherwise move the marker back to an earlier one.
+function SettingsIndex({ sections }: { sections: SettingsSection[] }) {
+  const [current, setCurrent] = useState(sections[0]?.key ?? "");
+  const pinnedUntil = useRef(0);
+  const keys = sections.map((s) => s.key).join(",");
+  useEffect(() => {
+    const els = keys.split(",").map((k) => document.getElementById(sectionAnchor(k))).filter((e): e is HTMLElement => !!e);
+    const first = els[0];
+    if (!first) return;
+    const onScroll = () => {
+      if (performance.now() < pinnedUntil.current) return;
+      let at = first.id;
+      for (const el of els) if (el.getBoundingClientRect().top <= 120) at = el.id;
+      setCurrent(at.slice("settings-".length));
+    };
+    onScroll();
+    // Capture phase on the document, so the scroll of whichever ancestor is the scroll container
+    // (the Atlas content column, or the window) reaches this one listener.
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    return () => document.removeEventListener("scroll", onScroll, { capture: true });
+  }, [keys]);
+  return (
+    <nav className="loom-settings-index" aria-label="Settings sections" data-testid="settings-index">
+      <span className="loom-settings-index-lbl">On this page</span>
+      <ul>
+        {sections.map((s) => (
+          <li key={s.key}>
+            <button type="button" data-testid={`settings-index-${s.key}`}
+              aria-current={current === s.key ? "location" : undefined}
+              className={current === s.key ? "is-current" : undefined}
+              onClick={() => {
+                pinnedUntil.current = performance.now() + 400;
+                document.getElementById(sectionAnchor(s.key))?.scrollIntoView({ block: "start" });
+                setCurrent(s.key);
+              }}>
+              {s.label}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
 }
 
 // The Atlas UI switch (card 757c80dd; what Atlas is: docs/plans/atlas-ui/02-architecture.md).

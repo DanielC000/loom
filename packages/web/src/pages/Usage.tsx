@@ -6,7 +6,7 @@ import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { bySessionActivity, mostRecentActivity, shortModel } from "../lib/sessions";
 import { isRateLimited } from "../lib/attention";
-import { Panel, SectionLabel, StatusPill, Badge, Chip, Meter, Select } from "../components/ui";
+import { Panel, SectionLabel, StatusPill, Badge, Chip, Meter, Select, Explainer } from "../components/ui";
 // The SHARED usage kit (card 30266229): the token/cost/ratio formatting, the four historical windows and
 // the small presentational primitives this page used to declare itself, now in ONE place so the
 // per-project Usage tab (pages/ProjectUsage.tsx) renders in the same visual language rather than a
@@ -132,7 +132,7 @@ export default function Usage() {
       {/* ── Scope controls (page-local) ───────────────────────────────────── */}
       <div style={{ display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap" }}>
         <Field label="Project">
-          <Select value={scope} onChange={(e) => setScope(e.target.value)} style={{ minWidth: 180 }}>
+          <Select value={scope} onChange={(e) => setScope(e.target.value)} style={{ minWidth: 180, maxWidth: "100%" }}>
             <option value="all">All projects</option>
             {projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </Select>
@@ -140,8 +140,9 @@ export default function Usage() {
         <Field label="Window">
           <WindowSelect value={span} onChange={setSpan} />
         </Field>
-        <span style={{ flex: 1 }} />
-        <span style={{ fontSize: fs.sm, color: color.text3, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
+        {/* Left-aligned with a capped measure, beside the controls it explains (audit A-21): a
+            right-aligned block in a left-flowing column read as stray. */}
+        <span style={{ flex: "1 1 280px", fontSize: fs.sm, color: color.text3, maxWidth: "75ch", lineHeight: 1.5 }}>
           Project filters all three sections. Window governs the two historical sections (Interactive
           sessions &amp; Agent&nbsp;Runs) — live occupancy is always now.
         </span>
@@ -166,8 +167,7 @@ export default function Usage() {
           <Stat label="ctx in use" value={fmtTokens(totalCtx)} tone="muted" />
           <Stat label="est. ctx cost" value={fmtUsd(totalCost)} tone="muted" />
           <Stat label="rate-limited" value={String(rateLimited.length)} tone={rateLimited.length ? "danger" : "muted"} />
-          <span style={{ flex: 1 }} />
-          <span style={{ fontSize: fs.sm, color: color.text3, maxWidth: 340, lineHeight: 1.5, textAlign: "right" }}>
+          <span style={{ flex: "1 1 280px", fontSize: fs.sm, color: color.text3, maxWidth: "75ch", lineHeight: 1.5 }}>
             "ctx in use" = current context size, not cumulative spend. Cost is an estimate of one input
             pass at list rates — relative gauge only.
           </span>
@@ -400,12 +400,12 @@ function SessionUsageSection({
   return (
     <section style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <SectionHead title="Interactive sessions" tag="est. consumption · over time" tagTone="muted" />
-      <span style={{ fontSize: fs.sm, color: color.text3, lineHeight: 1.5, marginTop: -8 }}>
+      <Explainer style={{ marginTop: -8 }}>
         Your interactive-session usage over time — cumulative tokens + an ESTIMATE of what they'd cost on
         metered API, sampled token-free from session transcripts. On a flat Claude subscription this is what
         you're consuming, not a separate bill — distinct from the live occupancy snapshot below (current
         context size) and the Agent&nbsp;Runs plane further down; the page never sums across the three.
-      </span>
+      </Explainer>
 
       {query.isLoading && <Panel><span style={{ color: color.text3 }}>Loading interactive-session usage…</span></Panel>}
       {query.isError && (

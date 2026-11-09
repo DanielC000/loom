@@ -52,7 +52,7 @@ Type scale (`--loom-fs-*`, TS `fs.*`):
 
 | Step | Size | Use |
 |---|---|---|
-| `xs` | 11px | the densest mono ids only, so those rows don't wrap |
+| `xs` | 11px | the floor: dense meta, small labels and mono ids. No text is set smaller, and there are no in-between sizes |
 | `sm` | 12px | small text and labels |
 | `mono` | 12.5px | data |
 | `body` | 14px | body and controls |

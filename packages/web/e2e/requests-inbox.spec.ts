@@ -393,7 +393,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(main.getByText(title, { exact: true })).toHaveCount(0);
 
     // History retains it, correctly labeled CANCELLED (not "answered"/"consumed").
-    await page.locator("main").getByRole("button", { name: "History" }).click();
+    await page.locator("main").getByRole("radio", { name: "History" }).click();
     await expect(main.getByText(title, { exact: true })).toBeVisible();
     const historyRow = main.locator("button").filter({ hasText: title }).first();
     await expect(historyRow).toContainText("cancelled");
@@ -414,7 +414,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title: other, type: "input", state: "consumed", note: "used a CDN" });
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
-    await page.locator("main").getByRole("button", { name: "History" }).click();
+    await page.locator("main").getByRole("radio", { name: "History" }).click();
     const main = page.locator("main");
     await expect(main.getByText(keep)).toBeVisible();
     await expect(main.getByText(other)).toBeVisible();
@@ -595,7 +595,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
     const main = page.locator("main");
-    await main.getByRole("button", { name: "History" }).click();
+    await main.getByRole("radio", { name: "History" }).click();
     await expect(main.getByText(title1, { exact: true })).toBeVisible();
     await expect(main.getByText(title2, { exact: true })).toBeVisible();
 
@@ -735,7 +735,7 @@ test.describe("request provenance vs routing (card 5b22b262)", () => {
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
     const main = page.locator("main");
-    await main.getByRole("button", { name: "History" }).click();
+    await main.getByRole("radio", { name: "History" }).click();
     // Narrow to THIS row — the shared daemon's history carries every other spec's resolved requests.
     await main.getByPlaceholder(/search titles/).fill(title);
     await expect(main.getByText(title, { exact: true })).toBeVisible();

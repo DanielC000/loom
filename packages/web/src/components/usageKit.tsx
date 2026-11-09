@@ -110,7 +110,10 @@ export function SectionHead({ title, tag, tagTone }: { title: string; tag: strin
 // A labelled form control (label above the field), for a scope-control bar.
 export function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label style={{ display: "inline-flex", flexDirection: "column", gap: 4 }}>
+    // `minWidth: 0` + `maxWidth: 100%` so a select inside, which sizes its closed box to its widest
+    // option (one long project name), can shrink to the row instead of running off a phone (card
+    // 7539206b's fix on Project Links, applied to the Usage scope controls).
+    <label style={{ display: "inline-flex", flexDirection: "column", gap: 4, minWidth: 0, maxWidth: "100%" }}>
       <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>{sentenceCase(label)}</span>
       {children}
     </label>
