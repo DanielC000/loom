@@ -105,6 +105,8 @@ setupSeed.seedCompanionAgent(setupDb);
 const setupHome = setupDb.getReservedProjectByName(setupSeed.SETUP_PROJECT_NAME);
 if (!setupDb.listAgents(setupHome.id).some((a) => a.name === setupSeed.OPERATOR_AGENT_NAME)) {
   setupDb.insertAgent({ id: "elev-op", projectId: setupHome.id, name: setupSeed.OPERATOR_AGENT_NAME, startupPrompt: setupSeed.OPERATOR_PROMPT, position: 9, profileId: null, endpoint: false, ioSchema: null });
+  // Card de790214: the refresh matches the seeded agents by their id marker, as production boot stamps it.
+  setupDb.setMeta("setup.operatorAgentId", "elev-op");
 }
 
 process.env.LOOM_DEV = "1"; // the platform layer is dev-gated: seedPlatformHome and the refresh only exist here

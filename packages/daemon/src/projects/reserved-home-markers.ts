@@ -1,4 +1,4 @@
-import type { Project } from "@loom/shared";
+import type { Agent, Project } from "@loom/shared";
 import type { Db } from "../db.js";
 
 /**
@@ -145,4 +145,57 @@ export function resolveSetupHome(db: Db): Project | undefined {
 export function resolveLiveSetupHome(db: Db): Project | undefined {
   const home = resolveSetupHome(db);
   return home && !home.archivedAt ? home : undefined;
+}
+
+/**
+ * Daemon-GLOBAL app_meta keys: each holds the id of one of the setup home's seeded standing agents, so a
+ * rename of that agent can never make the next boot seed a second copy (card de790214). The setup home's
+ * OWN operator agent keeps its pre-existing `SETUP_HOME_LEAD_AGENT_ID_KEY`.
+ */
+export const SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY = "setup.workspaceAuditorAgentId";
+export const SETUP_HOME_OPERATOR_AGENT_ID_KEY = "setup.operatorAgentId";
+export const SETUP_HOME_COMPANION_AGENT_ID_KEY = "setup.companionAgentId";
+
+/**
+ * Find a seeded standing agent of the setup `home` by its id marker. PURE: it never writes app_meta and
+ * never looks at a name, so it is safe on any read path (the provision route, the setup-home response).
+ * A missing, dangling (agent deleted) or out-of-home marker resolves to `undefined`; the boot seeder then
+ * re-seeds and re-stamps. A name fallback here would adopt a human's same-named agent (those names are no
+ * longer reserved against humans) as the seeded one.
+ */
+export function resolveSeededHomeAgent(db: Db, home: Project, markerKey: string): Agent | undefined {
+  const markedId = db.getMeta(markerKey);
+  if (!markedId) return undefined;
+  const marked = db.getAgent(markedId);
+  return marked && marked.projectId === home.id ? marked : undefined;
+}
+
+/** The per-key sentinel recording that `migrateSeededHomeAgentMarker` has already run for `markerKey`. */
+export const seededMarkerMigratedKey = (markerKey: string): string => `${markerKey}.nameMigrated`;
+
+/**
+ * ONE-SHOT per key, run at BOOT by each seeder (before the operator's flag check): an install that
+ * pre-dates the marker may hold the seeded agent only as a name match (the name was still reserved then, so
+ * a match really is the seeded agent). Pin the first in-home match (listAgents order — the agent row has no
+ * createdAt) when the marker is absent, then record the sentinel WHETHER OR NOT anything matched. Once the
+ * sentinel is set no lookup ever falls back to a name again, so an agent a human creates later under the
+ * bundled name (now unreserved) can never be adopted as the seeded one, however long the key stays unstamped
+ * (the operator flag defaults off). The stamp and the sentinel land together.
+ */
+export function migrateSeededHomeAgentMarker(db: Db, home: Project, markerKey: string, name: string): void {
+  const sentinel = seededMarkerMigratedKey(markerKey);
+  if (db.getMeta(sentinel)) return;
+  db.runInTransaction(() => {
+    if (!db.getMeta(markerKey)) {
+      const matches = db.listAgents(home.id).filter((a) => a.name === name);
+      const first = matches[0];
+      if (first) {
+        if (matches.length > 1) {
+          console.warn(`[setup] ${matches.length} agents named "${name}" in the setup home; pinning the first (${first.id}) as the seeded one`);
+        }
+        db.setMeta(markerKey, first.id);
+      }
+    }
+    db.setMeta(sentinel, new Date().toISOString());
+  });
 }

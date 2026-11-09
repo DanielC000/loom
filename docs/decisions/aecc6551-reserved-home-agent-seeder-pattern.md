@@ -46,6 +46,17 @@ Both gotchas recur verbatim (or near-verbatim) at every later standing-agent see
 file — `seedSetupAuditorAgent`, `seedOperatorAgent`, `seedCompanionAgent` — each restating them
 independently rather than pointing at one place. This record is that one place.
 
+## Scope note (card `de790214`, 2026-11-09)
+
+Gotcha #2's "name-presence-keyed" wording is superseded for the Workspace Auditor, Elevated Operator and
+Companion seeders: they are now keyed on an id-marker in app_meta (`setup.workspaceAuditorAgentId`,
+`setup.operatorAgentId`, `setup.companionAgentId`), so a rename of the seeded agent no longer makes the
+next boot seed a copy. A one-shot boot name migration (`migrateSeededHomeAgentMarker`, sentinel
+`<key>.nameMigrated`, recorded whether or not a match was found, run before the operator's flag check)
+pins a pre-marker install's existing agent once; afterwards nothing falls back to a name. The marker
+resolver (`resolveSeededHomeAgent`) is pure. A NEW standing-agent seeder follows this marker-plus-one-shot
+shape and never the by-name pattern; the separate-boot-step rule of Gotcha #2 itself still holds.
+
 ## Source
 
 Gotcha #1 introduced by commit `7ef34ce2` ("refactor(platform): rebrand Setup Assistant operator

@@ -102,8 +102,9 @@ function setupMayTouchProjectError(project: Project): string | null {
 /**
  * ONE predicate for "may the ungated setup surface touch this EXISTING agent AT ALL" — ANY edit,
  * including a bare rename (card 4d70cc06, B2 + M1 + the code-review's reserved-home name-hijack finding:
- * renaming the real "Companion" away and `agent_create`-ing an impostor under that name would DoS
- * `gateway/server.ts`'s by-NAME default-companion resolution, so a rename can never be the exempt case).
+ * a rename or edit of a standing reserved-home agent is outside what this surface may do at all, so a
+ * rename can never be the exempt case; the gateway now resolves the default companion by id marker, so a
+ * rename no longer DoSes it, but the refusal stays).
  * Refuses when the agent's CURRENT rig role is locked (`SETUP_LOCKED_ROLES` above) — regardless of what
  * NEW profile the caller is trying to assign, that's `agentAssignableProfileError`'s job — or when the
  * agent lives in a reserved/system project: every standing agent seeded there (Setup Assistant, Companion,
@@ -553,9 +554,9 @@ export class SetupMcpRouter {
         const project = db.getProject(projectId);
         if (!project) return ok({ error: "project not found" });
         // card 4d70cc06 (code review, reserved-home name-hijack): refuse creating ANY agent into a
-        // reserved/system project — otherwise a same-named impostor (e.g. "Companion") could be minted
-        // there to collide with gateway/server.ts's by-NAME resolution of the real one. ONE shared
-        // predicate, see setupMayTouchProjectError's own doc (card ccd373cc).
+        // reserved/system project — a same-named impostor (e.g. "Companion") minted there would confuse the
+        // human even though the gateway now resolves the real one by id marker. ONE shared predicate, see
+        // setupMayTouchProjectError's own doc (card ccd373cc).
         const reservedErr = setupMayTouchProjectError(project);
         if (reservedErr) return ok({ error: reservedErr });
         if (profileId !== undefined) {

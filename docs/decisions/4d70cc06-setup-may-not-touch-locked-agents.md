@@ -38,8 +38,12 @@ of the checks above), but raised three further findings that shaped the CURRENT 
   automatically, fail-closed, instead of silently staying touchable until someone remembers to add it.
 - **Reserved-home name hijack.** The ungated surface could rename the real "Companion" agent away (a
   bare rename was deliberately EXEMPT from the lock in the first version of this fix) and then
-  `agent_create` an impostor named "Companion" in the same reserved home — `gateway/server.ts`'s default-
-  companion resolution is BY NAME, so this DoSes the human's "New companion" flow. Fixed two ways:
+  `agent_create` an impostor named "Companion" in the same reserved home — at the time
+  `gateway/server.ts`'s default-companion resolution was BY NAME, so this DoSed the human's "New companion"
+  flow (scope note 2026-11-09, card de790214: the gateway, the seeders and the pristine refresh now find the
+  Companion, Workspace Auditor and Elevated Operator by an id-keyed app_meta marker, so a rename no longer
+  DoSes them; the refusals below STAY, since this surface still must not edit standing reserved-home agents).
+  Fixed two ways:
   `agent_update` now runs `setupMayTouchAgentError` unconditionally, BEFORE parsing the patch, so a bare
   rename of a locked/reserved-home agent is refused exactly like a profile/prompt edit; `agent_create`
   and `template_apply` now both refuse a reserved/system `projectId` outright (the same `project.reserved`

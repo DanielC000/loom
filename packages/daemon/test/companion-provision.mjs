@@ -125,6 +125,7 @@ async function makeRig(name) {
   db.insertProfile({ id: profId, name: "Companion", role: "assistant", description: "the standing companion rig", allowDelta: [], skills: null, model: null, icon: "💬" });
   const companionAgentId = randomUUID();
   db.insertAgent({ id: companionAgentId, projectId: home.id, name: COMPANION_AGENT_NAME, startupPrompt: "COMPANION_PERSONA", position: 0, profileId: profId });
+  db.setMeta("setup.companionAgentId", companionAgentId); // card de790214: the provision lookup resolves by the id marker, as boot stamps it
 
   const events = {
     onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },

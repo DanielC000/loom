@@ -11,8 +11,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       ignores a patch without `name` (no scope needed).
 //   (2) REST POST /api/agents/:id end to end: a rename round-trips (trimmed); empty, whitespace, dup-name
 //       and dup-slug are 400 with nothing written; the same name in ANOTHER project is fine; the seeded
-//       Companion agent in the setup home is refused 400 and keeps its name, so a re-seed does not mint a
-//       second Companion; an ORDINARY setup-home agent can't take a reserved name ("companion") either.
+//       Companion agent (pinned by an id marker, card de790214) CAN be renamed and a re-seed mints no second
+//       one; the setup home's own "Platform" agent (still found by name) is refused 400 and keeps its name,
+//       and an ORDINARY setup-home agent can't take that reserved name either.
 //   (3) The agent-facing agent_update tools, which bypass the REST route: the MANAGER's (orchestration →
 //       sessions.updateAgentPreset) refuses a dup name / dup slug / empty name with an `agent_update: …`
 //       error and writes NOTHING of the patch; the SETUP surface's (validateAgentPatch + agentNameScope)
@@ -70,14 +71,14 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   const slugSelf = resolveAgentRename("QA-Tester", scope("a1", "QA Tester"));
   check("(0) a slug-equal change of its own name passes (it only collides with itself)", slugSelf.ok === true);
 
-  const reserved = ["Companion"];
-  const rs = { agentId: "c1", currentName: "Companion", siblings: [{ id: "c1", name: "Companion" }, { id: "x", name: "Other" }], reservedNames: reserved };
+  const reserved = ["Platform"];
+  const rs = { agentId: "c1", currentName: "Platform", siblings: [{ id: "c1", name: "Platform" }, { id: "x", name: "Other" }], reservedNames: reserved };
   const renameReserved = resolveAgentRename("Buddy", rs);
   check("(0) a name-keyed seeded agent can't be renamed", renameReserved.ok === false && /built-in agent/.test(renameReserved.error));
-  const caseReserved = resolveAgentRename("companion", rs);
-  check("(0) ...not even case-only (the seeders compare exactly)", caseReserved.ok === false);
-  check("(0) ...but re-saving its exact name passes", resolveAgentRename("Companion", rs).ok === true);
-  const takeReserved = resolveAgentRename("companion", { ...rs, agentId: "x", currentName: "Other", siblings: [{ id: "x", name: "Other" }] });
+  const caseReserved = resolveAgentRename("platform", rs);
+  check("(0) ...not even case-only (the lookups compare exactly)", caseReserved.ok === false);
+  check("(0) ...but re-saving its exact name passes", resolveAgentRename("Platform", rs).ok === true);
+  const takeReserved = resolveAgentRename("platform", { ...rs, agentId: "x", currentName: "Other", siblings: [{ id: "x", name: "Other" }] });
   check("(0) another agent can't take a reserved seeded name", takeReserved.ok === false && /reserved for a built-in agent/.test(takeReserved.error));
 }
 
@@ -133,25 +134,29 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("(2) the same name in ANOTHER project is allowed", crossRes.statusCode === 200 && db.getAgent("agB1").name === "Architect");
 
   const companion = db.listAllAgents().find((a) => a.name === COMPANION_AGENT_NAME);
-  check("(2) fixture: the Companion agent was seeded into the setup home", !!companion && agentNameScope(db, companion).reservedNames.includes(COMPANION_AGENT_NAME));
+  check("(2) fixture: the Companion agent was seeded into the setup home", !!companion && !agentNameScope(db, companion).reservedNames.includes(COMPANION_AGENT_NAME));
+  // Card de790214: the Companion is pinned by an id marker, so a rename is allowed and a re-seed adds nothing.
   const compRes = await rename(companion.id, "My Buddy");
-  check("(2) renaming the seeded Companion is refused 400, saying why", compRes.statusCode === 400 && /built-in agent/.test(compRes.json().error));
-  check("(2) the Companion keeps its name", db.getAgent(companion.id).name === COMPANION_AGENT_NAME);
+  check("(2) renaming the seeded Companion is allowed (200)", compRes.statusCode === 200 && db.getAgent(companion.id).name === "My Buddy");
   seedCompanionAgent(db);
-  check("(2) so a re-seed does not mint a second Companion", db.listAllAgents().filter((a) => a.name === COMPANION_AGENT_NAME).length === 1);
+  check("(2) so a re-seed does not mint a second Companion",
+    db.listAllAgents().filter((a) => a.name === COMPANION_AGENT_NAME).length === 0 && db.listAllAgents().filter((a) => a.name === "My Buddy").length === 1);
   check("(2) an ordinary project's agents get no reserved names", agentNameScope(db, db.getAgent("agA1")).reservedNames.length === 0);
 
-  // An ORDINARY (non-seeded) agent in the setup home can't TAKE a reserved name either — end to end over
-  // REST, so a second "Companion" can never be minted by rename beside the real one.
+  // The setup home's OWN operator agent is still found by name by the lead fallbacks, so it stays
+  // un-renameable, and an ORDINARY setup-home agent can't take its name — end to end over REST.
   const setupHome = resolveSetupHome(db);
   check("(2) fixture: the setup home resolves", !!setupHome && setupHome.id === companion.projectId);
+  const platformAgent = db.listAgents(setupHome.id).find((a) => a.name === "Platform");
+  check("(2) fixture: the setup home's own agent exists", !!platformAgent);
+  const platRes = await rename(platformAgent.id, "Not Platform");
+  check("(2) renaming the setup home's own agent is refused 400, saying why", platRes.statusCode === 400 && /built-in agent/.test(platRes.json().error));
+  check("(2) ...and it keeps its name", db.getAgent(platformAgent.id).name === "Platform");
   db.insertAgent({ id: "agHomeOrd", projectId: setupHome.id, name: "Notetaker", startupPrompt: "", position: 90, profileId: null });
-  const takeRes = await rename("agHomeOrd", "companion");
+  const takeRes = await rename("agHomeOrd", "platform");
   check("(2) an ordinary setup-home agent renamed to a reserved name is refused 400, saying why",
     takeRes.statusCode === 400 && /reserved for a built-in agent/.test(takeRes.json().error));
   check("(2) ...and keeps its name", db.getAgent("agHomeOrd").name === "Notetaker");
-  check("(2) ...so there is still exactly one agent named Companion (any case)",
-    db.listAllAgents().filter((a) => a.name.toLowerCase() === COMPANION_AGENT_NAME.toLowerCase()).length === 1);
 
   await app.close();
 

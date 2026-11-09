@@ -101,7 +101,7 @@ export function PlatformView({ edition, previewOnly = false }: { edition: Platfo
   if (home.isError || !home.data || !home.data.project) {
     return <p style={{ color: color.danger }}>{edition.copy.errorText}</p>;
   }
-  const { project, agents, resolvedLead } = home.data;
+  const { project, agents, resolvedLead, seededAgentIds } = home.data;
 
   const roleOf = (a: Agent): SessionRole | null => profiles.data?.find((p) => p.id === a.profileId)?.role ?? null;
   // Card b2b69ec8 (M3): when the server resolved an authoritative Lead (`resolvedLead.agentId` — the
@@ -114,7 +114,13 @@ export function PlatformView({ edition, previewOnly = false }: { edition: Platfo
   const operator = resolvedLead?.agentId
     ? agents.find((a) => a.id === resolvedLead.agentId)
     : agents.find((a) => roleOf(a) === edition.operatorRole) ?? agents.find((a) => a.name === edition.operatorName);
-  const auditor = agents.find((a) => roleOf(a) === edition.auditorRole) ?? agents.find((a) => a.name === edition.auditorName);
+  // Card de790214: the setup home's Workspace Auditor is identified by the daemon's id marker (present on
+  // every setup-home response, null when unstamped), never by its display name, which a rename or a
+  // same-named human agent would mislead. Only the dev platform home, whose response carries no marker block,
+  // keeps the profile-role then name resolution.
+  const auditor = seededAgentIds
+    ? agents.find((a) => a.id === seededAgentIds.workspaceAuditor)
+    : agents.find((a) => roleOf(a) === edition.auditorRole) ?? agents.find((a) => a.name === edition.auditorName);
   // f437d4e9 C5 round 2, item 1(b) / round 3 M2+M4(d): the operator's SPAWN role tracks its CURRENT
   // bound profile role, never the edition's static default — mirrors first-run.ts's own resolution
   // (profile role "platform" ⇒ "platform", else "setup"). A customized, not-yet-upgraded end-user agent

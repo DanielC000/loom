@@ -15,6 +15,11 @@ import type { Db } from "../db.js";
 export interface PristinePromptSpec {
   /** The bundled agent's display name — rows under any other name (a user rename) are skipped. */
   readonly agentName: string;
+  /**
+   * Optional app_meta key holding the bundled agent's id (card de790214). When set, the agent is matched by
+   * that id (so a rename keeps getting refreshes) and `agentName` is NOT consulted for it.
+   */
+  readonly markerKey?: string;
   /** The CURRENT shipped text. */
   readonly current: string;
   /**
@@ -37,7 +42,7 @@ export function isPristineStalePrompt(prompt: string, spec: PristinePromptSpec):
 export function refreshPristinePrompts(db: Db, agents: readonly Agent[], specs: readonly PristinePromptSpec[]): string[] {
   const refreshed: string[] = [];
   for (const agent of agents) {
-    const spec = specs.find((s) => s.agentName === agent.name);
+    const spec = specs.find((s) => (s.markerKey ? db.getMeta(s.markerKey) === agent.id : s.agentName === agent.name));
     if (!spec) continue; // a user-renamed or unrelated agent
     if (!isPristineStalePrompt(agent.startupPrompt, spec)) continue; // customized, or already current
     db.updateAgent(agent.id, { startupPrompt: spec.current });

@@ -106,6 +106,7 @@ import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge,
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
 import { resolveLiveSetupHome, COMPANION_AGENT_NAME, seedOperatorAgent, agentNameScope, newAgentNameScope } from "../setup/seed.js";
+import { resolveSeededHomeAgent, SETUP_HOME_COMPANION_AGENT_ID_KEY, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, SETUP_HOME_OPERATOR_AGENT_ID_KEY } from "../projects/reserved-home-markers.js";
 import { resolveHomeLeadAgent, isSanctionedPlatformLeadAgent } from "../projects/live-lead-home.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
@@ -2107,7 +2108,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       agentId = b.agentId.trim();
     } else {
       const home = resolveLiveSetupHome(deps.db);
-      const companionAgent = home ? deps.db.listAgents(home.id).find((a) => a.name === COMPANION_AGENT_NAME) : undefined;
+      const companionAgent = home ? resolveSeededHomeAgent(deps.db, home, SETUP_HOME_COMPANION_AGENT_ID_KEY) : undefined;
       if (!home || !companionAgent) return reply.code(400).send({ error: "no default Companion rig is available — pass an explicit agentId" });
       if (findEnabledAgentCollision(deps.db, companionAgent.id)) {
         cloneSource = { sourceAgentId: companionAgent.id, targetProjectId: home.id };
@@ -4552,7 +4553,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const resolvedLead: { agentId: string | null; role: "platform" | "setup" | null } = leadAgent
       ? { agentId: leadAgent.id, role: isSanctionedPlatformLeadAgent(deps.db, leadAgent.id) ? "platform" : "setup" }
       : { agentId: null, role: null };
-    return { project, agents, liveSessions, resolvedLead };
+    // Card de790214: the seeded standing agents' ids, from the pure marker resolver (never a name match) —
+    // the web identifies the Workspace Auditor by this instead of by its display name.
+    const seededAgentIds = {
+      workspaceAuditor: resolveSeededHomeAgent(deps.db, foundSetup, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY)?.id ?? null,
+      operator: resolveSeededHomeAgent(deps.db, foundSetup, SETUP_HOME_OPERATOR_AGENT_ID_KEY)?.id ?? null,
+      companion: resolveSeededHomeAgent(deps.db, foundSetup, SETUP_HOME_COMPANION_AGENT_ID_KEY)?.id ?? null,
+    };
+    return { project, agents, liveSessions, resolvedLead, seededAgentIds };
   });
 
   // --- Workflow templates (Guided Onboarding & Templates, onboarding C3): the HUMAN-only REST mirror of
@@ -6016,7 +6024,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.db.recordPlatformConfigChange(before, mv.value, "human");
     // Bucket 2b follow-up: a false→true flip should surface the bundled "Elevated Operator" convenience
     // agent immediately, not just on the next boot seed (seedOperatorAgent is itself flag-gated + idempotent
-    // seed-if-absent-by-name, so this is a safe no-op on every other transition). Best-effort — a seed
+    // seed-if-absent-by-id-marker, so this is a safe no-op on every other transition). Best-effort — a seed
     // failure must never fail the config write the human actually asked for.
     if (!wasOperatorEnabled && isOperatorEnabled(deps.db)) {
       try {

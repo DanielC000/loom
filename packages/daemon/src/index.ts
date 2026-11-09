@@ -309,22 +309,23 @@ async function main(): Promise<void> {
   // End-User Platform tier B4: seed the bundled Workspace Auditor agent into the SAME reserved "Platform"
   // setup home as the operator (one home, two agents). A SEPARATE boot-time backfill — NOT folded into
   // seedSetupHome, which no-ops the whole seed once the home exists (gotcha #2) and so would never give an
-  // EXISTING install the auditor. seed-if-absent BY AGENT-NAME within the reserved home: backfills upgrades
-  // AND covers fresh installs (operator from seedSetupHome above + auditor here, same boot), idempotent,
-  // never clobbers a user-renamed agent. The operator still resolves by SETUP_AGENT_NAME (distinct name).
+  // EXISTING install the auditor. seed-if-absent BY ID MARKER within the reserved home (a one-shot boot
+  // name migration pins a pre-marker install's existing agent): backfills upgrades AND covers fresh
+  // installs (operator from seedSetupHome above + auditor here, same boot), idempotent, never clobbers or
+  // duplicates a user-renamed agent. The operator still resolves by SETUP_AGENT_NAME (distinct name).
   const seededAuditor = seedSetupAuditorAgent(db);
   if (seededAuditor) console.log(`[boot] seeded workspace auditor agent: ${seededAuditor}`);
   // Loom Companion: seed the bundled Companion RIG (the assistant-role Companion profile + a Companion agent
   // bound to it) into the SAME reserved "Platform" setup home — the default spawn TARGET for the
-  // human-triggered "New companion" flow. Its OWN seed-if-absent-by-name backfill (like the auditor above),
+  // human-triggered "New companion" flow. Its OWN seed-if-absent-by-id-marker backfill (like the auditor above),
   // so it covers both existing installs (seedSetupHome already no-ops) and fresh ones. TEMPLATE ONLY — it
   // spawns NO session and writes NO companion_config; the rig stays invisible until a human provisions it.
   const seededCompanion = seedCompanionAgent(db);
   if (seededCompanion) console.log(`[boot] seeded companion agent: ${seededCompanion}`);
   // Bucket 2b "Bounded Elevated Operator": seed the bundled Elevated Operator agent into the SAME
   // reserved "Platform" setup home — FLAG-GATED (isOperatorEnabled, read LIVE), so a fresh install with
-  // platform.operatorEnabled off never grows this agent row. seed-if-absent BY AGENT-NAME within the
-  // reserved home, mirroring the auditor/companion seeders above. NO first-run auto-launch — seeding the
+  // platform.operatorEnabled off never grows this agent row. seed-if-absent BY ID MARKER within the
+  // reserved home (its one-shot name migration runs even with the flag off), mirroring the auditor/companion seeders above. NO first-run auto-launch — seeding the
   // agent is not spawning a session (that stays human-REST-only via startOperator).
   const seededOperatorAgent = seedOperatorAgent(db);
   if (seededOperatorAgent) console.log(`[boot] seeded elevated operator agent: ${seededOperatorAgent}`);

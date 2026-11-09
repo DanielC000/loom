@@ -59,8 +59,8 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // ===================== (0) resolveAgentName / uniqueAgentName (pure) =====================
 {
-  const scope = { siblings: [{ id: "a1", name: "QA Tester" }, { id: "a2", name: "Web Designer" }], reservedNames: ["Companion"] };
-  const ok = resolveAgentName("  Reviewer  ", scope);
+  const scope = { siblings: [{ id: "a1", name: "QA Tester" }, { id: "a2", name: "Web Designer" }], reservedNames: ["Platform"] };
+  const ok =resolveAgentName("  Reviewer  ", scope);
   check("(0) a fresh name passes, trimmed", ok.ok === true && ok.name === "Reviewer");
   check("(0) empty refused", resolveAgentName("", scope).ok === false);
   const ws = resolveAgentName("  \t ", scope);
@@ -69,7 +69,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("(0) a case-insensitive duplicate NAME is refused, naming the other agent", dupName.ok === false && /already named "QA Tester"/.test(dupName.error));
   const dupSlug = resolveAgentName("web-designer!", scope);
   check("(0) a duplicate SLUG is refused", dupSlug.ok === false && /"Web Designer"/.test(dupSlug.error) && /"web-designer"/.test(dupSlug.error));
-  const rsv = resolveAgentName("companion", scope);
+  const rsv = resolveAgentName("platform", scope);
   check("(0) a reserved seeded name is refused, case-insensitively", rsv.ok === false && /reserved for a built-in agent/.test(rsv.error));
   // No self-exclusion: the create twin has no "own name" to re-save, so an identical name is a collision.
   check("(0) no self-exclusion: the exact name of an existing agent is refused", resolveAgentName("QA Tester", scope).ok === false);
@@ -131,7 +131,7 @@ const countIn = (projectId) => db.listAgents(projectId).length;
   check("(1) the same name in ANOTHER project is allowed", cross.statusCode === 201);
 
   const homeBefore = countIn(setupHome.id);
-  for (const name of ["companion", "Workspace Auditor"]) {
+  for (const name of ["platform", "PLATFORM"]) {
     const res = await create(setupHome.id, name);
     check(`(1) setup home: "${name}" is refused 400 as reserved`, res.statusCode === 400 && /reserved for a built-in agent/.test(res.json().error));
   }
@@ -192,12 +192,12 @@ const connect = async (router, sessionId) => {
   check("(3) positive control: a clean agent_create lands, trimmed", !okc.error && okc.name === "Fresh");
 
   const hBefore = countIn(setupHome.id);
-  const rsv = await lead("agent_create", { projectId: setupHome.id, name: "Companion" });
-  check("(3) agent_create into the setup home as `Companion` is refused", typeof rsv.error === "string" && /reserved/.test(rsv.error));
-  const cloneRsv = await lead("agent_clone", { sourceAgentId: "agA1", targetProjectId: setupHome.id, nameOverride: "Workspace Auditor" });
-  check("(3) agent_clone into the setup home as `Workspace Auditor` is refused", typeof cloneRsv.error === "string" && /reserved/.test(cloneRsv.error));
-  const cloneRsv2 = await lead("agent_clone", { sourceAgentId: "agA1", targetProjectId: setupHome.id, nameOverride: "companion" });
-  check("(3) ...and `companion` in any case", typeof cloneRsv2.error === "string" && /reserved/.test(cloneRsv2.error));
+  const rsv = await lead("agent_create", { projectId: setupHome.id, name: "Platform" });
+  check("(3) agent_create into the setup home as `Platform` is refused", typeof rsv.error === "string" && /reserved/.test(rsv.error));
+  const cloneRsv = await lead("agent_clone", { sourceAgentId: "agA1", targetProjectId: setupHome.id, nameOverride: "Platform" });
+  check("(3) agent_clone into the setup home as `Platform` is refused", typeof cloneRsv.error === "string" && /reserved/.test(cloneRsv.error));
+  const cloneRsv2 = await lead("agent_clone", { sourceAgentId: "agA1", targetProjectId: setupHome.id, nameOverride: "platform" });
+  check("(3) ...and `platform` in any case", typeof cloneRsv2.error === "string" && /reserved/.test(cloneRsv2.error));
   check("(3) ...nothing minted into the setup home", countIn(setupHome.id) === hBefore);
   check("(3) ...so exactly one Companion exists",
     db.listAllAgents().filter((a) => a.name.toLowerCase() === COMPANION_AGENT_NAME.toLowerCase()).length === 1);
@@ -214,7 +214,7 @@ const connect = async (router, sessionId) => {
   const batch = await lead("agent_clone_batch", { sourceAgentId: "agA1", targets: [
     { targetProjectId: "pC", nameOverride: "Batch One" },
     { targetProjectId: "pD", nameOverride: "taken" },
-    { targetProjectId: setupHome.id, nameOverride: "Companion" },
+    { targetProjectId: setupHome.id, nameOverride: "Platform" },
     { targetProjectId: "pD", nameOverride: "Batch Two" },
   ] });
   check("(3) clone_batch: one result per target, in order", Array.isArray(batch) && batch.length === 4);
@@ -282,7 +282,7 @@ const connect = async (router, sessionId) => {
   check("(6) an EXPLICIT colliding nameOverride is refused, not suffixed", explicit.ok === false && /already named "Pal 2"/.test(explicit.error));
   const scope = newAgentNameScope(db, "pP");
   check("(6) newAgentNameScope lists the project's agents and no reserved names outside the setup home", scope.siblings.length === 3 && scope.reservedNames.length === 0);
-  check("(6) ...and the reserved names inside the setup home", newAgentNameScope(db, setupHome.id).reservedNames.includes(COMPANION_AGENT_NAME));
+  check("(6) ...and the reserved names inside the setup home", newAgentNameScope(db, setupHome.id).reservedNames.includes("Platform") && !newAgentNameScope(db, setupHome.id).reservedNames.includes(COMPANION_AGENT_NAME));
 }
 
 // ===================== (7) seeders keep their idempotent path (boot twice) =====================

@@ -13,6 +13,11 @@ import {
   LEGACY_SETUP_PROJECT_NAME,
   SETUP_AGENT_NAME,
   SETUP_HOME_LEAD_AGENT_ID_KEY,
+  SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY,
+  SETUP_HOME_OPERATOR_AGENT_ID_KEY,
+  SETUP_HOME_COMPANION_AGENT_ID_KEY,
+  resolveSeededHomeAgent,
+  migrateSeededHomeAgentMarker,
   resolveSetupHome,
   resolveLiveSetupHome,
 } from "../projects/reserved-home-markers.js";
@@ -545,8 +550,8 @@ export function migrateSetupHomeToLead(db: Db): { migrated: boolean; offered: bo
 const SETUP_AUDITOR_PROFILE_NAME = "Workspace Auditor";
 
 /**
- * The seeded Workspace Auditor agent's DISPLAY name (also the name-scoped anchor seedSetupAuditorAgent
- * resolves by — DISTINCT from SETUP_AGENT_NAME "Platform" so the operator and the auditor never collide,
+ * The seeded Workspace Auditor agent's DISPLAY name (also the name the one-shot boot migration matches a
+ * pre-marker install by; the agent is otherwise found by its id marker — DISTINCT from SETUP_AGENT_NAME "Platform" so the operator and the auditor never collide,
  * and first-run.ts / maybeAutoLaunchSetup keep resolving the OPERATOR by SETUP_AGENT_NAME with both present).
  */
 export const SETUP_AUDITOR_AGENT_NAME = "Workspace Auditor";
@@ -612,24 +617,26 @@ Your audit + suggestion tools and the "Review my workspace" trigger are live —
 
 /**
  * B4 backfill — seed the bundled Workspace Auditor agent into the SAME reserved "Platform" setup home as
- * the operator (one home, two agents), SEED-IF-ABSENT BY AGENT-NAME. Run at boot AFTER seedSetupHome.
+ * the operator (one home, two agents), SEED-IF-ABSENT BY ID MARKER (with a one-shot boot name migration for
+ * a pre-marker install). Run at boot AFTER seedSetupHome.
  *
  * @decision sha:aecc6551 — scoped to the reserved home via resolveSetupHome (marker, falling back to
  * name), never a name-agnostic reserved lookup (gotcha #1, amended by card a47dd144); seeded by its own
- * separate boot-time name-presence check, never folded into seedSetupHome (gotcha #2).
+ * separate boot-time check (id-marker-keyed since card de790214), never folded into seedSetupHome (gotcha #2).
  *
- * Idempotent + non-clobbering: if an agent named SETUP_AUDITOR_AGENT_NAME already lives in the home this
- * no-ops (returns null), so reboots never duplicate it and a user's edits to that agent (prompt, profile)
- * are preserved. A user who RENAMES the auditor leaves no agent under the bundled name — the documented
- * seed-if-absent-by-name limitation shared with resetProfileToBundled / seedGlobalSkills: a re-seed would
- * add a fresh one. Bound to the bundled "Workspace Auditor" profile (looked up by name; profileId null
- * backstop if absent so the seed never throws). Returns the seeded name, or null when it no-ops.
+ * Idempotent + non-clobbering: the seeded agent is pinned by an id marker (card de790214), so a rename
+ * never makes the next boot seed a second copy and a user's edits to that agent (prompt, profile) are
+ * preserved. An install that pre-dates the marker is migrated by a one-time name match (see
+ * migrateSeededHomeAgentMarker); a DELETED agent is re-seeded. Bound to the bundled "Workspace Auditor" profile
+ * (looked up by name; profileId null backstop if absent so the seed never throws). Returns the seeded
+ * name, or null when it no-ops.
  */
 export function seedSetupAuditorAgent(db: Db): string | null {
   const home = resolveSetupHome(db);
   if (!home) return null; // no setup home yet — seedSetupHome (run first) creates it; nothing to attach to
+  migrateSeededHomeAgentMarker(db, home, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, SETUP_AUDITOR_AGENT_NAME); // one-shot per key
+  if (resolveSeededHomeAgent(db, home, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY)) return null; // already present — idempotent
   const agents = db.listAgents(home.id);
-  if (agents.some((a) => a.name === SETUP_AUDITOR_AGENT_NAME)) return null; // already present — idempotent
 
   const profile = db.listProfiles().find((p) => p.name === SETUP_AUDITOR_PROFILE_NAME);
   const agent: Agent = {
@@ -641,7 +648,10 @@ export function seedSetupAuditorAgent(db: Db): string | null {
     profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
     endpoint: false, ioSchema: null, // not an API endpoint
   };
-  db.insertAgent(agent);
+  db.runInTransaction(() => {
+    db.insertAgent(agent);
+    db.setMeta(SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, agent.id);
+  });
   return SETUP_AUDITOR_AGENT_NAME;
 }
 
@@ -668,7 +678,7 @@ Act only on the explicit task the human gives you this session. Confirm before a
 
 /**
  * Bucket 2b "Bounded Elevated Operator" — seed the bundled Elevated Operator agent into the SAME reserved
- * "Platform" setup home as the operator/auditor/companion agents, SEED-IF-ABSENT BY AGENT-NAME, mirroring
+ * "Platform" setup home as the operator/auditor/companion agents, SEED-IF-ABSENT BY ID MARKER, mirroring
  * seedSetupAuditorAgent/seedCompanionAgent, run at boot AFTER seedSetupHome.
  *
  * @decision sha:afd3bf5b — FLAG-GATED (seeds only while platform.operatorEnabled is on, read live)
@@ -682,11 +692,15 @@ Act only on the explicit task the human gives you this session. Confirm before a
  * no-ops (home missing, flag off, or already present).
  */
 export function seedOperatorAgent(db: Db): string | null {
-  if (!isOperatorEnabled(db)) return null; // flag off — never seed the agent row at all
   const home = resolveSetupHome(db);
   if (!home) return null; // no setup home yet — seedSetupHome (run first) creates it; nothing to attach to
+  // Migrate (one-shot, recorded even with no match) BEFORE the flag check: the flag defaults off, and an
+  // unstamped key with the name migration still armed would later adopt a human's same-named agent when the
+  // flag flips on (card de790214). An operator seeded earlier and renamed while the flag is off is pinned here.
+  migrateSeededHomeAgentMarker(db, home, SETUP_HOME_OPERATOR_AGENT_ID_KEY, OPERATOR_AGENT_NAME);
+  if (resolveSeededHomeAgent(db, home, SETUP_HOME_OPERATOR_AGENT_ID_KEY)) return null; // already present — idempotent
+  if (!isOperatorEnabled(db)) return null; // flag off — never seed the agent row at all
   const agents = db.listAgents(home.id);
-  if (agents.some((a) => a.name === OPERATOR_AGENT_NAME)) return null; // already present — idempotent
 
   const profile = db.listProfiles().find((p) => p.name === OPERATOR_PROFILE_NAME);
   const agent: Agent = {
@@ -698,7 +712,10 @@ export function seedOperatorAgent(db: Db): string | null {
     profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
     endpoint: false, ioSchema: null, // not an API endpoint
   };
-  db.insertAgent(agent);
+  db.runInTransaction(() => {
+    db.insertAgent(agent);
+    db.setMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY, agent.id);
+  });
   return OPERATOR_AGENT_NAME;
 }
 
@@ -706,19 +723,21 @@ export function seedOperatorAgent(db: Db): string | null {
 const COMPANION_PROFILE_NAME = "Companion";
 
 /**
- * The seeded Companion agent's DISPLAY name (also the name-scoped anchor seedCompanionAgent resolves by —
- * DISTINCT from SETUP_AGENT_NAME "Platform" and SETUP_AUDITOR_AGENT_NAME "Workspace Auditor" so the three
+ * The seeded Companion agent's DISPLAY name (also the name the one-shot boot migration matches a pre-marker
+ * install by; the agent is otherwise found by its id marker — DISTINCT from SETUP_AGENT_NAME "Platform" and SETUP_AUDITOR_AGENT_NAME "Workspace Auditor" so the three
  * standing agents in the reserved home never collide).
  */
 export const COMPANION_AGENT_NAME = "Companion";
 
 /**
- * Card b0495d0b: every name a boot seeder or the setup-lead fallback finds a setup-home agent BY (the same
- * constants those lookups compare with `===`). Renaming one of these agents would make the next boot seed
- * a duplicate beside it, so the rename check refuses it. Add a constant here when a new seeder keys on one.
+ * Card b0495d0b: every name a boot seeder or the setup-lead fallback still finds a setup-home agent BY (the
+ * same constants those lookups compare with `===`). Renaming one of these agents would make the next boot
+ * seed a duplicate beside it, so the rename check refuses it. Add a constant here when a new seeder keys on
+ * one. Card de790214: the auditor, operator and companion are pinned by id markers instead, so their names
+ * are no longer reserved.
  */
 const NAME_KEYED_SETUP_HOME_AGENT_NAMES: readonly string[] = [
-  SETUP_AGENT_NAME, LEGACY_SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME, OPERATOR_AGENT_NAME, COMPANION_AGENT_NAME,
+  SETUP_AGENT_NAME, LEGACY_SETUP_AGENT_NAME,
 ];
 
 /**
@@ -777,9 +796,9 @@ When a request is ambiguous, make a sensible assumption and say what you assumed
 /** The pristine-refresh specs for the reserved setup home's bundled agents (see pristine-prompt-refresh.ts). */
 const SETUP_PRISTINE_SPECS: readonly PristinePromptSpec[] = [
   { agentName: SETUP_AGENT_NAME, current: PLATFORM_LEAD_OPERATOR_PROMPT, priorValues: PLATFORM_LEAD_OPERATOR_PROMPT_PRIOR_VALUES },
-  { agentName: SETUP_AUDITOR_AGENT_NAME, current: WORKSPACE_AUDITOR_PROMPT, priorValues: WORKSPACE_AUDITOR_PROMPT_PRIOR_VALUES },
-  { agentName: OPERATOR_AGENT_NAME, current: OPERATOR_PROMPT, priorValues: OPERATOR_PROMPT_PRIOR_VALUES },
-  { agentName: COMPANION_AGENT_NAME, current: COMPANION_PROMPT, priorValues: COMPANION_PROMPT_PRIOR_VALUES },
+  { agentName: SETUP_AUDITOR_AGENT_NAME, markerKey: SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, current: WORKSPACE_AUDITOR_PROMPT, priorValues: WORKSPACE_AUDITOR_PROMPT_PRIOR_VALUES },
+  { agentName: OPERATOR_AGENT_NAME, markerKey: SETUP_HOME_OPERATOR_AGENT_ID_KEY, current: OPERATOR_PROMPT, priorValues: OPERATOR_PROMPT_PRIOR_VALUES },
+  { agentName: COMPANION_AGENT_NAME, markerKey: SETUP_HOME_COMPANION_AGENT_ID_KEY, current: COMPANION_PROMPT, priorValues: COMPANION_PROMPT_PRIOR_VALUES },
 ];
 
 /**
@@ -798,29 +817,29 @@ export function refreshSetupHomePromptsPristine(db: Db): string[] {
 
 /**
  * Seed the bundled Companion agent into the SAME reserved "Platform" setup home as the operator + auditor
- * (one home, three standing agents), SEED-IF-ABSENT BY AGENT-NAME — the EXACT mirror of seedSetupAuditorAgent
+ * (one home, three standing agents), SEED-IF-ABSENT BY ID MARKER — the EXACT mirror of seedSetupAuditorAgent
  * (B4). Run at boot AFTER seedSetupHome.
  *
  * @decision sha:aecc6551 — scoped to the reserved home via resolveSetupHome (marker, falling back to
  * name), never a name-agnostic reserved lookup (gotcha #1, amended by card a47dd144); seeded by its own
- * separate boot-time name-presence check, never folded into seedSetupHome (gotcha #2).
+ * separate boot-time check (id-marker-keyed since card de790214), never folded into seedSetupHome (gotcha #2).
  *
  * TEMPLATE ONLY — this seeds the rig (the assistant-role Companion profile + a Companion agent bound to it)
  * so a "New companion" provision has an author-free default spawn target. It creates NO session and writes
  * NO companion_config; the rig is invisible until a human provisions from it.
  *
- * Idempotent + non-clobbering: if an agent named COMPANION_AGENT_NAME already lives in the home this no-ops
- * (returns null), so reboots never duplicate it and a user's edits (prompt, profile) are preserved. A user
- * who RENAMES the companion leaves no agent under the bundled name — the documented seed-if-absent-by-name
- * limitation shared with seedSetupAuditorAgent / resetProfileToBundled. Bound to the bundled "Companion"
- * profile (looked up by name; profileId null backstop if absent so the seed never throws). Returns the
- * seeded name, or null when it no-ops.
+ * Idempotent + non-clobbering: the seeded agent is pinned by an id marker (card de790214), so reboots never
+ * duplicate it, a rename is safe, and a user's edits (prompt, profile) are preserved. A pre-marker install
+ * is migrated by a one-shot name match (migrateSeededHomeAgentMarker); a DELETED agent is re-seeded. Bound to the
+ * bundled "Companion" profile (looked up by name; profileId null backstop if absent so the seed never
+ * throws). Returns the seeded name, or null when it no-ops.
  */
 export function seedCompanionAgent(db: Db): string | null {
   const home = resolveSetupHome(db);
   if (!home) return null; // no setup home yet — seedSetupHome (run first) creates it; nothing to attach to
+  migrateSeededHomeAgentMarker(db, home, SETUP_HOME_COMPANION_AGENT_ID_KEY, COMPANION_AGENT_NAME); // one-shot per key
+  if (resolveSeededHomeAgent(db, home, SETUP_HOME_COMPANION_AGENT_ID_KEY)) return null; // already present — idempotent
   const agents = db.listAgents(home.id);
-  if (agents.some((a) => a.name === COMPANION_AGENT_NAME)) return null; // already present — idempotent
 
   const profile = db.listProfiles().find((p) => p.name === COMPANION_PROFILE_NAME);
   const agent: Agent = {
@@ -832,6 +851,9 @@ export function seedCompanionAgent(db: Db): string | null {
     profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
     endpoint: false, ioSchema: null, // not an API endpoint
   };
-  db.insertAgent(agent);
+  db.runInTransaction(() => {
+    db.insertAgent(agent);
+    db.setMeta(SETUP_HOME_COMPANION_AGENT_ID_KEY, agent.id);
+  });
   return COMPANION_AGENT_NAME;
 }
