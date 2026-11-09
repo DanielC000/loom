@@ -331,6 +331,45 @@ durable escape — stable across a further restart) and
 both even when one claimant's own stale, reverted-to-unresolvable active entry would otherwise falsely
 block the sweep).
 
+### Follow-up `0dcba62c` — the per-claimant sidecar was DECLINED; the graduated-entry clear now discloses
+
+Direction (b) above (a durable per-claimant tombstone) was re-examined a month later and declined for good.
+The cleared-tokens sidecar added since (`d2592cd5` and its descendants) does not cover this shape: it is
+keyed by token and identity, and a corrupt shared file has no readable tokens, while the boot fan-out
+diverts one pending entry per registered unresolvable claimant by hash alone. Reproduced on current main
+for all three by-path routes: clearing one of two (or three) claimants leaves the shared file and every
+claimant re-arms on the next boot. A new sidecar would be a new durable surface that can fail OPEN — a
+tombstone could mask a genuinely new corrupt-latch event for that identity — while today's behaviour is a
+fail-closed over-block that is already disclosed and has a working exit. The latch-id clear
+(`clearMergeQuarantineLatchFile` / `POST /internal/merge-quarantine/clear-by-path` with `{id}`) remains the
+lift-everything route.
+
+The one real gap found: clearing a claimant that had GRADUATED (remount + query) and then unmounted again
+re-armed on the next boot with NO `latchKept`/`referencingRepoPaths`, because that clear never runs the
+pending-clear branch's own file sweep. `tryClearMergeQuarantineByOwnIdentityBody` now folds the still-pending
+siblings that name the same shared file (`sharedPendingLatchReferencersFor`) into the same
+`keptReferencingRepoPaths` map the pending branch uses, so all three routes report it identically. Disclosure
+only: what is lifted and what survives are unchanged, and the pinned "DOCUMENTED BEHAVIOUR" assertions in
+`merge-quarantine-pass1-degraded-key-writes.mjs` stay as they are. Test:
+`merge-quarantine-0dcba62c-graduated-clear-discloses-shared-latch.mjs`.
+
+## Do not (0dcba62c)
+
+- Do not add a durable per-claimant tombstone/sidecar for a shared corrupt latch — it can mask a genuinely
+  new corrupt-latch event for that identity (fail-open); the latch-id clear is the lift-everything route.
+- Do not let the disclosure in `sharedPendingLatchReferencersFor` lift, delete or re-arm anything; it only
+  names siblings. A resolvable path never shares a degraded key, so it returns nothing.
+- Do not name a pending sibling in `sharedPendingLatchReferencersFor` unless its entry is a PLACEHOLDER
+  (`isPlaceholderEntryShape`, what the boot corrupt/unreadable fan-out mints). A pending with real content on
+  the same file is another identity's READABLE latch; the cleared claimant never re-diverts from it, and
+  naming it advised a latch-id clear that would lift that sibling's genuine quarantine. The placeholder shape
+  was chosen over re-reading the file: it is the in-memory fact the fan-out recorded, with no extra I/O.
+- Do not reuse `keptOnlyReasonFor` on the graduated path. Its "will NOT itself re-divert" is false there: the
+  cleared claimant shares the surviving file and re-arms next boot. That path has its own
+  `sharedLatchKeptAfterGraduatedClearReasonFor` (says it MAY RE-DIVERT until the shared latch is cleared by
+  its 24-hex id, which also lifts the named siblings). The pending branch's wording (`182c01cc`) is unchanged;
+  its own residual is tracked separately.
+
 ## Verification
 
 `test/merge-quarantine-pass1-degraded-key-writes.mjs`, SIXTEEN scenarios (each its own child process,

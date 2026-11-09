@@ -4239,6 +4239,13 @@ function keptOnlyReasonFor(refs: string[]): string {
   return `this identity's own quarantine is lifted and will NOT itself re-divert, but a latch file it referenced is still needed by ${refs.length} other claimant(s) that still structurally depend on it (${refs.join(", ")}) — it stays on disk, and every one of THOSE claimants still depending on it WILL RE-DIVERT on the next restart until EVERY one of them has been cleared too (note: a named claimant here can be OVER-reported due to a known, separately-tracked stale-sourceFile gap — it may already be resolved). If they share this exact degraded key, you can lift all of them durably right now by clearing the shared latch by its own 24-hex id instead (POST /internal/merge-quarantine/clear-by-path with {id}); otherwise, clear each one by its own repoPath or id (see stillBlockedCoOccupants).`;
 }
 
+/** The reason text for a GRADUATED claimant's clear whose shared corrupt/unreadable latch file survives for
+ *  still-pending siblings. Unlike {@link keptOnlyReasonFor}, the cleared claimant itself is NOT exempt: it
+ *  shares that file, so it may re-divert on the next boot until the shared latch is cleared (882d6cff). */
+function sharedLatchKeptAfterGraduatedClearReasonFor(refs: string[]): string {
+  return `this identity's own graduated quarantine record is lifted, but it shares a corrupt/unreadable latch file that is still needed by ${refs.length} other pending claimant(s) (${refs.join(", ")}) — the file stays on disk, so this identity MAY RE-DIVERT from that shared latch on the next restart, along with those claimants, until the shared latch is cleared by its own 24-hex id (POST /internal/merge-quarantine/clear-by-path with {id}), which lifts this identity and the named claimants together (see stillBlockedCoOccupants).`;
+}
+
 /** The reason text for a clear whose OWN identity is genuinely lifted, but a latch file it referenced is
  *  kept on disk purely because its own CONTENT parsed to a different repoPath (no true in-memory
  *  referencer at all — see {@link keptOnlyReasonFor}'s own doc for that case instead). {@link
@@ -8708,6 +8715,32 @@ function tryClearMergeQuarantineByOwnIdentity(
   decideDeferredTombstones(deferredTombstoneJobs, writeFailedIdentitiesThisCall);
   return out;
 }
+
+/**
+ * Pending claimants of a DIFFERENT identity whose diverted `sourceFile` is the very file an UNRESOLVABLE
+ * `repoPath`'s own degraded key names — the shared corrupt latch (card `882d6cff`) `repoPath` would
+ * re-divert from at the next boot. Disclosure input only: the graduated-entry clear (remount, then
+ * unmount again) removes its own graduated record but never goes through the pending-clear branch's own
+ * file sweep, so without this a still-shared latch was kept with nothing said.
+ *
+ * @decision 882d6cff — disclosure ONLY, never a basis for lifting or deleting anything; no durable
+ * per-claimant tombstone (a tombstone masking a genuinely new corrupt-latch event is fail-open) — the
+ * latch-id clear is the lift-everything route. See the record's 0dcba62c follow-up section.
+ */
+function sharedPendingLatchReferencersFor(repoPath: string, identity: string): Array<{ repoPath: string; sourceFile: string }> {
+  if (isRepoPathCurrentlyResolvable(repoPath)) return [];
+  const filename = path.basename(quarantinePathFor(repoPath));
+  if (!fs.existsSync(path.join(MERGE_QUARANTINE_DIR, filename))) return [];
+  const out = new Map<string, { repoPath: string; sourceFile: string }>();
+  for (const p of pendingUnresolvedQuarantines) {
+    if (p.sourceFile !== filename || directPathIdentity(p.entry.repoPath) === identity) continue;
+    // @decision 882d6cff — only a PLACEHOLDER pending shares a corrupt latch; a real-content pending on this
+    // file is another identity's readable latch, and naming it steers a clear that lifts its genuine quarantine.
+    if (!isPlaceholderEntryShape(p.entry)) continue;
+    out.set(p.entry.repoPath, { repoPath: p.entry.repoPath, sourceFile: p.sourceFile });
+  }
+  return [...out.values()];
+}
 function tryClearMergeQuarantineByOwnIdentityBody(
   repoPath: string,
   pendingSweep: "broad" | "none" | "unreduced",
@@ -8991,6 +9024,16 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   // identity-matched record in EITHER tier. The caller decides what happens next (see this function's own
   // doc + each caller's own doc) — this helper never guesses on their behalf.
   if (!wasQuarantined) return { matched: false };
+  const sharedGraduatedRefs = new Set<string>();
+  // @decision 882d6cff — a graduated-entry clear (no pending branch ran) discloses a still-shared latch the
+  // same way the pending branch does; disclosure only, never touches what is lifted or deleted.
+  if (matched.length > 0 && matchedPending.length === 0) {
+    for (const ref of sharedPendingLatchReferencersFor(repoPath, identity)) {
+      if (keptReferencingRepoPaths.has(ref.repoPath)) continue;
+      keptReferencingRepoPaths.set(ref.repoPath, blockedCoOccupant(ref.repoPath, ref.sourceFile));
+      sharedGraduatedRefs.add(ref.repoPath);
+    }
+  }
   // @decision 8596ddfb — ONCE, after the matched loop AND the pending branch: whichever step deleted a file that
   // an earlier step content-kept (a later ByKey call's pending sweep, or this body's own), drop that ghost keep
   // before the result is built. Never inside the pending branch alone. Identity-wide route only.
@@ -9048,7 +9091,9 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     // @decision 182c01cc — dropped "this (and every other) claimant": THIS identity is already fully
     // lifted and will NOT itself re-divert — only `refs` can. `refs` may still be OVER-reported (a known,
     // separately-tracked stale-sourceFile gap, cd5a3cf9/c93e9e7a) — over-warning stays the safe direction.
-    const keptReason = keptOnlyReasonFor(refs);
+    // @decision 882d6cff — all-graduated-disclosure referencers: the cleared claimant DOES re-divert, so
+    // `keptOnlyReasonFor`'s "will NOT itself re-divert" is false here. Pending-branch wording (182c01cc) untouched.
+    const keptReason = refs.every((r) => sharedGraduatedRefs.has(r)) ? sharedLatchKeptAfterGraduatedClearReasonFor(refs) : keptOnlyReasonFor(refs);
     // @decision 182c01cc (round 3, M1) — a repoPath BOTH kept and relocated is named ONCE, with BOTH
     // routes, same fix as clearMergeQuarantineByKey's own dedupe — see the decision record.
     const relocatedSet = new Set(relocated.map((co) => co.repoPath));
