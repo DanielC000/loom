@@ -359,16 +359,80 @@ only: what is lifted and what survives are unchanged, and the pinned "DOCUMENTED
   new corrupt-latch event for that identity (fail-open); the latch-id clear is the lift-everything route.
 - Do not let the disclosure in `sharedPendingLatchReferencersFor` lift, delete or re-arm anything; it only
   names siblings. A resolvable path never shares a degraded key, so it returns nothing.
-- Do not name a pending sibling in `sharedPendingLatchReferencersFor` unless its entry is a PLACEHOLDER
-  (`isPlaceholderEntryShape`, what the boot corrupt/unreadable fan-out mints). A pending with real content on
-  the same file is another identity's READABLE latch; the cleared claimant never re-diverts from it, and
-  naming it advised a latch-id clear that would lift that sibling's genuine quarantine. The placeholder shape
-  was chosen over re-reading the file: it is the in-memory fact the fan-out recorded, with no extra I/O.
+- Do not name a pending sibling in `sharedPendingLatchReferencersFor` unless it was minted BECAUSE its file
+  failed to read/parse (superseded below by `c755eac8`: the content shape `isPlaceholderEntryShape` was the
+  wrong key). A pending with real content on the same file is another identity's READABLE latch; the cleared
+  claimant never re-diverts from it, and naming it advised a latch-id clear that would lift that sibling's
+  genuine quarantine. Keying on in-memory state, not a re-read of the file, keeps it free of extra I/O.
 - Do not reuse `keptOnlyReasonFor` on the graduated path. Its "will NOT itself re-divert" is false there: the
   cleared claimant shares the surviving file and re-arms next boot. That path has its own
   `sharedLatchKeptAfterGraduatedClearReasonFor` (says it MAY RE-DIVERT until the shared latch is cleared by
   its 24-hex id, which also lifts the named siblings). The pending branch's wording (`182c01cc`) is unchanged;
   its own residual is tracked separately.
+
+### Follow-up `c755eac8` — the disclosure keys on the fan-out fact, and covers tmp residues
+
+Re-review of `0dcba62c` found four defects, all in the DISCLOSURE (nothing lifted, deleted or re-armed
+changed; a pre/post run of the test's `STATE` lines is identical).
+
+1. **False disclosure.** `isPlaceholderEntryShape(p.entry)` is a content test: a pending built from a
+   READABLE file whose stored content is itself a placeholder record passed it, so the clear named that
+   sibling and advised a latch-id clear that lifts its genuine quarantine. Now `PendingUnresolvedQuarantine`
+   carries an in-memory, never-serialized `sharedCorruptLatch` set ONLY at the boot sites that mint a pending
+   because the file failed to read or parse (unreadable divert; corrupt `.json` unresolvable and ancestor
+   tiers; corrupt safety-tmp unresolvable, degraded-occupied and ancestor tiers; corrupt tmp unresolvable,
+   degraded-occupied and ancestor tiers). Left UNTAGGED on purpose: pendings built from a parsed file
+   (no-resolvedKey, all-keys-occupied, `degradedDivertsToFlush`, readable safety-tmp), the two UNRESOLVED
+   placeholders from `quarantineAllRegisteredFailClosed`/arming, the reconcile placeholder, and any wrapper a
+   rewrite/relocate REPLACES (the fresh object has no tag). Fails toward silence: a sibling minted untagged that
+   later graduates, or a wrapper that was replaced, is simply not disclosed. Pending entries are rebuilt from
+   disk at every boot, so no older state carries a stale tag.
+2. **Missed tmp residues.** The helper matched only `sourceFile === "<hash>.json"` and returned early unless
+   that file existed. It now matches by hash stem (`latchHashStemOf`, shared with
+   `ownLatchHashForClearedPending`), requires the named file to still exist, and also names a tagged pending
+   that owns a same-hash residue through `orphanLatchFiles` (`orphanLatchFileOwners`, extracted from
+   `sweepTmpResidueForHashIfUnreferenced` and used by both). **Guarantee, stated narrowly:** for a shared
+   corrupt `.tmp-`/`.tmp-safety-` residue the graduated and pending clears name the same sibling (pinned in the
+   test); the pending path may ALSO name non-corrupt owners, which the graduated path deliberately does not.
+3. **Mixed reason text.** The selector was `refs.every(graduated)`, so one non-graduated ref selected
+   `keptOnlyReasonFor`, whose "will NOT itself re-divert" is false when any graduated ref is present. It is now
+   `keptReasonForRefs`, choosing by subset (graduated-only, mixed, none-graduated = the pending text,
+   unchanged). The shared fact is also recorded BEFORE the already-kept `continue`, so a ref another route kept
+   first still drives the text. **No end-to-end mixed scenario was found:** the graduated clear reaches the
+   disclosure only because the shared file survives, so the by-key delete's same-hash sweep (the other keep
+   route) does not run, and a tmp residue owned by a third claimant was not named. The rule is pinned at unit
+   level.
+4. **Same-identity skip.** Unreachable through the clear (the caller consults the helper only when no pending
+   of that identity matched), so it is defence in depth; pinned on the helper with a negative control.
+
+Test: `merge-quarantine-c755eac8-shared-latch-disclosure-fanout-fact.mjs`.
+
+**Review round (same card).** Four findings, all disclosure-only (the test's `STATE` lines are unchanged):
+
+- A `byContent` corrupt-tmp entry (the bytes PARSED and name an absolute repoPath; only the branch/reason check
+  failed) is a READABLE file attributed by content, so the unresolvable and degraded-occupied boot sites no longer
+  tag it. Tagging it named the content-named repo and advised a latch-id clear that lifts its genuine quarantine.
+- The tag now fails toward silence by construction, not by convention: `replaceEntryEverywhere` and the two
+  `sourceFile` reassignments after a successful `writePendingDivertFile` drop it. Pinned at source-text level only
+  (the test counts the three untag sites in the compiled module); no behavioural test drives each rewrite.
+- Residue ownership is read off the TAGGED pending's own `orphanLatchFiles`, not `orphanLatchFileOwners(f)`
+  filtered by repoPath: the latter named an UNTAGGED readable entry of the same repo on the strength of a tagged
+  pending whose own file was gone. `orphanLatchFileOwners` stays the sweep's helper.
+- **Known non-disclosure gaps (tag sites deliberately not added; each fails toward silence):** the prior-eviction
+  site (`priorStillAtKey` handling in the stale-key resolution), the two degraded-occupied protective pushes via
+  `originalEntryBySource` in the corrupt-tmp and migrate passes, and the safety-tmp protective push in the
+  migrate pass. A sibling minted at one of these is simply not disclosed.
+
+## Do not (c755eac8)
+
+- Do not infer "shares a corrupt latch" from a pending entry's CONTENT (placeholder branch, `placeholder:true`).
+  A readable file may hold a placeholder record; only the mint-time `sharedCorruptLatch` fact counts.
+- Do not serialize `sharedCorruptLatch` or add a re-read of the file to compute it. A later boot rebuilds it.
+- Do not tag a new pending-mint site unless the pending exists BECAUSE its file failed to read or parse
+  (a `byContent` file parsed, so it never qualifies), and do not let a rewritten wrapper keep the tag.
+- Do not derive residue ownership from `orphanLatchFileOwners` in the disclosure; read the tagged pending's own entry.
+- Do not widen the disclosure to non-corrupt owners, and do not reuse `keptOnlyReasonFor` whenever any graduated
+  ref is present.
 
 ## Verification
 

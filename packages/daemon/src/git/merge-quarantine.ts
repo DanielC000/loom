@@ -457,6 +457,12 @@ const loggedDegradedOccupantRefusals = new Set<string>();
 interface PendingUnresolvedQuarantine {
   entry: MergeQuarantineEntry;
   sourceFile: string;
+  /**
+   * @decision 882d6cff (Follow-up c755eac8) — set only where boot minted this pending BECAUSE `sourceFile` failed to read/parse;
+   * in-memory, never serialized, never inferred from `entry`'s shape. A replaced wrapper loses it
+   * (fails toward silence, see {@link sharedPendingLatchReferencersFor}).
+   */
+  sharedCorruptLatch?: true;
 }
 let pendingUnresolvedQuarantines: PendingUnresolvedQuarantine[] = [];
 
@@ -1782,7 +1788,9 @@ function replaceEntryEverywhere(byRepoKey: Map<string, MergeQuarantineEntry>, ol
     if (v === oldEntry) byRepoKey.set(k, newEntry);
   }
   for (const p of pendingUnresolvedQuarantines) {
-    if (p.entry === oldEntry) p.entry = newEntry;
+    // @decision 882d6cff (Follow-up c755eac8) — a rewritten wrapper no longer stands for the unread file it was minted for:
+    // drop the shared-corrupt-latch tag so the disclosure fails toward silence by construction, never by convention.
+    if (p.entry === oldEntry) { p.entry = newEntry; delete p.sharedCorruptLatch; }
   }
 }
 
@@ -4246,6 +4254,24 @@ function sharedLatchKeptAfterGraduatedClearReasonFor(refs: string[]): string {
   return `this identity's own graduated quarantine record is lifted, but it shares a corrupt/unreadable latch file that is still needed by ${refs.length} other pending claimant(s) (${refs.join(", ")}) — the file stays on disk, so this identity MAY RE-DIVERT from that shared latch on the next restart, along with those claimants, until the shared latch is cleared by its own 24-hex id (POST /internal/merge-quarantine/clear-by-path with {id}), which lifts this identity and the named claimants together (see stillBlockedCoOccupants).`;
 }
 
+/** Picks the kept-latch reason for an identity-wide clear's `refs` by SUBSET: any ref in `sharedGraduatedRefs`
+ *  means the cleared claimant itself may re-divert, so {@link keptOnlyReasonFor} is used only when none is. */
+function keptReasonForRefs(refs: string[], sharedGraduatedRefs: ReadonlySet<string>): string {
+  const graduatedRefs = refs.filter((r) => sharedGraduatedRefs.has(r));
+  const otherRefs = refs.filter((r) => !sharedGraduatedRefs.has(r));
+  if (graduatedRefs.length === 0) return keptOnlyReasonFor(refs);
+  return otherRefs.length === 0 ? sharedLatchKeptAfterGraduatedClearReasonFor(refs) : mixedKeptReasonAfterGraduatedClearFor(graduatedRefs, otherRefs);
+}
+export function keptReasonForRefsTestOnly(refs: string[], sharedGraduatedRefs: string[]): string { return keptReasonForRefs(refs, new Set(sharedGraduatedRefs)); }
+
+/** The reason text when a GRADUATED clear's referencers are a MIX: `graduatedRefs` (the shared-latch
+ *  disclosure — the cleared claimant itself MAY re-divert) plus `otherRefs` (kept by another route). The
+ *  "will NOT itself re-divert" claim of {@link keptOnlyReasonFor} is never stated here, since it is false
+ *  whenever any graduated ref is present. */
+function mixedKeptReasonAfterGraduatedClearFor(graduatedRefs: string[], otherRefs: string[]): string {
+  return `${sharedLatchKeptAfterGraduatedClearReasonFor(graduatedRefs)} Separately, a latch file it referenced is also still needed by ${otherRefs.length} other claimant(s) that structurally depend on it (${otherRefs.join(", ")}) — it stays on disk, and those claimants WILL RE-DIVERT on the next restart until each of them is cleared too (clear each by its own repoPath or id; see stillBlockedCoOccupants).`;
+}
+
 /** The reason text for a clear whose OWN identity is genuinely lifted, but a latch file it referenced is
  *  kept on disk purely because its own CONTENT parsed to a different repoPath (no true in-memory
  *  referencer at all — see {@link keptOnlyReasonFor}'s own doc for that case instead). {@link
@@ -5933,6 +5959,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string, writeFai
       // @decision 9c681680 — same in-place mutation as above, no index lookup needed.
       live.entry = written.entry;
       live.sourceFile = written.filename;
+      delete live.sharedCorruptLatch; // @decision 882d6cff — rewritten as a READABLE record: fail toward silence
       // @decision e1572b69 — capture the return: rewriteOrphanLatchFilesAfterPartialClear can itself
       // replace `written.entry` with a stranded-tmp-tracking object; `live.entry` must never go stale.
       live.entry = rewriteOrphanLatchFilesAfterPartialClear(written.entry, writtenBasenames, new Set([token]));
@@ -6928,6 +6955,20 @@ function canonicalKeyOrUndefined(repoPath: string): string | undefined {
 }
 
 /**
+ * The repoPaths of every in-memory entry (active or pending) whose `orphanLatchFiles` names `f` — the
+ * ownership signal the tmp-residue sweep keeps a file on. No I/O.
+ *
+ * @decision 882d6cff (Follow-up c755eac8) — the ONE copy: the sweep and the graduated-clear shared-latch
+ * disclosure both call it, so they cannot drift on who owns a residue.
+ */
+function orphanLatchFileOwners(f: string): Set<string> {
+  const owners = new Set<string>();
+  for (const e of activeQuarantines.values()) if (e.orphanLatchFiles?.includes(f)) owners.add(e.repoPath);
+  for (const p of pendingUnresolvedQuarantines) if (p.entry.orphanLatchFiles?.includes(f)) owners.add(p.entry.repoPath);
+  return owners;
+}
+
+/**
  * The `.json.tmp-<pid>` twin of {@link orphanLatchFileSweepDecision}'s check (1) — deletes every tmp
  * residue file for `hash` EXCEPT one whose EXACT filename a surviving entry's own `orphanLatchFiles` still
  * lists, keeping (and reporting) that one instead. The ownership scan is NOT entry-scoped: it checks
@@ -7036,9 +7077,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
       if (!dischargeable) { anyUnattributed = true; continue; }
       reconciledPlaceholderTokens = reconciled!.tokens;
     }
-    const owners = new Set<string>();
-    for (const e of activeQuarantines.values()) if (e.orphanLatchFiles?.includes(f)) owners.add(e.repoPath);
-    for (const p of pendingUnresolvedQuarantines) if (p.entry.orphanLatchFiles?.includes(f)) owners.add(p.entry.repoPath);
+    const owners = orphanLatchFileOwners(f);
     if (owners.size > 0) {
       for (const o of owners) { referencingRepoPaths.add(o); keptEntries.push({ repoPath: o, sourceFile: f }); }
       continue;
@@ -7143,9 +7182,7 @@ function sweepTmpResidueForHashIfUnreferenced(hash: string, candidateTokens: str
       if (residueKey === undefined || !freedKeys.has(residueKey)) continue; // belongs to a DIFFERENT identity/key entirely — not this call's concern
       // Only NOW, for a file genuinely confirmed to belong to `freedKeys`, does ownership matter — the
       // SAME in-memory check the same-hash loop above runs, cheap, no I/O.
-      const owners = new Set<string>();
-      for (const e of activeQuarantines.values()) if (e.orphanLatchFiles?.includes(f)) owners.add(e.repoPath);
-      for (const p of pendingUnresolvedQuarantines) if (p.entry.orphanLatchFiles?.includes(f)) owners.add(p.entry.repoPath);
+      const owners = orphanLatchFileOwners(f);
       if (owners.size > 0) {
         for (const o of owners) { referencingRepoPaths.add(o); keptEntries.push({ repoPath: o, sourceFile: f }); }
         continue;
@@ -7235,9 +7272,13 @@ function freedKeysForClearedPendingEntries(entries: ReadonlyArray<MergeQuarantin
  * or a crash-left tmp residue of it), else the hash Loom would write for its canonical key. `undefined` when
  * neither is derivable — never an invented hash.
  */
+function latchHashStemOf(sourceFile: string): string | undefined {
+  return /^(.+?)\.json(?:\.tmp-.+)?$/.exec(path.basename(sourceFile))?.[1] || undefined;
+}
+
 function ownLatchHashForClearedPending(p: PendingUnresolvedQuarantine): string | undefined {
-  const m = /^(.+?)\.json(?:\.tmp-.+)?$/.exec(path.basename(p.sourceFile));
-  if (m?.[1]) return m[1];
+  const stem = latchHashStemOf(p.sourceFile);
+  if (stem) return stem;
   const key = canonicalKeyOrUndefined(p.entry.repoPath);
   return key !== undefined ? quarantineHashForKey(key) : undefined;
 }
@@ -7401,8 +7442,8 @@ export function markLatchFileUnreadableTestOnly(basename: string): void {
  *  twin (the SAME `entry` object reference also armed via `setActiveQuarantineTestOnly`) or a
  *  structurally-tied-but-distinct pending record, on demand. Never imported by `index.ts` — see
  *  {@link setActiveQuarantineTestOnly}'s own doc for why the `TestOnly` suffix is load-bearing. */
-export function pushPendingQuarantineTestOnly(entry: MergeQuarantineEntry, sourceFile: string): void {
-  pendingUnresolvedQuarantines.push({ entry, sourceFile });
+export function pushPendingQuarantineTestOnly(entry: MergeQuarantineEntry, sourceFile: string, sharedCorruptLatch = false): void {
+  pendingUnresolvedQuarantines.push(sharedCorruptLatch ? { entry, sourceFile, sharedCorruptLatch: true } : { entry, sourceFile });
 }
 
 /** TEST-ONLY: a read-only snapshot of the REAL, module-global {@link pendingUnresolvedQuarantines} array
@@ -7793,6 +7834,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
         if (writtenTwin.entry !== updated) replaceEntryEverywhere(activeQuarantines, updated, writtenTwin.entry);
         p.entry = writtenTwin.entry;
         p.sourceFile = writtenTwin.filename;
+        delete p.sharedCorruptLatch; // @decision 882d6cff — rewritten as a READABLE record: fail toward silence
       } else {
         // @decision 59e758e5 (round 3) — never unlink: not proven secured elsewhere. Keep the tmp — now
         // tracked (444cd8e2) below, so a later clear narrows/sweeps it; boot's own recovery pass is a backstop only.
@@ -8729,18 +8771,36 @@ function tryClearMergeQuarantineByOwnIdentity(
  */
 function sharedPendingLatchReferencersFor(repoPath: string, identity: string): Array<{ repoPath: string; sourceFile: string }> {
   if (isRepoPathCurrentlyResolvable(repoPath)) return [];
-  const filename = path.basename(quarantinePathFor(repoPath));
-  if (!fs.existsSync(path.join(MERGE_QUARANTINE_DIR, filename))) return [];
+  const hash = path.basename(quarantinePathFor(repoPath)).slice(0, -".json".length);
   const out = new Map<string, { repoPath: string; sourceFile: string }>();
+  const name = (rp: string, sourceFile: string): void => {
+    if (directPathIdentity(rp) !== identity && !out.has(rp)) out.set(rp, { repoPath: rp, sourceFile });
+  };
+  // @decision 882d6cff (Follow-up c755eac8) — name only a pending minted BECAUSE its file failed to read/parse
+  // (`sharedCorruptLatch`), never one inferred from content shape: a readable placeholder record is another
+  // identity's genuine latch, and naming it steers a clear that lifts it.
+  const faultedPendings: PendingUnresolvedQuarantine[] = [];
   for (const p of pendingUnresolvedQuarantines) {
-    if (p.sourceFile !== filename || directPathIdentity(p.entry.repoPath) === identity) continue;
-    // @decision 882d6cff — only a PLACEHOLDER pending shares a corrupt latch; a real-content pending on this
-    // file is another identity's readable latch, and naming it steers a clear that lifts its genuine quarantine.
-    if (!isPlaceholderEntryShape(p.entry)) continue;
-    out.set(p.entry.repoPath, { repoPath: p.entry.repoPath, sourceFile: p.sourceFile });
+    if (p.sharedCorruptLatch !== true || latchHashStemOf(p.sourceFile) !== hash) continue;
+    faultedPendings.push(p);
+    // The named file must still be on disk: the `.json` final OR a `.json.tmp-*`/`.tmp-safety-*` residue.
+    if (fs.existsSync(path.join(MERGE_QUARANTINE_DIR, p.sourceFile))) name(p.entry.repoPath, p.sourceFile);
+  }
+  if (faultedPendings.length === 0) return [...out.values()];
+  // A faulted pending that OWNS a same-hash residue by `orphanLatchFiles` is named too — narrower than the
+  // pending path, which also names owners that were never minted from a failed read.
+  // @decision 882d6cff (Follow-up c755eac8) — ownership is read off the TAGGED pending's OWN entry, never
+  // `orphanLatchFileOwners(f)` filtered by repoPath: that would name an UNTAGGED readable entry of the same
+  // repo that owns the residue, on the strength of a tagged pending whose own file may be gone.
+  let files: string[] = [];
+  try { files = fs.readdirSync(MERGE_QUARANTINE_DIR); } catch { return [...out.values()]; }
+  for (const f of files) {
+    if (!f.startsWith(`${hash}.json.tmp-`) || !isTmpResidueFilename(f, true)) continue;
+    for (const p of faultedPendings) if (p.entry.orphanLatchFiles?.includes(f)) name(p.entry.repoPath, f);
   }
   return [...out.values()];
 }
+export function sharedPendingLatchReferencersForTestOnly(repoPath: string, identity: string): Array<{ repoPath: string; sourceFile: string }> { return sharedPendingLatchReferencersFor(repoPath, identity); }
 function tryClearMergeQuarantineByOwnIdentityBody(
   repoPath: string,
   pendingSweep: "broad" | "none" | "unreduced",
@@ -9029,9 +9089,11 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   // same way the pending branch does; disclosure only, never touches what is lifted or deleted.
   if (matched.length > 0 && matchedPending.length === 0) {
     for (const ref of sharedPendingLatchReferencersFor(repoPath, identity)) {
+      // @decision 882d6cff (Follow-up c755eac8) — record the shared fact BEFORE the already-kept skip, so a ref
+      // another route kept first still drives the reason text (the map entry itself is never overwritten).
+      sharedGraduatedRefs.add(ref.repoPath);
       if (keptReferencingRepoPaths.has(ref.repoPath)) continue;
       keptReferencingRepoPaths.set(ref.repoPath, blockedCoOccupant(ref.repoPath, ref.sourceFile));
-      sharedGraduatedRefs.add(ref.repoPath);
     }
   }
   // @decision 8596ddfb — ONCE, after the matched loop AND the pending branch: whichever step deleted a file that
@@ -9093,7 +9155,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     // separately-tracked stale-sourceFile gap, cd5a3cf9/c93e9e7a) — over-warning stays the safe direction.
     // @decision 882d6cff — all-graduated-disclosure referencers: the cleared claimant DOES re-divert, so
     // `keptOnlyReasonFor`'s "will NOT itself re-divert" is false here. Pending-branch wording (182c01cc) untouched.
-    const keptReason = refs.every((r) => sharedGraduatedRefs.has(r)) ? sharedLatchKeptAfterGraduatedClearReasonFor(refs) : keptOnlyReasonFor(refs);
+    const keptReason = keptReasonForRefs(refs, sharedGraduatedRefs);
     // @decision 182c01cc (round 3, M1) — a repoPath BOTH kept and relocated is named ONCE, with BOTH
     // routes, same fix as clearMergeQuarantineByKey's own dedupe — see the decision record.
     const relocatedSet = new Set(relocated.map((co) => co.repoPath));
@@ -10705,6 +10767,7 @@ function reenterMergeQuarantinesAtBootImpl(
             enteredAt: Date.now(), tokens: [syntheticToken], placeholder: true,
           },
           sourceFile: f,
+          sharedCorruptLatch: true,
         });
       }
       return;
@@ -11179,7 +11242,7 @@ function reenterMergeQuarantinesAtBootImpl(
         reason: `boot found a CORRUPT/unparsable quarantine latch (${f}) matching this repo's hash, while ${matchedRepo} did not currently resolve — fail-closed rather than risk discarding a real quarantine, but not armed under any walked-up key`,
         enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
       };
-      pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+      pendingUnresolvedQuarantines.push({ entry, sourceFile: f, sharedCorruptLatch: true });
       continue;
     }
     const key = canonicalRepoLockKey(matchedRepo);
@@ -11221,7 +11284,7 @@ function reenterMergeQuarantinesAtBootImpl(
       reason: `boot found a CORRUPT/unparsable quarantine latch (${f}) whose hash matches an ancestor-walk key ${matchedRepo}'s own resolution would produce if it (or an intermediate ancestor) were unresolvable — fail-closed rather than risk discarding a real quarantine, but not a verified identity and never armed under any walked-up key`,
       enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
     };
-    pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+    pendingUnresolvedQuarantines.push({ entry, sourceFile: f, sharedCorruptLatch: true });
   }
 
   // PASS 1b (item 5) — recover/repair any leftover `.json.tmp-<pid>` latch. Its filename is
@@ -11612,7 +11675,7 @@ function reenterMergeQuarantinesAtBootImpl(
             reason: `boot found a CORRUPT/unreadable SAFETY-TMP residue (${f}) matching this repo's hash, while ${matchedRepo} did not currently resolve — fail-closed rather than risk discarding a real quarantine, but not armed under any walked-up key`,
             enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
           };
-          pendingUnresolvedQuarantines.push({ entry: placeholder, sourceFile: f });
+          pendingUnresolvedQuarantines.push({ entry: placeholder, sourceFile: f, sharedCorruptLatch: true });
           return;
         }
         const key = canonicalRepoLockKey(matchedRepo);
@@ -11644,6 +11707,7 @@ function reenterMergeQuarantinesAtBootImpl(
           pendingUnresolvedQuarantines.push({
             entry: { ...placeholder, orphanLatchFiles: [...new Set([...(placeholder.orphanLatchFiles ?? []), f])] },
             sourceFile: f,
+            sharedCorruptLatch: true,
           });
         }
       };
@@ -11662,7 +11726,7 @@ function reenterMergeQuarantinesAtBootImpl(
             reason: `boot found a CORRUPT/unreadable SAFETY-TMP residue (${f}) whose hash matches an ANCESTOR-walk key for registered repo ${claimant} — never a verified identity for ${claimant} itself, so it is NOT armed/written at any key`,
             enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
           };
-          pendingUnresolvedQuarantines.push({ entry: placeholder, sourceFile: f });
+          pendingUnresolvedQuarantines.push({ entry: placeholder, sourceFile: f, sharedCorruptLatch: true });
         }
       } else {
         // No registered repo matches this corrupt safety-tmp's hash at any tier — join the ordinary
@@ -11901,7 +11965,9 @@ function reenterMergeQuarantinesAtBootImpl(
           : `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) matching this repo's hash, while ${matchedRepo} did not currently resolve — fail-closed rather than risk discarding a real quarantine, but not armed under any walked-up key`,
         enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
       };
-      pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+      // @decision 882d6cff (Follow-up c755eac8) — a `byContent` file PARSED and names its repo by content: readable, so
+      // never the shared-corrupt-latch class (tagging it would attribute a readable file to a hash-sharer).
+      pendingUnresolvedQuarantines.push(byContent === true ? { entry, sourceFile: f } : { entry, sourceFile: f, sharedCorruptLatch: true });
       continue;
     }
     const key = canonicalRepoLockKey(matchedRepo);
@@ -11960,6 +12026,7 @@ function reenterMergeQuarantinesAtBootImpl(
       pendingUnresolvedQuarantines.push({
         entry: { ...entry, orphanLatchFiles: [...new Set([...(entry.orphanLatchFiles ?? []), f])] },
         sourceFile: f,
+        ...(byContent === true ? {} : { sharedCorruptLatch: true as const }),
       });
     }
     // eslint-disable-next-line no-console
@@ -12004,7 +12071,7 @@ function reenterMergeQuarantinesAtBootImpl(
       reason: `boot found a CORRUPT/unparsable torn-write quarantine latch (${f}) whose hash matches an ancestor-walk key ${matchedRepo}'s own resolution would produce — fail-closed rather than risk discarding a real quarantine, but not a verified identity and never armed under any walked-up key`,
       enteredAt: Date.now(), tokens: [randomUUID()], placeholder: true,
     };
-    pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
+    pendingUnresolvedQuarantines.push({ entry, sourceFile: f, sharedCorruptLatch: true });
   }
 
   // @decision 8db913e2 (Follow-up 8bff3cae) — resolve every deferred stale-key candidate only NOW, with
