@@ -25,6 +25,7 @@ import {
 } from "../lib/profileGrantReach";
 import { GrantReachConfirm } from "../components/GrantReachConfirm";
 import { useAllAgents } from "../lib/useAllAgents";
+import { DotLegend, GuideList, RowDescription, matchesFilter } from "../components/actorList";
 
 // Loom's Profiles — the reusable, platform-level rig (role + model + permission deltas + icon) an
 // agent runs under via its profileId. The injected prompt comes from the AGENT; a profile's
@@ -103,6 +104,9 @@ export default function Profiles() {
     },
   });
 
+  const [filter, setFilter] = useState("");
+  const allRigs = agentProfiles(profiles.data ?? []);
+  const rigs = allRigs.filter((p) => matchesFilter(filter, p.name, p.description, roleDisplay(p.role).short));
   const validNew = newName.trim().length > 0 && !profiles.data?.some((p) => p.name === newName.trim());
 
   return (
@@ -121,10 +125,20 @@ export default function Profiles() {
             description blurb. An agent runs under one to drive how its sessions spawn; the injected
             prompt comes from the agent. Human-managed only; edits apply on the next spawn.
           </p>
+          {/* Same filter shape as the Projects rail (audit A-32): name, description and role label. */}
+          {allRigs.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <Input placeholder="Filter profiles…" value={filter} onChange={(e) => setFilter(e.target.value)}
+                aria-label="Filter profiles" style={{ flex: 1, minWidth: 0 }} />
+              <span data-testid="profiles-filter-count" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, flexShrink: 0 }}>
+                {rigs.length === allRigs.length ? allRigs.length : `${rigs.length}/${allRigs.length}`}
+              </span>
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {/* The companion's assistant-role rig is HIDDEN here — companion config lives entirely under
                 Companion → Manage now, so it never shows among the agent rigs. */}
-            {agentProfiles(profiles.data ?? []).map((p) => (
+            {rigs.map((p) => (
               // A selected row is a SELECTION, not a call to action: the kit's `loom-btn-on` (neutral selected
               // fill + ink edge), never the primary fill, which inverted the row and left the role label's
               // muted grey at ~2:1 (audit A-09). Same treatment as the Skills list.
@@ -133,7 +147,10 @@ export default function Profiles() {
                 onClick={() => setSelected(p.id)} title={p.description || p.name}>
                 {/* A fixed icon slot, empty when the profile has none, so every name starts at the same x (A-16). */}
                 <span aria-hidden="true" style={{ flex: "0 0 18px", width: 18, display: "inline-flex", justifyContent: "center", lineHeight: 1 }}>{p.icon}</span>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                  {p.description && <RowDescription text={p.description} />}
+                </span>
                 {/* A rig that spawns a DIFFERENT vendor binary should be identifiable without opening it
                     (card fa2277b6 item 5). Only codex is marked — claude is the default, so badging every
                     row would be noise, not signal. */}
@@ -142,7 +159,10 @@ export default function Profiles() {
                 <span style={{ fontSize: fs.sm, color: roleColor(p.role) }}>{roleDisplay(p.role).short}</span>
               </Button>
             ))}
-            {agentProfiles(profiles.data ?? []).length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No profiles yet.</span>}
+            {allRigs.length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No profiles yet.</span>}
+            {allRigs.length > 0 && rigs.length === 0 && (
+              <span style={{ color: color.text3, fontSize: fs.sm }}>No profiles match the filter.</span>
+            )}
           </div>
           <div style={{ marginTop: 12, display: "flex", gap: 6 }}>
             <Input placeholder="new profile name" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
@@ -159,8 +179,33 @@ export default function Profiles() {
               onDelete={() => remove.mutate({ id: selected, name: current.data!.name })} deleting={remove.isPending}
               onRevert={() => revert.mutate(selected)} reverting={revert.isPending}
               onAdopt={(resolutions) => adopt.mutate(resolutions)} adopting={adopt.isPending} adoptError={adopt.error as Error | null} />
-          ) : <p style={{ color: color.text3, padding: 12 }}>Select a profile to edit it, or create a new one.</p>}
+          ) : <ProfilesGuide count={profiles.data ? allRigs.length : null} />}
         </Panel>
+      </div>
+    </div>
+  );
+}
+
+// The editor pane before anything is selected (audit A-40): what each part of a rig controls, and what
+// the list's status dots mean. The lead sentence is kept verbatim (e2e atlas-deep-links.spec.ts reads it).
+function ProfilesGuide({ count }: { count: number | null }) {
+  return (
+    <div data-testid="profiles-guide" style={{ padding: 12, maxWidth: 560, display: "flex", flexDirection: "column", gap: 14 }}>
+      <p style={{ margin: 0, color: color.text2, lineHeight: 1.5 }}>
+        {count === 0
+          ? "No profiles yet. Type a name in the box beside + New to make the first one."
+          : "Select a profile to edit it, or create a new one."}
+      </p>
+      <GuideList items={[
+        ["Role", "What a session may do: manage workers, build on a branch, audit, and so on."],
+        ["Model and harness", "Which engine the session runs, and on which model."],
+        ["Permissions and skills", "Extra tools it may use without asking, and which skills it receives."],
+        ["Agents", "Each agent picks one profile. A change applies on that agent's next spawn."],
+      ]} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <SectionLabel style={{ margin: 0 }}>List markers</SectionLabel>
+        <DotLegend tone="muted" label="Customized: you edited this bundled profile" />
+        <DotLegend tone="attn" label="Update available: Loom shipped a newer version" />
       </div>
     </div>
   );

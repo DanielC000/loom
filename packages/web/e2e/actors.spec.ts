@@ -143,7 +143,9 @@ test.describe("actors (Profiles + Skills consolidation)", () => {
       const parkPointer = async () => { const v = page.viewportSize()!; await page.mouse.move(v.width - 2, v.height / 2); };
 
       const profileRows = page.locator(".loom-actor-split > :first-child button[title]");
-      const qa = profileRows.filter({ hasText: "QA Tester" });
+      // Pinned on the NAME span, exactly: rows carry a description line now (card 4a5f13ec), and other
+      // profiles' descriptions mention "QA Tester", so a contains-match resolves to several rows.
+      const qa = profileRows.filter({ has: page.getByText("QA Tester", { exact: true }) });
       await qa.click();
       // Soft assertions throughout, so one run reports every check that fails rather than only the first.
       await expect.soft(qa).toHaveAttribute("aria-pressed", "true");
@@ -187,5 +189,31 @@ test.describe("actors (Profiles + Skills consolidation)", () => {
 
     // PRESERVED GATE: LOOM_DEV=0 ⇒ isDev=false ⇒ the "Publish to repo" affordance is hidden.
     await expect(page.getByRole("button", { name: /publish to repo/i })).toHaveCount(0);
+  });
+
+  // Card 4a5f13ec (audit A-32 / A-40): the Profiles list filters on name, description and role label, a
+  // no-match query says so, and the empty editor pane is a guide rather than one grey sentence.
+  test("the profiles filter narrows the list, and the empty pane is a guide", async ({ page, loomDaemon }) => {
+    await page.goto(`${loomDaemon.baseURL}/actors`);
+    const rows = page.locator(".loom-actor-split > :first-child button[title]");
+    const qa = rows.filter({ has: page.getByText("QA Tester", { exact: true }) });
+    await expect(qa).toBeVisible();
+    const total = await rows.count();
+    expect(total).toBeGreaterThan(1);
+    await expect(page.getByTestId("profiles-guide")).toContainText("Select a profile to edit it");
+    await expect(page.getByTestId("profiles-guide")).toContainText("Update available");
+
+    const filter = page.getByRole("textbox", { name: "Filter profiles" });
+    await filter.fill("QA Tester");
+    await expect(qa).toBeVisible();
+    await expect.poll(() => rows.count()).toBeLessThan(total);
+    await expect(page.getByTestId("profiles-filter-count")).toHaveText(new RegExp(`^\\d+/${total}$`));
+
+    await filter.fill("zz-no-profile-matches-this");
+    await expect(rows).toHaveCount(0);
+    await expect(page.getByText("No profiles match the filter.")).toBeVisible();
+
+    await filter.fill("");
+    await expect(rows).toHaveCount(total);
   });
 });

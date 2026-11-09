@@ -399,6 +399,70 @@ test("a skill carrying permission-widening frontmatter is flagged, naming each v
   }
 });
 
+// Card 4a5f13ec (audit A-32 / A-40): the list filter narrows the rows (name + description), a no-match
+// query says so, and the empty editor pane is a guide that decodes the status dots, not one grey line.
+test("the skills filter narrows the list, and the empty pane is a guide", async ({ page, loomDaemon }) => {
+  await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
+  const rows = page.locator('[data-testid^="skill-row-"]');
+  await expect(skillButton(page, "web-design")).toBeVisible();
+  const total = await rows.count();
+  expect(total).toBeGreaterThanOrEqual(CORE_SKILLS.length);
+
+  const guide = page.getByTestId("skills-guide");
+  await expect(guide).toContainText("Select a skill to edit its SKILL.md");
+  await expect(guide).toContainText("Grants tools or runs shell");
+
+  // Each row carries its description as a visible second line, so the filter can match on it too.
+  const desc = (await fetch(`${loomDaemon.baseURL}/api/skills`).then((r) => r.json()) as Array<{ name: string; description: string }>)
+    .find((s) => s.name === "web-design")!.description;
+  await expect(page.getByTestId("skill-row-web-design")).toContainText(desc.slice(0, 20));
+
+  const filter = page.getByRole("textbox", { name: "Filter skills" });
+  await filter.fill("web-design");
+  await expect(page.getByTestId("skill-row-web-design")).toBeVisible();
+  await expect.poll(() => rows.count()).toBeLessThan(total);
+  await expect(page.getByTestId("skills-filter-count")).toHaveText(new RegExp(`^\\d+/${total}$`));
+
+  await filter.fill("zz-no-skill-matches-this");
+  await expect(rows).toHaveCount(0);
+  await expect(page.getByText("No skills match the filter.")).toBeVisible();
+
+  await filter.fill("");
+  await expect(rows).toHaveCount(total);
+});
+
+// Card 4a5f13ec (audit A-36): Preview renders the CURRENT text through the shared Markdown component, and
+// Edit brings the source back. Delete is offered on a local skill only: on a bundled one it removed the
+// store copy and the next boot re-seeded the shipped version, a delayed reset wearing a delete label.
+test("a skill previews as Markdown, and Delete is offered on a local skill only", async ({ page, loomDaemon }) => {
+  const local = `e2e-local-${Date.now()}`;
+  const created = await fetch(`${loomDaemon.baseURL}/api/skills`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: local }),
+  });
+  expect(created.ok).toBe(true);
+  try {
+    await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
+    await page.getByTestId("skill-row-web-design").click();
+    const editor = page.locator("textarea");
+    await expect(editor).toHaveValue(/deliberately designed/);
+    await expect(page.getByRole("button", { name: "Delete", exact: true })).toHaveCount(0);
+
+    // BEFORE: raw source in a textarea, no preview. AFTER Preview: a rendered heading, no textarea.
+    await expect(page.getByTestId("skill-preview")).toHaveCount(0);
+    await page.getByRole("radio", { name: "Preview" }).click();
+    const preview = page.getByTestId("skill-preview");
+    await expect(preview.getByRole("heading", { name: "When to use this" })).toBeVisible();
+    await expect(editor).toHaveCount(0);
+    await page.getByRole("radio", { name: "Edit" }).click();
+    await expect(page.locator("textarea")).toHaveValue(/deliberately designed/);
+
+    await page.getByTestId(`skill-row-${local}`).click();
+    await expect(page.getByRole("button", { name: "Delete", exact: true })).toBeVisible();
+  } finally {
+    await fetch(`${loomDaemon.baseURL}/api/skills/${local}`, { method: "DELETE" });
+  }
+});
+
 // A stale `shippedHash` must be REFUSED, not silently applied — assets/** is read live, so `shipped` can
 // change between the diff being read and the button being clicked. Driven at the REST layer because the
 // race is a server-side guard: the UI's job is only to carry the token it was handed.

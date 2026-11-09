@@ -3,7 +3,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SkillPermissionVector } from "@loom/shared";
 import { api, type SkillMergePreview, type SkillFileState } from "../lib/api";
 import { LineDiff } from "../components/LineDiff";
-import { Panel, Button, Input, SectionLabel, Badge } from "../components/ui";
+import { Panel, Button, Input, SectionLabel, Badge, Segmented } from "../components/ui";
+import Markdown from "../components/Markdown";
+import { DotLegend, GuideList, RowDescription, matchesFilter } from "../components/actorList";
 import { color, font, radius, toneFill, type Tone, fs } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 
@@ -76,6 +78,8 @@ export default function Skills() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["skills"] }); }, // refetch clears the update-available flag (base advances)
   });
 
+  const [filter, setFilter] = useState("");
+  const filtered = (skills.data ?? []).filter((s) => matchesFilter(filter, s.name, s.description));
   const validNew = /^[a-z0-9][a-z0-9-]{0,63}$/.test(newName);
   const selectedSkill = skills.data?.find((s) => s.name === selected);
   const bundled = selectedSkill?.bundled ?? false;
@@ -107,15 +111,28 @@ export default function Skills() {
           <code> ~/.claude/skills</code> is untouched and takes precedence, so Loom's names are chosen
           not to collide. Edits apply on the next spawn.
         </p>
+        {/* Same filter shape as the Projects rail (audit A-32): one Input, matching name + description. */}
+        {!!skills.data?.length && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <Input placeholder="Filter skills…" value={filter} onChange={(e) => setFilter(e.target.value)}
+              aria-label="Filter skills" style={{ flex: 1, minWidth: 0 }} />
+            <span data-testid="skills-filter-count" style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, flexShrink: 0 }}>
+              {filtered.length === skills.data.length ? skills.data.length : `${filtered.length}/${skills.data.length}`}
+            </span>
+          </div>
+        )}
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {skills.data?.map((s) => (
+          {filtered.map((s) => (
             // Selection reads as `loom-btn-on`, never the primary CTA fill, so the muted "· bundled" stays
             // legible on a selected row (audit A-09). Same treatment as the Profiles list.
-            <Button key={s.name} className={s.name === selected ? "loom-btn-on" : undefined} aria-pressed={s.name === selected}
+            <Button key={s.name} data-testid={`skill-row-${s.name}`} className={s.name === selected ? "loom-btn-on" : undefined} aria-pressed={s.name === selected}
               style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 6 }}
               onClick={() => setSelected(s.name)} title={s.description || s.name}>
-              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {s.name}<span style={{ color: color.text3 }}>{s.bundled ? "  ·  bundled" : "  ·  local"}</span>
+              <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {s.name}<span style={{ color: color.text3 }}>{s.bundled ? "  ·  bundled" : "  ·  local"}</span>
+                </span>
+                {s.description && <RowDescription text={s.description} />}
               </span>
               <StatusDots customized={!!s.customized} updateAvailable={!!s.updateAvailable}
                 notTrusted={!s.bundled && s.provenance !== "human"}
@@ -123,6 +140,9 @@ export default function Skills() {
             </Button>
           ))}
           {skills.data?.length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No skills yet.</span>}
+          {!!skills.data?.length && filtered.length === 0 && (
+            <span style={{ color: color.text3, fontSize: fs.sm }}>No skills match the filter.</span>
+          )}
         </div>
         <div style={{ marginTop: 12, display: "flex", gap: 6 }}>
           <Input placeholder="new-skill-name" value={newName} onChange={(e) => setNewName(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
@@ -141,8 +161,34 @@ export default function Skills() {
             onReset={() => reset.mutate(selected)} resetting={reset.isPending}
             onAdopt={(content) => adopt.mutate(content)} adopting={adopt.isPending} adoptError={adopt.error as Error | null}
             onPublish={() => publish.mutate(selected)} publishing={publish.isPending} />
-        ) : <p style={{ color: color.text3, padding: 12 }}>Select a skill to edit its SKILL.md, or create a new one.</p>}
+        ) : <SkillsGuide count={skills.data?.length ?? null} />}
       </Panel>
+    </div>
+  );
+}
+
+// The editor pane before anything is selected (audit A-40). It used to be one grey sentence over ~830px
+// of nothing; now it says what to do and decodes the list's status dots, which otherwise only explain
+// themselves on hover. The lead sentence is kept verbatim (e2e skills.spec.ts reads it).
+function SkillsGuide({ count }: { count: number | null }) {
+  return (
+    <div data-testid="skills-guide" style={{ padding: 12, maxWidth: 560, display: "flex", flexDirection: "column", gap: 14 }}>
+      <p style={{ margin: 0, color: color.text2, lineHeight: 1.5 }}>
+        {count === 0
+          ? "No skills yet. Type a name in the box beside + New (lowercase letters, digits and dashes) to make the first one."
+          : "Select a skill to edit its SKILL.md, or create a new one."}
+      </p>
+      <GuideList items={[
+        ["bundled", "Ships with Loom. Your edits are kept, and Loom offers its own updates for you to adopt."],
+        ["local", "Created here. It is yours to edit or delete."],
+        ["Preview", "Reads the SKILL.md as formatted text. Edit switches back to the source."],
+      ]} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <SectionLabel style={{ margin: 0 }}>List markers</SectionLabel>
+        <DotLegend tone="muted" label="Customized: you edited this skill" />
+        <DotLegend tone="attn" label="Update available, or not delivered to locked roles (hover the dot)" />
+        <DotLegend tone="danger" label="Grants tools or runs shell when it loads" />
+      </div>
     </div>
   );
 }
@@ -261,6 +307,7 @@ function SkillEditor({
 }) {
   const [text, setText] = useState(content);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [view, setView] = useState<"edit" | "preview">("edit");
   const [confirmReset, setConfirmReset] = useState(false);
   const [confirmPublish, setConfirmPublish] = useState(false);
   const [resolver, setResolver] = useState<(SkillMergePreview & { clean: false }) | null>(null);
@@ -304,13 +351,18 @@ function SkillEditor({
         )}
         <span style={{ color: color.text3, fontSize: fs.sm }}>· SKILL.md</span>
         <span style={{ flex: 1 }} />
-        {confirmDel ? (
+        <Segmented ariaLabel="SKILL.md view" value={view} onChange={setView}
+          items={[{ key: "edit", label: "Edit" }, { key: "preview", label: "Preview" }]} />
+        {/* Delete is a LOCAL-skill action only (audit A-36). On a bundled skill it removed the store copy
+            (losing any edits) and the next daemon boot re-seeded the shipped version, so it read as a
+            delete but behaved as a delayed reset. "Reset to shipped" below is the honest form of that. */}
+        {!bundled && (confirmDel ? (
           <>
             <span style={{ color: color.danger, fontSize: fs.sm }}>delete {name}?</span>
             <Button variant="danger" disabled={deleting} onClick={onDelete}>Confirm</Button>
             <Button onClick={() => setConfirmDel(false)}>Cancel</Button>
           </>
-        ) : <Button variant="danger" onClick={() => setConfirmDel(true)}>Delete</Button>}
+        ) : <Button variant="danger" onClick={() => setConfirmDel(true)}>Delete</Button>)}
       </div>
 
       {/* Permission-widening notice (card 87a51903) — FIRST of the banners: it describes what the skill
@@ -347,12 +399,22 @@ function SkillEditor({
           already covers; the banner self-suppresses if no supporting file actually diverges. */}
       {bundled && customized && !updateAvailable && <FilesDivergedBanner name={name} />}
 
-      <textarea value={text} onChange={(e) => setText(e.target.value)} spellCheck={false}
-        style={{
-          flex: 1, minHeight: 360, width: "100%", boxSizing: "border-box", resize: "none",
-          fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
-          background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 10,
-        }} />
+      {/* Preview renders the CURRENT text (unsaved edits included), so it doubles as a check before Save.
+          `untrusted`: a store skill can be agent-written, so no external image is fetched from it. */}
+      {view === "preview" ? (
+        <div data-testid="skill-preview"
+          style={{ flex: 1, minHeight: 360, overflow: "auto", background: color.inset, border: `1px solid ${color.line}`,
+            borderRadius: radius.sm, padding: "10px 16px" }}>
+          <Markdown source={text} files={[]} onOpen={() => {}} untrusted />
+        </div>
+      ) : (
+        <textarea value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} aria-label={`${name} SKILL.md`}
+          style={{
+            flex: 1, minHeight: 360, width: "100%", boxSizing: "border-box", resize: "none",
+            fontFamily: font.mono, fontSize: fs.body, lineHeight: 1.5,
+            background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 10,
+          }} />
+      )}
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <Button variant="primary" disabled={!dirty || saving} onClick={() => { setSavedText(text); onSave(text); }}>{saving ? "Saving…" : "Save"}</Button>
         {dirty
