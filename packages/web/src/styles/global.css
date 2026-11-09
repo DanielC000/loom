@@ -4800,6 +4800,23 @@ button.loom-ovbrief-cell.is-open {
   }
 }
 
+/* ── Review surface: Files list + Diff (components/ReviewSurface.tsx) ──────────────────────────
+   Sized off the surface's OWN width (a container query), not the viewport: under Atlas the tree
+   takes 244px, so a 768px viewport leaves ~480px, too narrow for a 220px Files column beside the
+   diff. Below 640px it is one column and the Files list is dropped, because every Diff header
+   already carries the same row and its own open/close toggle (card 2b7826f4). */
+.rv-files { container: rv-files / inline-size; }
+.rv-files-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+@container rv-files (max-width: 640px) {
+  .rv-files-grid { grid-template-columns: minmax(0, 1fr); }
+  .rv-files-list { display: none; }
+}
+
 /* The collapsed startup-prompt preview renders its Markdown inline-sized: the caller's own type and
    colour, no block margins or heading scale, so the 2-line clamp shows two lines of prose. */
 .loom-prompt-preview .loom-md {

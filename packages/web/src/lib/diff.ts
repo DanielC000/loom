@@ -168,10 +168,12 @@ export function parseDiff(patch: string): FileDiff[] {
 export interface DiffNumstat { filesChanged: number; insertions: number; deletions: number; }
 
 // ── Auto-summary ─────────────────────────────────────────────────────────────────
-// A cheap derived headline + the touched-area roll-up. No model call: the "intent" is inferred from
-// change shape (mostly-added → "Adds", mostly-removed → "Removes", else "Updates") and the dominant
-// subsystem(s). Labelled as auto-derived in the UI so it reads as a hint, not ground truth. Pass the
-// authoritative `numstat` to single-source the headline file/±totals from git (see DiffNumstat above).
+// A cheap derived headline + the touched-area roll-up. No model call. The verb comes from FILE STATUS,
+// never from the insertion/deletion ratio: "Adds" only when every file is new, "Removes" only when every
+// file is deleted, otherwise "Changes". The old ratio rule read a modified file that only gained lines as
+// an addition, so one new file + one edited file headlined "Adds 2 files (1 new)", i.e. "created two
+// files" (card 2b7826f4). Labelled as auto-derived in the UI so it reads as a hint, not ground truth. Pass
+// the authoritative `numstat` to single-source the headline file/±totals from git (see DiffNumstat above).
 export function analyzeDiff(patch: string, numstat?: DiffNumstat): DiffAnalysis {
   const files = parseDiff(patch);
   const totalInsertions = numstat?.insertions ?? files.reduce((a, f) => a + f.insertions, 0);
@@ -188,18 +190,19 @@ export function analyzeDiff(patch: string, numstat?: DiffNumstat): DiffAnalysis 
   const deleted = files.filter((f) => f.status === "deleted").length;
   const renamed = files.filter((f) => f.status === "renamed").length;
 
-  let verb = "Updates";
-  if (totalInsertions > totalDeletions * 3 && deleted === 0) verb = "Adds";
-  else if (totalDeletions > totalInsertions * 3 && added === 0) verb = "Removes";
-  else if (added > 0 && deleted === 0 && totalDeletions < totalInsertions) verb = "Extends";
+  // Compared against the HEADLINE count, so the verb can never claim more than the number beside it.
+  const allAdded = fileCount > 0 && added === fileCount;
+  const allDeleted = fileCount > 0 && deleted === fileCount;
+  const verb = allAdded ? "Adds" : allDeleted ? "Removes" : "Changes";
 
   const areaPhrase = areas.length === 0
     ? "no files"
     : areas.slice(0, 3).map((a) => a.area).join(", ") + (areas.length > 3 ? ` +${areas.length - 3} more` : "");
 
+  // The verb already says "all new" / "all deleted", so that count would only repeat it.
   const extras: string[] = [];
-  if (added) extras.push(`${added} new`);
-  if (deleted) extras.push(`${deleted} deleted`);
+  if (added && !allAdded) extras.push(`${added} new`);
+  if (deleted && !allDeleted) extras.push(`${deleted} deleted`);
   if (renamed) extras.push(`${renamed} moved`);
 
   const headline = fileCount === 0
@@ -207,6 +210,16 @@ export function analyzeDiff(patch: string, numstat?: DiffNumstat): DiffAnalysis 
     : `${verb} ${fileCount} file${fileCount === 1 ? "" : "s"} in ${areaPhrase}${extras.length ? ` (${extras.join(", ")})` : ""}.`;
 
   return { files, totalInsertions, totalDeletions, highRisk, mediumRisk, areas, headline };
+}
+
+// A diff this small reads in one screen, so collapsing it only adds clicks (card 2b7826f4).
+export const AUTO_EXPAND_MAX_FILES = 3;
+
+// Which file blocks the review surface opens on first render: every file of a small diff, otherwise
+// only the files that carry risk (high/medium), so a long low-risk tail folds away.
+export function defaultOpenPaths(files: FileDiff[]): string[] {
+  if (files.length <= AUTO_EXPAND_MAX_FILES) return files.map((f) => f.path);
+  return files.filter((f) => f.risk !== "low").map((f) => f.path);
 }
 
 // Risk → signal tone (matches the theme's Tone vocabulary; imported where rendered).

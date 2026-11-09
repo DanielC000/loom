@@ -9,7 +9,7 @@
 // CI (which runs `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/diff.mjs
 import assert from "node:assert/strict";
-import { parseDiff, analyzeDiff, hunkLineKind, rawPatchLineKind } from "../src/lib/diff.ts";
+import { parseDiff, analyzeDiff, defaultOpenPaths, AUTO_EXPAND_MAX_FILES, hunkLineKind, rawPatchLineKind } from "../src/lib/diff.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -256,6 +256,66 @@ check("analyzeDiff headline file/±totals come from the backend numstat when sup
   assert.equal(reconciled.totalDeletions, 7, "totalDeletions single-sourced from numstat");
   // the per-file overview is untouched — still the parsed file
   assert.equal(reconciled.files.length, 1, "parsed per-file overview unchanged");
+});
+
+// Card 2b7826f4 — the headline VERB comes from file status, never the +/- ratio. A new file plus an
+// edited file that only gained lines used to read "Adds 2 files in src (1 new)", i.e. "created two
+// files". Each case below is mostly insertions, so the old ratio rule would have said "Adds" for all.
+const newFileBlock = (path, n) =>
+  patch(
+    `diff --git a/${path} b/${path}`,
+    "new file mode 100644",
+    "index 0000000..abcdef0",
+    "--- /dev/null",
+    `+++ b/${path}`,
+    `@@ -0,0 +1,${n} @@`,
+    ...Array.from({ length: n }, (_, i) => `+line ${i}`),
+  );
+const deletedFileBlock = (path) =>
+  patch(
+    `diff --git a/${path} b/${path}`,
+    "deleted file mode 100644",
+    "index abcdef0..0000000",
+    `--- a/${path}`,
+    "+++ /dev/null",
+    "@@ -1,1 +0,0 @@",
+    "-gone",
+  );
+check("headline: one new + one edited file reads 'Changes 2 files … (1 new)', never 'Adds'", () => {
+  const a = analyzeDiff(patch(newFileBlock("src/cart/coupon.ts", 18), addedLinesBlock("src/cart/total.ts", 14)));
+  assert.equal(a.headline, "Changes 2 files in src (1 new).");
+});
+check("headline: 'Adds' only when every file is new, without repeating the count", () => {
+  const a = analyzeDiff(patch(newFileBlock("src/a.ts", 3), newFileBlock("src/b.ts", 4)));
+  assert.equal(a.headline, "Adds 2 files in src.");
+  assert.equal(analyzeDiff(newFileBlock("src/a.ts", 3)).headline, "Adds 1 file in src.");
+});
+check("headline: 'Removes' only when every file is deleted", () => {
+  assert.equal(analyzeDiff(patch(deletedFileBlock("src/a.ts"), deletedFileBlock("src/b.ts"))).headline, "Removes 2 files in src.");
+  // a delete beside an edit is a change, and names its delete
+  assert.equal(analyzeDiff(patch(deletedFileBlock("src/a.ts"), addedLinesBlock("src/b.ts", 9))).headline, "Changes 2 files in src (1 deleted).");
+});
+check("headline: an edit-only diff of pure insertions reads 'Changes', not 'Adds'", () => {
+  assert.equal(analyzeDiff(addedLinesBlock("src/a.ts", 40)).headline, "Changes 1 file in src.");
+});
+check("headline: the verb is checked against the numstat count, so 'Adds' never claims unparsed files", () => {
+  // parse sees 1 new file, git's numstat says 2 changed: not every file is known to be new
+  const a = analyzeDiff(newFileBlock("src/a.ts", 3), { filesChanged: 2, insertions: 5, deletions: 0 });
+  assert.equal(a.headline, "Changes 2 files in src (1 new).");
+});
+
+// Card 2b7826f4 — a diff of ≤3 files opens fully; a bigger one opens only its risky files.
+check("defaultOpenPaths: ≤ AUTO_EXPAND_MAX_FILES opens every file; above it, only high/medium risk", () => {
+  assert.equal(AUTO_EXPAND_MAX_FILES, 3);
+  const small = parseDiff(patch(oneLineBlock("src/a.ts"), oneLineBlock("src/b.ts"), oneLineBlock("src/c.ts")));
+  assert.deepEqual(defaultOpenPaths(small), ["src/a.ts", "src/b.ts", "src/c.ts"]);
+  const big = parseDiff(patch(
+    oneLineBlock("src/a.ts"), oneLineBlock("src/b.ts"), oneLineBlock("src/c.ts"),
+    deletedFileBlock("src/gone.ts"), oneLineBlock("src/d.ts"),
+  ));
+  assert.equal(big.find((f) => f.path === "src/gone.ts").risk, "high");
+  assert.deepEqual(defaultOpenPaths(big), ["src/gone.ts"]);
+  assert.deepEqual(defaultOpenPaths([]), []);
 });
 
 // A numstat reporting zero files yields the no-change headline even if the parse somehow saw none.

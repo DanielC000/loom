@@ -6,7 +6,7 @@ import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api, workerDiffQuery } from "../lib/api";
 import { Panel, Button, SectionLabel, Chip, Meter, Dot, Badge } from "./ui";
 import { FileDiffBlock, FileOverviewRow } from "./Diff";
-import { analyzeDiff, riskOrder, riskTone } from "../lib/diff";
+import { analyzeDiff, defaultOpenPaths, riskOrder, riskTone } from "../lib/diff";
 import { color, font, tone, fs, radius } from "../theme";
 
 // The human-in-the-loop REVIEW & MERGE gate — the product's fast-triage centerpiece. A worker's
@@ -70,9 +70,10 @@ export function ReviewSurface({ workerId, embedded = false }: {
       riskOrder(b.risk) - riskOrder(a.risk) || (b.insertions + b.deletions) - (a.insertions + a.deletions));
   }, [analysis]);
 
-  // Which file blocks are expanded — keyed by path. Seeded (on first analysis) to high+medium risk.
+  // Which file blocks are expanded — keyed by path. Seeded (on first analysis) by defaultOpenPaths:
+  // every file of a small diff, else only the high/medium-risk ones.
   const [openFiles, setOpenFiles] = useState<Set<string> | null>(null);
-  const open = openFiles ?? new Set(analysis ? analysis.files.filter((f) => f.risk !== "low").map((f) => f.path) : []);
+  const open = openFiles ?? new Set(analysis ? defaultOpenPaths(analysis.files) : []);
   const toggleFile = (path: string) => setOpenFiles(() => {
     const next = new Set(open);
     next.has(path) ? next.delete(path) : next.add(path);
@@ -187,20 +188,27 @@ export function ReviewSurface({ workerId, embedded = false }: {
         </Panel>
       )}
 
-      {/* File overview (risk-ranked) + the per-file diff. */}
+      {/* File overview (risk-ranked) + the per-file diff. The two-column grid and its narrow collapse
+          live in global.css (`.rv-files`), keyed to THIS surface's own width via a container query
+          rather than the viewport: the Atlas tree eats 244px, so at a 768px viewport the content column
+          is ~480px and a 220px Files column would leave the diff a sliver. Narrow, it goes one column
+          and the Files list is dropped, since each Diff header already carries the same row (card
+          2b7826f4: at 390px the Diff column was clipped off-screen and could not be opened). */}
       {analysis && analysis.files.length > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(220px, 300px) minmax(0, 1fr)", gap: 12, alignItems: "start" }}>
-          <div style={{ position: "sticky", top: 12 }}>
-            <SectionLabel>Files ({analysis.files.length})</SectionLabel>
-            <Panel style={{ maxHeight: "60vh", overflow: "auto", padding: 6 }}>
-              {overview.map((f) => <FileOverviewRow key={f.path} file={f} onJump={() => jumpTo(f.path)} />)}
-            </Panel>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <SectionLabel>Diff</SectionLabel>
-            {analysis.files.map((f) => (
-              <FileDiffBlock key={f.path} file={f} anchorId={`file-${f.path}`} open={open.has(f.path)} onToggle={() => toggleFile(f.path)} />
-            ))}
+        <div className="rv-files" data-testid="review-files">
+          <div className="rv-files-grid">
+            <div className="rv-files-list" style={{ position: "sticky", top: 12 }}>
+              <SectionLabel>Files ({analysis.files.length})</SectionLabel>
+              <Panel style={{ maxHeight: "60vh", overflow: "auto", padding: 6 }}>
+                {overview.map((f) => <FileOverviewRow key={f.path} file={f} onJump={() => jumpTo(f.path)} />)}
+              </Panel>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
+              <SectionLabel>Diff</SectionLabel>
+              {analysis.files.map((f) => (
+                <FileDiffBlock key={f.path} file={f} anchorId={`file-${f.path}`} open={open.has(f.path)} onToggle={() => toggleFile(f.path)} />
+              ))}
+            </div>
           </div>
         </div>
       )}
