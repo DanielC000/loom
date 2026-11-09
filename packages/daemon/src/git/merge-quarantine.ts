@@ -1283,6 +1283,50 @@ function bootUnionOccupantContributors(entry: MergeQuarantineEntry): string[] {
 }
 
 /**
+ * @decision 103405e0 — DISCLOSURE ONLY: never stamp these as contributors (that refuses clear(winner) and
+ * breaks the d2582692 L1/L2 keep-loser-pending pin); name a loser only if its files are really gone.
+ *
+ * A boot union of two unresolvable `.json`-backed identities keeps no record of its loser, so clearing the
+ * winner deletes the loser's file and token with `liftedRepoPaths` naming only the winner. This reads,
+ * BEFORE the clear deletes anything, every record the union's armed keys / `orphanLatchFiles` point at whose
+ * identity differs from the union's, is unresolvable and is not already a contributor.
+ */
+function unionedUnresolvableLoserRecords(entry: MergeQuarantineEntry): Map<string, { repoPath: string; files: string[] }> {
+  const out = new Map<string, { repoPath: string; files: string[] }>();
+  const own = directPathIdentity(entry.repoPath);
+  const known = new Set([...(entry.contributorRepoPaths ?? []), ...(entry.reducedContributorRepoPaths ?? [])].map(directPathIdentity));
+  // A pending wrapper whose `.entry` IS the union object is boot's "same object, two structures" source-file
+  // reference (the stale-named record that lost the tie-break): its file is the loser's, not the winner's.
+  const files = [
+    ...liveArmedKeysOf(entry).map(quarantinePathForKey),
+    ...(entry.orphanLatchFiles ?? []).map((f) => path.join(MERGE_QUARANTINE_DIR, f)),
+    ...pendingUnresolvedQuarantines.filter((p) => p.entry === entry).map((p) => path.join(MERGE_QUARANTINE_DIR, p.sourceFile)),
+  ];
+  for (const file of new Set(files)) {
+    try {
+      const rec: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (!isReadableLatchRecord(rec) || typeof rec.repoPath !== "string") continue;
+      const id = directPathIdentity(rec.repoPath);
+      if (id === own || known.has(id) || isRepoPathCurrentlyResolvable(rec.repoPath)) continue;
+      const slot = out.get(id);
+      if (slot) slot.files.push(file); else out.set(id, { repoPath: rec.repoPath, files: [file] });
+    } catch { /* unreadable/absent: nothing to disclose */ }
+  }
+  return out;
+}
+
+/** The post-clear half of {@link unionedUnresolvableLoserRecords} and the ONE rule both clear sites call: only
+ *  an identity whose EVERY recorded file is now physically gone was really destroyed by this clear, and one
+ *  that still has its own entry or is still blocked by any entry was not lifted. A kept/protected/failed-unlink
+ *  file keeps its identity out of the disclosure. */
+function unionedLosersLifted(before: ReadonlyMap<string, { repoPath: string; files: string[] }>): string[] {
+  return [...before.values()]
+    .filter((l) => l.files.every((f) => !fs.existsSync(f)))
+    .map((l) => l.repoPath)
+    .filter((rp) => !ownIdentityEntryFor(rp) && !stillBlockedEntryFor(rp));
+}
+
+/**
  * Resolves `repoPath`'s own identity to ONE target for `clear-broad-union` — BOTH the entry SELECTION and
  * the accept/refuse VERDICT, in a single function, so {@link clearBroadUnion} and every
  * `remediationTextFor` call site below read the SAME answer by construction and can never drift (card
@@ -7542,6 +7586,11 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       if (reducedCandidateBlockedByEntry(c, entry)) candidateIdentities.add(c);
     }
   }
+  // @decision 103405e0 — snapshot (before any delete below) the unresolvable losers whose records this union
+  // physically occupies; added as disclosure candidates only after the clear, if their files are really gone.
+  // Only for a clear addressed at the union's OWN identity: a foreign occupant's file (d2582692's shape) is read
+  // by the protect path, whose fault-injection read counts an extra read here would shift.
+  const unionedLosersBefore = entry && directPathIdentity(entry.repoPath) === directPathIdentity(identityRepoPath) ? unionedUnresolvableLoserRecords(entry) : undefined;
   // @decision 8db913e2 (round 4) — candidate tokens for the ONE tombstone call at the end of this
   // function (`tombstoneIfNotSurviving`) — never tombstoned here, at this bare lookup: `entry` can be a
   // FOREIGN occupant (d2582692's shape) this clear ends up PROTECTING, not destroying.
@@ -7942,6 +7991,11 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     // protected owner's own reduced candidates ride on its surviving record just as unverifiably as its
     // live contributors do.
     for (const c of entry.reducedContributorRepoPaths ?? []) excludeRepoPaths.add(c);
+  }
+  // @decision 103405e0 — a loser only counts once every one of its files is gone; the shared re-resolve below
+  // still drops one that survives as its own pending/active entry or sits in `excludeRepoPaths`.
+  if (unionedLosersBefore && unionedLosersBefore.size > 0) {
+    for (const rp of unionedLosersLifted(unionedLosersBefore)) candidateIdentities.add(rp);
   }
   const { released: releasedRepoPaths, lifted: liftedRepoPaths, releasedStillBlocked: releasedStillBlockedRepoPaths } = resolveReleasedAndLiftedRepoPaths(candidateIdentities, excludeRepoPaths, [identityRepoPath]);
   const provenanceUnknownLifted = anyLiftedCandidateProvenanceUnknown(releasedRepoPaths, provenanceByCandidate);
@@ -9956,6 +10010,8 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       return { ok: true, wasQuarantined: true, reason: preClearActive.reason, liftedRepoPaths: [], stillQuarantined: true, refusedBeforeClear: true, stillBlockedCoOccupants: [] };
     }
     // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
+    // @decision 103405e0 — snapshot before the clear deletes anything; names only losers whose files are gone.
+    const idLosersBefore = unionedUnresolvableLoserRecords(activeMatch.entry);
     const activeClearResult = clearMergeQuarantineByKey(activeMatch.key, activeMatch.entry.repoPath, undefined, true);
     // @decision 64283e06 (CR 3439677b, item 3) — surface clearMergeQuarantineByKey's OWN latchKept/
     // referencingRepoPaths too, the same way the pending branch below already does, instead of discarding
@@ -9989,9 +10045,11 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
         stillBlockedCoOccupants: activeStillBlocked, ...activeLatchKeptFields,
       };
     }
+    // @decision 103405e0 — the same shared rule as the by-key site; survivors stay unnamed.
+    const idLosersLifted = unionedLosersLifted(idLosersBefore);
     return {
-      ok: true, wasQuarantined: true, liftedRepoPaths: [activeMatch.entry.repoPath],
-      releasedRepoPaths: [activeMatch.entry.repoPath], releasedStillBlockedRepoPaths: [],
+      ok: true, wasQuarantined: true, liftedRepoPaths: [activeMatch.entry.repoPath, ...idLosersLifted],
+      releasedRepoPaths: [activeMatch.entry.repoPath, ...idLosersLifted], releasedStillBlockedRepoPaths: [],
       // @decision 1872935d (CR round 2, MINOR) — the identity the id itself resolves to (activeMatch's
       // own key), never `liftedRepoPaths` itself — passing a field against itself made the disclosure dead.
       addressedRepoPaths: [activeMatch.entry.repoPath],
