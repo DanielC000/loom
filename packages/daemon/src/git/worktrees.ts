@@ -1070,6 +1070,158 @@ async function captureDiscardedOnRecut(worktreePath: string, deps: BoundedGitDep
   }
 }
 
+/** NUL-filled-file scan caps (crash recovery). Files EXAMINED per worktree; a file bigger than the size cap is
+ *  skipped unread (counted, never read); and at most `SAMPLE_BYTES` from the head and again from the tail of a
+ *  file are ever read, so a huge file cannot stall boot. */
+export const NUL_SCAN_MAX_FILES = 200;
+export const NUL_SCAN_MAX_FILE_BYTES = 256 * 1024 * 1024;
+export const NUL_SCAN_SAMPLE_BYTES = 4096;
+/** Paths NAMED in a notice line, per category (the counts are always exact). */
+export const NUL_SCAN_MAX_PATHS_NAMED = 5;
+const NUL_SCAN_MAX_PATH_CHARS = 120;
+
+export interface NulFilledScan {
+  /** files that look NUL-filled, tracked + untracked (exact, among the files examined). */
+  count: number;
+  /** of `count`: files that have a HEAD copy to restore from. */
+  trackedCount: number;
+  /** of `count`: files with NO HEAD copy (untracked `??`, or newly added `A`) — nothing to restore from. */
+  untrackedCount: number;
+  /** the first {@link NUL_SCAN_MAX_PATHS_NAMED} flagged TRACKED paths. */
+  paths: string[];
+  /** the first {@link NUL_SCAN_MAX_PATHS_NAMED} flagged no-HEAD-copy paths. */
+  untrackedPaths: string[];
+  /** files actually sampled. */
+  examined: number;
+  /** files skipped unread because they exceed the size cap. */
+  skippedOversize: number;
+  /** the changed-file list was longer than the file cap, so some files were not examined. */
+  fileCapHit: boolean;
+}
+
+export interface NulScanOpts extends BoundedGitDeps {
+  maxFiles?: number;
+  maxFileBytes?: number;
+  sampleBytes?: number;
+}
+
+/** Pure: is this byte sample ENTIRELY 0x00? Delayed-write loss zeroes the whole file, and anything short of
+ *  100% also flags legitimate sparse binaries (SQLite/WAL, .wasm fixtures). An empty sample is never flagged. */
+export function looksNulFilled(sample: Buffer): boolean {
+  if (sample.length === 0) return false;
+  for (let i = 0; i < sample.length; i++) if (sample[i] !== 0) return false;
+  return true;
+}
+
+/** Is `real` (already realpath-resolved) inside `rootReal` (also realpath-resolved)? */
+function isInsideRealRoot(rootReal: string, real: string): boolean {
+  const back = path.relative(rootReal, real);
+  return back !== "" && !back.startsWith("..") && !path.isAbsolute(back);
+}
+
+async function sampleLooksNulFilled(abs: string, rootReal: string, maxFileBytes: number, sampleBytes: number): Promise<"nul" | "ok" | "oversize" | "skip"> {
+  // Containment (real, not lexical): a junction/symlinked DIRECTORY inside the worktree can make
+  // `link/secret.bin` resolve outside it while lstat on the full path still reports a regular file. Resolve
+  // the file and require it to sit inside the resolved root; read through the resolved path.
+  const real = await fs.promises.realpath(abs);
+  if (!isInsideRealRoot(rootReal, real)) return "skip";
+  const st = await fs.promises.lstat(real);
+  if (!st.isFile() || st.size === 0) return "skip"; // an empty file is not NUL damage
+  if (st.size > maxFileBytes) return "oversize";
+  const fh = await fs.promises.open(real, "r");
+  try {
+    const headLen = Math.min(st.size, sampleBytes);
+    const head = Buffer.alloc(headLen);
+    const { bytesRead: hr } = await fh.read(head, 0, headLen, 0);
+    let sample = head.subarray(0, hr);
+    if (st.size > sampleBytes * 2) {
+      const tail = Buffer.alloc(sampleBytes);
+      const { bytesRead: tr } = await fh.read(tail, 0, sampleBytes, st.size - sampleBytes);
+      sample = Buffer.concat([sample, tail.subarray(0, tr)]);
+    } else if (st.size > headLen) {
+      const rest = Buffer.alloc(st.size - headLen);
+      const { bytesRead: rr } = await fh.read(rest, 0, rest.length, headLen);
+      sample = Buffer.concat([sample, rest.subarray(0, rr)]);
+    }
+    return looksNulFilled(sample) ? "nul" : "ok";
+  } finally {
+    await fh.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Crash-recovery scan (card 5643ce01): after an unclean host stop, NTFS delayed writes can leave a
+ * worker's uncommitted file at its full size but entirely 0x00. Lists the worktree's modified/untracked
+ * files (`git status --porcelain -z`, via the same bounded helper + daemon-noise filter as the rest of this
+ * file) and byte-samples each — read-only, NEVER restores or modifies anything. ASYNC and bounded (git
+ * timeout, {@link NUL_SCAN_MAX_FILES}, {@link NUL_SCAN_MAX_FILE_BYTES}, {@link NUL_SCAN_SAMPLE_BYTES}).
+ * `undefined` = the check could not run (git error/timeout/no path); a per-file read error just skips that
+ * file. File CONTENT is never returned or logged, only paths and counts.
+ */
+export async function scanWorktreeForNulFilledFiles(worktreePath: string | null | undefined, opts: NulScanOpts = {}): Promise<NulFilledScan | undefined> {
+  if (!worktreePath) return undefined;
+  const maxFiles = opts.maxFiles ?? NUL_SCAN_MAX_FILES;
+  const maxFileBytes = opts.maxFileBytes ?? NUL_SCAN_MAX_FILE_BYTES;
+  const sampleBytes = opts.sampleBytes ?? NUL_SCAN_SAMPLE_BYTES;
+  try {
+    const { git, timeoutMs } = boundedGit(worktreePath, opts);
+    const porcelainZ = await withTimeout(
+      git.raw(["-c", "core.quotePath=false", "status", "--porcelain", "-z", "--untracked-files=all"]), timeoutMs, "git status --porcelain -z (nul scan)",
+    );
+    const files: { rel: string; noHead: boolean }[] = [];
+    for (const e of filteredWorkEntries(porcelainZ)) {
+      if (e.status.includes("D")) continue; // deleted: nothing on disk to inspect
+      if (e.path.endsWith("/")) continue; // a directory record
+      files.push({ rel: e.path, noHead: e.untracked || e.status[0] === "A" });
+    }
+    const fileCapHit = files.length > maxFiles;
+    const result: NulFilledScan = { count: 0, trackedCount: 0, untrackedCount: 0, paths: [], untrackedPaths: [], examined: 0, skippedOversize: 0, fileCapHit };
+    const rootReal = await fs.promises.realpath(path.resolve(worktreePath));
+    for (const { rel, noHead } of files.slice(0, maxFiles)) {
+      const abs = path.resolve(rootReal, rel);
+      if (!isInsideRealRoot(rootReal, abs)) continue; // lexical pre-check; sampleLooksNulFilled re-checks the REAL path
+      try {
+        const verdict = await sampleLooksNulFilled(abs, rootReal, maxFileBytes, sampleBytes);
+        if (verdict === "skip") continue;
+        if (verdict === "oversize") { result.skippedOversize++; continue; }
+        result.examined++;
+        if (verdict === "nul") {
+          result.count++;
+          if (noHead) { result.untrackedCount++; if (result.untrackedPaths.length < NUL_SCAN_MAX_PATHS_NAMED) result.untrackedPaths.push(rel); }
+          else { result.trackedCount++; if (result.paths.length < NUL_SCAN_MAX_PATHS_NAMED) result.paths.push(rel); }
+        }
+      } catch { /* unreadable/vanished file — skip it, never fail the scan */ }
+    }
+    return result;
+  } catch {
+    return undefined; // FAIL SAFE — recovery must never depend on this
+  }
+}
+
+function nulPathLabel(p: string): string {
+  return p.length > NUL_SCAN_MAX_PATH_CHARS ? `${p.slice(0, NUL_SCAN_MAX_PATH_CHARS)}…` : p;
+}
+
+/** The one-line notice text for a flagged scan, or `""` when nothing was flagged (so a clean recovery's
+ *  text stays byte-identical to before). */
+export function nulFilledNoticeLine(scan: NulFilledScan | undefined): string {
+  if (!scan || scan.count === 0) return "";
+  const namedList = (paths: string[], total: number): string =>
+    paths.map(nulPathLabel).join(", ") + (total > paths.length ? ` (+${total - paths.length} more)` : "");
+  const parts: string[] = [];
+  // Tracked: a HEAD copy exists, so the remedy is restore + re-apply.
+  if (scan.trackedCount > 0) {
+    const subject = scan.trackedCount === 1 ? "1 modified file looks" : `${scan.trackedCount} modified files look`;
+    parts.push(`${subject} NUL-filled after the crash: ${namedList(scan.paths, scan.trackedCount)}; restore from HEAD and re-apply`);
+  }
+  // Untracked / newly added: there is NO HEAD copy to restore from — never call these "modified".
+  if (scan.untrackedCount > 0) {
+    const subject = scan.untrackedCount === 1 ? "1 untracked file looks" : `${scan.untrackedCount} untracked files look`;
+    parts.push(`${subject} NUL-filled after the crash (untracked: no HEAD copy, recreate them): ${namedList(scan.untrackedPaths, scan.untrackedCount)}`);
+  }
+  return parts.join("; ");
+}
+
 /** Cap on {@link StaleBaseInfo.changedFiles} — enough for a worker kickoff note to see the scope of
  *  what changed without growing the spawn result/prompt unboundedly. */
 const STALE_BASE_FILES_MAX = 30;

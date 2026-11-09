@@ -31,6 +31,7 @@ import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { resolveStartupPromptEdit } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
+import { nulFilledNoticeLine, type NulFilledScan } from "../git/worktrees.js";
 import { createWorktree, snapshotGateReflogs, gateReflogLeftHead, gateReflogUnreadable, gateHeadOnBranch, expectedTipForLanding, type GateHeadOnBranch, type LandingPin, type GateReflogSnapshot, removeWorktree, worktreeRemovalRefusal, deleteBranch, deleteBranches, diffBranch, reviewDiffNeedsBuild, mergeBranch, mergeMainIntoWorktree, verifyReviewedTipChain, branchExistsInRepo, readLandedTipTrailer, TRAILER_TIP_UNVERIFIABLE, findLandedSquashCommit, findIntroducingSquashCommit, findLandedSquashCommitViaMap, findAllLandedTrailerCommits, GitTransientReadFailure, checkCutBaseAncestry, checkCutBaseRestampEligibility, CUT_BASE_RESTAMP_MAX_SCAN, type CutBaseRestampEligibility, recordedTipContentLanded, stampedPathsPlausible, fullTreeEntries, findNestedGitRepos, worktreeHasWork, worktreeHasWorkDetailed, classifiedRefusalKindText, worktreeStatusHasWork, detectStrandedWork, detectCanonicalDirtyOverlap, detectCanonicalUntrackedOverlap, detectCanonicalStagedDirt, stagedCanonicalDirtRefusalMessage, type CanonicalStagedDirt, type CanonicalDirtyOverlap, type CanonicalUntrackedOverlap, countCommitsBehind, firstBranchCommitTime, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, workerBaseRef, normalizeReviewBaseSha, reviewBaseShaConsensusByPath, trustedReviewBaseSha, reviewBaseShaToStamp, toConventionalSubject, attemptCodexAutoCommit, deriveTasklessSubject, deriveOwnNonTipCommitSubjects, diffOwedLanding, describeOwedFailure, codescapeWorktreeId, matchAddedDenyGlobs, machineReadablePathSet, pathGlobToRegExp, matchRetractedPremiseTitle, resolveMainlineBranch, resolveMainlineBranchState, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveWorktreePath, normForCompare, worktreeIdentityKey, pathsOverlap, containmentForms, pathOverlapKindAgainstForms, resolveGitRef, resolveBranchTip, findLaterBranchSquash, getTaskMergedInfo, isInertMergeDiff, changedSkillNames, computeEmitCompareGate, buildReducedGateCommand, ReducedGateOnlyFileError, computeDirectDistImporterRunSet, changedDaemonSrcTsPathsForCommit, ASSET_READING_TEST_REPO_PATHS, CHANGED_TS_TEXT_SCANNER_REPO_PATHS, CHANGED_SCRIPT_TEXT_SCANNER_REPO_PATHS, reclaimNodeModulesDir, readWorktreeUncommittedState, worktreeHasGitLink, readBaseSha, renameWorktreeDirAside, listStaleAsideWorktrees, staleAsideRepoKeysByProject, reclaimStaleAsideWorktreeDir, measureDirSize, findNestedWorktreeLikeChild, isWorktreeCollisionBackstopEnabled, type StaleAsideWorktreeEntry, type StaleAsideReclaimOutcome, type BoundedGitDeps, type GoneBranchLedgerFacts, type WorkerTipLedgerFacts, type EmitCompareNotApplicableKind, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type DiscardedOnRecutInfo, type StaleBaseInfo, type WorktreeGateStamp, type MergedCommitInfo, type ChangedSkillInfo } from "../git/worktrees.js";
 import { computeBatchSize, runBatchedMerge, fastForwardCanonicalMain, type BatchCandidate, type BatchGateResult, type BatchGitDeps } from "../git/batch-merge.js";
 import { resolveEscalationDestMerged } from "../orchestration/linked-fixes.js";
@@ -9204,6 +9205,10 @@ export class SessionService {
       // pre-UPDATE SELECT (`recovered`); the persisted row's busy is already 0 by the time this runs.
       // Card 7970db77 widened this from manager-only to ANY session id — see its own doc below.
       busyAtCrashBySessionId?: Map<string, boolean>;
+      // Card 5643ce01: per-worker NUL-filled-file scan results, computed ASYNC by the caller (index.ts) off
+      // this synchronous method, mirroring resumeFleetOnBoot's `deployStaleness`. Absent/undefined entry ⇒ no
+      // clause is added (byte-identical text). Never auto-restores anything — notice text only.
+      nulScanByWorkerId?: Map<string, NulFilledScan | undefined>;
     } = {},
   ): { resumed: string[]; skippedParked: string[]; failed: string[]; managersFailed: string[]; retiredSkipped: string[]; consolidatedSkipped: string[] } {
     const now = opts.now ?? new Date();
@@ -9248,6 +9253,26 @@ export class SessionService {
     // @decision 4775165f — same UNCONDITIONAL instance-field consultation shape as `isRetired` above, but
     // for `consolidatedPredecessorIds` (predecessor ids, not successor ids) — see that set's own doc.
     const isConsolidated = (id: string): boolean => this.consolidatedPredecessorIds.has(id);
+    // Card 5643ce01: file the NUL-filled finding DURABLY, one event per flagged worker, as a PRE-PASS over ALL
+    // candidates — before the retired/consolidated filtering and before any resume or suppression below. The
+    // nudge line is withheld on many branches (parked worker/manager, awaiting-review done, parked-kickoff
+    // escalation, a failed resume, a deferred manager kickoff, a consolidated or retired manager), and the
+    // damage must always be named somewhere. Paths and counts only, never content. Never nudges (audit-only).
+    if (!cleanStop) {
+      for (const c of candidates) {
+        const nul = opts.nulScanByWorkerId?.get(c.workerSessionId);
+        if (!nul || nul.count === 0) continue;
+        try {
+          this.db.appendEvent({
+            id: randomUUID(), ts: now.toISOString(), managerSessionId: c.managerSessionId, workerSessionId: c.workerSessionId,
+            taskId: this.db.getSession(c.workerSessionId)?.taskId ?? null, kind: "crash_recovery_nul_filled",
+            detail: { count: nul.count, trackedCount: nul.trackedCount, untrackedCount: nul.untrackedCount, paths: nul.paths, untrackedPaths: nul.untrackedPaths },
+          });
+        } catch (e) {
+          console.warn(`[crash-recovery] appendEvent(crash_recovery_nul_filled) failed for ${c.workerSessionId.slice(0, 8)}: ${(e as Error).message}`);
+        }
+      }
+    }
     const byManager = new Map<string, CrashOrphanedWorker[]>();
     for (const c of candidates) {
       // @decision 08c81809 — a retired recycle successor must never be re-resumed as a manager here
@@ -9337,6 +9362,8 @@ export class SessionService {
       // this card exists to close. Scope: worktree EXISTENCE only — branch state is explicitly NOT
       // covered (see classifyWorktreeIntegrity's own doc); the notice text below says so.
       let worktreeAtRiskCount = 0;
+      // Card 5643ce01: one entry per recovered worker with NUL-filled files ("<id8>: N modified files look…").
+      const nulFlagged: string[] = [];
       // Card 55d40cfd (F2): captured regardless of `managerParked` (cheap — only populated on an actual
       // resume failure) but only ever READ in the `managerParked` branch below, where the summary nudge
       // that would otherwise surface these failures is skipped to honor the park.
@@ -9356,6 +9383,12 @@ export class SessionService {
         recoveredCount++;
         const integrity = classifyWorktreeIntegrity(this.db.getSession(w.workerSessionId)?.worktreePath);
         if (integrity.status !== "intact") worktreeAtRiskCount++;
+        // Card 5643ce01: crash-shaped boots only (a clean stop loses no delayed writes). Empty string when
+        // nothing was flagged / the scan didn't run, so every clean recovery's text is byte-identical.
+        const nulScan = cleanStop ? undefined : opts.nulScanByWorkerId?.get(w.workerSessionId);
+        const nulLine = nulFilledNoticeLine(nulScan);
+        if (nulLine) { nulFlagged.push(`(worker ${w.workerSessionId.slice(0, 8)}: ${nulLine})`); }
+        const workerNulClause = nulLine ? ` ${nulLine}.` : "";
         if (workerParked) { skippedParked.push(w.workerSessionId); continue; } // resumed live; honor the park — no nudge
         // Card 7970db77: decide the kickoff-confirm boot escalation FIRST, before either continuation
         // nudge below — same load-bearing ordering as the manager-level call further down, and as
@@ -9394,7 +9427,7 @@ export class SessionService {
                     ) + RESUME_NUDGE_TAIL
                   : buildBlockedResumeNudgeBody(
                       `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch.`,
-                      bootDiagnosticsClause,
+                      workerNulClause + bootDiagnosticsClause,
                     ) + RESUME_NUDGE_TAIL,
                 this.db.getSession(w.workerSessionId)?.taskId ?? null,
               );
@@ -9418,7 +9451,7 @@ export class SessionService {
                   `finished, call worker_report (done/blocked) so your manager isn't left waiting.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL
                 : `[loom:crash-recovered] The daemon ${hadCrashLog ? "crashed" : "was killed from outside (no crash record was written)"} and Loom auto-resumed you on relaunch — re-check your ` +
                   `worktree's state, then continue your assigned task from where you left off. If you had ` +
-                  `already finished, call worker_report (done/blocked) so your manager isn't left waiting.${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL,
+                  `already finished, call worker_report (done/blocked) so your manager isn't left waiting.${workerNulClause}${bootDiagnosticsClause}` + RESUME_NUDGE_TAIL,
               this.db.getSession(w.workerSessionId)?.taskId ?? null,
             );
           } catch { /* not ready yet — the resume stands */ }
@@ -9505,6 +9538,8 @@ export class SessionService {
               ? `${recoveredCount} of your ${workers.length} in-flight worker(s) were recovered and are back in worker_list`
               : `none of your ${workers.length} in-flight worker(s) could be recovered`,
             worktreeNote,
+            // Card 5643ce01: absent (null) unless a recovered worker's worktree held NUL-filled files.
+            nulFlagged.length > 0 ? `NUL-filled worktree files after the crash ${nulFlagged.join(" ")}` : null,
             awaitingReviewDoneCount > 0 ? `${awaitingReviewDoneCount} of those already reported done and are awaiting your review/merge (worker_report_get is the durable, authoritative read — re-check there before merging)` : null,
             awaitingReviewBlockedCount > 0 ? `${awaitingReviewBlockedCount} of those reported BLOCKED and are waiting on an answer from you (worker_report_get is the durable, authoritative read — re-check there before replying)` : null,
             failedCount > 0 ? `${failedCount} could not be resumed (check worker_list / logs)` : null,

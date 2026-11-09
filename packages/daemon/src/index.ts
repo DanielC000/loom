@@ -77,6 +77,7 @@ import { reviveCompanionSessionAtBoot, withCompanionSelfHeal, withCompanionTrans
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
 import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
+import { startNulFilledScan, recoverCrashOrphanedWorkersWithNulScan } from "./orchestration/nul-scan-boot.js";
 import { readAndClearMergeDangerLatches, describeMergeDangerLatchAtBoot } from "./git/merge-danger-latch.js";
 import { reenterMergeQuarantinesAtBoot, partitionQuarantinesByRegistration, setRegisteredRepoPathsProvider } from "./git/merge-quarantine.js";
 import { computeCanonicalRepoPaths } from "./projects/canonical-repo-paths.js";
@@ -840,6 +841,13 @@ async function main(): Promise<void> {
   // misread as "clean" by a LATER, genuine crash that happens to leave no marker of its own.
   const shutdownMarker = readAndClearShutdownMarker();
   const protectedSessionIds = restartIntent ? protectedIdsFromIntent(restartIntent) : new Set<string>();
+  // Card 5643ce01: kick off the crash-recovery NUL-filled-file scan NOW — the earliest point both
+  // `restartIntent` and `shutdownMarker` (which decide whether a crash-shaped recovery will run at all) are
+  // known, and after `crashOrphanedWorkers` was derived — so it overlaps the remaining boot instead of
+  // adding to it. Never rejects, hard-bounded (nul-scan-boot.ts); awaited at the recovery call below.
+  const nulScanPromise = !restartIntent && !shutdownMarker && crashOrphanedWorkers.length > 0
+    ? startNulFilledScan(crashOrphanedWorkers, { getWorktreePath: (id) => db.getSession(id)?.worktreePath })
+    : undefined;
   // Crash-orphaned-worker recovery (card 9fc41af5): fold the derived candidates' worker + manager ids
   // into the SAME protected set, for the SAME reason (pass-B GC must not reclaim a worktree we're about
   // to resume into). Harmless no-op overlap on the exit-75 path (those ids are already covered by
@@ -1889,11 +1897,13 @@ async function main(): Promise<void> {
     // zeroed every busy flag. Card 7970db77: ONE map, keyed by ANY session id, read by both
     // escalateDeferredManagerKickoffAtBoot AND escalateParkedKickoffAtBoot (see each call site's doc).
     const busyAtCrashBySessionId = new Map(recovered.map((s) => [s.id, s.busy]));
+    // Card 5643ce01: the NUL-filled-file scan was STARTED early (nulScanPromise, near the shutdown-marker read)
+    // so it overlapped the rest of boot; recovery awaits it here, behind its own hard budget (nul-scan-boot.ts).
     const { resumed, skippedParked, failed, managersFailed, retiredSkipped, consolidatedSkipped } =
-      sessions.recoverCrashOrphanedWorkers(crashOrphanedWorkers, {
+      await recoverCrashOrphanedWorkersWithNulScan(sessions, crashOrphanedWorkers, {
         soloManagerIds: crashOrphanedManagers, shutdownMarker, hadCrashLogAtBoot, bootedAt: bootStartedAt, supervisorIteration,
         busyAtCrashBySessionId,
-      });
+      }, nulScanPromise);
     console.log(
       `[boot] crash recovery: re-parented ${resumed.length} in-flight worker(s) to their resumed manager(s)` +
       (skippedParked.length ? `, ${skippedParked.length} resumed-but-parked (usage hold honored)` : "") +

@@ -2076,6 +2076,13 @@ export type OrchestrationEventKind =
   // @decision 55d40cfd — never send a nudge alongside this event: it would push a turn into a parked
   //  manager's cap, exactly what the park exists to prevent. This is a durable record only.
   | "parked_manager_workers_unresumed"
+  // Card 5643ce01 — one per crash-recovered worker whose worktree held NUL-filled uncommitted files (NTFS
+  // delayed-write loss after a hard host stop). The DURABLE twin of the NUL line in the worker/manager
+  // nudges, which several recovery branches suppress. `managerSessionId` = the worker's manager,
+  // `workerSessionId`/`taskId` its own; `detail` = { count, trackedCount, untrackedCount, paths (capped,
+  // tracked), untrackedPaths (capped) }. Paths and counts only — never file content. Audit-only, same
+  // posture as `parked_manager_workers_unresumed`: no nudge accompanies it.
+  | "crash_recovery_nul_filled"
   // @decision 09e9ba29 — never let a throw in one resumeFleetOnBoot entry escape uncaught (it would
   // strand every later entry); catch it per-entry and file it HERE under the failed entry's own
   // identity, never batched like `fleet_resume_failed`.
@@ -2401,7 +2408,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   companion_home_cleared: true, companion_reminder_rerouted: true, companion_unbound_route_refused: true,
   deploy: true, worker_gate: true, assistant_relay_message: true, paste_length_loss: true,
   paste_tripwire_give_up: true, prompt_mismatch_unresolved: true, fleet_resume_failed: true,
-  manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
+  manager_crash_resume_failed: true, parked_manager_workers_unresumed: true, crash_recovery_nul_filled: true, fleet_resume_entry_failed: true, setup_resume_superseded: true,
   repeated_tool_call: true, batch_merge_forfeited: true, batch_merge_branch_diverted: true, batch_merge_head_moved: true, batch_merge_ff_unverified: true, batch_merge_dropped: true, batch_merge_branch_retained: true, merge_branch_retained: true, mainline_moved_outside_loom: true, watermark_finalize_withheld: true, commondir_trust_pinned: true, engine_session_rotated: true,
   discovery_block_injection: true,
   codex_submit_unconfirmed: true, codex_boot_stuck: true, claude_boot_dialog_stuck: true, claude_boot_dialog_resolved: true, skill_permission_frontmatter_warning: true, codex_unsupported_capability: true, harness_default_skipped: true, harness_role_forced_claude: true, codex_provider_dropped: true, locked_role_skills_dropped: true, codex_isolation_gap_disclosed: true,
