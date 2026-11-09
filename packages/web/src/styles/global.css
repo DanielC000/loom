@@ -166,6 +166,11 @@
 }
 
 :root {
+  /* The keyboard focus ring as one value (card 78eaac95): `outline: var(--loom-focus-ring)`. Each rule
+     still picks its own outline-offset, since that depends on what clips the control. Resolved here on
+     :root, the same element the theme blocks above set --loom-ring on, so it follows the theme. */
+  --loom-focus-ring: 2px solid var(--loom-ring);
+
   /* Type */
   --loom-font-ui: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
   --loom-font-mono: "Geist Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -323,7 +328,7 @@ body {
   white-space: nowrap; cursor: pointer;
 }
 .loom-lane-more-chip:hover { color: var(--loom-text); border-color: var(--loom-accent-edge); }
-.loom-lane-more-chip:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: 1px; color: var(--loom-text); }
+.loom-lane-more-chip:focus-visible { outline: var(--loom-focus-ring); outline-offset: 1px; color: var(--loom-text); }
 
 /* ── Board lane controls (card 67c43038) ─────────────────────────────────────────
    The header is the drag handle (grip + label); the grip is revealed on hover / keyboard focus inside the
@@ -342,7 +347,7 @@ body {
 }
 .loom-lane-head:hover .loom-lane-more,
 .loom-lane-more[aria-expanded="true"] { border-color: var(--loom-line-strong); color: var(--loom-text-2); }
-.loom-lane-more:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: 1px; color: var(--loom-text); }
+.loom-lane-more:focus-visible { outline: var(--loom-focus-ring); outline-offset: 1px; color: var(--loom-text); }
 /* Portalled to <body> and positioned inline (fixed, from the trigger's rect) by LaneMenu. */
 .loom-lane-menu {
   z-index: 60;
@@ -357,7 +362,7 @@ body {
 }
 .loom-lane-menu-item.is-quiet { color: var(--loom-text-2); }
 .loom-lane-menu-item:hover { background: var(--loom-inset); }
-.loom-lane-menu-item:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
+.loom-lane-menu-item:focus-visible { outline: var(--loom-focus-ring); outline-offset: -2px; }
 .loom-lane-menu-item[aria-disabled="true"] { color: var(--loom-text-3); cursor: default; }
 .loom-lane-menu-item[aria-disabled="true"]:hover { background: transparent; }
 .loom-lane-menu-hint { margin-left: auto; color: var(--loom-text-3); font-family: var(--loom-font-mono); font-size: 10px; }
@@ -369,7 +374,7 @@ body {
   font-family: var(--loom-font-ui); font-size: 11px; font-weight: 700;
 }
 .loom-lane-rail:hover { background: var(--loom-inset); }
-.loom-lane-rail:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: -2px; }
+.loom-lane-rail:focus-visible { outline: var(--loom-focus-ring); outline-offset: -2px; }
 .loom-lane-rail-label { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) {
   .loom-lane-grip { transition: none; }
@@ -719,12 +724,22 @@ body {
 /* Keyboard focus ring — shown only for keyboard nav (:focus-visible), so mouse clicks stay clean
    while Tab users get a clear blue --loom-ring on every interactive control. Every focus ring in
    this sheet uses that one token. A .loom-field draws its own ring (border plus halo, above), so it is
-   not listed here: an outline on top of the halo would double it. */
+   not listed here: an outline on top of the halo would double it.
+
+   The :where() rule is the fallback for every keyboard-focusable thing WITHOUT a rule of its own (card
+   78eaac95): those fell through to Chromium's `auto 1px` ring, near-black on the dark theme, so a Tab walk
+   showed three different treatments and some stops all but vanished. :where() has zero specificity, so
+   every class rule below (its own offset, a field's halo, an `outline: none` on a programmatic focus
+   target) still wins; only the browser's own default loses. */
+:where(:focus-visible) {
+  outline: var(--loom-focus-ring);
+  outline-offset: 2px;
+}
 .loom-toggle:focus-visible,
 .loom-btn:focus-visible,
 .loom-task-link:focus-visible,
 .loom-manifest-row:focus-visible {
-  outline: 2px solid var(--loom-ring);
+  outline: var(--loom-focus-ring);
   outline-offset: 2px;
 }
 
@@ -792,7 +807,7 @@ body {
    other axis to `auto` as well, so the ring on the first or last card in a lane would be clipped away
    at a positive offset. Drawn inside the border box, nothing can eat it. */
 .loom-board-open:focus-visible {
-  outline: 2px solid var(--loom-ring);
+  outline: var(--loom-focus-ring);
   outline-offset: -2px;
   border-radius: 3px;
 }
@@ -813,8 +828,62 @@ body {
   filter: brightness(1.15);
 }
 .loom-card-worker:focus-visible {
-  outline: 2px solid var(--loom-ring);
+  outline: var(--loom-focus-ring);
   outline-offset: 1px;
+}
+
+/* Board card drag grip (pages/Board.tsx `Card`). Not a Tab stop (591fe6ed), but a press focuses it and a
+   later key makes that focus visible, which fell through to the browser's own 1px auto ring — the one
+   odd treatment on the board (card 78eaac95). Same ring as the card, inset like it. */
+.loom-card-grip {
+  border-radius: 3px;
+}
+.loom-card-grip:focus-visible {
+  outline: var(--loom-focus-ring);
+  outline-offset: -2px;
+}
+
+/* One-time keyboard hint (pages/Board.tsx `BoardNavHint`, card 78eaac95), on the left of the lane
+   overflow row: above the grid, so it never covers the focused card, and never over the filters. */
+.loom-board-navhint {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  padding: 2px 10px;
+  border-radius: var(--loom-radius-pill);
+  background: var(--loom-surface);
+  border: 1px solid var(--loom-line-strong);
+  box-shadow: var(--loom-panel-shadow);
+  color: var(--loom-text-2);
+  font-size: var(--loom-fs-sm);
+  line-height: 16px;
+  pointer-events: none;
+}
+.loom-board-navhint kbd {
+  font-family: var(--loom-font-mono);
+  font-size: var(--loom-fs-xs);
+  line-height: 1;
+  padding: 2px 4px;
+  border: 1px solid var(--loom-line-strong);
+  border-radius: 2px;
+  background: var(--loom-inset);
+  color: var(--loom-text);
+}
+.loom-board-navhint-keys {
+  display: inline-flex;
+  gap: 2px;
+  vertical-align: 1px;
+}
+.loom-board-navhint-sep {
+  margin: 0 6px;
+  color: var(--loom-text-3);
+}
+@media (max-width: 560px) {
+  /* Phone: the row's right side holds the "N more lanes" chip, so the selection key gives way. */
+  .loom-board-navhint-wide {
+    display: none;
+  }
 }
 
 /* Attachment-manifest row (the Requests inbox's attached-files list, card 19b7cf7a): one dense `ls`-like

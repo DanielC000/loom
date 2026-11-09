@@ -46,7 +46,7 @@ import { errorText } from "../lib/loopbackCredential";
 import { submitDraft } from "../lib/draftSubmit";
 import {
   BoardNavContext, NAV_HEAD, NAV_KEYS, NAV_MORE, NEW_CARD_KEY, SELECT_KEY, laneRange, navElement, navTarget, readNavLanes,
-  renderedCards, resolveLaneItem, shortcutBlocked, useBoardNav, type BoardFocus, type BoardNav, type NavKey,
+  renderedCards, resolveLaneItem, shortcutBlocked, tabOutWrapTarget, takeNavHint, useBoardNav, type BoardFocus, type BoardNav, type NavKey,
 } from "../lib/boardFocus";
 import { usePreviewOnly, PREVIEW_REQUEST_HELD_TITLE } from "../lib/previewOnly";
 // Ship state is only DISCOVERABLE from git while this project writes the reserved trailer paragraph
@@ -522,6 +522,15 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // True while a nav item holds focus, and still true if that item is then removed from the DOM (React
   // removing a focused node drops focus to <body>). That is the case `repairIfLost` puts right.
   const navHadFocus = useRef(false);
+  const [navHint, setNavHint] = useState(false);
+  // True from a pointer press in the grid until the next key press anywhere. :focus-visible alone is not
+  // enough to tell a keyboard entry: a Ctrl/⌘+click selection holds a key, so Chromium marks it visible.
+  const pointerEntry = useRef(false);
+  useEffect(() => {
+    const onKey = () => { pointerEntry.current = false; };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
   const columnKeys = board.data?.columns.map((c) => c.key) ?? [];
   let navLane: string | null = null;
   let navItem: string | null = focusPos?.item ?? null;
@@ -642,6 +651,9 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     const lane = el?.closest<HTMLElement>("[data-lane-key]")?.dataset.laneKey;
     if (!el || !lane) return;
     navHadFocus.current = true;
+    // The one-time "how do I move in here" hint (card 78eaac95), on keyboard entry only: a pointer user
+    // clicked the card they wanted and needs no telling.
+    if (!navHint && !pointerEntry.current && el.matches(":focus-visible") && takeNavHint()) setNavHint(true);
     const item = el.dataset.boardNav!;
     const items = [...el.closest("[data-lane-key]")!.querySelectorAll<HTMLElement>("[data-board-nav]")];
     const index = items.indexOf(el);
@@ -651,6 +663,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     const el = e.target as HTMLElement;
     requestAnimationFrame(() => {
       if (gridRef.current?.contains(document.activeElement)) return;
+      setNavHint(false);
       // Still in the DOM and still focusable ⇒ the user moved focus elsewhere on purpose. Removed, or
       // just disabled (a windowed "Show more" while its page loads) ⇒ keep the flag so the next render
       // can put focus back.
@@ -664,6 +677,13 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     const item = el.dataset?.boardNav;
     const lane = el.closest<HTMLElement>("[data-lane-key]")?.dataset.laneKey;
     if (!item || !lane || !gridRef.current) return;
+    // Tab out of the grid (card 78eaac95). With nothing tabbable after the grid the browser drops focus on
+    // <body>; hand it to the page's first stop instead. Otherwise the browser's own Tab is already right.
+    if (e.key === "Tab") {
+      const wrap = e.shiftKey ? null : tabOutWrapTarget(gridRef.current);
+      if (wrap) { e.preventDefault(); wrap.focus(); }
+      return;
+    }
     const isCard = item !== NAV_HEAD && item !== NAV_MORE;
     // Selection keys (card 19074e42): `x` toggles the focused card; Shift+↑/↓ extends the selection to the
     // neighbouring card in the same lane and moves there. Both act on cards only, never a header.
@@ -706,6 +726,8 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // Re-subscribed whenever the set of lanes or their collapse changes (new lane elements to observe).
   const laneEdges = useLaneOverflow(gridRef,
     board.data ? `${columnKeys.join(",")}|${[...collapsedLanes].sort().join(",")}` : "");
+  const laneOverflowing = laneEdges.before.length > 0 || laneEdges.after.length > 0;
+  const showLaneRow = laneOverflowing || navHint;
 
   return (
     <div ref={rootRef}>
@@ -756,14 +778,18 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
             </div>
           )}
           {/* Lanes behind an edge (card c315f579): a row of its own, only while some lane is cut off. */}
-          {(laneEdges.before.length > 0 || laneEdges.after.length > 0) && (
-            <div className="loom-lane-more-row" data-testid="lane-overflow-row">
+          {/* The one-time keyboard hint (card 78eaac95) borrows this row's left side: above the grid, so it
+              never covers the focused card, and in the row the overflow chips already use, so it never
+              covers the filters. With every lane in view the row comes up for the hint alone. */}
+          {showLaneRow && (
+            <div className="loom-lane-more-row" data-testid={laneOverflowing ? "lane-overflow-row" : undefined}>
+              {navHint && <BoardNavHint />}
               <LaneOverflowChip side="before" keys={laneEdges.before} columns={board.data.columns} gridRef={gridRef} />
               <span style={{ flex: 1 }} />
               <LaneOverflowChip side="after" keys={laneEdges.after} columns={board.data.columns} gridRef={gridRef} />
             </div>
           )}
-          <div style={{ display: "flex", gap: 10, marginTop: laneEdges.before.length > 0 || laneEdges.after.length > 0 ? 6 : 10, alignItems: "stretch" }}>
+          <div style={{ display: "flex", gap: 10, marginTop: showLaneRow ? 6 : 10, alignItems: "stretch" }}>
             <DndContext onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={clearLaneDrag}
               sensors={sensors} collisionDetection={boardCollision} accessibility={{ announcements }}>
               {/* Responsive lane grid (.loom-board-grid): equal 1fr lanes when they fit, horizontal
@@ -773,6 +799,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                   board keeps the stylesheet's auto tracks untouched. */}
               <BoardNavContext.Provider value={nav}>
               <div className="loom-board-grid" ref={gridRef} onFocus={onGridFocus} onBlur={onGridBlur} onKeyDown={onGridKey}
+                onPointerDownCapture={() => { pointerEntry.current = true; }}
                 data-more-left={laneEdges.before.length > 0 ? "true" : undefined}
                 data-more-right={laneEdges.after.length > 0 ? "true" : undefined}
                 style={board.data.columns.some((c) => collapsedLanes.has(c.key))
@@ -2553,6 +2580,18 @@ function useLaneOverflow(gridRef: React.RefObject<HTMLDivElement | null>, layout
 
 // The chip on an edge with lanes behind it: says how many, names them in its tooltip, and scrolls the
 // nearest one fully into view. Lanes are never hidden by this, only reached.
+/** The one-time keyboard hint for the lane grid (card 78eaac95). `x`, not Space, selects: Space opens a
+ *  card exactly as Enter does (19074e42's record). Pointer events off, so it never takes a click. */
+function BoardNavHint() {
+  return (
+    <div className="loom-board-navhint" data-testid="board-nav-hint">
+      <span className="loom-board-navhint-keys"><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd></span> move
+      <span className="loom-board-navhint-sep">·</span><kbd>Enter</kbd> opens
+      <span className="loom-board-navhint-wide"><span className="loom-board-navhint-sep">·</span><kbd>X</kbd> selects</span>
+    </div>
+  );
+}
+
 function LaneOverflowChip({ side, keys, columns, gridRef }:
   { side: "before" | "after"; keys: string[]; columns: KanbanColumn[]; gridRef: React.RefObject<HTMLDivElement | null> }) {
   if (keys.length === 0) return null;

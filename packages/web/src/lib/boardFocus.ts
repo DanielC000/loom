@@ -95,6 +95,41 @@ export function navElement(grid: HTMLElement, lane: string, item: string): HTMLE
   return grid.querySelector<HTMLElement>(`[data-lane-key="${CSS.escape(lane)}"] [data-board-nav="${CSS.escape(item)}"]`);
 }
 
+const TABBABLE = "a[href], button, input, select, textarea, summary, [tabindex], [contenteditable]:not([contenteditable='false'])";
+
+/** Every element a plain Tab can reach, in document order (positive tabindex is not used in this app). */
+function tabbables(doc: Document): HTMLElement[] {
+  return [...doc.querySelectorAll<HTMLElement>(TABBABLE)].filter((el) =>
+    el.tabIndex >= 0 && !el.matches(":disabled") && !el.closest("[inert]")
+    && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden");
+}
+
+/** Where a plain Tab out of the lane grid should go (card 78eaac95). The grid is one Tab stop, so
+ *  leaving it means "the first tabbable after the grid". When the grid is the LAST thing on the page (the
+ *  /board page), the browser has nowhere to go and drops focus onto <body>, where it is invisible; this
+ *  hands it to the page's first tabbable instead. Null when a real element already follows the grid, so
+ *  the browser's own Tab (which lands on exactly that element) is left alone. */
+export function tabOutWrapTarget(grid: HTMLElement): HTMLElement | null {
+  const all = tabbables(grid.ownerDocument);
+  const follows = all.some((el) => !grid.contains(el) && !!(grid.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING));
+  if (follows) return null;
+  return all.find((el) => !grid.contains(el)) ?? null;
+}
+
+/** The one-time keyboard hint (card 78eaac95): shown the first time the grid takes KEYBOARD focus in this
+ *  browser, then never again. Remembered in localStorage; when that is unavailable, for this page load. */
+const NAV_HINT_KEY = "loom.boardNavHintSeen";
+let navHintSeenThisLoad = false;
+export function takeNavHint(): boolean {
+  if (navHintSeenThisLoad) return false;
+  navHintSeenThisLoad = true;
+  try {
+    if (localStorage.getItem(NAV_HINT_KEY) === "1") return false;
+    localStorage.setItem(NAV_HINT_KEY, "1");
+  } catch { /* storage unavailable: the in-memory flag still limits it to once per load */ }
+  return true;
+}
+
 /** The board's new-card shortcut key. Plain `n`: no other handler in the app reads a bare letter. */
 export const NEW_CARD_KEY = "n";
 
