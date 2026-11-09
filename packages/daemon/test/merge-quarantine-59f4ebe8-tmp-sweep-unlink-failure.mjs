@@ -120,7 +120,7 @@ try {
       const s = enterMergeQuarantine(r, "b", "W active");
       const name = plantTmp(r, [s], "77777-abc123");
       const tmpPath = path.join(MERGE_QUARANTINE_DIR, name);
-      pushPendingQuarantineTestOnly({ repoPath: r, branch: "p2", reason: "P2 pending sourced from the tmp", enteredAt: Date.now(), tokens: [`other-${tag}`] }, name);
+      pushPendingQuarantineTestOnly({ repoPath: r, branch: "p2", reason: "P2 pending sourced from the tmp", enteredAt: Date.now(), tokens: [s] }, name); // c4f0d786: P2 must be REMOVED by this clear (a surviving pending naming the tmp now keeps it)
       const inj = injectUnlinkFault(tmpPath, faulted);
       let res;
       try { res = clearMergeQuarantine(r); } finally { inj.restore(); }
@@ -148,7 +148,7 @@ try {
       const tmpName = `${h}.json.tmp-77777-abc123`;
       const tmpPath = path.join(MERGE_QUARANTINE_DIR, tmpName);
       fs.writeFileSync(tmpPath, JSON.stringify({ repoPath: r, branch: "b", reason: "stranded tmp", enteredAt: Date.now() - 1000, tokens: [s] }, null, 2) + "\n");
-      pushPendingQuarantineTestOnly({ repoPath: r, branch: "p2", reason: "P2 pending sourced from the tmp", enteredAt: Date.now(), tokens: [`other-tpt-${tag}`] }, tmpName);
+      pushPendingQuarantineTestOnly({ repoPath: r, branch: "p2", reason: "P2 pending sourced from the tmp", enteredAt: Date.now(), tokens: [s] }, tmpName); // c4f0d786: removed by this clear, not a surviving owner
       const inj = injectUnlinkFault(tmpPath, faulted);
       try { clearMergeQuarantineByToken(r, s); } finally { inj.restore(); }
       if (faulted) {
@@ -168,7 +168,8 @@ try {
       const r = makeRepo(`twin-${tag}`);
       const key = canonicalRepoLockKey(r);
       const h = hashFor(key);
-      const h2 = "ab".repeat(12);
+      // c4f0d786: unique per run — the control run leaves its pending P2 behind, and a surviving pending entry naming the same tmp now keeps it.
+      const h2 = hashFor(`${key}-twin-h2`);
       fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
       const s = `tok-59f4ebe8-twin-${tag}-s`;
       const live = { repoPath: r, branch: "b", reason: "live", enteredAt: Date.now() - 2000, tokens: [s], armedKeys: [key] };
@@ -180,7 +181,7 @@ try {
       const tmpName = `${h2}.json.tmp-77777-abc123`;
       const tmpPath = path.join(MERGE_QUARANTINE_DIR, tmpName);
       wj(tmpName, { repoPath: r, branch: "b", reason: "stranded", enteredAt: Date.now() - 1000, tokens: [s] });
-      pushPendingQuarantineTestOnly({ repoPath: r, branch: "p2", reason: "P2 tracks the tmp", enteredAt: Date.now(), tokens: [`other-twin-${tag}`] }, tmpName);
+      pushPendingQuarantineTestOnly({ repoPath: r, branch: "p2", reason: "P2 tracks the tmp", enteredAt: Date.now(), tokens: [s] }, tmpName); // c4f0d786: removed by this clear, not a surviving owner
       const inj = injectUnlinkFault(tmpPath, faulted);
       try { clearMergeQuarantineByToken(r, s); } finally { inj.restore(); }
       if (faulted) {

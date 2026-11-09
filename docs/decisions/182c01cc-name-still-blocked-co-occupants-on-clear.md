@@ -476,10 +476,9 @@ argument from scratch should re-verify this split still produces a correct stand
 ## Follow-up `7d767b90`: the "will NOT itself re-divert" clause is conditional
 
 The wording below holds only for a kept referencer that is NOT a fan-out claimant of a shared corrupt latch. When
-the kept refs share a still-present corrupt latch file the cleared claimant re-arms with them, and when the same
-clear already removed the shared residue nothing is kept at all. Both are now disclosed truthfully; see
-`882d6cff`'s Follow-up `7d767b90` section and its Do-not list (never claim `latchKept` for a file the same clear
-removed).
+the kept refs share a still-present corrupt latch file the cleared claimant re-arms with them (disclosed
+truthfully; see `882d6cff`'s Follow-up `7d767b90` section). A shared tmp/safety-tmp residue is kept the same way
+since `c4f0d786`, and a route `id` is offered only when it clears every pending file of that claimant.
 
 ## Follow-up: the stale-sourceFile root (cd5a3cf9/c93e9e7a) stays open
 

@@ -199,8 +199,8 @@ try {
     // @decision f8e11853 — the real call site now carries a trailing `freedKeys` (`new Set([key])`) 7th argument;
     // this mutation targets the 6th (`excludeIdentities`) argument only, leaving `freedKeys` untouched.
     await withDistMutation(
-      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], new Set([clearIdentity]), new Set([key]));",
-      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], undefined, new Set([key]));",
+      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], new Set([clearIdentity]), new Set([key]), undefined, pendingBeingRemoved);",
+      "identityWideHumanClear ? clearIdentityOwnTmpTokensByFile : [], undefined, new Set([key]), undefined, pendingBeingRemoved);",
       async (mutated) => {
         const r2 = makeRepo("exclb-r2");
         const key2 = canonicalRepoLockKey(r2);

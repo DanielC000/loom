@@ -447,26 +447,28 @@ lines is identical — nothing lifted, deleted or re-armed changed):
    `tryClearMergeQuarantineByOwnIdentityBody` and `clearMergeQuarantineReporting`'s kept-only branch. One text
    (`sharedLatchKeptAfterGraduatedClearReasonFor`, now worded neutrally: "own quarantine record is lifted").
    `keptOnlyReasonFor` is left for non-shared keeps, where its clause is true.
-2. **Shared corrupt tmp / safety-tmp residue.** The same clear's tmp sweep UNLINKS the residue, but an earlier
-   sweep had already named the siblings, so the result said `latchKept`, "stays on disk", "WILL RE-DIVERT" — a
-   fresh boot arms nobody. `refsWhoseLatchFilesWereRemoved` decides from the pending entries' own files on disk
-   (never from the residue's shape); such refs are dropped from `latchKept`/`referencingRepoPaths` and the reason
-   (`sharedResidueRemovedReasonFor`) says the residue was removed and the siblings are blocked IN THIS PROCESS ONLY
-   and will NOT re-arm. `clearMergeQuarantineReporting`'s plain still-blocked branch now keeps that upstream reason
-   instead of recomputing "relocated" text. **The deletion itself (a residue other pending claimants still reference
-   is unlinked, so their quarantine is lost at reboot) is a STATE problem filed as its own card, not changed here.**
+2. **Shared corrupt tmp / safety-tmp residue.** The same clear's tmp sweep used to UNLINK the residue, so a
+   fresh boot armed nobody while the result said `latchKept` / "stays on disk". 7d767b90 first reworded that
+   disclosure (`refsWhoseLatchFilesWereRemoved` / `sharedResidueRemovedReasonFor`); card `c4f0d786` then fixed the
+   STATE: the sweep keeps a residue a surviving pending entry names as its `sourceFile` (see
+   `docs/decisions/c4f0d786-pending-sourceFile-keeps-a-shared-tmp-residue.md`), so the residue stays, a fresh boot
+   re-arms every claimant, and the removed-residue wording is unreachable and was deleted. `clearMergeQuarantineReporting`'s
+   plain still-blocked branch still keeps an upstream reason instead of recomputing "relocated" text.
 
 Test: `merge-quarantine-7d767b90-pending-clear-kept-latch-disclosure.mjs` (each shape x 2/3 claimants x the three
 by-path routes, each claim checked against what a fresh boot arms). `merge-quarantine-c755eac8-...` `[parity]`
-checks were updated deliberately: the pending-branch clear no longer reports `latchKept` for a residue it removed.
+checks were updated deliberately (twice: by 7d767b90, then back by c4f0d786 once the residue is kept, so the pending
+branch reports `latchKept` for it exactly like the graduated branch).
 
 ## Do not (7d767b90)
 
-- Do not claim `latchKept` / "stays on disk" / "WILL RE-DIVERT" for a file the SAME clear removed. Decide from the
-  actual disk outcome, never from the shape of the residue.
+- Do not claim `latchKept` / "stays on disk" / "WILL RE-DIVERT" for a file a clear actually removed. Decide from the
+  actual disk outcome, never from the shape of the residue. (Since c4f0d786 a clear keeps a residue any surviving
+  pending entry names, so the removed-residue wording was deleted as unreachable; a clear still removes a residue
+  nothing names, e.g. the last claimant's.)
 - Do not use `keptOnlyReasonFor`'s "will NOT itself re-divert" when any kept ref fans out from a still-present
   shared corrupt latch; the cleared claimant re-arms with it.
-- Do not "fix" the disclosure by changing what the clear deletes or lifts; that is the separate state card.
+- Do not "fix" a disclosure by changing what the clear deletes or lifts; state changes are their own card (c4f0d786).
 
 ## Verification
 

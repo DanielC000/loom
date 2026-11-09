@@ -3,9 +3,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Disclosure only: nothing lifted, deleted or re-armed may differ from what the clear did before this card.
 //   A. a shared corrupt `<hash>.json` (all claimants still pending): the cleared claimant re-arms on the next
 //      boot too, so the reason must NOT say it "will NOT itself re-divert" (it MAY RE-DIVERT, with the siblings)
-//   B. a shared corrupt tmp / safety-tmp residue that the SAME clear unlinks: the result must NOT claim
-//      latchKept / "stays on disk" / "WILL RE-DIVERT"; it says the residue was removed and the siblings are
-//      blocked IN THIS PROCESS ONLY (a restart arms nobody)
+//   B. a shared corrupt tmp / safety-tmp residue: since c4f0d786 the pending clear KEEPS it (siblings name it as
+//      their sourceFile), so it is the same kept-latch disclosure as A and a restart re-arms every claimant
+//      (7d767b90's interim "removed / IN THIS PROCESS ONLY" wording is unreachable and was removed)
 //   C. (control) a non-shared kept referencer keeps the pending text unchanged
 // Each truth claim is checked against what a FRESH boot actually arms.
 //
@@ -69,8 +69,8 @@ try {
   // pending entry per file; the clear unlinks the residue only, the json survives and re-arms everybody.
   const SHAPES = [
     ["json", (h) => [`${h}.json`], true],
-    ["tmp", (h) => [`${h}.json.tmp-4242-ab12`], false],
-    ["safety-tmp", (h) => [`${h}.json.tmp-safety-4242-ab12cd34`], false],
+    ["tmp", (h) => [`${h}.json.tmp-4242-ab12`], true],
+    ["safety-tmp", (h) => [`${h}.json.tmp-safety-4242-ab12cd34`], true],
     ["json+tmp", (h) => [`${h}.json`, `${h}.json.tmp-4242-ab12`], true],
     ["json+safety-tmp", (h) => [`${h}.json`, `${h}.json.tmp-safety-4242-ab12cd34`], true],
   ];
@@ -93,19 +93,16 @@ try {
         // STATE line: identical before/after this card (the card changes the disclosure only).
         console.log(`STATE ${label} lifted=${(res.liftedRepoPaths ?? []).map(base).sort()} filesBefore=${filesBefore} filesAfter=${filesAfter} dir=${dirNames()} armedNextBoot=${armedAfter}`);
         check(`${label} (precondition) the shared file existed and w1 was lifted`, filesBefore === fileNames(hashOf(y)).length && (res.liftedRepoPaths ?? []).includes(w1));
-        check(`${label} (disk truth) the shared file ${fileSurvives ? "survives" : "was unlinked by this same clear"}`, filesAfter === (fileSurvives ? 1 : 0));
+        check(`${label} (disk truth) every shared file survives this clear (c4f0d786: a sibling still names each one)`, filesAfter === fileNames(hashOf(y)).length);
         check(`${label} (reason is never the old unconditional text) no "will NOT itself re-divert"`, reason.length > 0 && !/will NOT itself re-divert/.test(reason));
         if (fileSurvives) {
           check(`${label} *** 7d767b90 *** a fresh boot re-arms w1 AND every sibling (what the text must be true against)`, JSON.stringify(armedAfter) === JSON.stringify(paths.map(base).sort()));
           check(`${label} *** 7d767b90 *** latchKept:true naming every sibling`, res.latchKept === true && siblings.every((s) => (res.referencingRepoPaths ?? []).includes(s)));
           check(`${label} *** 7d767b90 *** says the claimant MAY RE-DIVERT and names the 24-hex latch-id clear`, /MAY RE-DIVERT/.test(reason) && /24-hex/.test(reason));
-        } else {
-          check(`${label} *** 7d767b90 *** a fresh boot re-arms NOBODY (what the text must be true against)`, armedAfter.length === 0);
-          check(`${label} *** 7d767b90 *** no latchKept and no referencingRepoPaths for a file this clear removed`, res.latchKept !== true && (res.referencingRepoPaths ?? []).length === 0);
-          check(`${label} *** 7d767b90 *** never says "stays on disk" / "WILL RE-DIVERT" / names a 24-hex latch-id clear`, !/stays on disk/.test(reason) && !/WILL RE-DIVERT/.test(reason) && !/MAY RE-DIVERT/.test(reason) && !/24-hex/.test(reason));
-          check(`${label} *** 7d767b90 *** says it was removed, blocked IN THIS PROCESS ONLY, will NOT re-arm, and names every sibling`, /removed from disk/.test(reason) && /IN THIS PROCESS ONLY/.test(reason) && /will NOT re-arm/.test(reason) && siblings.every((s) => reason.includes(s)));
-          check(`${label} (unchanged) the siblings are still blocked in this process and not reported as lifted`, siblings.every((s) => !!mq.activeMergeQuarantineFor(s) && !(res.liftedRepoPaths ?? []).includes(s)));
         }
+        // c4f0d786: no shape removes a file a sibling still names, so the "removed from disk / IN THIS PROCESS ONLY" wording is gone.
+        check(`${label} *** c4f0d786 *** never claims a removal / "IN THIS PROCESS ONLY" / "will NOT re-arm"`, !/removed from disk/.test(reason) && !/IN THIS PROCESS ONLY/.test(reason) && !/will NOT re-arm/.test(reason));
+        check(`${label} (unchanged) the siblings are still blocked in this process and not reported as lifted`, siblings.every((s) => !!mq.activeMergeQuarantineFor(s) && !(res.liftedRepoPaths ?? []).includes(s)));
       }
     }
   }

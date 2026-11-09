@@ -145,8 +145,8 @@ try {
       const pend = mqP.clearMergeQuarantine(p1); // both claimants still PENDING: the pending-clear branch
       const names = (r, other) => r.latchKept === true && (r.referencingRepoPaths ?? []).includes(other);
       console.log(`INFO  [parity ${kind}] graduated refs=${(grad.referencingRepoPaths ?? []).map((p) => path.basename(p))} pending refs=${(pend.referencingRepoPaths ?? []).map((p) => path.basename(p))}`);
-      // 7d767b90 (deliberate update): the PENDING-branch clear unlinks the shared residue itself, so it no longer reports latchKept for w2 — it says the residue was removed and still names w2 in the reason.
-      check(`[parity ${kind}] the pending-branch clear of w1 does NOT claim a kept latch (it removed the residue) but still names w2 in its reason`, pend.latchKept !== true && (pend.referencingRepoPaths ?? []).length === 0 && /removed from disk/.test(pend.reason ?? "") && (pend.reason ?? "").includes(p2));
+      // c4f0d786 (deliberate update, reverses 7d767b90's interim wording): the PENDING-branch clear no longer unlinks the shared residue (w2 still names it as its sourceFile), so it reports it kept, exactly like the graduated branch.
+      check(`[parity ${kind}] the pending-branch clear of w1 reports the residue KEPT and names w2 (same as the graduated branch)`, names(pend, p2) && (pend.referencingRepoPaths ?? []).length === 1 && !/removed from disk/.test(pend.reason ?? "") && (pend.reason ?? "").includes(p2));
       check(`[parity ${kind}] the graduated-branch clear of w1 (residue survives there) names w2 as kept`, names(grad, g2) && (grad.referencingRepoPaths ?? []).length === 1);
     }
   }
