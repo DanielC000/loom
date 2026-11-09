@@ -1,9 +1,14 @@
 # 1ae4f88c — the card-drawer's context section: placement and the no-placeholder choice
 
 The UI half of the owner-directed board-hierarchy phase 1 (data/REST half is card `3df86c87`). The card
-drawer's parent/children/relations section sits directly under the dossier header and above the
-two-column edit body — it answers "what is this card connected to" in the same register as the header's
-own id/priority/lane chips, not as another editable field.
+drawer's context section (children, plus the relation kinds the card cannot write about itself) answers
+"what is this card connected to".
+
+**Placement, superseded by card `92259dac` (Atlas audit I-01):** it first sat directly under the dossier
+header, above the edit body. Once the parent and the four writable relation kinds moved into the
+Relations editor (cards `03d9db6e`, `6ed6d8b2`), that left an epic's Children list ABOVE its Title. It now
+sits inside the edit column straight after the Relations editor, so the dialog reads Title, Priority,
+then the card graph (parent, relations, children, and the "+ Add child card" control).
 
 ## Do not
 

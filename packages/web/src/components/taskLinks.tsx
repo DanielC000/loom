@@ -73,9 +73,9 @@ export function BoardCardHierarchy({ h, parentTitle }: { h: BoardHierarchy; pare
 }
 
 // ── Drawer: the full links block ─────────────────────────────────────────────────────────────────
-// Sits under the dossier header, above the edit/requests body, because it's card CONTEXT ("what is this
-// connected to") in the same register as the header's id/priority/lane chips — not another editable
-// field. Renders nothing when the card has no links, so an ordinary card's drawer is unchanged.
+// Card CONTEXT ("what is this connected to"), not another editable field. Sits right after the dialog's
+// Relations editor (card 92259dac moved it down from under the header, so an epic reads Title first).
+// Renders nothing when the card has no links, so an ordinary card's drawer is unchanged.
 const RELATION_LABEL: Record<RelationKind, string> = {
   blockedBy: "Blocked by",
   blocks: "Blocking",

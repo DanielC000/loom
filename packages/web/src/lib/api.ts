@@ -666,7 +666,9 @@ export const api = {
   // `repoKey` (multi-repo epic 49136451) routes the card at a NON-primary registered repo; omitted /
   // null = the project's primary repo. postErr so the server's `resolveRepoKeyOrError` 400 (which names
   // the registered keys) surfaces verbatim instead of a bare `-> 400`.
-  createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string; priority?: Task["priority"]; repoKey?: string | null }) =>
+  // `parentId` (card 92259dac) files the new card as a child; the route plans it through the same
+  // structure validator as an edit, so a depth or cross-board refusal comes back as the 400 text.
+  createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string; priority?: Task["priority"]; repoKey?: string | null; parentId?: string }) =>
     postErr<Task>(`/api/projects/${projectId}/tasks`, b),
   sessions: (agentId: string, signal?: AbortSignal) => get<Session[]>(`/api/agents/${agentId}/sessions`, signal),
   // role omitted/undefined = auto (the agent's profile role applies, server-side); "manager"/"platform"

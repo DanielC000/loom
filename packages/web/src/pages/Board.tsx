@@ -202,6 +202,19 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
     onError: () => { /* surfaced inline by NewTask via create.error */ },
   });
+  // "+ Add child card" from the card dialog (card 92259dac, audit G-03). Lands in the inbox like a
+  // quick-added card, with `parentId` set. Refetches the PARENT's detail too, since that read is what
+  // carries its Children list.
+  const addChild = useMutation({
+    meta: { inlineError: true },
+    mutationFn: ({ parentId, title }: { parentId: string; title: string }) =>
+      api.createTask(projectId, { title, columnKey: "inbox", parentId }),
+    onSuccess: (_r, { parentId }) => {
+      qc.invalidateQueries({ queryKey: ["board", projectId] });
+      qc.invalidateQueries({ queryKey: ["task", parentId] });
+    },
+    onError: () => { /* surfaced inline by AddChildCard */ },
+  });
   // Edit a task's title/description/priority/held/deferred from the detail drawer (same store the MCP tools read/write).
   // `baseVersion` (card 0b36702e) rides along on a content (title/body) save — the drawer sends the
   // version it LOADED, so a stale save (an agent wrote the body while the drawer was open) 409s instead
@@ -797,6 +810,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           onDismissConflict={() => edit.reset()}
           onMoveLane={(columnKey) => move.mutate({ id: openTask.id, columnKey })}
           moving={move.isPending && move.variables?.id === openTask.id}
+          onAddChild={(title) => addChild.mutateAsync({ parentId: openTask.id, title })}
           onDelete={() => del.mutate(openTask.id)} deleting={del.isPending}
           deleteError={del.error ? errorText(del.error) : null} />
       )}
@@ -1706,7 +1720,7 @@ function shipVerificationStyle(verification: Task["mergedVerification"]): { colo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, cards, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError, onMoveLane, moving }:
+function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, cards, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onAddChild, onDelete, deleting, deleteError, onMoveLane, moving }:
   { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string;
     /** The session working this card, if any — the same `workerByTask` pick the board card shows. */
     worker?: SessionListItem;
@@ -1719,6 +1733,8 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
     /** Every card on the loaded board, for the relation picker (card 03d9db6e). */
     cards: PickerCard[]; onOpenTask: (id: string) => void;
     onClose: () => void; onSave: (patch: TaskEditPatch) => void; saving: boolean; saveError: TaskUpdateConflictError | null; onDismissConflict: () => void;
+    /** Create a child of this card NOW (card 92259dac). Immediate, like a lane move: not part of the staged Save. */
+    onAddChild: (title: string) => Promise<unknown>;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body ?? "");
@@ -1917,6 +1933,9 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
     try { const v = localStorage.getItem(RAIL_KEY); return v === null ? null : v === "1"; } catch { return null; }
   });
   const railCollapsed = collapsedPref ?? !hasRequests;
+  // Below 600px a side rail leaves the form ~250px and slices its text (audit B-15), so the requests
+  // become a disclosure row above Description instead. Same collapsed preference drives both shapes.
+  const narrow = useNarrowViewport(600);
   const toggleRail = () => {
     const next = !railCollapsed;
     setCollapsedPref(next);
@@ -1933,11 +1952,15 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
           // Grow toward the viewport height on a large window (the flex:1 description below absorbs the
           // extra room and scrolls internally): floor at min(820px, 85vh) — 820px mirrors the width cap
           // and bounds the height on a huge monitor — and cap at 88vh (with the overlay's 6vh top/bottom
-          // padding that's an exact fit). On a short viewport the 85vh floor collapses below the 88vh cap
-          // and the panel itself scrolls (overflowY) instead of overflowing. Sibling to the width cap.
-          minHeight: "min(820px, 85vh)", maxHeight: "88vh", overflowY: "auto",
+          // padding that's an exact fit). Sibling to the width cap.
+          //
+          // Three bands (card 92259dac, audit B-08): a pinned head (header + discard prompt), ONE scroll
+          // region, and a pinned footer. The panel used to scroll as a whole, so on any card taller than
+          // the window Save/Reset/Delete sat below the fold and a staged edit had no visible state.
+          minHeight: "min(820px, 85vh)", maxHeight: "88vh", overflow: "hidden",
           background: color.surface, border: `1px solid ${color.line}`, boxShadow: shadow.pop,
-          borderRadius: radius.lg, padding: 16, display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
+          borderRadius: radius.lg, display: "flex", flexDirection: "column", boxSizing: "border-box" }}>
+        <div style={{ flexShrink: 0, padding: "16px 16px 0", display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Dossier header: TASK · id · priority · lane · close. The priority chip reflects the LIVE
             edited priority (updates as you pick below); the lane chip is tinted by the column's role. */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -1976,38 +1999,21 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
             <Button onClick={() => setPendingNav(null)}>Cancel</Button>
           </div>
         )}
+        </div>
+        <div data-testid="task-dialog-scroll" style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto",
+          padding: "10px 16px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Card → worker → review (card fa4234ab): who is on this card and the two hops out of it. Only a
             card some session holds renders anything, so an unworked card's dialog is unchanged. */}
         {worker && <CardWorkerRow worker={worker} status={workerStatus(worker, decisions.has(worker.id))}
           onNavigate={requestRoute} />}
-        {/* Card-context section: the children, and the relations this card cannot write about itself.
-            The four WRITABLE kinds moved to the Relations editor below when it shipped (card 03d9db6e),
-            and the parent followed (card 6ed6d8b2) — see hasTaskContextLinks for why the gate had to
-            move with them both times.
-
-            @decision 1ae4f88c — sits directly under the dossier header, above the edit body, and
-            reserves no loading placeholder: that would flash an empty panel on every drawer open for
-            the common case of a card with no links.
-
-            @decision 230cb6e3 — a failed links read must say so rather than render silently; otherwise
-            it's indistinguishable from a card that genuinely has no connections (a false zero). */}
-        {linksUnavailable && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, color: color.text3,
-            fontSize: fs.sm }}>
-            <Dot tone="attn" />
-            <span>links unavailable — couldn’t read this card’s connections (retrying…)</span>
-          </div>
-        )}
-        {hasTaskContextLinks(links) && (
-          <TaskLinksBlock links={links} columns={columns} titleById={titleById} onOpenTask={requestOpen} />
-        )}
         {/* Card policies (card 61d32daf): same register as the links block, and the same two rules — nothing
             renders when no policy applies, and a failed read says so rather than reading as "no policy". */}
         <CardPolicyBlock taskId={task.id} projectId={task.projectId} />
         {/* Dossier body: LEFT = task editing, RIGHT = connected-requests rail. When the rail is collapsed
             the left column expands to full width (single-column); flexWrap lets the two stack on a narrow
-            panel. flex:1 so the body fills the panel down to its min-height. */}
-        <div style={{ display: "flex", gap: 14, flex: 1, minHeight: 0, alignItems: "stretch",
+            panel. Grows to fill the panel down to its min-height, but never SHRINKS below its content:
+            inside the scroll region a shrinking row lets the form overflow it, and the rail stops short. */}
+        <div style={{ display: "flex", gap: 14, flex: "1 0 auto", alignItems: "stretch",
           flexWrap: railCollapsed ? "nowrap" : "wrap" }}>
           <div data-testid="task-edit-column" style={{ flex: railCollapsed ? "1 1 auto" : "2 1 360px", minWidth: 0, display: "flex",
             flexDirection: "column", gap: 10, minHeight: 0 }}>
@@ -2043,6 +2049,16 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
             same board only · staged until you save
           </span>
         </div>
+        {/* @decision 230cb6e3 — a failed links read must say so rather than render silently; otherwise
+            it's indistinguishable from a card that genuinely has no connections (a false zero). Sits at
+            the head of Relations because the parent, the editor and Children all read that same links. */}
+        {linksUnavailable && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, color: color.text3,
+            fontSize: fs.sm }}>
+            <Dot tone="attn" />
+            <span>links unavailable — couldn’t read this card’s connections (retrying…)</span>
+          </div>
+        )}
         {/* Parent — a card id or any unambiguous PREFIX, empty to clear. A plain field rather than a
             picker: this board runs to thousands of cards, so a <select>/datalist of every one is a DOM
             cost paid on every drawer open for a field most cards never set, and an 8-char prefix is
@@ -2142,6 +2158,17 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
           cards={cards} columns={columns} titleById={titleById}
           saveErrorMessage={saveError && !saveConflict ? saveError.message : null}
           onChange={setRelationDraft} onOpenTask={requestOpen} />
+        {/* Card-context block: the children, and the relations this card cannot write about itself (the
+            writable kinds and the parent live in the editor above — see hasTaskContextLinks for why the
+            gate moved with them).
+
+            @decision 1ae4f88c — reserves no loading placeholder: that would flash an empty panel on every
+            open for the common case of a card with no links. Placed after Relations since card 92259dac
+            (audit I-01), so the dialog reads Title, Priority, then the card graph. */}
+        {hasTaskContextLinks(links) && (
+          <TaskLinksBlock links={links} columns={columns} titleById={titleById} onOpenTask={requestOpen} />
+        )}
+        <AddChildCard onAdd={onAddChild} />
         {/* Target repo (multi-repo epic 49136451, phase 3). Rendered ONLY when the project has a
             registry — a single-repo project's drawer is byte-identical to before. Shows the RESOLVED
             absolute path of whatever is currently selected, which is the thing a human actually needs to
@@ -2208,46 +2235,30 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
         {/* Owner HOLD gate — the SOLE human brake (Board Hold Model): held=true means this card won't be
             worked (spawnWorker refuses to dispatch onto it) AND won't nag (excluded from the idle-watcher's
             actionable count) — in whatever column it sits. Distinct from priority/column — an owner-only
-            "don't touch this" signal. Persisted on the same task store the MCP tools read. */}
-        <span style={labelStyle}>Hold</span>
-        <button type="button" role="switch" aria-checked={held} aria-label="Held — won't be worked or nagged"
-          title={held
-            ? "Held — won't be worked or nagged. No worker will be dispatched onto this card and the idle watchdog won't nag about it. Click to release."
-            : "Not held — click to hold this card so it won't be worked or nagged."}
-          onClick={() => setHeld((h) => !h)}
-          style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", textAlign: "left",
-            padding: "6px 8px", borderRadius: radius.sm, background: color.inset,
-            border: `1px solid ${held ? color.lineStrong : color.line}` }}>
-          <span aria-hidden style={{ width: 30, height: 16, borderRadius: radius.pill, flexShrink: 0, position: "relative",
-            background: held ? color.text3 : color.line, transition: "background 0.12s" }}>
-            <span style={{ position: "absolute", top: 2, left: held ? 16 : 2, width: 12, height: 12, borderRadius: radius.pill,
-              background: color.bg, transition: "left 0.12s" }} />
-          </span>
-          <span style={{ fontSize: fs.sm, color: held ? color.text : color.text2 }}>
-            {held ? "⏸ Held — won't be worked or nagged" : "Not held"}
-          </span>
-        </button>
-        {/* Manager DEFERRED marker — orthogonal to Hold: a manager's own sequencing/dependency-gating
-            signal (won't nag the idle watchdog) that, UNLIKE Hold, never blocks worker_spawn. Distinct
-            cyan styling so it never reads as the owner's brake. */}
-        <span style={labelStyle}>Defer</span>
-        <button type="button" role="switch" aria-checked={deferred} aria-label="Deferred — sequencing marker, won't nag"
-          title={deferred
-            ? "Deferred — your own sequencing marker; won't nag the idle watchdog, but a worker can still be dispatched onto it. Click to un-defer."
-            : "Not deferred — click to defer this card as your own sequencing marker (not a brake)."}
-          onClick={() => setDeferred((d) => !d)}
-          style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", textAlign: "left",
-            padding: "6px 8px", borderRadius: radius.sm, background: color.inset,
-            border: `1px solid ${deferred ? color.lineStrong : color.line}` }}>
-          <span aria-hidden style={{ width: 30, height: 16, borderRadius: radius.pill, flexShrink: 0, position: "relative",
-            background: deferred ? color.text3 : color.line, transition: "background 0.12s" }}>
-            <span style={{ position: "absolute", top: 2, left: deferred ? 16 : 2, width: 12, height: 12, borderRadius: radius.pill,
-              background: color.bg, transition: "left 0.12s" }} />
-          </span>
-          <span style={{ fontSize: fs.sm, color: deferred ? color.text : color.text2 }}>
-            {deferred ? "Deferred — sequencing marker, won't nag" : "Not deferred"}
-          </span>
-        </button>
+            "don't touch this" signal. Persisted on the same task store the MCP tools read.
+            The manager DEFERRED marker beside it is orthogonal: a manager's own sequencing signal (won't
+            nag the idle watchdog) that, UNLIKE Hold, never blocks worker_spawn.
+            One row of two switches since card 92259dac (audit I-02): the two boxed full-width rows cost
+            ~130px above the description for two booleans. The state text IS each switch's label. */}
+        <div role="group" aria-label="Card state" data-testid="task-state-toggles"
+          style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <StateSwitch on={held} onToggle={() => setHeld((h) => !h)}
+            ariaLabel="Held — won't be worked or nagged"
+            title={held
+              ? "Held — won't be worked or nagged. No worker will be dispatched onto this card and the idle watchdog won't nag about it. Click to release."
+              : "Not held — click to hold this card so it won't be worked or nagged."}
+            label={held ? "⏸ Held — won't be worked or nagged" : "Not held"} />
+          <StateSwitch on={deferred} onToggle={() => setDeferred((d) => !d)}
+            ariaLabel="Deferred — sequencing marker, won't nag"
+            title={deferred
+              ? "Deferred — your own sequencing marker; won't nag the idle watchdog, but a worker can still be dispatched onto it. Click to un-defer."
+              : "Not deferred — click to defer this card as your own sequencing marker (not a brake)."}
+            label={deferred ? "Deferred — sequencing marker, won't nag" : "Not deferred"} />
+        </div>
+        {/* Narrow viewport: the connected requests as a disclosure row here instead of a side rail. */}
+        {narrow && (railCollapsed
+          ? <RequestsDisclosureRow count={linked.length} onExpand={toggleRail} />
+          : <ConnectedRequestsRail linked={linked} onCollapse={toggleRail} inline />)}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ ...labelStyle, flex: 1 }}>Description</span>
           <DescriptionMic speech={speech} dictating={dictating} onStart={startDictation} />
@@ -2260,7 +2271,21 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
             background: color.inset, color: color.text, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: 8,
           }} />
         {speech.supported && <DescriptionVoiceNote speech={speech} />}
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          </div>
+          {/* RIGHT rail — the card's connected requests (card 8c1f27f0). Collapsed → a slim, clickable
+              strip so the left editing column takes the full width; expanded → the full dossier rail.
+              Wide viewports only: below 600px the same requests render inline above Description. */}
+          {!narrow && (railCollapsed
+            ? <CollapsedRequestsStrip count={linked.length} onExpand={toggleRail} />
+            : <ConnectedRequestsRail linked={linked} onCollapse={toggleRail} />)}
+        </div>
+        </div>
+        {/* Pinned footer (card 92259dac, audit B-08): Save, Reset, the unsaved/saved state and Delete stay
+            in view however long the card is. Errors and the conflict prompt wrap onto their own row
+            (`order: 1`) so they never push Delete off its right edge. */}
+        <div data-testid="task-dialog-footer" style={{ flexShrink: 0, display: "flex", alignItems: "center",
+          flexWrap: "wrap", gap: 8, padding: "10px 16px", borderTop: `1px solid ${color.line}`,
+          background: color.surface }}>
           {/* `repoKey` rides along ONLY when it actually changed. Both write paths validate an explicit
               repoKey against the CURRENT registry BEFORE their no-op exemption applies, so sending it
               unconditionally made a card whose key was later de-registered un-saveable for EVERY field —
@@ -2292,12 +2317,18 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
           {dirty
             ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); setParentDraft(null); setParentEditing(false); setRelationDraft(null); }}>Reset</Button>
             : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
+          {dirty && (
+            <span data-testid="task-dialog-unsaved" aria-live="polite"
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, color: color.attnText, fontSize: fs.sm }}>
+              <Dot tone="attn" />Unsaved changes
+            </span>
+          )}
           {/* The catch-all failure line. A refusal the Relations section has already placed at the row
               (or section) it names is suppressed HERE rather than printed twice — one message, shown at
               the control the human has to go fix. `relationErrorTarget` returning null (anything it does
               not recognise) falls through to this line, so nothing is ever swallowed. */}
           {saveError && !saveConflict && !relationErr && (
-            <span role="alert" style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError.message}</span>
+            <span role="alert" style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.4, flex: "1 1 100%", order: 1 }}>{saveError.message}</span>
           )}
           {/* Card 0b36702e's "detect-and-warn" remedy: a stale save doesn't clobber — it surfaces the fresh
               server row and lets the human choose. Reload adopts the fresh row (discarding local edits) and
@@ -2305,8 +2336,8 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
               WITHOUT baseVersion, the human's explicit override (same blind write the route always did
               before this card — see api.updateTask's own doc for why omitting it means "write blind"). */}
           {saveConflict && (
-            <div role="alert" style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 100%",
-              padding: "6px 8px", borderRadius: radius.sm, background: color.inset, border: `1px solid ${color.attn}` }}>
+            <div role="alert" style={{ display: "flex", alignItems: "center", gap: 6, flex: "1 1 100%", order: 1,
+              flexWrap: "wrap", padding: "6px 8px", borderRadius: radius.sm, background: color.inset, border: `1px solid ${color.attn}` }}>
               <span style={{ flex: 1, color: color.attnText, fontSize: fs.sm }}>
                 This card changed while you had it open — reload to see the latest, or overwrite anyway.
               </span>
@@ -2338,17 +2369,95 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
               <Button variant="danger" onClick={() => setConfirmingDelete(true)}>Delete</Button>
             )}
           </div>
-        </div>
-        {/* The server's live-session guard (or any failure) surfaces here rather than silently closing. */}
-        {deleteError && <span style={{ color: color.danger, fontSize: fs.sm }}>{deleteError}</span>}
-          </div>
-          {/* RIGHT rail — the card's connected requests (card 8c1f27f0). Collapsed → a slim, clickable
-              strip so the left editing column takes the full width; expanded → the full dossier rail. */}
-          {railCollapsed
-            ? <CollapsedRequestsStrip count={linked.length} onExpand={toggleRail} />
-            : <ConnectedRequestsRail linked={linked} onCollapse={toggleRail} />}
+          {/* The server's live-session guard (or any failure) surfaces here rather than silently closing. */}
+          {deleteError && <span role="alert" style={{ color: color.danger, fontSize: fs.sm, flex: "1 1 100%", order: 1 }}>{deleteError}</span>}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Below `px` wide? Live, via matchMedia, so a rotate or resize re-lays the dialog without a reopen.
+function useNarrowViewport(px: number): boolean {
+  const query = `(max-width: ${px - 1}px)`;
+  const read = () => typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(query).matches;
+  const [narrow, setNarrow] = useState<boolean>(read);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(query);
+    const on = () => setNarrow(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, [query]);
+  return narrow;
+}
+
+// One of the dialog's two state switches (Hold, Defer). Sized to its label, so the pair shares a row.
+function StateSwitch({ on, onToggle, ariaLabel, title, label }:
+  { on: boolean; onToggle: () => void; ariaLabel: string; title: string; label: string }) {
+  return (
+    <button type="button" role="switch" aria-checked={on} aria-label={ariaLabel} title={title} onClick={onToggle}
+      className="loom-toggle"
+      style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", textAlign: "left",
+        minHeight: 32, padding: "5px 10px 5px 8px", borderRadius: radius.sm, background: color.inset,
+        border: `1px solid ${on ? color.lineStrong : color.line}`, color: on ? color.text : color.text2 }}>
+      <span aria-hidden style={{ width: 30, height: 16, borderRadius: radius.pill, flexShrink: 0, position: "relative",
+        background: on ? color.text3 : color.line, transition: "background 0.12s" }}>
+        <span style={{ position: "absolute", top: 2, left: on ? 16 : 2, width: 12, height: 12, borderRadius: radius.pill,
+          background: color.bg, transition: "left 0.12s" }} />
+      </span>
+      <span style={{ fontSize: fs.sm }}>{label}</span>
+    </button>
+  );
+}
+
+// "+ Add child card" (card 92259dac, audit G-03). Creates the card at once with `parentId` set, rather
+// than staging it on Save: a new card is a create, like a lane move, not an edit of this one. The field
+// stays open after an add so an epic can be decomposed in one sitting.
+function AddChildCard({ onAdd }: { onAdd: (title: string) => Promise<unknown> }) {
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [added, setAdded] = useState<string | null>(null);
+  const close = () => { setOpen(false); setTitle(""); setError(null); };
+  const submit = async () => {
+    const t = title.trim();
+    if (!t || busy) return;
+    setBusy(true); setError(null);
+    try { await onAdd(t); setTitle(""); setAdded(t); }
+    catch (e) { setError(errorText(e)); }
+    finally { setBusy(false); }
+  };
+  if (!open) {
+    return (
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
+        <Button variant="ghost" data-testid="add-child-open" style={{ fontSize: fs.sm, padding: "2px 6px", marginLeft: -6 }}
+          onClick={() => { setOpen(true); setAdded(null); }}>+ Add child card</Button>
+      </div>
+    );
+  }
+  return (
+    <div data-testid="add-child" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <Input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus disabled={busy}
+          aria-label="New child card title" placeholder="Child card title"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); void submit(); }
+            // Close only this field, never the dialog: the dialog's Esc listener is a native `window`
+            // handler, which React's synthetic stopPropagation does not reach.
+            if (e.key === "Escape") { e.nativeEvent.stopPropagation(); close(); }
+          }}
+          style={{ flex: "1 1 220px", minWidth: 0 }} />
+        <Button variant="primary" disabled={!title.trim() || busy} onClick={() => void submit()}>
+          {busy ? "Adding…" : "Add child"}</Button>
+        <Button variant="ghost" style={{ fontSize: fs.sm }} onClick={close}>cancel</Button>
+      </div>
+      <span aria-live="polite" style={{ fontSize: fs.sm, lineHeight: 1.4,
+        color: error ? color.danger : color.text3 }}>
+        {error ?? (added ? `Added "${added}" to Inbox` : "Lands in Inbox as a child of this card")}
+      </span>
     </div>
   );
 }
@@ -2358,7 +2467,10 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
 // signal row per connected request — the same visual language as the Requests inbox (components/
 // requests.tsx): a 3px left edge signed by the type's color, a bordered type tag + lifecycle state
 // chip, the title, and the asking-agent/time meta. Each row inline-expands to its recorded answer.
-function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxItem[]; onCollapse: () => void }) {
+function ConnectedRequestsRail({ linked, onCollapse, inline = false }:
+  { linked: QuestionInboxItem[]; onCollapse: () => void;
+    /** Narrow viewport: rendered full-width in the form, not beside it, so it collapses UP (▾), not right. */
+    inline?: boolean }) {
   const now = Date.now();
   const pending = linked.filter((q) => q.state === "pending").length;
   const answered = linked.filter((q) => q.state === "answered").length;
@@ -2370,7 +2482,8 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
   const notices = linked.filter((q) => q.state === "notice").length;
   return (
     <div data-testid="task-requests-rail"
-      style={{ flex: "1 1 280px", minWidth: 240, maxWidth: "100%", display: "flex", flexDirection: "column",
+      style={{ ...(inline ? { flexShrink: 0, maxHeight: 320 } : { flex: "1 1 280px", minWidth: 240 }),
+        maxWidth: "100%", display: "flex", flexDirection: "column",
         minHeight: 0, background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.base }}>
       {/* Header (pinned) — title + count + collapse control. */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 10px 8px", borderBottom: `1px solid ${color.line}` }}>
@@ -2382,7 +2495,7 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
         <button type="button" onClick={onCollapse} aria-expanded aria-label="Collapse connected requests"
           title="Collapse the requests rail" data-testid="task-requests-collapse" className="loom-toggle"
           style={{ background: "transparent", border: "none", cursor: "pointer", color: color.text2,
-            fontSize: fs.lg, lineHeight: 1, padding: "2px 4px", borderRadius: radius.sm }}>›</button>
+            fontSize: fs.lg, lineHeight: 1, padding: "2px 4px", borderRadius: radius.sm }}>{inline ? "▴" : "›"}</button>
       </div>
       {linked.length === 0 ? (
         // Empty state — reads as intentional, not broken. (A card with no requests defaults to collapsed,
@@ -2537,6 +2650,22 @@ function CollapsedRequestsStrip({ count, onExpand }: { count: number; onExpand: 
         Inbox
       </span>
       <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: count > 0 ? color.text2 : color.text3 }}>{count}</span>
+    </button>
+  );
+}
+
+// The narrow-viewport twin of CollapsedRequestsStrip (card 92259dac, audit B-15): one full-width
+// disclosure row above Description instead of a 36px rail that leaves the form too narrow to read.
+function RequestsDisclosureRow({ count, onExpand }: { count: number; onExpand: () => void }) {
+  return (
+    <button type="button" onClick={onExpand} aria-expanded={false} aria-label={`Expand connected requests (${count})`}
+      data-testid="task-requests-disclosure" className="loom-toggle"
+      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 36, padding: "6px 10px",
+        cursor: "pointer", textAlign: "left", background: color.inset, border: `1px solid ${color.line}`,
+        borderRadius: radius.base, color: color.text2 }}>
+      <span style={{ fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700 }}>Connected requests</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, fontWeight: 700, color: count > 0 ? color.text2 : color.text3 }}>{count}</span>
+      <span aria-hidden style={{ marginLeft: "auto", fontSize: fs.body, lineHeight: 1 }}>▾</span>
     </button>
   );
 }

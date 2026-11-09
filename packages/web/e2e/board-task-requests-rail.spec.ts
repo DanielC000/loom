@@ -78,10 +78,11 @@ test("the task modal renders the two-column dossier with a populated connected-r
   await expect(rail.getByText(seed.decTitle, { exact: true })).toBeVisible();
   await expect(rail.getByText(seed.credTitle, { exact: true })).toBeVisible();
   await expect(rail.getByText(seed.inpTitle, { exact: true })).toBeVisible();
-  // …and the LEFT editing column still carries the task-editing surface (Title/Priority + Save).
+  // …and the LEFT editing column still carries the task-editing surface (Title/Priority). Save lives in
+  // the dialog's pinned footer since card 92259dac, below both columns.
   const editCol = dialog.getByTestId("task-edit-column");
   await expect(editCol.getByText("Title", { exact: true })).toBeVisible();
-  await expect(editCol.getByRole("button", { name: "Save" })).toBeVisible();
+  await expect(dialog.getByTestId("task-dialog-footer").getByRole("button", { name: "Save" })).toBeVisible();
   await shoot(page, "dossier-two-column.png");
 });
 
