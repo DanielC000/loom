@@ -16,6 +16,7 @@ import {
 } from "../components/atlasHome";
 import { FleetControlsBar } from "../components/fleetControls";
 import { CompactMergeAction } from "../components/reviewQueue";
+import { mergeRequestCardTitle, mergeRequestRowText } from "../lib/cardWorker";
 import { RoleBadge } from "../lib/roleDisplay";
 import { sessionVitals, standingOperators } from "../lib/atlasAgents";
 import {
@@ -547,9 +548,34 @@ export function AttentionList({ items, cap, fitPanel }: {
 }) {
   const navigate = useNavigate();
   const openRequest = useOpenRequest();
+  // A MERGE REQUEST names its CARD (card fa4234ab, Atlas audit B finding G-01): "w:<id> task <id>" alone
+  // made the reader go and look the work up. Resolved worker → taskId → title off reads both node levels
+  // already make — the shared session feed and the per-project ["board", id] roll-up, same key and
+  // staleTime as both pages' own board reads, so on either page this is a warm cache hit, not a new
+  // fetch. Only projects that actually hold a pending merge request are read at all.
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
+  const mergeProjectIds = [...new Set(items.flatMap((item) => {
+    if (item.kind !== "MERGE REQUEST" || !item.workerSessionId) return [];
+    const pid = sessionsQ.data?.find((s) => s.id === item.workerSessionId)?.projectId;
+    return pid ? [pid] : [];
+  }))];
+  const mergeBoardQs = useQueries({
+    queries: mergeProjectIds.map((pid) => ({
+      queryKey: ["board", pid], queryFn: ({ signal }: { signal: AbortSignal }) => api.board(pid, undefined, signal), staleTime: 30_000,
+    })),
+  });
+  const titleById = new Map<string, string>();
+  for (const q of mergeBoardQs) for (const t of q.data?.tasks ?? []) titleById.set(t.id, t.title);
   const listRef = useRef<HTMLDivElement>(null);
-  const capped = items.slice(0, cap);
-  const { n: fitted, measuring } = useFitRows(listRef, !!fitPanel && items.length > 0, capped.map((i) => i.key).join("|"), items.length);
+  const capped = items.slice(0, cap).map((item) => {
+    if (item.kind !== "MERGE REQUEST" || !item.workerSessionId) return item;
+    const title = mergeRequestCardTitle(item.workerSessionId, sessionsQ.data, titleById);
+    // Unknown title (board still loading, card gone) keeps the row's own text rather than a blank.
+    return title ? { ...item, text: mergeRequestRowText(title, item.workerSessionId) } : item;
+  });
+  // The resolved title rides in `rowsKey` too: a title arriving after first paint changes a merge row's
+  // text (and so possibly its height), so the fit must re-measure rather than keep a stale count.
+  const { n: fitted, measuring } = useFitRows(listRef, !!fitPanel && items.length > 0, capped.map((i) => `${i.key}:${i.text}`).join("|"), items.length);
   if (items.length === 0) return <BandEmpty>Nothing needs you right now.</BandEmpty>;
   const shown = fitPanel && !measuring ? capped.slice(0, fitted ?? capped.length) : capped;
   const hidden = items.length - shown.length;

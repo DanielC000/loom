@@ -738,6 +738,26 @@ body {
   border-radius: 3px;
 }
 
+/* Board card worker pill as a link to its session (pages/Board.tsx `Card`, card fa4234ab). The pill keeps
+   its own capsule and EXACT width (a lane is ~240px, and any extra glyph wraps the branch chip and grows
+   the card), so the link cue is hover-only: the label underlines and the capsule lifts. A lane full of
+   worker cards therefore never reads as a column of bright links. */
+.loom-card-worker {
+  display: inline-flex;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 999px;
+}
+.loom-card-worker:hover > span {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  filter: brightness(1.15);
+}
+.loom-card-worker:focus-visible {
+  outline: 2px solid var(--loom-ring);
+  outline-offset: 1px;
+}
+
 /* Attachment-manifest row (the Requests inbox's attached-files list, card 19b7cf7a): one dense `ls`-like
    row per file. Reads as plain text at rest and lifts to panel-2 on hover, so a whole manifest of 20 rows
    isn't pre-highlighted — the SELECTED row's own phosphor left edge (inline, since it is state, not

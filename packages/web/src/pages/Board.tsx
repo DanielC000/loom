@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, DragOverlay, useDraggable, useDroppable, type DragEndEvent, type DragOverEvent, type DragStartEvent, type Announcements } from "@dnd-kit/core";
 import { LaneMenu, boardCollision, laneDragId, movedKeys, useCollapsedLanes, type BoardDragData } from "../components/boardLanes";
@@ -18,6 +18,8 @@ import { DecisionStateChip } from "../components/decisions";
 import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
 import { usePendingDecisionsBySession } from "../lib/attention";
 import { WAITING_ON_YOU } from "../lib/fleet";
+import { workerSessionPath } from "../lib/cardWorker";
+import { CardWorkerRow } from "../components/cardWorker";
 import { color, columnTone, font, fs, radius, shadow, tone, toneFill, toneSoft, toneText, type Tone } from "../theme";
 // Board-hierarchy read model + presentation (card 1ae4f88c). The lib reads the daemon's hierarchy fields
 // structurally and defaults every one of them, so a response without them renders exactly as before.
@@ -785,6 +787,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
       )}
       {openTask && drawerTask && (
         <TaskDrawer key={drawerTask.id} task={drawerTask} column={openColumn} onClose={() => setOpenTaskId(null)}
+          worker={workerByTask.get(drawerTask.id)}
           repos={repos} primaryRepoPath={project?.repoPath ?? ""}
           trailersOff={commitTrailersOff(project?.config?.orchestration)}
           links={taskLinks(detail)} linksUnavailable={taskDetail.isError && !detail}
@@ -1461,11 +1464,14 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
         {/* A press with Ctrl/⌘ or Shift is a selection gesture (card 19074e42): its mousedown is suppressed
             so neither text selection nor the focus move happens before the board reads its anchor, and its
             click never opens the card. A plain press opens it exactly as before. */}
+        {/* The open target and the worker row are SIBLINGS in one column (card fa4234ab): the worker
+            pill is a real link to its session, and a link may not sit inside role=button. */}
+        <div style={{ flex: 1, minWidth: 0 }}>
         <div role="button" tabIndex={tabIndex} data-board-nav={task.id} className="loom-board-open"
           onMouseDown={(e) => { if (e.ctrlKey || e.metaKey || e.shiftKey) e.preventDefault(); }}
           onClick={(e) => { if (!nav?.press(task.id, e)) onOpen(); }}
           onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
-          title="Open task" style={{ flex: 1, cursor: "pointer", minWidth: 0 }}>
+          title="Open task" style={{ cursor: "pointer", minWidth: 0 }}>
           {/* flexWrap is the phone-density hinge: the priority chip + a held/deferred badge share this
               line with the title. On a TIGHT lane (phone ~200px / the 240px desktop floor) a chip + badge
               starve the title's slice, so the title's 120px flex-basis no longer fits beside them and
@@ -1547,19 +1553,32 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
           {hasBoardHierarchy(hier) && (
             <BoardCardHierarchy h={hier} parentTitle={hier.parentId ? titleById.get(hier.parentId) ?? null : null} />
           )}
+        </div>
           {worker && st && (
-            <div style={{ marginTop: 5, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+            // A press on the row's empty space still opens the card, exactly as it did when this row sat
+            // inside the open target; only the pill itself leaves for the session.
+            <div onClick={(e) => { if (!nav?.press(task.id, e)) onOpen(); }}
+              style={{ marginTop: 5, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", cursor: "pointer" }}>
               {/* While a merge gate is in flight the pill speaks the MERGE state (merging/merged/failed)
                   plus a live timer, and the branch chip yields to it — a merge pill + branch chip would
                   overflow a tight (~240px) lane and wrap, growing the card. Keeping the row to the single
                   merge pill holds the card at the SAME height as a plain worker card; the branch chip
                   returns the instant the op settles + evicts (pendingMerge → null). */}
-              {merge
-                ? <MergePill merge={merge} />
-                : <>
-                    <StatusPill tone={st.tone} label={st.label} glow={st.glow} solid={st.solid} />
-                    {worker.branch && <Chip label="branch" value={worker.branch} tone="muted" />}
-                  </>}
+              {/* The pill is the card's link to its worker session (card fa4234ab). It adds NO width: a
+                  trailing ↗ pushed the branch chip onto a second line in a 240px lane and grew the card
+                  (board-merge-meter.spec's footprint check caught it), so the link cue is hover-only.
+                  tabIndex -1 keeps the
+                  board's single roving Tab stop (card 591fe6ed), same as the drag grip: the keyboard way in
+                  is the dialog's Worker row. stopPropagation so the row's own open-the-card click doesn't
+                  also fire under the navigation. */}
+              <Link to={workerSessionPath(worker.id)} tabIndex={-1} className="loom-card-worker"
+                data-testid="card-worker-link" title={`Open ${worker.agentName}'s session`}
+                onClick={(e) => e.stopPropagation()}>
+                {merge
+                  ? <MergePill merge={merge} />
+                  : <StatusPill tone={st.tone} label={st.label} glow={st.glow} solid={st.solid} />}
+              </Link>
+              {!merge && worker.branch && <Chip label="branch" value={worker.branch} tone="muted" />}
             </div>
           )}
         </div>
@@ -1687,8 +1706,10 @@ function shipVerificationStyle(verification: Task["mergedVerification"]): { colo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, cards, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError, onMoveLane, moving }:
+function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, cards, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onDelete, deleting, deleteError, onMoveLane, moving }:
   { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string;
+    /** The session working this card, if any — the same `workerByTask` pick the board card shows. */
+    worker?: SessionListItem;
     /** Card 67c43038 — move this card to another lane NOW (the keyboard twin of dragging it). Not part of
      *  the staged Save: a lane move is the same immediate action the drag already is. */
     onMoveLane: (columnKey: string) => void; moving: boolean;
@@ -1807,10 +1828,21 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
   // immediately, zero extra friction. Two kinds of exit share one pending-nav state so the guard can't be
   // bypassed by the newer one: closing (backdrop / Esc / ✕ → `to: null`) and following a links-block
   // link to ANOTHER card (card 1ae4f88c → `to: <id>`), which unmounts this drawer just as thoroughly.
-  const [pendingNav, setPendingNav] = useState<{ to: string | null } | null>(null);
+  // A third kind (card fa4234ab): the Worker row's links leave the board for a route (`route`), which
+  // unmounts the whole board, drawer and edits with it.
+  const [pendingNav, setPendingNav] = useState<{ to: string | null; route?: string } | null>(null);
   const requestClose = () => { if (dirty) setPendingNav({ to: null }); else onClose(); };
   const panelRef = useDialogFocus<HTMLDivElement>();
   const requestOpen = (id: string) => { if (dirty) setPendingNav({ to: id }); else onOpenTask(id); };
+  const navigate = useNavigate();
+  const decisions = usePendingDecisionsBySession(); // the Worker row's pill, same reading as the card's
+  // The Worker row's links are real anchors (middle-click / new tab still work); only a plain click on a
+  // dirty card is held back for the discard confirm.
+  const requestRoute = (path: string, e: ReactMouseEvent) => {
+    if (!dirty || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    setPendingNav({ to: null, route: path });
+  };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { if (dirty) setPendingNav({ to: null }); else onClose(); } };
     window.addEventListener("keydown", onKey);
@@ -1932,14 +1964,22 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, trailersOff, links, 
           <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", borderRadius: radius.base,
             background: color.attnSoft }}>
             <span style={{ flex: 1, color: toneText.attn, fontSize: fs.sm, fontFamily: font.ui }}>
-              {pendingNav.to ? "Discard unsaved changes and open that card?" : "Discard unsaved changes?"}
+              {pendingNav.route ? "Discard unsaved changes and leave the board?"
+                : pendingNav.to ? "Discard unsaved changes and open that card?" : "Discard unsaved changes?"}
             </span>
-            <Button variant="danger" onClick={() => { const to = pendingNav.to; if (to) onOpenTask(to); else onClose(); }}>
-              {pendingNav.to ? "Discard and open" : "Discard"}
+            <Button variant="danger" onClick={() => {
+              const { to, route } = pendingNav;
+              if (route) navigate(route); else if (to) onOpenTask(to); else onClose();
+            }}>
+              {pendingNav.route ? "Discard and leave" : pendingNav.to ? "Discard and open" : "Discard"}
             </Button>
             <Button onClick={() => setPendingNav(null)}>Cancel</Button>
           </div>
         )}
+        {/* Card → worker → review (card fa4234ab): who is on this card and the two hops out of it. Only a
+            card some session holds renders anything, so an unworked card's dialog is unchanged. */}
+        {worker && <CardWorkerRow worker={worker} status={workerStatus(worker, decisions.has(worker.id))}
+          onNavigate={requestRoute} />}
         {/* Card-context section: the children, and the relations this card cannot write about itself.
             The four WRITABLE kinds moved to the Relations editor below when it shipped (card 03d9db6e),
             and the parent followed (card 6ed6d8b2) — see hasTaskContextLinks for why the gate had to
