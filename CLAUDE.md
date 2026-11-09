@@ -295,7 +295,7 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   terminal (the Overview / "cockpit" page, `App.tsx:99`) freezes its CDP renderer, so stick to LIGHT,
   non-terminal routes — `/settings` (`Sidebar.tsx:181,208-209`), `/skills` (`App.tsx:298`), `/platform`
   (`App.tsx:248,292`). The generic version of this constraint (prefer the headless Playwright path; if you
-  must use the real browser, pick a light page) lives in `orchestrate/SKILL.md` — this bullet is where its
+  must use the real browser, pick a light page) lives in `orchestrate/SKILL.md` (core) and `orchestrate/references/verification-discipline.md` — this bullet is where its
   Loom-specific route names live, since a shipped skill can't name them (they don't exist in an end user's
   own project).
 - **Opt-in document conversion (`documentConversion`):** a session whose resolved Profile sets
@@ -334,7 +334,7 @@ This list is **Loom-specific**. Every project keeps its OWN "Commit scopes" list
 decision-record / contract-docs / noise), the `@decision <id>` / `@decision sha:<8hex>` anchor grammar,
 the `docs/adr/` (immutable) vs `docs/decisions/` (mutable) split, and "one record file per id, always" —
 read them in `packages/daemon/assets/skills/worker/SKILL.md` ("Extracting a decision record") and
-`packages/daemon/assets/skills/orchestrate/SKILL.md` (the matching review-side bullet). Every Loom
+`packages/daemon/assets/skills/orchestrate/references/planning-and-kickoffs.md` (the matching review-side bullet; the orchestrate core points at it). Every Loom
 project gets that doctrine, not just this one; what follows here is Loom's OWN tooling on top of it —
 specific to this repo, not part of the generic rule.
 
