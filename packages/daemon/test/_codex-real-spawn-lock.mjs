@@ -253,6 +253,40 @@ export function detectCodexUsageLimit(text) {
   return { limited: true, detail: reset ? `resets ${reset[1].trim()}` : line.trim() };
 }
 
+// ---- Account/model-rejection classifier (card 24dea2d3) ---------------------------------------------------
+// WHY: a codex install can be logged in yet have the ACCOUNT reject the configured model (`{"type":"error",
+// "status":400,"error":{"type":"invalid_request_error","message":"The '<model>' model is not supported when
+// using Codex with a ChatGPT account.","code":"model_not_found"}}`). That is an environment precondition, not a
+// product failure, so the family SKIPs loudly (same channel as the usage-limit skip) rather than reddening the
+// gate. STRICT: only a PARSED structured vendor error counts — status 400/401/403 AND a code in
+// ACCOUNT_REJECTION_CODES. @decision 24dea2d3 — never widen to unstructured text or non-auth statuses. A timeout, empty/wrong reply, 429, 5xx, or any unstructured text never skips.
+const ACCOUNT_REJECTION_STATUSES = new Set([400, 401, 403]);
+const ACCOUNT_REJECTION_CODES = new Set([
+  "model_not_found", "unsupported_model", "model_not_supported", "not_logged_in", "invalid_api_key",
+  "token_expired", "account_deactivated", "account_not_supported",
+]);
+
+/** Pure: does codex output carry a structured vendor error rejecting the ACCOUNT/AUTH/MODEL?
+ *  Returns { rejected, detail } (detail = "<status> <code>: <message>"). */
+export function detectCodexAccountRejection(text) {
+  const s = String(text ?? "");
+  for (const line of s.split(/\r?\n/)) {
+    const start = line.indexOf("{");
+    const end = line.lastIndexOf("}");
+    if (start < 0 || end <= start) continue;
+    let obj;
+    try { obj = JSON.parse(line.slice(start, end + 1)); } catch { continue; }
+    if (!obj || typeof obj !== "object") continue;
+    const err = obj.error && typeof obj.error === "object" ? obj.error : null;
+    const status = Number(obj.status ?? err?.status);
+    const code = typeof err?.code === "string" ? err.code : typeof obj.code === "string" ? obj.code : null;
+    if (!ACCOUNT_REJECTION_STATUSES.has(status) || code === null || !ACCOUNT_REJECTION_CODES.has(code)) continue;
+    const message = typeof err?.message === "string" ? err.message : typeof obj.message === "string" ? obj.message : "";
+    return { rejected: true, detail: `${status} ${code}${message ? `: ${message}` : ""}` };
+  }
+  return { rejected: false, detail: null };
+}
+
 // pid-scoped tree kill of the probe we spawned (a win32 shell wrapper leaves the real child alive on a bare kill()).
 function killTree(child) {
   try {
@@ -275,7 +309,8 @@ export function probeCodexUsageLimit(opts = {}) {
       if (done) return;
       done = true;
       if (timer) clearTimeout(timer);
-      resolve(detectCodexUsageLimit(out));
+      const rej = detectCodexAccountRejection(out);
+      resolve({ ...detectCodexUsageLimit(out), rejected: rej.rejected, rejectedDetail: rej.detail });
     };
     try {
       child = spawn(bin, args, { shell, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -295,7 +330,7 @@ export async function codexUsageLimitStatus(opts = {}) {
   const cachePath = opts.cachePath ?? PROBE_CACHE_PATH;
   try {
     const c = JSON.parse(fs.readFileSync(cachePath, "utf8"));
-    if (typeof c.at === "number" && Date.now() - c.at < PROBE_CACHE_MS) return { limited: !!c.limited, detail: c.detail ?? null };
+    if (typeof c.at === "number" && Date.now() - c.at < PROBE_CACHE_MS) return { limited: !!c.limited, detail: c.detail ?? null, rejected: !!c.rejected, rejectedDetail: c.rejectedDetail ?? null };
   } catch {}
   const r = await probeCodexUsageLimit(opts);
   try { fs.writeFileSync(cachePath, JSON.stringify({ at: Date.now(), ...r })); } catch {}
@@ -354,6 +389,11 @@ export async function acquireCodexRealSpawnLock() {
   if (usage.limited) {
     release();
     console.log(`WARN  SKIP  ${waiterName()} — codex account is over its USAGE LIMIT (quota exhausted; ${usage.detail ?? "no reset time reported"}). Real-codex coverage did NOT run on this host; this is not a pass of the codex behaviour.`);
+    process.exit(0);
+  }
+  if (usage.rejected) {
+    release();
+    console.log(`WARN  SKIP  ${waiterName()} — codex rejected this ACCOUNT/model (${usage.rejectedDetail ?? "no detail"}). Environment precondition, not a product failure; real-codex coverage did NOT run on this host and this is not a pass of the codex behaviour.`);
     process.exit(0);
   }
   return release;
