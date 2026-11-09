@@ -126,6 +126,8 @@ export default function MissionControl() {
   // managerSessionId, so every event's manager is in this set). Feeds the per-row project chip so the
   // god-eye feed, which interleaves rows from every active project, carries which project each event is for.
   const projectByManager = new Map(managers.map((m) => [m.id, m.projectName]));
+  // Card 99b98864: the row's card link makes the event's own project active before opening the board.
+  const projectIdByManager = new Map(managers.map((m) => [m.id, m.projectId]));
 
   // Order projects by recent activity: each project ranks by its most-recent-active member across
   // any of its managers/workers, most-recent first — so the project you're actively driving floats
@@ -315,7 +317,7 @@ export default function MissionControl() {
           <SectionLabel>Activity</SectionLabel>
           <Panel grid style={{ maxHeight: "62vh", overflow: "auto" }}>
             {allEvents.length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No events yet.</span>}
-            {allEvents.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
+            {allEvents.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} projectId={projectIdByManager.get(e.managerSessionId)} />)}
           </Panel>
         </div>
       </div>

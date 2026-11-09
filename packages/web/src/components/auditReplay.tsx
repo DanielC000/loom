@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
+import { eventKindLabel } from "../lib/eventLabels";
 import type { SessionListItem, AuditTimeline, AuditEvent, AuditSessionRef, AuditScope } from "@loom/shared";
 import { api } from "../lib/api";
 import { bySessionActivity } from "../lib/sessions";
@@ -84,9 +86,10 @@ function ReplayEvent({ t, e, state }: { t: AuditTimeline; e: AuditEvent; state: 
   const future = state === "future";
   // Hoisted so it can be both the column's text AND its `title`: the actor is the column the row's shrink
   // priority spends first (after the detail), so a truncated one is only recoverable from the hover.
+  const actorId = ref?.id ?? e.workerSessionId ?? e.managerSessionId;
   const actorLine = ref
     ? `${ref.role ?? "session"} ${ref.id.slice(0, 8)}`
-    : (e.workerSessionId ?? e.managerSessionId).slice(0, 8);
+    : actorId.slice(0, 8);
   return (
     // `data-replay-state` mirrors the visual state (the phosphor edge + panel2 fill on the head, the
     // 0.34 opacity on everything after it) as an assertable attribute, so a test can prove the scrub
@@ -102,10 +105,14 @@ function ReplayEvent({ t, e, state }: { t: AuditTimeline; e: AuditEvent; state: 
     }}>
       <span style={{ color: color.text3, width: 26, textAlign: "right", flexShrink: 0 }}>{e.seq}</span>
       <Dot tone={tn} glow={state === "current"} />
-      <span title={e.kind} style={{ color: tone[tn], whiteSpace: "nowrap", minWidth: 0, flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{e.kind}</span>
-      <span title={actorLine} style={{ color: color.text3, whiteSpace: "nowrap", minWidth: 0, flexShrink: 1000, overflow: "hidden", textOverflow: "ellipsis" }}>
+      {/* Card 99b98864: a plain-English label; the raw kind stays on the hover and `data-event-kind`. */}
+      <span title={e.kind} data-testid="audit-replay-event-kind" data-event-kind={e.kind}
+        style={{ color: tone[tn], whiteSpace: "nowrap", minWidth: 0, flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{eventKindLabel(e.kind, e.detail as Record<string, unknown> | null)}</span>
+      <Link to={`/session/${actorId}`} title={`${actorLine}: open session`} data-testid="audit-replay-event-actor"
+        style={{ color: color.text3, whiteSpace: "nowrap", minWidth: 0, flexShrink: 1000, overflow: "hidden", textOverflow: "ellipsis",
+          textDecoration: "underline", textDecorationColor: color.line, textUnderlineOffset: 2 }}>
         {actorLine}
-      </span>
+      </Link>
       {detail && <span title={detail} style={{ color: color.text2, minWidth: 0, flexShrink: 100000, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail}</span>}
       <span data-testid="audit-replay-event-time"
         style={{ color: color.text3, whiteSpace: "nowrap", flexShrink: 0, marginLeft: "auto" }}>{timeOfDay(e.ts)}</span>
@@ -157,11 +164,11 @@ function RunDiff({ rootId, scope, compareTo, onClose }: {
       {changedKinds.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {changedKinds.map((k) => (
-            <span key={k.kind} title={`A:${k.a} B:${k.b}`} style={{
+            <span key={k.kind} title={`${k.kind} · A:${k.a} B:${k.b}`} data-event-kind={k.kind} style={{
               fontFamily: font.mono, fontSize: fs.mono, padding: "1px 6px", borderRadius: radius.sm,
               border: `1px solid ${color.line}`, color: k.delta > 0 ? color.liveFg : color.danger,
             }}>
-              {k.kind} {k.delta > 0 ? "+" : ""}{k.delta}
+              {eventKindLabel(k.kind)} {k.delta > 0 ? "+" : ""}{k.delta}
             </span>
           ))}
         </div>
@@ -343,20 +350,27 @@ export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionLis
 
         {/* Scrubber + transport */}
         {events.length > 0 && (
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Button variant="ghost" title="Step back" onClick={() => { setPlaying(false); setSeq(Math.max(0, cur - 1)); }}>‹</Button>
-            <Button variant={playing ? "primary" : "default"} onClick={() => (playing ? setPlaying(false) : play())} style={{ minWidth: 64 }}>
-              {playing ? "❚❚ Pause" : "▶ Play"}
-            </Button>
-            <Button variant="ghost" title="Step forward" onClick={() => { setPlaying(false); setSeq(Math.min(last, cur + 1)); }}>›</Button>
-            <input type="range" min={0} max={last} value={cur}
-              onChange={(e) => { setPlaying(false); setSeq(Number(e.target.value)); }}
-              style={{ flex: 1, accentColor: color.accent }} aria-label="Replay position" />
-            <span data-testid="audit-replay-position"
-              style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, minWidth: 64, textAlign: "right" }}>
-              {cur + 1}/{events.length}
-            </span>
-            {seq !== null && cur < last && <Button variant="ghost" title="Jump to live edge" onClick={() => setSeq(null)}>↦ live</Button>}
+          // Card 99b98864 (B-17): two wrap groups, so at phone width the slider + counter drop onto their own
+          // row instead of squeezing the counter off the edge; Play stays one line (`nowrap`).
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+              <Button variant="ghost" title="Step back" onClick={() => { setPlaying(false); setSeq(Math.max(0, cur - 1)); }}>‹</Button>
+              <Button variant={playing ? "primary" : "default"} onClick={() => (playing ? setPlaying(false) : play())}
+                style={{ minWidth: 64, whiteSpace: "nowrap" }}>
+                {playing ? "❚❚ Pause" : "▶ Play"}
+              </Button>
+              <Button variant="ghost" title="Step forward" onClick={() => { setPlaying(false); setSeq(Math.min(last, cur + 1)); }}>›</Button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "1 1 240px", minWidth: 0 }}>
+              <input type="range" min={0} max={last} value={cur}
+                onChange={(e) => { setPlaying(false); setSeq(Number(e.target.value)); }}
+                style={{ flex: 1, minWidth: 0, accentColor: color.accent }} aria-label="Replay position" />
+              <span data-testid="audit-replay-position"
+                style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2, minWidth: 64, textAlign: "right", whiteSpace: "nowrap", flexShrink: 0 }}>
+                {cur + 1}/{events.length}
+              </span>
+              {seq !== null && cur < last && <Button variant="ghost" title="Jump to live edge" onClick={() => setSeq(null)} style={{ whiteSpace: "nowrap" }}>↦ live</Button>}
+            </div>
           </div>
         )}
 

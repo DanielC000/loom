@@ -54,7 +54,8 @@ test.describe("Mission Control — Wave Replay collapse + activity project attri
 
     // ── B. Activity row carries the owning project's chip ────────────────────────────────────────
     // The god-eye feed row for our seeded event shows the kind AND the project chip in the same row.
-    const eventRow = page.locator("main").getByText("merge_done", { exact: true }).first().locator("..");
+    // Keyed on the raw kind attribute (card 99b98864): the row's visible label is now plain English.
+    const eventRow = page.locator("main").locator('[data-testid="activity-event-kind"][data-event-kind="merge_done"]').first().locator("..");
     await expect(eventRow).toContainText(proj.name);
 
     // ── A (cont.) Expand → picker appears, lists live + archived managers, poll now fires ─────────

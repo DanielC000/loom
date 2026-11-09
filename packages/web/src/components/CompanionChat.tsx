@@ -554,7 +554,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: 12 }}>
-      <ChatHeader conn={conn} title={name} />
+      <ChatHeader conn={conn} title={name} armed={armed} />
 
       {/* The zero-reply ALERT, deliberately ABOVE the "not wired" notice: "bound but has stopped
           answering" is a live fault, "not bound yet" is an unfinished setup step. `role="alert"` (not
@@ -674,8 +674,15 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
 // Names the companion INSIDE the chat panel (left), with the live connection state right-aligned. The name
 // reads in the panel's own header strip so it's present even once the empty state (which also names it)
 // scrolls away. Truncates with an ellipsis rather than wrapping the strip.
-function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
+//
+// Card 99b98864 (B-14): `connected` measures this panel's own socket, not whether a message can reach the
+// companion. With no in-app binding (`armed === false`) the "won't reach it" notice below is the voice for
+// reachability, so the pill drops to a neutral tone (no green, no glow) and its hover says what it measures.
+// The label stays "connected": it is still true, and specs read it as the socket-open precondition.
+function ChatHeader({ conn, title, armed }: { conn: ChatConnState; title: string; armed?: boolean }) {
+  const unbound = armed === false;
   const pill =
+    conn === "connected" && unbound ? { tone: "muted" as const, label: "connected", glow: false } :
     conn === "connected" ? { tone: "live" as const, label: "connected", glow: true } :
     conn === "connecting" ? { tone: "work" as const, label: "connecting", glow: false } :
     conn === "revoked" ? { tone: "danger" as const, label: "token revoked", glow: false } :
@@ -703,7 +710,12 @@ function ChatHeader({ conn, title }: { conn: ChatConnState; title: string }) {
       >
         {title}
       </span>
-      <StatusPill tone={pill.tone} label={pill.label} glow={pill.glow} />
+      <span data-testid="companion-chat-conn" data-conn={conn} data-armed={armed === undefined ? undefined : String(armed)}
+        title={conn === "connected"
+          ? (unbound ? "This chat is connected, but no in-app route is bound yet, so messages won't reach the companion." : "This chat is connected and messages reach the companion.")
+          : undefined}>
+        <StatusPill tone={pill.tone} label={pill.label} glow={pill.glow} />
+      </span>
     </div>
   );
 }

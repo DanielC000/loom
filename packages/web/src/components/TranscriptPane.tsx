@@ -99,7 +99,7 @@ export function TranscriptPane({ sessionId, runRef }: { sessionId: string; runRe
 
       <div style={{ flex: 1, overflow: "auto", padding: 8, overscrollBehavior: "contain" }}>
         {turns?.length === 0 && (
-          <p style={{ color: color.text3 }}>No transcript yet (engine session id not captured, or no turns).</p>
+          <p style={{ color: color.text3 }}>Nothing recorded yet. The transcript appears after this session's first turn.</p>
         )}
         {turns && turns.length > 0 && filtered.length === 0 && (
           <p style={{ color: color.text3 }}>No turns match.</p>

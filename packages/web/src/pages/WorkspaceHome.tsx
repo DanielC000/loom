@@ -170,6 +170,8 @@ export default function WorkspaceHome() {
   // Over BOTH tiers: a row whose manager is missing here renders with no project chip, and an exited
   // manager's rows are exactly the ones this card added.
   const projectByManager = new Map([...managers, ...exitedManagers].map((m) => [m.id, m.projectName]));
+  // Card 99b98864: the row's card link makes the event's own project active before opening the board.
+  const projectIdByManager = new Map([...managers, ...exitedManagers].map((m) => [m.id, m.projectId]));
 
   // ── The re-homed tabs' counts (card 41eab0eb) ────────────────────────────────────────────────────
   // The mockup gives a count to three of the seven: `Inbox 4`, `Gates 1·2`, `Automation 9`. The other
@@ -322,7 +324,7 @@ export default function WorkspaceHome() {
   const pulsePanel = (
     <BandPanel label="Pulse" testId="atlas-band-pulse">
       {events.length === 0 && <BandEmpty>No orchestration events yet.</BandEmpty>}
-      {events.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
+      {events.slice(0, GLOBAL_ACTIVITY_CAP).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} projectId={projectIdByManager.get(e.managerSessionId)} />)}
     </BandPanel>
   );
 

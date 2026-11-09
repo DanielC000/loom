@@ -1,4 +1,5 @@
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
@@ -6,6 +7,8 @@ import { api } from "../lib/api";
 import { attentionKindLabel, isRateLimited, isAnswerableRequest, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
 import { fleetRollup, workerBuckets, capArchived, ARCHIVED_ONLY_CAP, WAITING_ON_YOU, type ArchivedOnlyProject } from "../lib/fleet";
 import { harnessOf } from "../lib/harnessFields";
+import { eventKindLabel } from "../lib/eventLabels";
+import { useActiveProject } from "../lib/activeProject";
 import { sentenceCase } from "../lib/textCase";
 import { DecisionStateChip } from "./decisions";
 import { HarnessTag } from "./HarnessPicker";
@@ -649,6 +652,9 @@ export function InactiveFleet({ projects, defaultOpen = false }: {
   );
 }
 
+// The w:/t: tokens inherit the row's colour and mono face; the underline is what marks them as links.
+const eventTokenLink: CSSProperties = { color: "inherit", textDecoration: "underline", textDecorationColor: color.line, textUnderlineOffset: 2 };
+
 // `projectName` — the owning project of this event. Optional + only passed at the god-eye Mission Control
 // call-site, where rows from every active project interleave and need attribution; the project-scoped
 // Overview feed omits it (all its rows already belong to the one project on screen), so that surface stays
@@ -658,8 +664,26 @@ export function InactiveFleet({ projects, defaultOpen = false }: {
 // @decision a7957bde — the columns give in a fixed order (detail, then project chip, then kind) and the
 // timestamp never gives at all. Do not flatten the flexShrink weights, do not drop any column's
 // minWidth + overflow + textOverflow trio, and do not make the row wrap.
-export function EventRow({ e, projectName }: { e: OrchestrationEvent; projectName?: string }) {
-  const detail = `${e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)}` : ""}${e.taskId ? ` t:${e.taskId.slice(0, 8)}` : ""}`;
+//
+// Card 99b98864: the kind column shows a plain-English label (lib/eventLabels.ts); the raw kind stays on
+// its `title` and `data-event-kind`. The `w:`/`t:` tokens are links — the worker to its session node, the
+// card to its board drawer. A card is project-scoped, so `projectId` (the event's own project, passed by
+// the cross-project feeds) is made active before the board opens; project-scoped feeds omit it because
+// the active project already IS the event's project. The detail column's text content and `title` are
+// unchanged (`w:<id8> t:<id8>`), so its existing identity filters keep matching.
+export function EventRow({ e, projectName, projectId }: { e: OrchestrationEvent; projectName?: string; projectId?: string }) {
+  const workerToken = e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)}` : "";
+  const taskToken = e.taskId ? `t:${e.taskId.slice(0, 8)}` : "";
+  const detail = `${workerToken}${taskToken ? ` ${taskToken}` : ""}`;
+  const label = eventKindLabel(e.kind, e.detail);
+  const active = useActiveProject();
+  const navigate = useNavigate();
+  const openCard = (ev: MouseEvent) => {
+    if (!e.taskId || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return;
+    ev.preventDefault();
+    if (projectId) active.setProjectId(projectId);
+    navigate(`/board?task=${encodeURIComponent(e.taskId)}`);
+  };
   return (
     <div data-testid="activity-event"
       style={{ display: "flex", alignItems: "baseline", gap: 8, fontFamily: font.mono, fontSize: fs.sm, padding: "2px 0", borderBottom: `1px solid ${color.line}` }}>
@@ -673,13 +697,23 @@ export function EventRow({ e, projectName }: { e: OrchestrationEvent; projectNam
           {projectName}
         </span>
       )}
-      <span title={e.kind} data-testid="activity-event-kind"
+      <span title={e.kind} data-testid="activity-event-kind" data-event-kind={e.kind}
         style={{ color: color.text2, whiteSpace: "nowrap", flexShrink: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-        {e.kind}
+        {label}
       </span>
       <span title={detail || undefined} data-testid="activity-event-detail"
         style={{ color: color.text2, whiteSpace: "nowrap", flexShrink: 100000, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-        {detail}
+        {workerToken && (
+          <Link to={`/session/${e.workerSessionId}`} data-testid="activity-event-worker-link"
+            title={`Open worker session ${e.workerSessionId}`} style={eventTokenLink}>{workerToken}</Link>
+        )}
+        {taskToken && (
+          <>
+            {workerToken ? " " : ""}
+            <Link to={`/board?task=${encodeURIComponent(e.taskId!)}`} onClick={openCard} data-testid="activity-event-task-link"
+              title={`Open card ${e.taskId} on the board`} style={eventTokenLink}>{taskToken}</Link>
+          </>
+        )}
       </span>
     </div>
   );

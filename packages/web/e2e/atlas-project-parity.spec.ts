@@ -277,8 +277,10 @@ test.describe("the project node's Pulse reaches an exited manager's events (card
     // and Playwright reports it `hidden` even though the feed is working perfectly. Measured:
     // `toHaveCount(1)` passes on the very render where `toBeVisible()` on that same span fails. The
     // ROW is the thing that is genuinely on screen.
+    // Matched on the detail's exact `title` (card 99b98864): the `w:` token is now a child link, so
+    // `:text-is` on the span resolves to that `<a>` instead and the filter would find nothing.
     const rowFor = (tag: string) => pulse.locator('[data-testid="activity-event"]')
-      .filter({ has: page.locator(`[data-testid="activity-event-detail"]:text-is("w:${tag}")`) });
+      .filter({ has: page.locator(`[data-testid="activity-event-detail"][title="w:${tag}"]`) });
 
     // The band is a FIXED-HEIGHT panel owning its own scroll, so "in the DOM" and "reachable" are two
     // different claims — scroll it into view before asserting the row is visible.
