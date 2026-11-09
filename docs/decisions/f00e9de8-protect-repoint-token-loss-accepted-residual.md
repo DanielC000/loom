@@ -102,6 +102,23 @@ one disclosure-safe `console.warn` naming the dropped COUNT plus the twin's own 
 NEVER a token value. No union, no fail-closed/fail-open change, no behavior change at all beyond the log
 line. A control case (nothing dropped) logs nothing.
 
+## Follow-up 52dfb66d — a two-ghost union's loser lifted in-process by `clear(registered repo)`: accepted too
+
+Measured on main `cf1fd7f8` (scratch test, temp `LOOM_HOME`, latch files hand-written as in the 103405e0 test, nothing in memory touched). Two unresolvable ghosts X and Y share `resolvedKey` Kp, the key of registered repo R. X's `.json` sits at `sha(Kp).json`, Y's at a stale name, and X is the older record, so X wins the boot union (tokens x+y).
+
+`clear(R)` is addressed at a foreign occupant, so it skips 103405e0's own-identity snapshot and goes through `protectOccupantContentBeforeDelete`. The `atFinalBasenameIdx` re-point drops token-y in memory:
+- `protect-repoint-dropped-tokens` is the only signal. The response names X in `stillBlockedCoOccupants`, never Y, and `liftedRepoPaths` is `[R]`.
+- Y's file stays on disk with token-y, but no in-memory record owns it. `activeMergeQuarantineFor(Y)` is undefined and a second `clear(R)` reports `wasQuarantined:false`, so nothing in-process can clear Y.
+- The window lasts until the next daemon boot, which re-arms Y from that file and blocks R, X and Y again. No timer ends it.
+- Y-older order drops nothing and logs nothing: both tokens survive.
+- What a human gains in the window: `assertRepoNotQuarantined(R)` is true, which is what `clear(R)` asked for. Y was already unblocked by identity before the clear. The only surprise is R re-blocking after a reboot because of a file the clear never named. That direction fails closed.
+
+Decision: accept, with no code change.
+- (a) Keeping Y's token in memory fails closed only in name. Its sole blocking effect would be on key Kp, which the human just cleared, so `clear(R)` would stop working and R would stay blocked until a reboot, since Y is unaddressable. Attaching it to X's identity is the `c9114934` Round 3 MAJOR #2 hazard above. The twin entry also does not carry Y's identity.
+- (b) Naming Y needs Y's identity, so an extra read of the occupant's file on a path 103405e0's Do-not forbids (it shifts Nth-read fault injection in `merge-quarantine-protect-read-failure.mjs` and `merge-quarantine-raise-protect-failure.mjs`). Listing Y in `liftedRepoPaths` would be false while its file survives, and a new response field would touch the surface-pinning tests.
+
+Unverified: whether a `!stale-` loser filename arises naturally (the fixture hand-writes it, as the 103405e0 test does).
+
 ## Do not
 
 - Do not union `oldAtFinalBasename`'s own tokens into `toWrite`/`written.entry` at either re-point site,

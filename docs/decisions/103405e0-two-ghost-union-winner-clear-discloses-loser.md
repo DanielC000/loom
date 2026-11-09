@@ -53,4 +53,5 @@ name; no response key was added.
   backstop in `composeBroadUnionClearResult`. That would be a true positive. No reachable shape is known, since
   398f476c stamps the loser for a resolvable winner, and the unstamped provenance-unknown shape was NOT built or
   tested here (untested). Both clear sites share one rule, `unionedLosersLifted`.
+- A `clear(registered repo)` that skips the own-identity gate can drop the loser's token in-process via a protect re-point, unnamed; accepted, see `f00e9de8-protect-repoint-token-loss-accepted-residual.md` (Follow-up 52dfb66d).
 - `clear(loser)` stays NOT FOUND; the loser remains unaddressable by its own path.
