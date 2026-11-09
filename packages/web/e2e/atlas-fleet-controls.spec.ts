@@ -139,6 +139,9 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
     const bar = page.getByTestId("atlas-fleet-controls-bar");
     const hold = bar.getByTestId("fleet-clear-hold");
     await expect(hold).toHaveText(/Clear usage hold/i);
+    // DEMOTED, NOT HIDDEN (card 73b41b5d): no session is parked here, only the latch is armed, and the
+    // web cannot see the latch. So this is the quiet variant, and the click below still has to work.
+    await expect(hold).toHaveAttribute("data-hold", "none-visible");
 
     await hold.click();
 
@@ -149,6 +152,50 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
       message: "POST /api/usage/clear-hold must have removed the daemon's usage latch",
       timeout: 5_000,
     }).toBe(false);
+  });
+
+  // Card 73b41b5d (Atlas audit A-13): Clear usage hold stood as a full peer of Pause and Kill all even
+  // with nothing held. It now carries full weight only while a session is parked or bailed.
+  //
+  // 🔴 THE PARKED SESSION IS INJECTED INTO THE `GET /api/sessions` READ, not seeded. The test seed route
+  // has no `rateLimitedUntil` field, and a real park needs a real rate-limited claude. The injection
+  // stops the moment the button is clicked, so the AFTER state is the daemon's own unparked list: the
+  // same session, read back without the mark, is what turns the button quiet again.
+  test("switch ON: clear usage hold is full weight only while a session is parked", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(uniq("fleethold"));
+    const parked = await loomDaemon.seedLiveSession({ project, role: "worker", agentName: "Dev" });
+
+    let inject = false;
+    await page.route((url) => url.pathname === "/api/sessions", async (route) => {
+      if (!inject || route.request().method() !== "GET") return route.continue();
+      const res = await route.fetch();
+      const rows = (await res.json()) as { id: string; rateLimitedUntil?: string | null }[];
+      const until = new Date(Date.now() + 60 * 60_000).toISOString();
+      await route.fulfill({ response: res, json: rows.map((r) => (r.id === parked.sessionId ? { ...r, rateLimitedUntil: until } : r)) });
+    });
+
+    await seedAtlasOn(page);
+    await page.goto(loomDaemon.baseURL + "/home");
+    const hold = page.getByTestId("atlas-fleet-controls-bar").getByTestId("fleet-clear-hold");
+
+    // BEFORE: the seeded session is on screen (fixture identity) and nothing is parked, so it is quiet.
+    await expect(page.getByTestId(`atlas-session-row-${parked.sessionId}`)).toBeVisible();
+    await expect(hold).toHaveAttribute("data-hold", "none-visible");
+    await expect(hold).toHaveClass(/loom-btn-ghost/);
+
+    // PARKED: the same page, re-read with the mark on. Full weight.
+    inject = true;
+    await page.reload();
+    await expect(hold).toHaveAttribute("data-hold", "sessions-held");
+    await expect(hold).toHaveClass(/loom-btn-default/);
+
+    // CLEAR: the real POST, then the daemon's own (unparked) list comes back and it goes quiet again.
+    inject = false;
+    const cleared = page.waitForResponse((r) => r.url().endsWith("/api/usage/clear-hold") && r.request().method() === "POST");
+    await hold.click();
+    expect((await cleared).status(), "the click must reach the daemon's clear-hold route").toBe(200);
+    await expect(hold).toHaveText(/hold cleared/i);
+    await expect(hold).toHaveAttribute("data-hold", "none-visible");
   });
 
   test("switch ON: kill all is a real two-step — cancel and Escape fire nothing, Confirm fires once and the daemon acts", async ({ page, loomDaemon }) => {

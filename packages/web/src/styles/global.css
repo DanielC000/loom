@@ -1865,6 +1865,18 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-atlas-nodemeta.is-attn {
   color: var(--loom-attn-text);
 }
+/* Read by a screen reader, never drawn. A tree row's badges are bare digits, so this is where their words
+   and separators go: without it the row's name read "AUDIT-Alpha Storefront32" (card 73b41b5d, A-19). */
+.loom-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 .loom-atlas-nodebadge {
   flex: none;
   min-width: 16px;
@@ -3598,6 +3610,30 @@ button.loom-kpi.is-open {
   white-space: nowrap;
   color: var(--loom-text-2);
 }
+/* `GatePair`: the separator is padded and dimmed so `0 · 0` cannot read as "00" (card 73b41b5d). */
+.loom-gatepair-sep {
+  white-space: pre;
+  margin: 0 0.12em;
+  color: var(--loom-text-3);
+}
+/* Two figures, then the bar on a line of its own. The figures never ellipsise: when both do not fit on
+   one line the value wraps under the label instead (a band panel is ~125px of content at 1440). */
+.loom-meterrow.is-stacked {
+  flex-wrap: wrap;
+  column-gap: 8px;
+  row-gap: 4px;
+}
+.loom-meterrow.is-stacked .loom-meterrow-l {
+  flex: none;
+  overflow: visible;
+}
+.loom-meterrow.is-stacked .loom-meterrow-v {
+  margin-left: auto;
+}
+.loom-meterrow.is-stacked .loom-meterrow-track {
+  order: 3;
+  flex: 1 0 100%;
+}
 .loom-datarow-v,
 .loom-meterrow-v {
   flex: none;
@@ -4135,14 +4171,46 @@ button.loom-ovbrief-cell.is-open {
   flex: none;
   min-width: 168px;
 }
+/* A flex row of its own so each part can ellipsise separately (card 73b41b5d, Atlas audit A-19). ORDER:
+   the project gives way first, down to a stub; the tail (agent + id) never shrinks but is capped (inline,
+   sessionTerminals.tsx), so past the stub the agent ellipsises; the 8-char id never does. */
 .loom-wsession-id {
+  display: flex;
+  align-items: baseline;
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--loom-font-mono);
   font-size: 12px;
+}
+.loom-wsession-proj,
+.loom-wsession-agent {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Its floor is set inline (sessionTerminals.tsx): a short stub survives so a row never loses its block
+   boundary outright, capped at the name's own length so a short name never gains a gap. */
+.loom-wsession-proj {
+  flex: 0 1 auto;
+}
+.loom-wsession-tail {
+  display: flex;
+  align-items: baseline;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.loom-wsession-agent {
+  flex: 0 1 auto;
+}
+.loom-wsession-sep,
+.loom-wsession-short {
+  flex: none;
+}
+.loom-wsession-sep {
+  color: var(--loom-text-3);
+  white-space: pre;
 }
 /* The AGENT carries the weight and the project trails behind it, dim. The rows are project-major,
    so a project's rows are already adjacent and its name only has to mark that block's boundary —

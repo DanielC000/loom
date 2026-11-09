@@ -22,7 +22,7 @@ import ProjectUsage from "./ProjectUsage";
 import Settings from "./Settings";
 import { Panel } from "../components/ui";
 import {
-  AtlasNodeHead, BandEmpty, BandFoot, DataRow, DayBars, LaneBar, MeterRow, NodeTabs,
+  AtlasNodeHead, BandEmpty, BandFoot, DataRow, DayBars, GatePair, LaneBar, MeterRow, NodeTabs,
   type NodeHeadPill,
 } from "../components/atlasHome";
 import {
@@ -35,7 +35,7 @@ import { AttentionList, GateLaneList } from "./WorkspaceHome";
 import { splitRoster } from "../lib/atlasAgents";
 import { projectRunningSessions } from "../lib/workspaceSessions";
 import {
-  boardRollup, gateLanes, isLiveSession, mergeThroughput, plural, relativeTime,
+  boardRollup, gateLanes, gatePairWords, isLiveSession, mergeThroughput, plural, relativeTime,
   useGateHistoryRecent, useGatesActive,
 } from "../lib/atlasHome";
 import {
@@ -339,9 +339,9 @@ export default function ProjectHome() {
       popover: <ContextList sessions={live} recycleAt={recycleAt} />,
     },
     {
-      key: "gates", label: "gate lanes", value: `${lanes.running}·${lanes.queued}`, sub: `of cap ${lanes.cap}`,
+      key: "gates", label: "gate lanes", value: <GatePair lanes={lanes} />, sub: `of cap ${lanes.cap}`,
       tone: lanes.queued > 0 || lanes.running > 0 ? "work" : "muted",
-      title: `${lanes.running} running · ${lanes.queued} queued, daemon-wide (cap ${lanes.cap})`,
+      title: `${gatePairWords(lanes)}, daemon-wide (cap ${lanes.cap})`,
       popover: <GateLaneList lanes={lanes} />,
     },
   ];

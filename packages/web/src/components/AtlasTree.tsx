@@ -126,7 +126,23 @@ function NodeMeta({ value, title, tone }: { value: ReactNode; title: string; ton
 
 /** The mockup's `.node-badge` — an amber attention count, deliberately louder than a plain metric. */
 function NodeBadge({ count, title }: { count: number; title: string }) {
-  return <span className="loom-atlas-nodebadge" title={title}>{count}</span>;
+  return (
+    <>
+      <span className="loom-atlas-nodebadge" title={title} aria-hidden>{count}</span>
+      <SrPart>{`${count} need${count === 1 ? "s" : ""} you`}</SrPart>
+    </>
+  );
+}
+
+/**
+ * A badge's words for a screen reader, with the comma that separates it from the row's name (card
+ * 73b41b5d, Atlas audit A-19). A row's badges sit INSIDE its button, so their text joins the button's
+ * accessible name, and bare digits read as part of the name ("AUDIT-Alpha Storefront32"). The badge
+ * itself goes aria-hidden; this sibling carries what it means. An `aria-label` on the badge would not do
+ * it: a plain span has no role that takes one.
+ */
+function SrPart({ children }: { children: string }) {
+  return <span className="loom-sr-only">{`, ${children}`}</span>;
 }
 
 // ── Roving focus (card fa8a2887) ─────────────────────────────────────────────────────────────────
@@ -871,10 +887,13 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
                           thing a reader would lose when selection moved from a dropdown to the tree —
                           so it comes along, derived the SAME way from the SAME shared cache entry. */}
                       {live > 0 && (
-                        <span className="loom-atlas-live" title={`${live} live session${live === 1 ? "" : "s"}`}>
-                          {live}
-                          <span className="loom-atlas-livedot" aria-hidden />
-                        </span>
+                        <>
+                          <span className="loom-atlas-live" title={`${live} live session${live === 1 ? "" : "s"}`} aria-hidden>
+                            {live}
+                            <span className="loom-atlas-livedot" aria-hidden />
+                          </span>
+                          <SrPart>{`${live} live`}</SrPart>
+                        </>
                       )}
                     </>
                   }>

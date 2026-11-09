@@ -11,7 +11,7 @@ import { useOpenRequest } from "../components/requests";
 import { AttentionRow, EventRow } from "../components/fleet";
 import { Badge, Button, Dot, Panel, SectionLabel, StatusPill } from "../components/ui";
 import {
-  AtlasNodeHead, BandDisclosure, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, KpiDeck, KpiPill,
+  AtlasNodeHead, BandDisclosure, BandEmpty, BandFoot, BandPanel, DataRow, DayBars, GatePair, KpiDeck, KpiPill,
   LaneBar, MeterRow, NodeTabs, PlanUsageDetail, relativeResets, useDashboardOpen, type KpiItem,
 } from "../components/atlasHome";
 import { FleetControlsBar } from "../components/fleetControls";
@@ -20,12 +20,13 @@ import { mergeRequestCardTitle, mergeRequestRowText } from "../lib/cardWorker";
 import { RoleBadge } from "../lib/roleDisplay";
 import { sessionVitals, standingOperators } from "../lib/atlasAgents";
 import {
-  boardRollup, gateLanes, isLiveSession, lastMergeByProject, liveCountsByProject, mergeThroughput,
+  boardRollup, gateLanes, gatePairWords, isLiveSession, lastMergeByProject, liveCountsByProject, mergeThroughput,
   plural, relativeTime, useGateHistoryRecent, useGatesActive,
 } from "../lib/atlasHome";
 import { GLOBAL_ACTIVITY_CAP, PULSE_EXITED_REFETCH_MS, pulseExitedManagers } from "../lib/fleet";
 import { WorkspaceReplay } from "../components/workspaceReplay";
 import { isCompanionSession } from "../lib/sessions";
+import { needsYouSplit, needsYouSummary } from "../lib/needsYouSplit";
 import { workspaceRunningSessions, workspaceSessionsSummary } from "../lib/workspaceSessions";
 import { SessionTerminalList, type SessionListTestIds } from "../components/sessionTerminals";
 import { color, type Tone, fs } from "../theme";
@@ -193,10 +194,11 @@ export default function WorkspaceHome() {
 
   // A count only once its read has RESOLVED: `undefined` renders no count at all, so a tab never
   // flashes a "0" that is really "not loaded yet". Gates is the exception and is always shown, because
-  // `gateLanes` has no pending state of its own and the `gate run·queued` KPI already reads 0·0 at rest.
+  // `gateLanes` has no pending state of its own and the `gate run · queued` KPI already reads 0 · 0 at rest.
+  // The pair is spaced (`GatePair`), and the words ride the hover: a tab count has no label of its own.
   const tabCounts: Record<string, ReactNode> = {
     inbox: inboxCount,
-    gates: `${lanes.running}·${lanes.queued}`,
+    gates: <span title={gatePairWords(lanes)}><GatePair lanes={lanes} /></span>,
     automation: automationCount,
   };
   const tabs = [
@@ -241,11 +243,18 @@ export default function WorkspaceHome() {
     {
       key: "needs", label: "needs you", value: attention.length,
       tone: attention.length > 0 ? "attn" : "muted",
-      sub: attentionSummary(attention.map((a) => a.kind)),
-      popover: <AttentionList items={attention} cap={8} />,
+      // The split, not the kinds (card 73b41b5d, Atlas audit A-15): the Inbox tab beside this tile counts
+      // Requests only, so a sub-line that names the requests and the rest is what reconciles the two.
+      sub: needsYouSummary(needsYouSplit(attention)),
+      popover: (
+        <>
+          <AttentionList items={attention} cap={8} />
+          <BandFoot>The Inbox tab counts requests only. Merges, notices and fleet alerts are counted here too.</BandFoot>
+        </>
+      ),
     },
     {
-      key: "gates", label: "gate run · queued", value: `${lanes.running}·${lanes.queued}`,
+      key: "gates", label: "gate run · queued", value: <GatePair lanes={lanes} />,
       tone: lanes.queued > 0 ? "work" : lanes.running > 0 ? "live" : "muted",
       sub: `cap ${lanes.cap} · daemon-wide`,
       popover: <GateLaneList lanes={lanes} />,
@@ -517,14 +526,6 @@ function ReplayTabPanel({ active }: { active: string }) {
 
 // ── Shared pieces ──────────────────────────────────────────────────────────────────────────────
 
-/** "2 decisions · 1 merge · 1 push" — the attention queue's own composition, in its own words. */
-function attentionSummary(kinds: string[]): string {
-  if (kinds.length === 0) return "nothing waiting";
-  const counts = new Map<string, number>();
-  for (const k of kinds) counts.set(k.toLowerCase(), (counts.get(k.toLowerCase()) ?? 0) + 1);
-  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n} ${k}`).join(" · ");
-}
-
 /**
  * The attention queue as compact rows, capped so one noisy project cannot make a panel the page.
  * Each row keeps its real affordances: a pending Request opens the shared modal (never a navigation
@@ -733,7 +734,10 @@ function OperatorList({ operators }: { operators: ReturnType<typeof standingOper
 export function GateLaneList({ lanes }: { lanes: ReturnType<typeof gateLanes> }) {
   return (
     <>
-      <MeterRow label={`${lanes.running}·${lanes.queued}`} value={`cap ${lanes.cap}`}
+      {/* Spelled out rather than the tile's bare `0 · 0`: this row has no label of its own to say which
+          figure is which. The cap rides the hover, since every mount already states it beside the row. */}
+      <MeterRow label={`${lanes.running} running`} value={`${lanes.queued} queued`} stacked
+        title={`${gatePairWords(lanes)} · cap ${lanes.cap}, daemon-wide`}
         ratio={lanes.cap > 0 ? lanes.running / lanes.cap : 0}
         tone={lanes.queued > 0 ? "work" : "live"} />
       {lanes.runs.length === 0 && <BandEmpty>No gate is running or queued.</BandEmpty>}
@@ -857,13 +861,15 @@ function ProjectGrid({ projects, boards, liveByProject, lastMerge, sessions, onO
             <span className="loom-projcard-head">
               <Dot tone={liveCount > 0 ? "live" : "muted"} glow={liveCount > 0} />
               <span className="loom-projcard-name">{p.name}</span>
-              {liveCount > 0 && <Badge tone="live">{liveCount}</Badge>}
+              {/* Worded (card 73b41b5d, Atlas audit A-35): a bare green digit beside the name said
+                  nothing about what it counted. */}
+              {liveCount > 0 && <Badge tone="live" style={{ flex: "none", whiteSpace: "nowrap" }}>{liveCount} live</Badge>}
             </span>
             <span className="loom-projcard-meta">
               {liveCount > 0 ? `${plural(mgr, "manager")} · ${plural(wrk, "worker")}` : "idle"}
               {board && ` · ${plural(board.open, "open card")}`}
             </span>
-            {board && <LaneBar lanes={board.lanes} />}
+            {board && <LaneBar lanes={board.lanes} title={`Cards by lane: ${board.lanes.filter((l) => l.count > 0).map((l) => `${l.label} ${l.count}`).join(" · ") || "none"}`} />}
             <span className="loom-projcard-foot">
               {landed ? `merged ${relativeTime(landed)}` : p.repoPath ? "no landing recorded yet" : "no repository bound yet"}
             </span>

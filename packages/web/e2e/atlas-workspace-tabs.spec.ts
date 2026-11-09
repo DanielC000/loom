@@ -181,10 +181,11 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
     }).toBeGreaterThanOrEqual(1);
     // Gates: the `running·queued` pair, always rendered — the same format the `gate run·queued` KPI
     // tile uses. A live gate has NO seed path on this fixture (the lane-hero reads the in-memory
-    // GateSemaphore registry — see gates.spec.ts's own note), so 0·0 is the only reachable reading and
+    // GateSemaphore registry — see gates.spec.ts's own note), so 0 · 0 is the only reachable reading and
     // the claim here is about the FORMAT being present and well-formed, not about a nonzero figure.
-    await expect(countOf("gates"), "the Gates tab's count is not the running·queued pair")
-      .toHaveText(/^\d+·\d+$/);
+    // SPACED (card 73b41b5d, Atlas audit A-10): a bare `0·0` read as "00".
+    await expect(countOf("gates"), "the Gates tab's count is not the spaced running · queued pair")
+      .toHaveText(/^\d+ · \d+$/);
     // Automation: triggers across both tables. Zero on a fresh daemon, so again a shape claim.
     await expect(countOf("automation"), "the Automation tab carries no count").toHaveText(/^\d+$/);
     // POSITIVE CONTROL on that collector, and on the mockup's own placement: every tab the design gives

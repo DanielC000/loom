@@ -85,6 +85,12 @@ export function gateLanes(active: GatesActive | undefined, projectId?: string): 
   };
 }
 
+/** The `running · queued` pair spelled out, for a row that has no label of its own and for every hover.
+ *  The compact form is `GatePair` (components/atlasHome.tsx). */
+export function gatePairWords(lanes: Pick<GateLanes, "running" | "queued">): string {
+  return `${lanes.running} running · ${lanes.queued} queued`;
+}
+
 // ── Merge throughput ───────────────────────────────────────────────────────────────────────────
 
 export interface MergeThroughput {

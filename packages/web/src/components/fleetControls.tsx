@@ -13,6 +13,7 @@ import { Badge, Button, Dot, Panel, SectionLabel } from "./ui";
 import { BandFoot, PlanUsageDetail } from "./atlasHome";
 import { api, orchStatusQuery } from "../lib/api";
 import { plural } from "../lib/atlasHome";
+import { isBailed, isRateLimited } from "../lib/fleet";
 import { useDismissable } from "../lib/useDismissable";
 import { color, font } from "../theme";
 
@@ -39,6 +40,20 @@ function useLiveWorkerCount(): number {
 }
 
 /**
+ * Whether any session is visibly held on the usage limit: parked (`rateLimitedUntil` still ahead) or
+ * bailed. Drives the Clear usage hold button's weight in the fleet cluster (card 73b41b5d, Atlas audit
+ * A-13): it no longer stands as a full peer of Pause and Kill all when nothing is held.
+ *
+ * ⛔ DEMOTE, NEVER HIDE, on a false here. The button also drops the daemon's GLOBAL latch, and no REST
+ * read exposes that latch, so "no session held" is not "no hold". Hiding the button would strand a
+ * latch-only hold (worker_spawn blocked, nothing parked) with no way to clear it from the UI.
+ */
+function useSessionHold(): boolean {
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
+  return (sessions.data ?? []).some((s) => isRateLimited(s) || isBailed(s));
+}
+
+/**
  * Global usage-hold override: drop the awareness latch (~/.loom/tmp/claude-usage.json) so new
  * worker_spawn is unblocked WITHOUT touching any session — for a transient overload with real headroom
  * (the plan-usage gauges beside it show the real account figures). HUMAN-only; mirrors the per-session
@@ -48,15 +63,22 @@ function useLiveWorkerCount(): number {
  * implementation of it — the four-second confirmation window included. Failures surface through the
  * app-wide MutationCache handler (main.tsx); a call-site `onError` here would show a second modal.
  */
-export function ClearUsageHoldButton({ onCleared }: { onCleared: () => void }) {
+export function ClearUsageHoldButton({ onCleared, quiet = false }: {
+  onCleared: () => void;
+  /** Demote to a ghost button: no session is parked, so there is nothing visibly held (see `useSessionHold`). */
+  quiet?: boolean;
+}) {
   const [done, setDone] = useState(false);
   const clear = useMutation({
     mutationFn: () => api.clearUsageHold(),
     onSuccess: () => { setDone(true); onCleared(); window.setTimeout(() => setDone(false), 4000); },
   });
   return (
-    <Button variant="default" disabled={clear.isPending} data-testid="fleet-clear-hold"
-      title="Clear the GLOBAL usage hold (the worker_spawn block) without touching any session — for a transient overload"
+    <Button variant={quiet && !done ? "ghost" : "default"} disabled={clear.isPending} data-testid="fleet-clear-hold"
+      data-hold={quiet ? "none-visible" : "sessions-held"}
+      title={quiet
+        ? "No session is parked on the usage limit. This still clears the GLOBAL usage hold (the worker_spawn block) if one is armed."
+        : "Clear the GLOBAL usage hold (the worker_spawn block) and resume the parked sessions, for a transient overload"}
       onClick={() => clear.mutate()}>
       {done ? "✓ hold cleared" : clear.isPending ? "Clearing…" : "Clear usage hold"}
     </Button>
@@ -80,6 +102,7 @@ export function FleetControls({ variant }: { variant: "bar" | "pop" }) {
   const qc = useQueryClient();
   const paused = useOrchestrationPaused();
   const liveWorkers = useLiveWorkerCount();
+  const sessionHold = useSessionHold();
   const [arming, setArming] = useState(false);
 
   const refreshStatus = () => qc.invalidateQueries({ queryKey: orchStatusQuery().queryKey });
@@ -99,7 +122,7 @@ export function FleetControls({ variant }: { variant: "bar" | "pop" }) {
         {paused ? "orchestration: paused" : "orchestration: running"}
       </Badge>
 
-      <ClearUsageHoldButton onCleared={refreshSessions} />
+      <ClearUsageHoldButton onCleared={refreshSessions} quiet={!sessionHold} />
 
       {paused ? (
         <Button variant="default" disabled={resume.isPending} data-testid="fleet-resume"

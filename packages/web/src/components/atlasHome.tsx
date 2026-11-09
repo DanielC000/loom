@@ -677,7 +677,9 @@ export function LaneBar({ lanes, title }: { lanes: BoardLane[]; title?: string }
       {total === 0
         ? <span className="loom-laneseg" style={{ flex: 1, background: color.line }} />
         : lanes.filter((l) => l.count > 0).map((l) => (
-          <span key={l.key} className="loom-laneseg"
+          // Each segment names its own lane on hover (card 73b41b5d, Atlas audit A-35): the bar's own
+          // title lists every lane, which is no help in telling WHICH colour is which.
+          <span key={l.key} className="loom-laneseg" title={`${l.label} · ${l.count}`}
             style={{ flex: l.count, background: l.accentColor ?? (columnTone(l) ? tone[columnTone(l)!] : color.lineStrong) }} />
         ))}
     </span>
@@ -698,12 +700,30 @@ export function DataRow({ label, value, tone: t, title }: {
   );
 }
 
+/**
+ * The `running · queued` gate pair as one compact figure, for a KPI tile or a tab count (card 73b41b5d,
+ * Atlas audit A-10). A bare `0·0` read as "00" at tile size, and plain spaces were not enough in the UI
+ * face, so the dot gets its own dimmed, padded span. Its text is still `0 · 0`.
+ */
+export function GatePair({ lanes }: { lanes: { running: number; queued: number } }) {
+  return (
+    <span className="loom-gatepair">
+      {lanes.running}<span className="loom-gatepair-sep">{" · "}</span>{lanes.queued}
+    </span>
+  );
+}
+
 /** A labelled meter row for a pop-over — a name, a bar, and the figure it measures. */
-export function MeterRow({ label, ratio, value, tone: t = "live" }: {
+export function MeterRow({ label, ratio, value, tone: t = "live", title, stacked }: {
   label: ReactNode; ratio: number; value: ReactNode; tone?: Tone;
+  title?: string;
+  /** Figures on top, never truncated, and the bar on its own full-width line beneath them. For a row
+   *  whose label and value are both FIGURES: inline, a narrow band panel ellipsised the label to "0…"
+   *  (Atlas audit A-10). Leave it off for a name label, which may ellipsise. */
+  stacked?: boolean;
 }) {
   return (
-    <div className="loom-meterrow">
+    <div className={`loom-meterrow${stacked ? " is-stacked" : ""}`} title={title}>
       <span className="loom-meterrow-l">{label}</span>
       <span className="loom-meterrow-track" aria-hidden>
         <span style={{ display: "block", height: "100%", borderRadius: radius.sm,

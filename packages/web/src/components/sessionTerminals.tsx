@@ -131,6 +131,12 @@ export function SessionTerminalList({ rows, ids, regionId, showProject = false, 
  * anchor inside a button is invalid and unreachable by keyboard — the same trap `.loom-atlas-noderow`
  * exists to avoid in the tree.
  */
+/** How much of a long project name a session row keeps once the name has to give way: the ellipsis plus
+ *  six characters, enough for a prefix like "AUDIT-" to still mark the block. */
+const PROJECT_STUB_CH = 7;
+/** The " · " between the project and the agent, in mono `ch`. */
+const SEP_CH = 3;
+
 function SessionRow({ s, open, onToggle, ids, regionId, showProject }: {
   s: SessionListItem; open: boolean; onToggle: () => void;
   ids: SessionListTestIds; regionId: string; showProject: boolean;
@@ -167,9 +173,20 @@ function SessionRow({ s, open, onToggle, ids, regionId, showProject }: {
             same token on every line, paying width to say nothing. */}
         <span className="loom-wsession-id"
           title={`${showProject ? `${s.projectName} · ` : ""}${s.agentName} · ${s.id}`}>
-          {showProject && <span className="loom-wsession-proj">{s.projectName} · </span>}
-          <span className="loom-wsession-agent">{s.agentName}</span>
-          <span className="loom-wsession-short">{` · ${s.id.slice(0, 8)}`}</span>
+          {/* Each part ellipsises on its own, project FIRST (card 73b41b5d, Atlas audit A-19): it is the
+              lowest-value token on a project-major list, so a long project name must not push the agent
+              and the id off the row. The separators sit outside the parts so an ellipsis never eats one. */}
+          {/* The agent and the id ride in one TAIL that never shrinks, capped at the row minus the project's
+              stub: the project absorbs the whole shortfall first, and only past its stub does the cap make
+              the agent ellipsise. (Shrink weights alone leaked a sub-pixel share to the agent, and that
+              was enough to ellipsise it with room to spare.) `ch` is exact: the row is set in the mono face. */}
+          {showProject && <><span className="loom-wsession-proj"
+            style={{ minWidth: `${Math.min(PROJECT_STUB_CH, s.projectName.length)}ch` }}>{s.projectName}</span><span className="loom-wsession-sep">{" · "}</span></>}
+          <span className="loom-wsession-tail"
+            style={showProject ? { maxWidth: `calc(100% - ${PROJECT_STUB_CH + SEP_CH}ch)` } : undefined}>
+            <span className="loom-wsession-agent">{s.agentName}</span>
+            <span className="loom-wsession-short">{` · ${s.id.slice(0, 8)}`}</span>
+          </span>
         </span>
         <span style={{ flex: 1 }} />
         <span className="loom-wsession-up" title={`Started ${relativeTime(s.createdAt)} · last activity ${relativeTime(s.lastActivity)}`}>
