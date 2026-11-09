@@ -2159,28 +2159,6 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 20px;
 }
 
-/* ── The tree below the narrow breakpoints (cards 8cbb2ac2, then 49e883a9) ────────────────────────
-   The tree holds every destination, so it is the ONLY navigation this shell has — hiding it, as the
-   empty-frame phase did, would leave a phone with no way to move around the app at all. Two answers,
-   at two widths, because the same answer does not fit both.
-
-   721–820px: the frame restacks and the tree becomes a capped, self-scrolling strip above the content
-   (it is already first in document order, so no reordering is needed). Unchanged from card 8cbb2ac2 —
-   card 49e883a9 narrowed the query's lower bound and touched nothing inside it. */
-@media (min-width: 721px) and (max-width: 820px) {
-  .loom-atlas {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-  .loom-atlas-tree {
-    /* Enough rows to navigate by without the strip becoming the page: the content column keeps two
-       thirds of a phone viewport, and the tree scrolls for the rest. */
-    max-height: 33dvh;
-    border-right: none;
-    border-bottom: 1px solid var(--loom-line);
-  }
-}
-
 /* The drawer toggle and the short leave label are OUT of the media query in their off state, so the
    wide shell renders exactly what it rendered before card 49e883a9: neither is reachable, and
    neither takes a gap in the crumb row. The crumb disclosure and the leave icon (card 9477a5ed) join
@@ -2274,15 +2252,19 @@ button.loom-atlas-node.is-branch.is-open {
   min-width: var(--loom-crumb-floor);
 }
 
-/* ≤720px: the strip above becomes an OVERLAY drawer. At 420px that stacked strip was 33dvh of nav
-   above the content, pushing the node head ~290px down — most of a phone's first screen spent on
-   chrome before the page says anything — and card 3b563642's session and card rows only made it
-   taller. Over the content instead of above it, the node head starts directly under the crumb row.
+/* ── The tree below the narrow line (cards 8cbb2ac2, 49e883a9, then cc0a6ff9) ─────────────────────
+   The tree holds every destination, so it is the ONLY navigation this shell has — hiding it, as the
+   empty-frame phase did, would leave a phone with no way to move around the app at all. ≤820px it
+   becomes an OVERLAY drawer behind a toggle that is always in the crumb row: still one tap away,
+   never gone. 820 is the shell's one narrow line, shared with the board chrome (card c315f579).
+   The stacked 33dvh strip it replaced spent a third of the screen on chrome, cut a row in half
+   against the crumb bar, and scrolled the current project out of view (card cc0a6ff9, measured).
 
    @decision 49e883a9 — the drawer OVERLAYS; it must never be expressed by unmounting the tree, the
    content column or the page panels. Unmounting the content discards unfinished input, and
-   unmounting the tree throws away its own branch-expansion state. */
-@media (max-width: 720px) {
+   unmounting the tree throws away its own branch-expansion state. Only drawer-coupled rules live in
+   this query; the crumb row's compaction stays at ≤720 below. */
+@media (max-width: 820px) {
   .loom-atlas {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
@@ -2317,15 +2299,6 @@ button.loom-atlas-node.is-branch.is-open {
   .loom-atlas-tree:focus-visible {
     outline: none;
   }
-  /* At this width the request pill (App.tsx › RequestCountPill) spans most of the row, so whatever the
-     page puts last — a Submit button, a Save — scrolls to rest UNDER it. The pill publishes its own
-     footprint as `--loom-request-pill-reserve` while it is on screen, and the scroller reserves exactly
-     that much below its normal 20px; unset (pill dismissed, suppressed, or no requests) costs nothing.
-     Narrow only: on a wide row the pill sits in the corner beside the content, and the extra padding
-     would steal height from every full-height page (terminals, board) for no gain. */
-  .loom-atlas-content {
-    padding-bottom: calc(20px + var(--loom-request-pill-reserve, 0px));
-  }
   .loom-atlas-scrim {
     display: block;
     position: fixed;
@@ -2341,8 +2314,6 @@ button.loom-atlas-node.is-branch.is-open {
      is the whole row, not 52 plus the padding — measured, after 44px left the toggle 4.5px high.) */
   .loom-atlas-crumbs {
     min-height: 52px;
-    padding: 4px 12px;
-    gap: 6px;
   }
   .loom-atlas-drawerbtn {
     display: inline-flex;
@@ -2375,6 +2346,25 @@ button.loom-atlas-node.is-branch.is-open {
   }
   .loom-atlas-treehead {
     padding-left: 56px;
+  }
+}
+
+/* ≤720px: the crumb row compacts for phone width (cards 49e883a9, 9477a5ed). Not drawer-coupled, so
+   it stays here when the drawer widened to 820 (card cc0a6ff9): at 721–820 the full row fits beside
+   the toggle (measured, see docs/decisions/49e883a9-*). */
+@media (max-width: 720px) {
+  /* At this width the request pill (App.tsx › RequestCountPill) spans most of the row, so whatever the
+     page puts last — a Submit button, a Save — scrolls to rest UNDER it. The pill publishes its own
+     footprint as `--loom-request-pill-reserve` while it is on screen, and the scroller reserves exactly
+     that much below its normal 20px; unset (pill dismissed, suppressed, or no requests) costs nothing.
+     Narrow only: on a wide row the pill sits in the corner beside the content, and the extra padding
+     would steal height from every full-height page (terminals, board) for no gain. */
+  .loom-atlas-content {
+    padding-bottom: calc(20px + var(--loom-request-pill-reserve, 0px));
+  }
+  .loom-atlas-crumbs {
+    padding: 4px 12px;
+    gap: 6px;
   }
   /* The crumb trail's own half of backlog card 9477a5ed: the full "Switch to the classic UI" wording
      took ~110px off a 420px row, which is most of what a two-segment trail needs. Card 9477a5ed
@@ -5054,6 +5044,25 @@ button.loom-ovbrief-cell.is-open {
 .loom-atlas-plus:focus-visible {
   outline: 2px solid var(--loom-ring);
   outline-offset: 1px;
+}
+/* A 32px pointer target around the 22px glyph box (card cc0a6ff9, audit A-28), shared with the
+   twist above. An invisible, CENTRED pseudo-element rather than padding: the `＋` draws its own
+   border and the twist rotates, so padding would grow the drawn box or swing off-centre with the
+   rotation. A pseudo-element hit-tests as its button, takes no layout, and a centred square is the
+   same square at 0° and 90°. The rows stay 28px; the 2px overlap into a neighbour row is the cost. */
+.loom-atlas-plus,
+.loom-atlas-twistbtn {
+  position: relative;
+}
+.loom-atlas-plus::before,
+.loom-atlas-twistbtn::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 32px;
+  height: 32px;
+  transform: translate(-50%, -50%);
 }
 
 /* The re-homed destinations' escape hatch (card 0d0c6cee) was deleted with card 5afd71bd,

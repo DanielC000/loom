@@ -1,4 +1,4 @@
-# The Atlas tree is an overlay drawer below 720px, never a stacked block
+# The Atlas tree is an overlay drawer at ≤820px, never a stacked block
 
 Card `49e883a9` — Atlas restructure 7 of 11, epic `9fe8cd4e`. Closes item 7 of the Atlas gap audit and supersedes backlog card `9477a5ed` (the crumb half). Builds on `0d0c6cee` (the entity hierarchy) and `3b563642` (the session/card entity tier).
 
@@ -21,9 +21,24 @@ The gap audit's own "~290px" was an understatement at this height: the node head
 
 ## What shipped
 
-`position: fixed` + `transform: translateX(-100%)` at `≤720px`, toggled by one `is-open` class, with a scrim at z-index 44 under the drawer's 45 and the toggle's 46. `AtlasShell` owns the boolean; `AtlasTree` takes `open` and `onNavigate`.
+`position: fixed` + `transform: translateX(-100%)` at `≤820px` (originally `≤720px`; see the next section), toggled by one `is-open` class, with a scrim at z-index 44 under the drawer's 45 and the toggle's 46. `AtlasShell` owns the boolean; `AtlasTree` takes `open` and `onNavigate`.
 
-**The 721–820px band is untouched.** The old query's lower bound was narrowed to `min-width: 721px` and nothing inside it changed. A tablet-width stacked strip is a different trade from a phone-width one, and re-deciding it was not this card's scope.
+## The 721–820px band, re-decided (card `cc0a6ff9`)
+
+This card originally left 721–820px as `8cbb2ac2`'s stacked strip, on the grounds that a tablet-width strip is a different trade from a phone-width one. Card `cc0a6ff9` (Atlas audit A-08) re-decided that band on its own evidence, measured on the rendered app with nine projects (the current one sorting last):
+
+| width | before: tree | before: content top | after: tree | after: content top |
+|---|---|---|---|---|
+| 721 × 1024 | 338px strip | 428px | `fixed`, off-canvas | 105px |
+| 768 × 1024 | 338px strip | 428px | `fixed`, off-canvas | 105px |
+| 820 × 1180 | 389px strip | 479px | `fixed`, off-canvas | 105px |
+| 821 × 1180 | 244px rail | 90px | 244px rail (unchanged) | 90px |
+
+Before the change, the strip's bottom edge cut a project row in half against the crumb bar, and the current project was scrolled out of the strip altogether, so the one row that says where you are was the one you couldn't see. Once the drawer opens, the current project row is in view at every one of these widths.
+
+`8cbb2ac2`'s reason for the strip was "never leave the shell without navigation", and the drawer keeps to it: the toggle is in the crumb row at every drawer width, and the tree stays mounted. So the rule is now **one narrow line at 820px**, the same line the board chrome folds at (card `c315f579`, `FILTER_FOLD_BELOW = 820`). The tree, the board's filter fold and the crumb row's toggle all switch together.
+
+**Only the drawer-coupled rules moved to `≤820px`:** the tree's position and transform, the scrim, the toggle, the drawer head's 56px clearance, and the crumb row's 52px `min-height`. The crumb row's phone compaction stays at `≤720px`. That covers the icon-only leave and jump buttons, the tightened gaps, the four-segment collapse (decision `9477a5ed`) and the request-pill reserve. Measured at 721, 768 and 820 with the toggle in the row, on `/project` (two segments) and `/board` (three), the full row fits: every crumb renders whole (`Workspace` 63/63px, the project 98/98px, `Board` 46/46px) and the row stays 52px tall.
 
 ### Why `visibility`, not just a transform
 
@@ -31,7 +46,7 @@ An off-canvas drawer that stays `visibility: visible` keeps every row in the tab
 
 ### Why no JS media query
 
-Nothing in the component knows the breakpoint. The boolean is meaningless above 720px because the CSS says so: the drawer rules live inside the media query, and the toggle plus the scrim are `display: none` outside it. A reader who opens the drawer and then rotates to landscape gets the persistent rail back with no state to reconcile, and the wide shell renders byte-identically to before this card whatever the boolean holds.
+Nothing in the component knows the breakpoint. The boolean is meaningless above 820px because the CSS says so: the drawer rules live inside the media query, and the toggle plus the scrim are `display: none` outside it. A reader who opens the drawer and then rotates to landscape gets the persistent rail back with no state to reconcile, and the wide shell renders byte-identically to before this card whatever the boolean holds.
 
 ### Why the toggle floats above the drawer
 
@@ -59,4 +74,5 @@ The other half of `9477a5ed` — the selected node scrolled out of a `33dvh` str
 - **Do not raise the scrim to a modal z-index.** It sits at 44, under the 50-and-up every dialog in this app uses, so a board card opened from the tree still arrives as the centred dialog on top of it. The tree drawer is navigation chrome, not a card surface.
 - **Do not give the toggle a text label.** Every Atlas nav label is already a live page-wide exact-text match in both shells, and a worded button here is one more string for an unrelated spec's text locator to collide with. The name is the `aria-label`.
 - **Do not let the leave button's accessible name vary by breakpoint.** Both spans ship at all widths; CSS chooses which one displays, and `aria-label` fixes the name.
-- **Do not widen the drawer breakpoint over the 721–820px band** without re-deciding that band on its own evidence. This card narrowed the old query's bound and changed nothing inside it.
+- **Do not split the drawer's line from the shell's other narrow line again.** It is 820px, shared with the board chrome (card `c315f579`). Card `cc0a6ff9` measured what a separate tablet band costs: a third of the screen spent on a strip that cut a row in half and hid the current project. Moving the line means moving the board's fold with it, on new evidence.
+- **Do not move the crumb row's phone compaction up to the drawer's line just because they used to share a query.** At 721–820 the full row fits beside the toggle (measured above). Compacting it there would hide the leave button's wording and the ⌘K hint for no width gain.

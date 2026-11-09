@@ -31,7 +31,9 @@ const WIDE = { width: 1440, height: 1000 };
 // The board's own search box. Chosen deliberately: it is a page panel's OWN uncontrolled input, so a
 // drawer that unmounted or remounted the content column would lose it — which is exactly the owner
 // rule this leg is here to hold, and nothing in the CSS can fake passing it.
-const BOARD_SEARCH = "search tasks by id or text…";
+// Located by its accessible NAME, which is the same at every width: the placeholder is not, since
+// card c315f579 shortened it to "search tasks…" below 820px.
+const BOARD_SEARCH = "Search tasks by id, title, or description";
 const DRAFT = "drawer-must-not-eat-this";
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
@@ -261,7 +263,7 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
     // ── The owner rule, measured behaviourally: type into the PAGE, then cycle the drawer over it.
-    const search = page.getByPlaceholder(BOARD_SEARCH);
+    const search = page.getByLabel(BOARD_SEARCH, { exact: true });
     await expect(search).toBeVisible();
     await search.fill(DRAFT);
     await expect(search).toHaveValue(DRAFT);
@@ -302,6 +304,105 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     await expect(page, "the row LANDED, not merely closed the drawer").toHaveURL(new RegExp(`${targetHref.replace(/\//g, "\\/")}(\\?|$)`));
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await expect(page.locator(".loom-atlas-tree"), "navigating via a tree row closes the drawer").toBeHidden();
+  });
+
+  // ── Card cc0a6ff9 (Atlas audit A-08): the drawer reaches TABLET width. 721–820px used to be a stacked
+  //    33dvh strip that spent a third of the screen on chrome, cut a row in half against the crumb bar
+  //    and scrolled the current project out of view. 820 is now the shell's one narrow line, shared
+  //    with the board chrome (card c315f579); 821 is the first rail width. The fillers sort AHEAD of
+  //    `atlas-narrow`, so the current project is the row a capped strip would have scrolled off — the
+  //    "it is in view after opening" leg is measured against the case that used to fail.
+  for (const width of [768, 820]) {
+    test(`switch ON at ${width}px: the tree is a drawer, and opening it shows the current project`, async ({ page, loomDaemon }) => {
+      test.setTimeout(180_000);
+      for (let i = 1; i <= 6; i++) await loomDaemon.createProject(`aaa-filler-${i}`);
+      const project = await seedNarrowProject(loomDaemon);
+      await seedAtlasOn(page);
+      await pinProject(page, project.id);
+      await page.setViewportSize({ width, height: 1024 });
+      await page.goto(loomDaemon.baseURL + "/project");
+      await expect(page.getByTestId("atlas-shell")).toBeVisible();
+      await expect(page.getByTestId("atlas-breadcrumb")).toContainText(project.name);
+
+      const closed = await treeBox(page);
+      expect(closed.position, `the tree is an overlay at ${width}px, not a stacked strip`).toBe("fixed");
+      const geom = await page.evaluate(() => {
+        const r = (s: string) => document.querySelector(s)!.getBoundingClientRect();
+        return { crumbsBottom: r(".loom-atlas-crumbs").bottom, headTop: r(".loom-atlas-nodehead").top };
+      });
+      expect(geom.headTop, "the node head starts at the crumb row's own bottom edge").toBeLessThanOrEqual(geom.crumbsBottom + 2);
+
+      const toggle = page.getByTestId("atlas-tree-toggle");
+      await toggle.click();
+      await expect(page.locator(".loom-atlas-tree")).toBeVisible();
+      const current = page.getByTestId("atlas-project-node");
+      await expect(current).toContainText(project.name);
+      await expect(current, "the current project is on screen once the drawer is open").toBeInViewport({ ratio: 1 });
+
+      // The crumb row's phone compaction stays at ≤720: at this width the full row fits BESIDE the
+      // toggle, so the leave button keeps its full wording and no segment of the trail is squeezed.
+      const fit = await page.getByTestId("atlas-breadcrumb").evaluate((nav) =>
+        [...nav.querySelectorAll("li")].map((li) => {
+          const span = li.querySelector("span:last-child") as HTMLElement;
+          return { text: (span.textContent ?? "").trim(), squeezed: span.scrollWidth > span.clientWidth };
+        }).filter((c) => c.squeezed));
+      expect(fit, `every crumb fits at ${width}px with the toggle in the row`).toEqual([]);
+      expect(await page.getByTestId("atlas-leave").evaluate((el) =>
+        getComputedStyle(el.querySelector(".loom-atlas-leave-full")!).display)).toBe("inline");
+    });
+  }
+
+  test("switch ON at 821px: the first width above the line is the persistent rail", async ({ page, loomDaemon }) => {
+    test.setTimeout(180_000);
+    const project = await seedNarrowProject(loomDaemon);
+    await seedAtlasOn(page);
+    await pinProject(page, project.id);
+    await page.setViewportSize({ width: 821, height: 1024 });
+    await page.goto(loomDaemon.baseURL + "/project");
+    await expect(page.getByTestId("atlas-shell")).toBeVisible();
+    const tree = await treeBox(page);
+    expect(tree.position, "at 821px the tree is a column of the frame's grid").toBe("static");
+    expect(tree.visibility).toBe("visible");
+    expect(tree.box.height, "the rail is full height, not a capped strip").toBeGreaterThan(1000);
+    await expect(page.getByTestId("atlas-tree-toggle")).toBeAttached();
+    await expect(page.getByTestId("atlas-tree-toggle")).toBeHidden();
+  });
+
+  // Card cc0a6ff9 (audit A-28): the twist (12×22) and the quick-spawn `＋` (22×22) answer the pointer over
+  // a 32px square without changing what is drawn. A hit test, not a CSS read: elementFromPoint 15px out
+  // from each glyph's centre must still land on that button. Vertically only to the row's own pitch
+  // (28px rows; the next row's target wins its 2px overlap), which is why the downward probe is 11px.
+  test("switch ON at 768px: the drawer's twist and ＋ have a 32px pointer target and an unchanged glyph", async ({ page, loomDaemon }) => {
+    test.setTimeout(180_000);
+    const project = await seedNarrowProject(loomDaemon);
+    await seedAtlasOn(page);
+    await pinProject(page, project.id);
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await page.goto(loomDaemon.baseURL + "/project");
+    await expect(page.getByTestId("atlas-shell")).toBeVisible();
+    await page.getByTestId("atlas-tree-toggle").click();
+    await expect(page.locator(".loom-atlas-tree")).toBeVisible();
+    // `visible` flips at the START of the 180ms slide-in; a hit test taken mid-slide probes where the
+    // buttons are going to be, not where they are. Wait for the panel to land at the left edge.
+    await expect.poll(() => page.locator(".loom-atlas-tree").evaluate((el) => Math.round(el.getBoundingClientRect().left)),
+      "the drawer has finished sliding in").toBe(0);
+
+    for (const [id, glyph] of [[`atlas-project-twist-${project.id}`, { w: 22, h: 12 }], [`atlas-project-quickspawn-${project.id}-open`, { w: 22, h: 22 }]] as const) {
+      const btn = page.getByTestId(id);
+      await expect(btn).toBeVisible();
+      const m = await btn.evaluate((b) => {
+        const r = b.getBoundingClientRect();
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+        const hits = (dx: number, dy: number) => { const e = document.elementFromPoint(cx + dx, cy + dy); return !!e && (e === b || b.contains(e)); };
+        return { w: Math.round(r.width), h: Math.round(r.height),
+          centre: hits(0, 0), probes: [hits(-15, 0), hits(15, 0), hits(0, -15), hits(0, 11)], beyond: hits(-18, 0) || hits(18, 0) };
+      });
+      expect(m.centre, `${id}: the centre hits the button (positive anchor)`).toBe(true);
+      expect(m.probes, `${id}: 15px out horizontally, 15px up and 11px down still hit the button`).toEqual([true, true, true, true]);
+      expect(m.beyond, `${id}: the target is a 32px square, not unbounded`).toBe(false);
+      // The DRAWN box is unchanged: the twist is the expanded project's, rotated 90°, hence 22×12.
+      expect({ w: m.w, h: m.h }, `${id}: the glyph box is unchanged`).toEqual(glyph);
+    }
   });
 
   test("switch ON at 1440px: the tree is still a persistent rail and the drawer never appears", async ({ page, loomDaemon }) => {
@@ -373,6 +474,6 @@ test.describe("Atlas tree drawer at narrow widths", () => {
 
     // The classic board still works at this width — the shell this card did not touch still renders
     // its own page, draft box and all.
-    await expect(page.getByPlaceholder(BOARD_SEARCH)).toBeVisible();
+    await expect(page.getByLabel(BOARD_SEARCH, { exact: true })).toBeVisible();
   });
 });
