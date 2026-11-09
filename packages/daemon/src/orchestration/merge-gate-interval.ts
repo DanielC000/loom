@@ -12,6 +12,8 @@ import type { MergeGateAgentView, MergeGateOutcomeEntry, MergeGateStatus } from 
  *
  * Rule (the contract both this card and the web card build to):
  *  - gate this landing iff cadence=every, OR gateOwed, OR (cadence=interval AND ungatedSinceLastPass + K > N)
+ *  - an INTERVAL skip is also refused (the gate runs) while the candidate's own tip carries a settled red run_gate self-check,
+ *    unless the manager supplies a recorded `overrideReason` (card 4a95e9fc); cadence=never never forces, it only warns
  *  - an ungated landing ⇒ ungatedSinceLastPass += (branches that ACTUALLY landed); cadence=never keeps counting
  *  - ANY passing gate ⇒ counter 0, gateOwed false, lastPass* updated, lastFailure cleared
  *  - a failing gate: recorded in `recent` + `lastFailure` under every cadence; it sets gateOwed ONLY when the
@@ -35,8 +37,15 @@ export function emptyMergeGateState(): MergeGateState {
   return { ungatedSinceLastPass: 0, gateOwed: false, lastPassAt: null, lastPassSha: null, recent: [], lastFailure: null };
 }
 
-export type MergeGateDecisionReason = "every" | "owed" | "interval-due" | "skip-never" | "skip-interval";
+/** A settled RED worker `run_gate` self-check recorded against the candidate branch's own tip (card 4a95e9fc). `overrideReason`
+ *  is the manager's RECORDED (never authenticated) reason for landing it ungated anyway; absent ⇒ no override. */
+export interface RedSelfCheck { opId: string; head: string; overrideReason?: string }
+
+export type MergeGateDecisionReason = "every" | "owed" | "interval-due" | "red-self-check" | "skip-never" | "skip-interval";
 export interface MergeGateDecision {
+  /** Set when a red self-check on the candidate's tip bore on this decision: it FORCED the gate (`reason:"red-self-check"`),
+   *  was OVERRIDDEN (an interval skip carrying `overrideReason`), or is merely WARNED about (gate off — never forced). */
+  redSelfCheck?: RedSelfCheck;
   gate: boolean;
   cadence: "every" | "interval" | "never";
   interval: number | null;
@@ -55,15 +64,42 @@ export function decideMergeGate(
   /** In-process RESERVED-but-unsettled ungated landings for this (project, repo) — counted like landed ones so overlapping
    *  confirms cannot overshoot N (see `SessionService.reserveMergeGate`). */
   pending = 0,
+  /** The latest settled red self-check on the candidate's own tip, if any (see {@link redSelfCheckOnTip}). Forces the gate on an
+   *  INTERVAL skip unless it carries an `overrideReason`; under cadence "never" (a human switched the gate off) it only rides
+   *  along as a warning — it never forces or refuses. */
+  red?: RedSelfCheck,
 ): MergeGateDecision {
   const { cadence, interval } = resolveMergeGateCadence(orch);
   const gated = (reason: MergeGateDecisionReason): MergeGateDecision => ({ gate: true, cadence, interval, reason, identityValue: "on" });
   if (cadence === "every") return gated("every");
   if (state.gateOwed) return gated("owed");
   if (cadence === "interval" && state.ungatedSinceLastPass + pending + K > interval!) return gated("interval-due");
-  return cadence === "never"
+  if (cadence === "interval" && red && red.overrideReason === undefined) return { ...gated("red-self-check"), redSelfCheck: red };
+  const skip: MergeGateDecision = cadence === "never"
     ? { gate: false, cadence, interval, reason: "skip-never", identityValue: "off", skipReason: "gate-disabled" }
     : { gate: false, cadence, interval, reason: "skip-interval", identityValue: "off", skipReason: "gate-interval" };
+  return red ? { ...skip, redSelfCheck: red } : skip;
+}
+
+/**
+ * Card 4a95e9fc — the latest settled self-check verdict on EXACTLY `tip`, from a branch's `worker_gate` events (chronological,
+ * oldest first). Returns the red's `{opId, head}` only when the NEWEST verdict-bearing event on that tip is a fail — so a later
+ * green on the same tip clears it. Counts only real run_gate verdicts: a row needs the `settleHead` a run_gate settle stamps, and
+ * a cancelled run, a thrown-error row (`error`), a landing-check/dist-importer row, or a row on another head carries no verdict
+ * for this tip and is skipped. `tip` is the BRANCH's own tip read BEFORE any union-merge forward of main, so main moving can
+ * never launder a red; a NEW commit by the worker is a new head and out of scope (a known limit).
+ */
+export function redSelfCheckOnTip(events: readonly { detail?: Record<string, unknown> | undefined }[], tip: string | null | undefined): { opId: string; head: string } | undefined {
+  if (!tip) return undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const d = events[i]!.detail;
+    if (!d) continue;
+    if (d.settleHead !== tip) continue;
+    if (d.cancelled === true || typeof d.error === "string" || d.landingCheckOnly === true || d.distImporterCheckOnly === true) continue;
+    if (typeof d.passed !== "boolean") continue;
+    return d.passed === false && typeof d.opId === "string" ? { opId: d.opId, head: tip } : undefined;
+  }
+  return undefined;
 }
 
 export function agentViewOf(state: MergeGateState, orch: { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined }, repoKey = "primary", pending = 0): MergeGateAgentView {

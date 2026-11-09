@@ -5,7 +5,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import { mapWithConcurrency } from "../concurrency.js";
 import {
-  resolveConfig, parseTasklessGuardedPaths, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
+  resolveConfig, resolveMergeGateCadence, parseTasklessGuardedPaths, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
   usesOrchestrationMcp, contextPercentFor, contextWindowForModel, PROFILE_SPAWNABLE_ROLES,
   type Session, type StopMode, type OrchestrationEvent, type OrchestrationEventKind, type Task, type Project, type Profile,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
@@ -94,7 +94,7 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, gateOnlyListPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
-import { decideMergeGate, applyUngatedLanding, applyGatePass, applyGateFail, applyGateNext, applyCadenceCleared, agentViewOf, statusOf, counterNote, type MergeGateDecision } from "../orchestration/merge-gate-interval.js";
+import { decideMergeGate, redSelfCheckOnTip, applyUngatedLanding, applyGatePass, applyGateFail, applyGateNext, applyCadenceCleared, agentViewOf, statusOf, counterNote, type MergeGateDecision, type RedSelfCheck } from "../orchestration/merge-gate-interval.js";
 import { touchedDistPathsFor, computeDistImporterCap, rankAndCapRunSet, newDistImporterCheckQueueState, enqueueLanding, drainFollowUp, formatDistImporterResultNudge, formatDistImporterMechanismFailureNudge, formatDistImporterCancelledNudge, formatDistImporterSupersededNudge, type DistImporterCheckQueueState } from "../orchestration/dist-importer-check.js";
 import { GateSemaphore, GateCancelledError, isMergeGateRed, type GateContinuation, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
@@ -898,6 +898,11 @@ type ConfirmMergeResult = {
   /** Card 6f13746c: the merge-gate interval counter line ("ungated 3/5 since the last passing gate" / "this was the
    *  periodic gated landing …") — present only when the project's cadence is not `every`. Manager-facing text only. */
   mergeGateNote?: string;
+  /** Card 4a95e9fc: present when a red run_gate self-check on this branch's own tip bore on the merge-gate decision — it FORCED the real gate
+   *  (an interval skip refused), was OVERRIDDEN, or is only WARNED about (gate off). Manager-facing text; never a pass claim. */
+  redSelfCheckNote?: string;
+  /** Card 4a95e9fc: the manager's RECORDED (never authenticated) reason, present only when it actually let a red-tip landing through ungated. */
+  overrideReason?: string;
   /** @decision a1a8c5c4 — `outputTail` covers only the two dominant paths (a plain gate-fail rejection, a
    *  plain successful merge); check `gateExtended`, never this field's absence, to tell "no gate ran"
    *  apart from "one ran on a rarer path this never wired up". */
@@ -1259,6 +1264,16 @@ function squashRefusedResult(r: Omit<ConfirmMergeResult, "squashRefused">): Conf
 
 function gateSkipWarning(reason: "gate-disabled" | "gate-interval" | undefined): string {
   return reason === "gate-interval" ? GATE_INTERVAL_WARNING : GATE_DISABLED_WARNING;
+}
+
+/** Card 4a95e9fc: the ONE wording for a red-self-check-on-the-tip decision — shared by the merge result, the `[loom:merge-done]` nudge and the warning. */
+function redSelfCheckNoteFor(d: MergeGateDecision): string | undefined {
+  const r = d.redSelfCheck;
+  if (!r) return undefined;
+  const at = `a red run_gate self-check (op ${r.opId.slice(0, 8)}) is the latest settled verdict on this branch's tip ${r.head.slice(0, 8)}`;
+  if (d.reason === "red-self-check") return `${at} — the interval skip was REFUSED and the real merge gate ran instead (pass overrideReason to land such a tip ungated)`;
+  if (r.overrideReason !== undefined) return `${at} — landed ungated under a manager overrideReason ("${r.overrideReason}"); the reason is RECORDED, not authenticated, and this is NOT a pass`;
+  return `${at} — the merge gate is OFF so nothing was refused; this landing carried no gate verdict on that tip`;
 }
 
 /** Card e8df2659: the `|mergeGate:<value>` suffix folded into a merge op's cache identity (see
@@ -20808,6 +20823,9 @@ export class SessionService {
     const mergeGateDecision = mergeGateDecisionIn ?? this.decideMergeGateFor(project.id, 1, orchestration, worker.repoKey ?? "primary");
     const gateDisabled = !mergeGateDecision.gate;
     const mergeSkipReason = mergeGateDecision.skipReason ?? "gate-disabled";
+    // Card 4a95e9fc: the red self-check note (forced gate / override / gate-off warning) and the override reason that actually let a skip through.
+    const redSelfCheckNote = redSelfCheckNoteFor(mergeGateDecision);
+    const appliedOverrideReason = gateDisabled ? mergeGateDecision.redSelfCheck?.overrideReason : undefined;
 
     // @decision 864e79fe — worktree-gone alone false-negatives "build gate failed" for an already-successful
     //  merge (best-effort removal can lag finalizeMerge); OR in the task's own terminal-lane state, but
@@ -22672,6 +22690,9 @@ export class SessionService {
           // stamped `skipped:true`. `gateOutcomeFromDetail` checks `skipped` before `passed`, so this alone
           // is what keeps a skip out of `gate_history`'s `"pass"` bucket.
           ...(gateRan ? {} : inertSkip ? { skipped: true, skipReason: gateDisabled ? mergeSkipReason : "inert-docs-only-diff" } : { reused: true, reusedOpId }),
+          // Card 4a95e9fc: the red self-check that bore on this decision, and the manager's recorded override reason when it let a skip through.
+          ...(mergeGateDecision.redSelfCheck ? { redSelfCheckOpId: mergeGateDecision.redSelfCheck.opId } : {}),
+          ...(appliedOverrideReason !== undefined ? { overrideReason: appliedOverrideReason } : {}),
           // Absent (never an empty array) whenever reuse actually fired.
           // @decision 2e52bf99 — reuseRefusalReasons is stamped independent of the inertSkip/reused
           //  ternary above, so it reflects why REUSE specifically was refused regardless of a later
@@ -23652,7 +23673,7 @@ export class SessionService {
     // return — persisted onto the task alongside the rest of finalize's bookkeeping.
     // @decision cc9bce38 — pin finalize to the tip the squash landed (the landing pin, else mergeBranchLocked's frozen resolve); a late worker commit retains the branch.
     const soloTipGuard = this.soloFinalizeTipGuard({ opId: thisOpId, managerSessionId: owner, workerSessionId, taskId, branch, landedTip: expectedTipForLanding(landingPin) ?? merge.landedTip, landedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
-    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, expectedBranchTip: soloTipGuard.expectedBranchTip, onBranchRetained: soloTipGuard.onBranchRetained, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: mergeSkipReason } : {}), ...(worker.cutBaseSha == null ? { cutBaseUnknown: true } : {}) });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, expectedBranchTip: soloTipGuard.expectedBranchTip, onBranchRetained: soloTipGuard.onBranchRetained, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: mergeSkipReason } : {}), ...(appliedOverrideReason !== undefined ? { overrideReason: appliedOverrideReason } : {}), ...(mergeGateDecision.redSelfCheck ? { redSelfCheckOpId: mergeGateDecision.redSelfCheck.opId } : {}), ...(worker.cutBaseSha == null ? { cutBaseUnknown: true } : {}) });
     // Card 6f13746c: the counter line for the merge result / [loom:merge-done] (read AFTER the landing was recorded, at the squash above).
     const mergeGateNote = this.mergeGateNoteFor(project.id, { gatedLanding: !gateDisabled, periodic: mergeGateDecision.cadence !== "every", inertSkip }, worker.repoKey ?? "primary");
     // SKILL-LIVENESS WARNING (card 64a30c79): a merge that just landed a change under
@@ -23749,7 +23770,7 @@ export class SessionService {
     // confirmWorkerMergeTracked's pendingOps.attach() wraps), so it's baked into this result once, at the
     // moment the merge actually runs, correct across every one of worker_merge_confirm's response shapes.
     const composerWarning = composerIntegrityWarning(this.pty, workerSessionId);
-    const warning = [nestedWarning, worktreeWarning, gateWarning, inertSkipWarning, emitCompareWarning, composerWarning, soloTipGuard.warning()].filter((w): w is string => !!w).join(" ") || undefined;
+    const warning = [nestedWarning, worktreeWarning, gateWarning, inertSkipWarning, redSelfCheckNote, emitCompareWarning, composerWarning, soloTipGuard.warning()].filter((w): w is string => !!w).join(" ") || undefined;
     // Drop this worker's recorded self-check (card e50600d2): its gated tip has landed, so the entry must not outlive it. Also true when finalize RETAINS the branch
     // (card cc9bce38, a late commit): that late tip was never checked, and a re-confirm gates it afresh rather than reading this record.
     this.lastWorkerGateCheck.delete(workerSessionId);
@@ -23789,8 +23810,8 @@ export class SessionService {
       // itself stays correctly omitted.
       : (gateRan && emitCompareNotApplicableKind !== undefined ? { emitCompareNotApplicableKind } : {});
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(soloTipGuard.warning() ? { branchRetainedWarning: soloTipGuard.warning() } : {}), ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: mergeSkipReason } : {}) } : {}), ...(mergeGateNote ? { mergeGateNote } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(soloTipGuard.warning() ? { branchRetainedWarning: soloTipGuard.warning() } : {}), ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: mergeSkipReason } : {}) } : {}), ...(mergeGateNote ? { mergeGateNote } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(soloTipGuard.warning() ? { branchRetainedWarning: soloTipGuard.warning() } : {}), ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: mergeSkipReason } : {}) } : {}), ...(mergeGateNote ? { mergeGateNote } : {}), ...(redSelfCheckNote ? { redSelfCheckNote } : {}), ...(appliedOverrideReason !== undefined ? { overrideReason: appliedOverrideReason } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(soloTipGuard.warning() ? { branchRetainedWarning: soloTipGuard.warning() } : {}), ...(reusedOpId ? { reusedOpId } : {}), ...(inertSkip ? { skipped: true, ...(gateDisabled ? { skipReason: mergeSkipReason } : {}) } : {}), ...(mergeGateNote ? { mergeGateNote } : {}), ...(redSelfCheckNote ? { redSelfCheckNote } : {}), ...(appliedOverrideReason !== undefined ? { overrideReason: appliedOverrideReason } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, gateProximity, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}), ...(gateOutputFileForRecord ? { outputFile: gateOutputFileForRecord } : {}), ...concurrencyFields, ...(retriedFile ? { retriedFile, retryPassed } : {}), ...(gateRetried ? { transientRetried: true } : {}), ...(skillWarning ? { skillWarning } : {}), ...(emitCompareWarning ? { reducedGateWarning: emitCompareWarning } : {}), ...emitCompareStructuredFields };
   }
 
   /**
@@ -24264,7 +24285,7 @@ export class SessionService {
    * @decision 0f1920e0 — `LOOM_GATE_OP_ID` is not renamed/dropped for a batch; `LOOM_GATE_BATCH_SIZE`
    *  stamps the real post-assembly landed count, and `gate_history.branch` reads null for a batch row.
    */
-  async mergeBatchTracked(managerSessionId: string, workerSessionIds: string[]): Promise<AttachResult<MergeBatchResult>> {
+  async mergeBatchTracked(managerSessionId: string, workerSessionIds: string[], overrideReasons?: Record<string, string>): Promise<AttachResult<MergeBatchResult>> {
     if (this.restartExiting) return { settled: true, ok: false, error: this.restartExitingRefusal("merge_batch") }; // @decision e4f0c1df
     if (workerSessionIds.length === 0) return { settled: true, ok: true, value: { ok: false, landed: [], fallback: [], reason: "no worker session ids given" } };
     interface Candidate { workerSessionId: string; taskId: string | null; branch: string; taskTitle: string | null; repoKey: string | null; cutBaseSha: string | null; }
@@ -24464,7 +24485,9 @@ export class SessionService {
         }
         handed.add(f.workerSessionId);
         try {
-          const r = await this.confirmWorkerMergeTracked(owner, f.workerSessionId, undefined, batchOpId || f.decision ? { ...(batchOpId ? { fallbackOfBatchOpId: batchOpId } : {}), ...(f.decision ? { mergeGateDecision: f.decision } : {}), ...(unit ? { mergeGateReservation: unit } : {}) } : undefined);
+          // Card 4a95e9fc: a candidate WITHOUT a threaded decision (overflow / stranded / spawn-conflict) re-decides for itself, so it carries its own override reason.
+          const ovr = f.decision ? undefined : overrideReasons?.[f.workerSessionId];
+          const r = await this.confirmWorkerMergeTracked(owner, f.workerSessionId, undefined, batchOpId || f.decision || ovr !== undefined ? { ...(batchOpId ? { fallbackOfBatchOpId: batchOpId } : {}), ...(f.decision ? { mergeGateDecision: f.decision } : {}), ...(unit ? { mergeGateReservation: unit } : {}), ...(ovr !== undefined ? { overrideReason: ovr } : {}) } : undefined);
           if (r.settled && !r.ok) {
             const msg = r.error instanceof Error ? r.error.message : String(r.error);
             console.warn(`[merge-batch] fallback confirm for worker ${f.workerSessionId} errored before/while running: ${msg}`);
@@ -24539,8 +24562,21 @@ export class SessionService {
     // landing's turn" answer takes the same per-branch fallback, each solo confirm HONOURING this decision
     // (threaded via `mergeGateDecision`) rather than re-deciding with K=1.
     const batchRepoKey = liveChosen[0]!.repoKey ?? "primary";
-    const batchDecision = this.decideMergeGateFor(finalProjectId, liveChosen.length, orchestration, batchRepoKey);
+    // Card 4a95e9fc: a candidate whose own tip carries a settled red self-check FORCES the batch's gate on an interval skip unless every such
+    // candidate has a recorded override; the read is before the decision and the reservation below, which stay one synchronous step.
+    const redByWorker = new Map<string, RedSelfCheck>();
+    for (const c of liveChosen) {
+      const r = await this.redSelfCheckFor(c.workerSessionId, overrideReasons?.[c.workerSessionId]);
+      if (r) redByWorker.set(c.workerSessionId, r);
+    }
+    const batchDecision = this.decideMergeGateFor(finalProjectId, liveChosen.length, orchestration, batchRepoKey, [...redByWorker.values()].find((r) => r.overrideReason === undefined));
     const mergeGateOff = !batchDecision.gate;
+    // A skip decision is shared by the fallback confirms; each carries ITS OWN red/override note, never the first candidate's.
+    const decisionFor = (workerSessionId: string): MergeGateDecision => {
+      const { redSelfCheck: _first, ...rest } = batchDecision;
+      const own = redByWorker.get(workerSessionId);
+      return own ? { ...rest, redSelfCheck: own } : rest;
+    };
     // A "not this landing's turn" decision RESERVES one unit per chosen candidate until that candidate's solo confirm settles (released by
     // `confirmWorkerMergeTracked`, or by `runFallback` when no confirm was started), so an overlapping confirm cannot land past N meanwhile.
     // The overflow/stranded members decide for THEMSELVES (K=1, these reservations counted): handing them this K=chosen decision would let
@@ -24548,7 +24584,7 @@ export class SessionService {
     const batchReservations = mergeGateOff ? new Map(liveChosen.map((c) => [c.workerSessionId, this.reserveMergeGate(finalProjectId, batchRepoKey, 1)] as const)) : undefined;
     if (!gate || mergeGateOff) {
       const fallback = await runFallback([
-        ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, decision: batchDecision, reason: mergeGateOff ? (batchDecision.skipReason === "gate-interval" ? "merge gate interval: not this landing's turn" : "merge gate disabled") : "no gateCommand configured for this repo — nothing to share a gate over" })),
+        ...chosen.map((c) => ({ workerSessionId: c.workerSessionId, decision: decisionFor(c.workerSessionId), reason: mergeGateOff ? (batchDecision.skipReason === "gate-interval" ? "merge gate interval: not this landing's turn" : "merge gate disabled") : "no gateCommand configured for this repo — nothing to share a gate over" })),
         ...overflow.map((c) => ({ workerSessionId: c.workerSessionId, reason: "over the batch cap" })),
         ...strandedFallback,
         ...spawnConflictFallback,
@@ -25952,9 +25988,34 @@ export class SessionService {
   }
   /** THE decision helper: "gate this landing of K branches?" — evaluated ONCE per landing (a batch counts K). Counts this
    *  (project, repo)'s in-process reservations as already-landed. Pure (no side effect): the caller reserves on a skip decision. */
-  decideMergeGateFor(projectId: string, K: number, orch?: { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined }, repoKey = "primary"): MergeGateDecision {
+  decideMergeGateFor(projectId: string, K: number, orch?: { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined }, repoKey = "primary", red?: RedSelfCheck): MergeGateDecision {
     const o = this.mergeGateOrch(projectId, orch) ?? { mergeGate: "on" as const };
-    return decideMergeGate(this.db.getMergeGateState(projectId, repoKey), o, K, this.mergeGatePending(projectId, repoKey));
+    return decideMergeGate(this.db.getMergeGateState(projectId, repoKey), o, K, this.mergeGatePending(projectId, repoKey), red);
+  }
+  /**
+   * Card 4a95e9fc — the settled RED `run_gate` self-check recorded on THIS worker's branch tip, if any, read from the DURABLE
+   * `worker_gate` events (never the in-memory `lastWorkerGateCheck` slot, which a daemon restart empties). The identity is the
+   * BRANCH's own tip, read by the caller BEFORE any union-merge forward of main, so main advancing cannot launder a red; a new
+   * worker commit is a new head and out of scope. Only consulted when the cadence could skip (cadence "every" can never skip).
+   * Fails OPEN (undefined + a warning) on a read error — it only ever ADDS a refusal, never relaxes one.
+   * @decision 4a95e9fc — an interval skip is refused while the candidate's own tip has a settled red self-check, unless a recorded overrideReason.
+   */
+  async redSelfCheckFor(workerSessionId: string, overrideReason?: string): Promise<RedSelfCheck | undefined> {
+    try {
+      const worker = this.db.getSession(workerSessionId);
+      if (!worker?.branch) return undefined;
+      const project = this.db.getProject(worker.projectId);
+      if (!project) return undefined;
+      const orch = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
+      if (resolveMergeGateCadence(orch).cadence === "every") return undefined;
+      const repo = resolveRepoByKey(project, worker.repoKey);
+      const tip = await resolveBranchTip(repo.path, worker.branch, { timeoutMs: this.gitOpMs });
+      const red = redSelfCheckOnTip(this.db.listEventsForBranch(worker.branch, "worker_gate"), tip);
+      return red ? { ...red, ...(overrideReason !== undefined ? { overrideReason } : {}) } : undefined;
+    } catch (err) {
+      console.warn(`[merge-gate] could not read the red self-check for worker ${workerSessionId} (non-fatal, treated as none): ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
   }
   /** Test seam (card 4fa36502): the mainline check's git reader; a test replaces it with a failing one to prove the check is FAIL-OPEN. */
   private mainlineFactsReader: typeof readMainlineFacts = readMainlineFacts;
@@ -27682,6 +27743,9 @@ export class SessionService {
       mergeGateDecision?: MergeGateDecision;
       /** Card 6f13746c: this candidate's unit of the batch's reservation, released here when the confirm settles (or never starts). */
       mergeGateReservation?: { release: (n?: number) => void };
+      /** Card 4a95e9fc: the manager's RECORDED (never authenticated) reason for landing a candidate whose tip carries a red self-check
+       *  ungated anyway; ignored when `mergeGateDecision` is already supplied (a batch built it per candidate). */
+      overrideReason?: string;
     },
   ): Promise<AttachResult<ConfirmMergeResult>> {
     // OWNERSHIP PRE-CHECK (card 656e326f — docs/decisions/656e326f-*.md): hoisted here, before ANY side
@@ -27839,9 +27903,11 @@ export class SessionService {
     // Card 6f13746c: it is now the whole merge-gate DECISION (every / owed / interval-due ⇒ gate; else skip), or
     // — for a `mergeBatchTracked` fallback — the batch's own decision, threaded in so it is never re-decided.
     const mgRepoKey = worker?.repoKey ?? "primary";
+    // Card 4a95e9fc: the red self-check on the branch's OWN tip, read here (before any union-merge forward) so it feeds the decision below.
+    const redSelfCheck = !opts?.mergeGateDecision && worker ? await this.redSelfCheckFor(workerSessionId, opts?.overrideReason) : undefined;
     const mergeGateDecision: MergeGateDecision | undefined = opts?.mergeGateDecision ?? (() => {
       const wp = worker ? this.db.getProject(worker.projectId) : undefined;
-      return wp ? this.decideMergeGateFor(wp.id, 1, undefined, mgRepoKey) : undefined;
+      return wp ? this.decideMergeGateFor(wp.id, 1, undefined, mgRepoKey, redSelfCheck) : undefined;
     })();
     // RESERVATION (see reserveMergeGate): a skip decision holds one ungated landing until this confirm settles, so overlapping confirms
     // cannot land past N. Taken in the SAME synchronous step as the decision. A batch fallback instead carries its own unit.
@@ -28046,7 +28112,9 @@ export class SessionService {
         // manager): a gate-disabled landing says so on the nudge too, so it is never read as a passed gate.
         const gateOffNote = (outcome.ok && outcome.value.merged && (outcome.value.skipReason === "gate-disabled" || outcome.value.skipReason === "gate-interval")
           ? ` ⚠ ${gateSkipWarning(outcome.value.skipReason)}`
-          : "") + (outcome.ok && outcome.value.merged && outcome.value.mergeGateNote ? ` [merge-gate ${outcome.value.mergeGateNote}]` : "");
+          : "") + (outcome.ok && outcome.value.merged && outcome.value.mergeGateNote ? ` [merge-gate ${outcome.value.mergeGateNote}]` : "")
+          // Card 4a95e9fc: a red self-check on this branch's tip (forced gate / recorded override / gate-off warning), so it is never read as a clean landing.
+          + (outcome.ok && outcome.value.merged && outcome.value.redSelfCheckNote ? ` ⚠ ${outcome.value.redSelfCheckNote}` : "");
         // @decision cc9bce38 — a solo landing whose branch finalize RETAINED must say so on the nudge (never a bare "merged").
         const retainedNote = outcome.ok && outcome.value.merged && outcome.value.branchRetainedWarning ? ` ⚠ ${outcome.value.branchRetainedWarning}` : "";
         const msg = outcome.ok
@@ -28705,12 +28773,15 @@ export class SessionService {
           if (worker.branch) {
             this.lastWorkerGateCheck.set(workerSessionId, { passed: gateResult.passed, headCurrent: headCurrency.headCurrent, stamp: settleStamp, opId, branch: worker.branch });
           }
+          // @decision 4a95e9fc — the settle head + branch are stamped on every pass/fail verdict row so a merge can find a red on the
+          // branch's own tip durably (the in-memory slot above dies on restart); cancelled/error rows never carry them.
+          const settleHeadFields = worker.branch && settleStamp.head ? { settleHead: settleStamp.head, branch: worker.branch } : {};
           if (gateResult.passed) {
             const durationMs = Date.now() - gateStartedAt;
             // `extended` (card 78214063): stamped alongside `opId` (the `evt` closure adds that
             // unconditionally) — same "answer the threading question for both fields at once" DoD this
             // card's own scope-limit section asks for. See `workerGateExtended`'s own doc above.
-            evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, extended: workerGateExtended });
+            evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, extended: workerGateExtended, ...settleHeadFields });
             // Card 4c5bf820: same INJECTION HYGIENE as the failure path below — strip C0 control chars
             // before this raw process output can reach a `[loom:gate-done]` pty text or the durable
             // verdict tombstone. `steps`/a sanitized `outputTail` are forwarded on the GREEN path too —
@@ -28759,6 +28830,7 @@ export class SessionService {
             gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
             // `extended` (card 78214063): same rationale as the passing path's own `evt` call above.
             extended: workerGateExtended,
+            ...settleHeadFields,
             ...(outputTail ? { outputTail } : {}),
           });
           return {
@@ -29818,6 +29890,9 @@ export class SessionService {
     /** Card e8df2659: stamped onto the `merge_done` event when the human-only merge-gate switch was OFF
      *  (card 6f13746c: or the gate interval let this landing through ungated — `"gate-interval"`). */
     gateSkipReason?: "gate-disabled" | "gate-interval";
+    /** Card 4a95e9fc: stamped onto the `merge_done` event — the manager's RECORDED override reason, and the red self-check op that bore on the decision. */
+    overrideReason?: string;
+    redSelfCheckOpId?: string;
     /** Card 293d418e: stamped on `merge_done` (with `landedSha` = `mergedSha`) when an ALREADY_MERGED finish ran without the gate. */
     gateSkipped?: "already-landed";
     /** Card 293d418e: `merge_done.landedSha` reports this (the introducing commit) instead of `mergedSha` when set; see {@link finishAlreadyMerged}'s own doc. */
@@ -29995,7 +30070,7 @@ export class SessionService {
           const mergeDoneSeq = this.db.appendEvent({
             id: randomUUID(), ts: new Date().toISOString(),
             managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
-            taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.mergedSha ? { mergedSha: args.mergedSha } : {}), ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}), ...(args.cutBaseUnknown ? { cutBaseUnknown: true } : {}) },
+            taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.mergedSha ? { mergedSha: args.mergedSha } : {}), ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.overrideReason !== undefined ? { overrideReason: args.overrideReason } : {}), ...(args.redSelfCheckOpId ? { redSelfCheckOpId: args.redSelfCheckOpId } : {}),...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}), ...(args.cutBaseUnknown ? { cutBaseUnknown: true } : {}) },
           });
           args.onMergeDoneAppended?.(args.branch, args.repoKey, mergeDoneSeq);
         }

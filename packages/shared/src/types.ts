@@ -2779,6 +2779,9 @@ export interface GateHistoryRow {
    *  Card 0d372516 (round 2): same "never writes a row here" shape for a `merge_batch` whose assembly ABORTED EARLY
    *  on a candidate's own unverified rollback — `gate_status` settles `skipReason:"assembly-aborted-rollback-unverified"`. */
   skipReason: string | null;
+  /** Card 4a95e9fc: the manager's RECORDED (never authenticated) reason a landing went ungated although a red `run_gate` self-check sat on its
+   *  branch tip; `null` on every other row. Never a pass — read `outcome` first. */
+  overrideReason: string | null;
   /** Card bd9a483b: `true` ONLY for the `ungatedLandingCheckCommand` safety-net check — see that field's
    *  own canonical doc (`OrchestrationConfig.ungatedLandingCheckCommand`, shared/config.ts) for the full
    *  contract; not restated here. Its OWN distinct `worker_gate`-kind row (`gateType:"worker"`, own

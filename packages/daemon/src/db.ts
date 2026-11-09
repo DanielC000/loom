@@ -12947,6 +12947,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     // Card e8df2659: read from the `build_gate` event's own `skipReason` (both the inert docs-only skip and the
     // human-only gate-disabled skip stamp it), so /api/gates/history can tell the two apart.
     skipReason: typeof detail.skipReason === "string" ? detail.skipReason : null,
+    overrideReason: typeof detail.overrideReason === "string" ? detail.overrideReason : null,
     emitCompareIdenticalCount,
     emitCompareTestFiles,
     batched,
