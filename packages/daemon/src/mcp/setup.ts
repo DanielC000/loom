@@ -10,13 +10,13 @@ import { CommondirPinConflictError } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir, resolveProjectInitTarget } from "../setup/bootstrap.js";
-import { agentNameScope } from "../setup/seed.js";
+import { agentNameScope, newAgentNameScope } from "../setup/seed.js";
 import { expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
 import { validateProfile, agentProfileKeyError, agentAssignableProfileError, agentCredentialGrantRoleChangeOnRebindError, roleChangeCapabilityCarryoverError, boundAgentCredentialGrantRoleChangeError, agentLockedRoleSkillsError, roleChangeLockedSkillsCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { recordProfileGrantReach, recordAgentProfileRebindReach, grantFieldsOf, setupVisibleGrantReach, rebindWideningFields } from "../profiles/grantReach.js";
 import { reservedProjectAgentBoundToProfile } from "../agents/clone-core.js";
 import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler.js";
-import { validateAgentPatch, resolveStartupPromptEdit } from "../agents/validate.js";
+import { validateAgentPatch, resolveStartupPromptEdit, resolveAgentName } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS, isHumanSetPermissionMode, humanSetPermissionModeRejectionMessage } from "./platform.js";
 import { ensureVaultRoot } from "../vault/writer.js";
@@ -568,8 +568,11 @@ export class SetupMcpRouter {
           const assignErr = agentAssignableProfileError(profile);
           if (assignErr) return ok({ error: assignErr });
         }
+        // Card 46d1faa5: same name checks as a rename (trim, non-empty, no name/slug twin in the project).
+        const named = resolveAgentName(name, newAgentNameScope(db, projectId));
+        if (!named.ok) return ok({ error: named.error });
         const agent: Agent = {
-          id: randomUUID(), projectId, name,
+          id: randomUUID(), projectId, name: named.name,
           startupPrompt: startupPrompt ?? "", position: db.listAgents(projectId).length,
           profileId: profileId ?? null,
           // An agent created via the setup MCP is NEVER an API endpoint — publishing one is a HUMAN-only

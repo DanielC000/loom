@@ -369,6 +369,27 @@ try {
     check("label(6h): the unnamed clone gets a label DISTINCT from the bundled default's bare name",
       secondAgent.name !== COMPANION_AGENT_NAME && secondAgent.name.startsWith(COMPANION_AGENT_NAME));
   }
+  // (6j) card 46d1faa5: through the REAL route, an UNNAMED clone whose would-be count label ("Companion 3":
+  // one existing agent after a 2nd is added, so count+1 = 3) is already taken walks to the next free suffix;
+  // an EXPLICIT name that collides is a 409 (a name conflict) and mints/spawns nothing.
+  {
+    const rig = await makeRig("p6j.db"); rigs.push(rig);
+    const homeId = rig.db.getAgent(rig.companionAgentId).projectId;
+    // The 1st provision takes the bundled rig itself; only later ones are clones.
+    const base = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("collide(6j): the first (bundled-rig) provision succeeds", base.statusCode === 201);
+    rig.db.insertAgent({ id: randomUUID(), projectId: homeId, name: `${COMPANION_AGENT_NAME} 3`, startupPrompt: "", position: 1, profileId: rig.db.getAgent(rig.companionAgentId).profileId });
+    const agentsBefore = rig.db.listAgents(homeId).length; // 2 → unnamed clone's would-be label is "Companion 3"
+    const unnamed = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: {} });
+    check("collide(6j): an unnamed provision whose would-be label is taken still succeeds (201)", unnamed.statusCode === 201);
+    const unnamedAgent = rig.db.getAgent(rig.db.getSession(JSON.parse(unnamed.payload).sessionId).agentId);
+    check("collide(6j): it got the NEXT free suffix (\"Companion 4\"), not the taken \"Companion 3\"", unnamedAgent.name === `${COMPANION_AGENT_NAME} 4`);
+    const spawnedBefore = rig.spawned.length;
+    const explicit = await rig.app.inject({ method: "POST", url: "/api/companion/provision", payload: { name: `${COMPANION_AGENT_NAME} 3` } });
+    check("collide(6j): an explicit colliding given name → 409 (name conflict, not 403)", explicit.statusCode === 409);
+    check("collide(6j): the 409 mints no agent and spawns no session",
+      rig.db.listAgents(homeId).length === agentsBefore + 1 && rig.spawned.length === spawnedBefore);
+  }
   // (6i) card a06650d2 fix round: the owner GRANTS the bundled Companion profile capabilities+connections
   // (a supported live-upgrade flow — see companion-live-upgrade.mjs ~176, a direct db.updateProfile write
   // mirroring what a human-only REST PATCH /api/profiles would persist). Provisioning a 2nd companion (the

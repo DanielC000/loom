@@ -223,7 +223,9 @@ try {
   check("(E1) agent_clone REJECTS cloning a setup-role profiled agent into a NON-reserved project (createAgentCore backstop)",
     typeof e1.error === "string" && /reserved/i.test(e1.error) && !e1.id);
 
-  const e2 = await call("agent_clone", { sourceAgentId: sourceSetup.id, targetProjectId: "pReserved" });
+  // Card 46d1faa5: cloning INTO THE SOURCE'S OWN project under the source's name is a name twin and is now
+  // refused, so this control (and E5's reserved target) names its clone — the profile bind is what's under test.
+  const e2 = await call("agent_clone", { sourceAgentId: sourceSetup.id, targetProjectId: "pReserved", nameOverride: "Clone-Setup" });
   check("(E2) agent_clone SUCCEEDS cloning the SAME setup-role profiled agent into a reserved project (control)",
     e2.profileId === "profSetup" && !e2.error);
 
@@ -238,7 +240,7 @@ try {
   const nAgentsOrdinaryBeforeBatch = db.listAgents("pOrdinary").length;
   const e5 = await call("agent_clone_batch", {
     sourceAgentId: sourceWsAuditor.id,
-    targets: [{ targetProjectId: "pOrdinary" }, { targetProjectId: "pReserved" }],
+    targets: [{ targetProjectId: "pOrdinary" }, { targetProjectId: "pReserved", nameOverride: "Clone-WsAuditor" }],
   });
   check("(E5) agent_clone_batch: the NON-reserved target is REJECTED, the reserved target SUCCEEDS, per-entry independent",
     typeof e5[0].error === "string" && /reserved/i.test(e5[0].error) && !e5[0].agent &&

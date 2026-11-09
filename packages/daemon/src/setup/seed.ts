@@ -16,7 +16,7 @@ import {
   resolveSetupHome,
   resolveLiveSetupHome,
 } from "../projects/reserved-home-markers.js";
-import type { AgentNameScope } from "../agents/validate.js";
+import type { AgentNameScope, NewAgentNameScope } from "../agents/validate.js";
 export { SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_HOME_LEAD_AGENT_ID_KEY, resolveLiveSetupHome };
 
 /**
@@ -731,6 +731,19 @@ export function agentNameScope(db: Db, agent: Agent): AgentNameScope {
     agentId: agent.id,
     currentName: agent.name,
     siblings: db.listAgents(agent.projectId).map((a) => ({ id: a.id, name: a.name })),
+    reservedNames: isSetupHome ? NAME_KEYED_SETUP_HOME_AGENT_NAMES : [],
+  };
+}
+
+/**
+ * Card 46d1faa5: the create-side twin of `agentNameScope` — what a NEW agent's name in `projectId` is
+ * checked against (agents/validate.ts › resolveAgentName). Same sibling list and same setup-home reserved
+ * names, minus the agent being renamed.
+ */
+export function newAgentNameScope(db: Db, projectId: string): NewAgentNameScope {
+  const isSetupHome = resolveSetupHome(db)?.id === projectId;
+  return {
+    siblings: db.listAgents(projectId).map((a) => ({ id: a.id, name: a.name })),
     reservedNames: isSetupHome ? NAME_KEYED_SETUP_HOME_AGENT_NAMES : [],
   };
 }

@@ -4,6 +4,8 @@ import type { Agent, Task } from "@loom/shared";
 import type { Db } from "../db.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
 import { reservedProjectManagerProfileError } from "../agents/clone-core.js";
+import { resolveAgentName } from "../agents/validate.js";
+import { newAgentNameScope } from "./seed.js";
 
 /**
  * Guided Onboarding & Templates (onboarding C1) — the workflow-template model. A BUNDLED TS preset, the
@@ -153,6 +155,11 @@ export function applyWorkflowTemplate(
   const profilesByName = new Map(db.listProfiles().map((p) => [p.name, p]));
 
   // Pre-flight: resolve + validate EVERY agent before writing any of them, so the apply is all-or-nothing.
+  // Card 46d1faa5: each name is also checked (the create-side twin of the rename check) against the project's
+  // existing agents AND the template's earlier entries, so applying a roster twice, or onto a project that
+  // already holds "QA Tester", throws here with nothing written instead of minting a twin.
+  const nameScope = newAgentNameScope(db, projectId);
+  const siblings = [...nameScope.siblings];
   const resolved = template.agents.map((spec) => {
     const profile = profilesByName.get(spec.profileName);
     if (!profile) throw new Error(`applyWorkflowTemplate: unknown bundled profile "${spec.profileName}" for agent "${spec.name}"`);
@@ -162,14 +169,17 @@ export function applyWorkflowTemplate(
       const reservedErr = reservedProjectManagerProfileError(project, profile);
       if (reservedErr) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${reservedErr}`);
     }
-    return { spec, profile };
+    const named = resolveAgentName(spec.name, { siblings, reservedNames: nameScope.reservedNames });
+    if (!named.ok) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${named.error}`);
+    siblings.push({ id: `template:${siblings.length}`, name: named.name });
+    return { spec, profile, name: named.name };
   });
 
-  const agents: Agent[] = resolved.map(({ spec, profile }) => {
+  const agents: Agent[] = resolved.map(({ spec, profile, name }) => {
     const agent: Agent = {
       id: randomUUID(),
       projectId,
-      name: spec.name,
+      name,
       startupPrompt: spec.startupPrompt,
       position: spec.position,
       profileId: profile.id,

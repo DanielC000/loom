@@ -1615,7 +1615,8 @@ export class PlatformMcpRouter {
         description:
           "Clone an existing agent's name/startupPrompt/profile assignment into a (usually different) " +
           "project, to provision a per-family role (e.g. \"Web Designer\") across sibling projects. Reads " +
-          "sourceAgentId's name/startupPrompt/profileId, applies nameOverride (else keeps the source name) " +
+          "sourceAgentId's name/startupPrompt/profileId, applies nameOverride (else keeps the source name; a clone into the source's OWN " +
+          "project needs a nameOverride, since the source name is already taken there) " +
           "and promptPatch (else keeps the source startupPrompt VERBATIM; promptPatch REPLACES the prompt " +
           "text, it is not a diff), and creates the clone in targetProjectId through the same validated " +
           "core agent_create uses. LEAST-PRIVILEGE, STRICTER than assigning an elevated profile directly via " +

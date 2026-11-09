@@ -1,3 +1,4 @@
+import { slugifyAgentName } from "@loom/shared";
 import { RESERVED_CAPABILITY_SLUGS } from "../capabilities/registry.js";
 import { capabilityGrantBindingError, agentCapabilitiesCodexProfileError, type CapabilityGrantBindingDbStore } from "../profiles/validate.js";
 
@@ -81,15 +82,9 @@ export function resolveStartupPromptEdit(
   return patch.startupPrompt;
 }
 
-/**
- * Slugify an agent name the way worker_spawn's `agentId` name/slug resolution does: lowercase, collapse any
- * run of non-alphanumerics to a single hyphen, trim leading/trailing hyphens. Deterministic and
- * dependency-free, so "QA Tester" and "qa-tester" both resolve to that agent. Shared with the rename check
- * below so a rename can never mint two agents one slug would resolve to.
- */
-export function slugifyAgentName(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
+// The slug definition lives in @loom/shared (card 46d1faa5) so the web editor's client-side pre-check uses
+// the very same function; re-exported here so the daemon's existing importers keep their path.
+export { slugifyAgentName };
 
 /**
  * What a rename has to be checked against, built from the Db by the caller (`agentNameScope`,
@@ -120,11 +115,21 @@ export function resolveAgentRename(raw: string, scope: AgentNameScope): { ok: tr
   if (scope.reservedNames.includes(scope.currentName)) {
     return { ok: false, error: `"${scope.currentName}" is a built-in agent that Loom finds by this exact name when it starts, so it can't be renamed (a renamed copy would be seeded again beside it)` };
   }
+  return checkNameAgainstSiblings(name, scope.reservedNames, scope.siblings.filter((a) => a.id !== scope.agentId));
+}
+
+/**
+ * The rules a NEW name must clear, shared by `resolveAgentRename` and `resolveAgentName` so create and
+ * rename cannot drift (card 46d1faa5): not a reserved built-in name (case-insensitive), no case-insensitive
+ * name match and no slug match among `others`. `name` is already trimmed and non-empty.
+ */
+function checkNameAgainstSiblings(
+  name: string, reservedNames: readonly string[], others: readonly { id: string; name: string }[],
+): { ok: true; name: string } | { ok: false; error: string } {
   const lower = name.toLowerCase();
-  if (scope.reservedNames.some((r) => r.toLowerCase() === lower)) {
+  if (reservedNames.some((r) => r.toLowerCase() === lower)) {
     return { ok: false, error: `"${name}" is reserved for a built-in agent of this project` };
   }
-  const others = scope.siblings.filter((a) => a.id !== scope.agentId);
   const sameName = others.find((a) => a.name.toLowerCase() === lower);
   if (sameName) return { ok: false, error: `another agent in this project is already named "${sameName.name}"` };
   const slug = slugifyAgentName(name);
@@ -133,6 +138,44 @@ export function resolveAgentRename(raw: string, scope: AgentNameScope): { ok: tr
     return { ok: false, error: `"${name}" is too close to the agent "${sameSlug.name}": a worker spawned by name would read both as "${slug}"` };
   }
   return { ok: true, name };
+}
+
+/** What a brand-new agent's name is checked against (`newAgentNameScope`, setup/seed.ts). */
+export type NewAgentNameScope = {
+  /** Every agent already in the target project. */
+  siblings: readonly { id: string; name: string }[];
+  /** Names Loom's boot seeders find an agent of this project BY (empty outside the setup home). */
+  reservedNames: readonly string[];
+};
+
+/**
+ * Card 46d1faa5: the CREATE-side twin of `resolveAgentRename` — same rules (shared `checkNameAgainstSiblings`),
+ * no self to exclude and no "current name" shortcut. Seeders do NOT call this: they find their agent by exact
+ * name and skip when present, which is what keeps boot idempotent.
+ */
+export function resolveAgentName(raw: string, scope: NewAgentNameScope): { ok: true; name: string } | { ok: false; error: string } {
+  const name = raw.trim();
+  if (name === "") return { ok: false, error: "name must not be empty" };
+  return checkNameAgainstSiblings(name, scope.reservedNames, scope.siblings);
+}
+
+/** Bound on the auto-suffix walk of `uniqueAgentName`. */
+export const AGENT_NAME_SUFFIX_LIMIT = 100;
+
+/**
+ * Card 46d1faa5: for an UNNAMED clone, walk `base <start>`, `base <start+1>`, ... until the name clears
+ * `resolveAgentName` (so name AND slug are free). Always numbered, matching the pre-existing unnamed-clone
+ * label. Bounded: past AGENT_NAME_SUFFIX_LIMIT attempts it refuses rather than loop. The result always
+ * passed the same checks an explicit name does.
+ */
+export function uniqueAgentName(base: string, scope: NewAgentNameScope, start: number): { ok: true; name: string } | { ok: false; error: string } {
+  const trimmed = base.trim();
+  if (trimmed === "") return { ok: false, error: "name must not be empty" };
+  for (let n = start; n < start + AGENT_NAME_SUFFIX_LIMIT; n++) {
+    const r = resolveAgentName(`${trimmed} ${n}`, scope);
+    if (r.ok) return r;
+  }
+  return { ok: false, error: `no free name found for "${trimmed}" after ${AGENT_NAME_SUFFIX_LIMIT} numbered attempts` };
 }
 
 export function validateAgentPatch(

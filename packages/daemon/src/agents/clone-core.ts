@@ -4,6 +4,8 @@ import type { Db } from "../db.js";
 import { isPlatformProfile } from "../profiles/seed.js";
 import { agentAssignableProfileError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { agentCreatePromptWarning } from "./promptLint.js";
+import { resolveAgentName, uniqueAgentName } from "./validate.js";
+import { newAgentNameScope } from "../setup/seed.js";
 import { isLoomHomeOrAncestor } from "../vault/versioner.js";
 
 // @decision d25e4ea7 — the ONE predicate for "may a manager session ever start/bind here": call this,
@@ -91,7 +93,7 @@ export function createAgentCore(
   db: Db,
   { projectId, name, startupPrompt, profileId }:
     { projectId: string; name: string; startupPrompt?: string; profileId?: string | null },
-  opts?: { allowElevatedRoles?: boolean; skipRoleCheck?: boolean; humanAuthorized?: boolean },
+  opts?: { allowElevatedRoles?: boolean; skipRoleCheck?: boolean; humanAuthorized?: boolean; autoSuffixFrom?: number },
 ): { ok: true; agent: Agent; promptWarning: string | null } | { ok: false; error: string } {
   const project = db.getProject(projectId);
   if (!project) return { ok: false, error: "project not found" };
@@ -115,8 +117,15 @@ export function createAgentCore(
   // callers (agent_clone/agent_clone_batch AND the companion auto-clone) with no separate wiring.
   const nonReservedErr = nonReservedElevatedProfileError(project, profile);
   if (nonReservedErr) return { ok: false, error: nonReservedErr };
+  // Card 46d1faa5: the create-side twin of the rename check — trimmed, non-empty, no same-project
+  // name/slug twin, and (in the setup home) none of the names the boot seeders find an agent by.
+  // `autoSuffixFrom` (an unnamed clone) walks to a free name instead of refusing.
+  const named = opts?.autoSuffixFrom !== undefined
+    ? uniqueAgentName(name, newAgentNameScope(db, projectId), opts.autoSuffixFrom)
+    : resolveAgentName(name, newAgentNameScope(db, projectId));
+  if (!named.ok) return { ok: false, error: named.error };
   const agent: Agent = {
-    id: randomUUID(), projectId, name,
+    id: randomUUID(), projectId, name: named.name,
     startupPrompt: startupPrompt ?? "", position: db.listAgents(projectId).length,
     profileId: profileId ?? null, // assign the (validated) profile, or stay profile-less
     // An agent created through this core is NEVER an endpoint — publishing an agent as an API
@@ -174,7 +183,7 @@ export function cloneAgentCore(
   db: Db,
   sourceAgentId: string, targetProjectId: string,
   patch: { nameOverride?: string; promptPatch?: string },
-  opts?: { humanAuthorized?: boolean },
+  opts?: { humanAuthorized?: boolean; autoSuffixFrom?: number },
 ): { ok: true; agent: Agent; promptWarning: string | null } | { ok: false; error: string } {
   const source = db.getAgent(sourceAgentId);
   if (!source) return { ok: false, error: "source agent not found" };
@@ -185,7 +194,7 @@ export function cloneAgentCore(
     name: patch.nameOverride ?? source.name,
     startupPrompt: patch.promptPatch ?? source.startupPrompt,
     profileId: source.profileId,
-  }, { skipRoleCheck: true, humanAuthorized: opts?.humanAuthorized });
+  }, { skipRoleCheck: true, humanAuthorized: opts?.humanAuthorized, autoSuffixFrom: opts?.autoSuffixFrom });
 }
 
 /**

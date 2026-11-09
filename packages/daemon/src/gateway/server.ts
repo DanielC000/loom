@@ -98,14 +98,14 @@ import { validateProfile, agentCapabilitiesCodexProfileError, boundAgentCapabili
 import { codexProviderBindingError } from "../profiles/codex-provider.js";
 import { CODEX_RESTRICTED_TOOLS_REASON } from "../profiles/codex-compat.js";
 import { recordProfileGrantReach, grantFieldsOf, computeProfileDeleteGrantReach, fileProfileDeleteGrantReachEvent, recordAgentProfileRebindReach, rebindWideningFields } from "../profiles/grantReach.js";
-import { validateAgentPatch, agentCredentialGrantWriteError } from "../agents/validate.js";
+import { validateAgentPatch, agentCredentialGrantWriteError, resolveAgentName } from "../agents/validate.js";
 import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore, MANAGER_SESSION_BARRED_ERROR } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
-import { resolveLiveSetupHome, COMPANION_AGENT_NAME, seedOperatorAgent, agentNameScope } from "../setup/seed.js";
+import { resolveLiveSetupHome, COMPANION_AGENT_NAME, seedOperatorAgent, agentNameScope, newAgentNameScope } from "../setup/seed.js";
 import { resolveHomeLeadAgent, isSanctionedPlatformLeadAgent } from "../projects/live-lead-home.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
@@ -2259,8 +2259,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     let clonedAgentId: string | null = null;
     if (cloneSource) {
       const source = deps.db.getAgent(cloneSource.sourceAgentId)!;
-      const label = name || `${source.name} ${deps.db.listAgents(cloneSource.targetProjectId).length + 1}`;
-      const cloned = cloneAgentCore(deps.db, cloneSource.sourceAgentId, cloneSource.targetProjectId, { nameOverride: label }, { humanAuthorized: true });
+      // Card 46d1faa5: an EXPLICIT name that collides is refused (409 below); an unnamed clone walks the
+      // counter to a free name+slug instead (bounded), starting at the count-based label it always had.
+      // A name collision is a 409 (a conflict the caller can fix by choosing another name); the profile-role
+      // refusal below stays a 403. The same check runs again inside the core, so this only picks the status.
+      if (name) {
+        const nameCheck = resolveAgentName(name, newAgentNameScope(deps.db, cloneSource.targetProjectId));
+        if (!nameCheck.ok) return reply.code(409).send({ error: `failed to clone a new companion agent: ${nameCheck.error}` });
+      }
+      const autoSuffixFrom = name ? undefined : deps.db.listAgents(cloneSource.targetProjectId).length + 1;
+      const cloned = cloneAgentCore(deps.db, cloneSource.sourceAgentId, cloneSource.targetProjectId, { nameOverride: name || source.name }, { humanAuthorized: true, autoSuffixFrom });
       if (!cloned.ok) return reply.code(403).send({ error: `failed to clone a new companion agent: ${cloned.error}` });
       agentId = cloned.agent.id;
       clonedAgentId = cloned.agent.id;
@@ -6038,9 +6046,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const projectId = (req.params as { id: string }).id;
     if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
     const b = (req.body ?? {}) as { name?: string; startupPrompt?: string };
-    if (!b.name) return reply.code(400).send({ error: "name required" });
+    if (!b.name || typeof b.name !== "string") return reply.code(400).send({ error: "name required" });
+    // Card 46d1faa5: the create-side twin of the rename check (trim, non-empty, no name/slug twin, no
+    // reserved setup-home name). Seeders insert through their own idempotent path, not this route.
+    const named = resolveAgentName(b.name, newAgentNameScope(deps.db, projectId));
+    if (!named.ok) return reply.code(400).send({ error: named.error });
     const agent: Agent = {
-      id: randomUUID(), projectId, name: b.name,
+      id: randomUUID(), projectId, name: named.name,
       startupPrompt: b.startupPrompt ?? "", position: deps.db.listAgents(projectId).length,
       profileId: null, // additive: agents start profile-less (P3 wires up profile assignment)
       endpoint: false, ioSchema: null, // Agent Runs R1: new agents are non-endpoint (flip via PATCH below)

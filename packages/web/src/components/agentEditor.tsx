@@ -12,7 +12,7 @@
 // @decision 318b5a21 — one editor. A second copy of this form drifts from the first within one card.
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { profileRoleBindsAsPlainSession, type Agent, type SessionRole, type CapabilityGrant } from "@loom/shared";
+import { profileRoleBindsAsPlainSession, slugifyAgentName, type Agent, type SessionRole, type CapabilityGrant } from "@loom/shared";
 import { api } from "../lib/api";
 import { Button, Input, Select, Badge } from "./ui";
 import { isDevLayerRole } from "../lib/roleDisplay";
@@ -145,9 +145,8 @@ export function useAgentWrites(
  * The client half of the daemon's rename check (agents/validate.ts › resolveAgentRename): trimmed,
  * non-empty, and no case-insensitive name or slug clash with another agent in the project. The server
  * stays the authority (it also refuses renaming a built-in seeded agent); this only says so before a
- * round trip. The slug mirrors the daemon's slugifyAgentName, which is what worker_spawn resolves by.
+ * round trip. The slug is the daemon's own slugifyAgentName (shared), which is what worker_spawn resolves by.
  */
-const agentSlug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 function renameProblem(draft: string, self: Agent, siblings: readonly Agent[]): string | null {
   const name = draft.trim();
   if (name === "") return "A name can't be empty.";
@@ -156,8 +155,8 @@ function renameProblem(draft: string, self: Agent, siblings: readonly Agent[]): 
   const lower = name.toLowerCase();
   const sameName = others.find((a) => a.name.toLowerCase() === lower);
   if (sameName) return `Another agent in this project is already named "${sameName.name}".`;
-  const slug = agentSlug(name);
-  const sameSlug = slug ? others.find((a) => agentSlug(a.name) === slug) : undefined;
+  const slug = slugifyAgentName(name);
+  const sameSlug = slug ? others.find((a) => slugifyAgentName(a.name) === slug) : undefined;
   if (sameSlug) return `Too close to "${sameSlug.name}": spawning by name would read both as "${slug}".`;
   return null;
 }
