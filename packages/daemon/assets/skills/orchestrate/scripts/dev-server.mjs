@@ -451,11 +451,7 @@ function commandLineOf(pid) {
       const r = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}").CommandLine`], { encoding: "utf8", timeout: 20000 });
       const raw = (r.stdout || "").trim() || null;
       if (!raw) return none;
-      const argv = [];
-      const re = /"([^"]*)"|(\S+)/g;
-      let m;
-      while ((m = re.exec(raw)) !== null) argv.push(m[1] !== undefined ? m[1] : m[2]);
-      return { raw, argv };
+      return { raw, argv: splitQuotedArgs(raw) };
     }
     if (process.platform === "linux") {
       try {
@@ -471,8 +467,29 @@ function commandLineOf(pid) {
   }
 }
 
+// Splits a win32 command line into arguments, honoring double-quoted segments (a quoted path may hold
+// spaces). Written as a char loop, not a regex, so the detached-console guard's lexer is not confused.
+function splitQuotedArgs(line) {
+  const out = [];
+  let cur = "";
+  let has = false;
+  let inQuote = false;
+  for (const ch of line) {
+    if (ch === '"') { inQuote = !inQuote; has = true; continue; }
+    if (!inQuote && (ch === " " || ch === "\t")) {
+      if (has) { out.push(cur); cur = ""; has = false; }
+      continue;
+    }
+    cur += ch;
+    has = true;
+  }
+  if (has) out.push(cur);
+  return out;
+}
+
 const normPath = (s) => {
-  const c = s.replace(/[\\/]+/g, "/");
+  let c = s.split("\\").join("/");
+  while (c.includes("//")) c = c.split("//").join("/");
   return process.platform === "win32" ? c.toLowerCase() : c;
 };
 
