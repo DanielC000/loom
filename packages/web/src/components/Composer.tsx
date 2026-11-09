@@ -375,7 +375,9 @@ function VoiceLangSelect({ lang, setLang, disabled }: { lang: string; setLang: (
       value={lang}
       disabled={disabled}
       onChange={(e) => setLang(e.target.value)}
-      style={{ flex: 1, minWidth: 0, fontSize: fs.sm, padding: "2px 4px" }}
+      // The right padding is the native chevron's own room, and the ellipsis is for a label that still
+      // doesn't fit at a narrow width: without both the text ran under the arrow (card 4f62b5cb).
+      style={{ flex: 1, minWidth: 0, fontSize: fs.sm, padding: "2px 20px 2px 6px", textOverflow: "ellipsis", whiteSpace: "nowrap", overflow: "hidden" }}
     >
       {all.map((o) => (
         <option key={o.tag} value={o.tag}>{o.label}</option>

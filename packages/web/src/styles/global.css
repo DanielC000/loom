@@ -1932,6 +1932,52 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-atlas-nodehead-row > :first-child {
   min-width: 0;
 }
+/* The SESSION node's row: when its state run and its controls no longer fit side by side, the controls
+   take a row of their own, right-aligned, rather than the state run squeezing under and into them (at
+   390px the context readout printed over Fork — card 4f62b5cb). */
+.loom-atlas-sessionhead-row {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+.loom-atlas-sessionhead-row > :last-child {
+  margin-left: auto;
+}
+/* Fork while the session is busy (card 4f62b5cb): still tappable, so a touch reader can learn why it
+   won't fork, which a hover-only `title` never told them. Looks exactly like a disabled button. */
+.loom-btn.loom-btn-blocked {
+  opacity: 0.45;
+}
+.loom-forkwrap {
+  position: relative;
+  display: inline-flex;
+}
+.loom-forkwhy {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  width: max-content;
+  max-width: min(320px, 80vw);
+  padding: 6px 10px;
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
+  line-height: 1.4;
+  color: var(--loom-text);
+  background: var(--loom-surface);
+  border: 1px solid var(--loom-line);
+  border-radius: var(--loom-radius);
+  box-shadow: var(--loom-pop-shadow);
+}
+/* Closed: out of sight but still in the accessibility tree, since the button's aria-describedby names it. */
+.loom-forkwhy:not(.is-open) {
+  clip-path: inset(50%);
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  white-space: nowrap;
+  padding: 0;
+  border: 0;
+}
 /* The node's own pills (card 5968d7e0). Wraps rather than clips, for the same reason the tab row
    below it does: at phone width a three-pill session head is wider than the column. */
 .loom-atlas-headpills {
@@ -2482,6 +2528,10 @@ button.loom-atlas-node.is-branch.is-open {
    viewport rather than a natural length.
    Why each piece is the way it is: docs/decisions/525c8ad9-atlas-session-node.md. */
 .loom-atlas-sessionnode {
+  /* ONE pane height for every tab that has a viewport (terminal, transcript, timeline), less whatever the
+     queue ledger is currently taking (`--loom-atlas-queue-h`, measured in TerminalCard). Together they
+     pin the composer: a tab switch or a queue expanding no longer moves it (card 4f62b5cb). */
+  --loom-atlas-pane-h: min(58vh, 640px);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -2496,9 +2546,12 @@ button.loom-atlas-node.is-branch.is-open {
 /* The terminal's own viewport. Bounded against the VIEWPORT, not the content, so the strips below it
    stay reachable with one short scroll on any screen instead of being pushed a page down on a tall
    one. `overflow: hidden` clips xterm's canvas to the box, the same guarantee the card body makes. */
-.loom-atlas-termbox {
-  height: min(58vh, 640px);
+.loom-atlas-termbox,
+.loom-atlas-panebox {
+  height: calc(var(--loom-atlas-pane-h, min(58vh, 640px)) - var(--loom-atlas-queue-h, 0px));
   min-height: 240px;
+}
+.loom-atlas-termbox {
   overflow: hidden;
   /* Graphite terminal well: the terminal's own dark ground in BOTH themes (--loom-term-bg), radius 12,
      no outline. The 1px border slot is kept transparent so the box measures as before. */
@@ -2507,6 +2560,13 @@ button.loom-atlas-node.is-branch.is-open {
   background: var(--loom-term-bg);
   padding: 6px;
   box-sizing: border-box;
+}
+/* A pane with a natural length (the manager's timeline) held to the terminal's height: its content
+   flexes to fill and scrolls inside. */
+.loom-atlas-panebox {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 .loom-atlas-nodesections {
   display: flex;
@@ -2524,8 +2584,8 @@ button.loom-atlas-node.is-branch.is-open {
 @media (max-width: 820px) {
   /* A phone has far less height to give the terminal, and the strips below it are the half a reader
      came for on a narrow screen. */
-  .loom-atlas-termbox {
-    height: min(46vh, 420px);
+  .loom-atlas-sessionnode {
+    --loom-atlas-pane-h: min(46vh, 420px);
   }
 }
 

@@ -28,10 +28,12 @@ export function browserDefaultLang(): string {
 
 // The options to render: the curated list, with the browser-default tag prepended iff it's not
 // already one of the curated tags — so the recognizer's default locale is always pickable.
+// Its label leads with "Auto" (card 4f62b5cb): the picker sits in a ~95px column beside Voice, where
+// the old "de (browser default)" never fit and ran under the chevron.
 export function voiceLangOptions(): ReadonlyArray<{ tag: string; label: string }> {
   const def = browserDefaultLang();
   if (VOICE_LANGS.some((l) => l.tag === def)) return VOICE_LANGS;
-  return [{ tag: def, label: `${def} (browser default)` }, ...VOICE_LANGS];
+  return [{ tag: def, label: `Auto · ${def}` }, ...VOICE_LANGS];
 }
 
 function read(): string {

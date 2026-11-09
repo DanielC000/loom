@@ -3,6 +3,7 @@ import { Button } from "./ui";
 import { color, fs } from "../theme";
 import { canResumeSession } from "../lib/sessions";
 import { RepinGrantsControl } from "./RepinGrants";
+import { ForkButton } from "./TerminalCard";
 
 // The per-session quick-action cluster — Clear-rate-limit / Fork / Stop / Resume — with its
 // per-state gating. The Workspace cockpit and the Overview fleet-accordion cockpit drive the SAME
@@ -48,8 +49,8 @@ export function SessionActions({
       {canEndSession(s) && <EndSessionButton s={s} onEnd={onEnd} ending={ending} />}
       {/* Re-pin grants (card 158cb01a): renders only when the session's pinned grants differ from its agent's. */}
       <RepinGrantsControl session={s} />
-      {live && <Button disabled={forking || s.busy} onClick={(ev) => { ev.stopPropagation(); onFork(); }}
-        title={s.busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}>Fork</Button>}
+      {/* The SHARED Fork (card 4f62b5cb): while busy it explains itself on a tap, not only on hover. */}
+      {live && <ForkButton onFork={onFork} busy={!!s.busy} pending={forking} style={{ padding: "4px 12px" }} />}
       {live && <Button disabled={stopping} title="Stop this session — graceful Ctrl-C, clean and resumable"
         onClick={(ev) => { ev.stopPropagation(); onStop(); }}>Stop</Button>}
       {canResume && <Button disabled={resuming} title="Resume this session and attach its terminal" onClick={onResume}>Resume</Button>}

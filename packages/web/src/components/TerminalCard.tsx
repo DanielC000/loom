@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem, Wake } from "@loom/shared";
@@ -121,11 +121,44 @@ const BUDGET_SLACK = 6;
 // The action-cluster buttons + the identity/status title. They live here (the base's home) so every
 // terminal-card variant renders the same controls; TerminalTile re-exports them for its call sites.
 
-export function ForkButton({ onFork, busy, pending }: { onFork: () => void; busy: boolean; pending: boolean }) {
+const FORK_BUSY_REASON = "Fork is available when the session is idle.";
+const FORK_REASON_MS = 4000;
+
+/**
+ * Fork. While the session is busy it is BLOCKED, not `disabled` (card 4f62b5cb): it looks disabled and
+ * never forks, but a tap shows the reason in a small note under it for a few seconds. A disabled button
+ * swallows the tap and its `title` only ever reaches a mouse, so a touch reader was never told why.
+ * The same reason is the button's accessible description throughout.
+ */
+export function ForkButton({ onFork, busy, pending, style }: {
+  onFork: () => void; busy: boolean; pending: boolean;
+  /** Layout only (e.g. a cluster's own padding) — never color/background (decision 6cefdf25). */
+  style?: CSSProperties;
+}) {
+  const reasonId = useId();
+  const [explain, setExplain] = useState(false);
+  const blocked = busy && !pending;
+  useEffect(() => {
+    if (!explain || !blocked) { if (explain) setExplain(false); return; }
+    const t = setTimeout(() => setExplain(false), FORK_REASON_MS);
+    return () => clearTimeout(t);
+  }, [explain, blocked]);
   return (
-    <Button style={{ padding: "0 8px" }} disabled={busy || pending}
-      title={busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}
-      onClick={(ev) => { ev.stopPropagation(); onFork(); }}>Fork</Button>
+    <span className="loom-forkwrap">
+      <Button style={{ padding: "0 8px", ...style, ...(blocked ? { cursor: "not-allowed" } : null) }} disabled={pending}
+        aria-disabled={blocked || undefined} aria-describedby={blocked ? reasonId : undefined}
+        className={blocked ? "loom-btn-blocked" : undefined}
+        title={blocked ? undefined : "Fork — branch this conversation into a new divergent session"}
+        onClick={(ev) => {
+          ev.stopPropagation();
+          if (blocked) { setExplain(true); return; }
+          onFork();
+        }}>Fork</Button>
+      {blocked && (
+        <span id={reasonId} role="status" data-testid="fork-blocked-reason"
+          className={`loom-forkwhy${explain ? " is-open" : ""}`}>{FORK_BUSY_REASON}</span>
+      )}
+    </span>
   );
 }
 
@@ -382,6 +415,24 @@ export function TerminalCard({
   }, [hug, maximized, height, activeTab, !!task, watchOnly, !!tabs,
       subPanels?.queue, subPanels?.wakes, subPanels?.taskCard]);
 
+  // The ATLAS node's counterpart to Direction B above, inverted (card 4f62b5cb): the node is a flowing
+  // column, so a queue that grows pushed the composer below the fold. There the PANE gives up the queue's
+  // height instead (`--loom-atlas-queue-h`, read by `.loom-atlas-termbox` / `.loom-atlas-panebox`), so the
+  // composer holds one position whatever the queue holds. Observes only the queue wrapper, which never
+  // contains the pane, so a pane resize cannot re-fire it.
+  const [atlasQueueH, setAtlasQueueH] = useState(0);
+  const isAtlasNode = atlasNode != null;
+  useLayoutEffect(() => {
+    if (!isAtlasNode || maximized) return;
+    const el = queueRef.current;
+    if (!el) return;
+    const measure = () => setAtlasQueueH((cur) => (Math.abs(cur - el.offsetHeight) <= 1 ? cur : el.offsetHeight));
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [isAtlasNode, maximized, subPanels?.queue]);
+
   const lifecycleButton = lifecycle === "kill"
     ? <Button variant="danger" style={{ padding: "0 8px" }} disabled={stopPending}
         title={stopTitle ?? "Kill this session"} onClick={(ev) => { ev.stopPropagation(); onStop?.(); }}>Kill</Button>
@@ -390,7 +441,7 @@ export function TerminalCard({
       : null;
 
   const header = (
-    <div className={atlasNode ? "loom-atlas-nodehead-row" : undefined}
+    <div className={atlasNode ? "loom-atlas-nodehead-row loom-atlas-sessionhead-row" : undefined}
       style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: atlasNode ? 0 : 4 }}>
       {title ?? <TileTitle s={session} showProject={showProject} />}
       {/* Never compresses — the identity prefix beside it is the element that gives up space (ad3157b9). */}
@@ -555,7 +606,12 @@ export function TerminalCard({
             <TranscriptPane sessionId={session.id} />
           </div>
         )}
-        {tabs && activeTab === "timeline" && tabs.timeline}
+        {/* The same box height as the terminal, so the composer below holds its place on a tab switch
+            (card 4f62b5cb). Diff is the exception on purpose: it is its own address (/review/:id) and
+            runs to the length of the diff. */}
+        {tabs && activeTab === "timeline" && (
+          <div className="loom-atlas-panebox" data-testid="session-node-pane-timeline">{tabs.timeline}</div>
+        )}
         {diffPane}
       </div>
       {belowStrip}
@@ -598,7 +654,8 @@ export function TerminalCard({
   // inline, so the de-duplication can never flicker a second identity onto the screen.
   if (atlasNode) {
     return (
-      <div className="loom-atlas-sessionnode" data-testid="session-node">
+      <div className="loom-atlas-sessionnode" data-testid="session-node"
+        style={{ "--loom-atlas-queue-h": `${atlasQueueH}px` } as CSSProperties}>
         {atlasNode.headerSlot ? createPortal(header, atlasNode.headerSlot) : null}
         {body(false)}
       </div>

@@ -54,9 +54,11 @@ function ctxReadout(s: SessionNodeRow) {
   const window = contextWindowForModel(s.model);
   const pct = window > 0 ? Math.round((ctx / window) * 100) : 0;
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+    // One unbreakable unit (card 4f62b5cb): split across two lines at phone width, its second line ran
+    // into the Fork button. The node head moves the controls to their own row instead.
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
       <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "attn" : "accent"} width={60} />
-      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3, whiteSpace: "nowrap" }}>
         {(ctx / 1000).toFixed(1)}k ctx · {pct}%
       </span>
     </span>
@@ -99,7 +101,7 @@ function SessionNodeState({ s }: { s: SessionNodeRow }) {
   // pill and same label SessionView's own ended-session panel uses, so the two read identically.
   if (!isLiveish(s)) {
     return (
-      <span data-testid="session-node-state" style={{ display: "inline-flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+      <span data-testid="session-node-state" style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
         <StatusPill tone="muted" label={s.processState} />
         {genReadout(s)}
         {ctxReadout(s)}
@@ -122,11 +124,18 @@ function SessionNodeState({ s }: { s: SessionNodeRow }) {
 // definition: a component importing it from a page would have made a page↔component cycle. Polls so it
 // stays live while the manager drills its workers; mounted only while the Timeline tab is active, so it
 // never fans out a query per manager.
-export function ManagerTimeline({ managerId }: { managerId: string }) {
+export function ManagerTimeline({ managerId, fill = false }: {
+  managerId: string;
+  /** Fill the box it is placed in rather than cap itself at 440px — the Atlas node gives every tab the
+   *  terminal's own height, so the composer below never moves on a tab switch (card 4f62b5cb). */
+  fill?: boolean;
+}) {
   const events = useQuery({ queryKey: ["orchEvents", managerId], queryFn: ({ signal }) => api.orchestrationEvents(managerId, signal), placeholderData: keepPreviousData });
   const list = events.data ?? [];
   return (
-    <Panel grid style={{ maxHeight: 440, overflow: "auto" }}>
+    // `fill` flexes rather than taking `height: 100%`, so the same node also fills the maximized card's
+    // column (where the tab row and composer share the height) instead of overrunning it.
+    <Panel grid style={{ ...(fill ? { flex: "1 1 auto", minHeight: 0 } : { maxHeight: 440 }), overflow: "auto" }}>
       {list.length === 0 && <span style={{ color: color.text3, fontSize: fs.sm }}>No events yet.</span>}
       {list.map((e) => <EventRow key={e.id} e={e} />)}
     </Panel>
@@ -160,7 +169,7 @@ export function SessionNode({ session, tab = "terminal" }: {
   // `tabs` is always an object — even an empty one — so a plain session still gets the two-tab row
   // rather than TerminalCard's no-tabs body.
   const tabs: TerminalTabs = {
-    ...(nodeTabs.includes("timeline") ? { timeline: <ManagerTimeline managerId={session.id} /> } : null),
+    ...(nodeTabs.includes("timeline") ? { timeline: <ManagerTimeline managerId={session.id} fill /> } : null),
     // Keyed on the id for the same reason /review/:workerId keys it: result / note / openFiles must
     // never carry across a session switch (card 496fe90e).
     ...(hasDiff ? { diff: <ReviewSurface key={session.id} workerId={session.id} embedded /> } : null),
