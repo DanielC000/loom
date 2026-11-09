@@ -246,6 +246,9 @@ async function rowCells(page: Page, sessionId: string) {
       branch: txt(".loom-ovroster-cell.is-branch"),
       context: txt(".loom-ovroster-ctx"),
       last: txt(".loom-ovroster-cell.is-last"),
+      // The raw kind behind the plain label (card c77713ae): the cell's `data-event-kind` and `title`.
+      lastKind: el.querySelector(".loom-ovroster-cell.is-last")?.getAttribute("data-event-kind") ?? null,
+      lastTitle: el.querySelector(".loom-ovroster-cell.is-last")?.getAttribute("title") ?? null,
       open: txt(".loom-ovroster-open"),
       labels,
       indented: el.classList.contains("is-child"),
@@ -288,7 +291,11 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     expect(mgr!.context, `manager context: ${mgr!.context}`).toContain(`${WARM_PCT}%`);
     // 🔴 The manager's event is one it FILED, not one filed about a worker — a map keyed only on
     // `workerSessionId` leaves this cell empty, which is the defect the derivation exists to avoid.
-    expect(mgr!.last, `manager last event: ${mgr!.last}`).toContain("idle_report");
+    // The cell reads in words (`eventKindLabel`), and the raw kind stays on it for debugging.
+    expect(mgr!.last, `manager last event: ${mgr!.last}`).toContain("Idle report");
+    expect(mgr!.last, "the raw kind is not the visible text").not.toContain("idle_report");
+    expect(mgr!.lastKind).toBe("idle_report");
+    expect(mgr!.lastTitle).toBe("idle_report");
     expect(mgr!.indented, "a manager is never indented").toBe(false);
     expect(mgr!.height, `at 1440 a row is ONE line (measured ${mgr!.height}px)`).toBeLessThan(60);
 
@@ -302,8 +309,9 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     expect(wkr!.branch).toContain(seeded.workerBranch);
     expect(wkr!.context).toContain(`${WARM_PCT}%`);
     // …and the LAST EVENT is the other new fact, and a DIFFERENT event from the manager's.
-    expect(wkr!.last, `worker last event: ${wkr!.last}`).toContain("merge_request");
-    expect(wkr!.last).not.toContain("idle_report");
+    expect(wkr!.last, `worker last event: ${wkr!.last}`).toContain("Merge requested");
+    expect(wkr!.lastKind).toBe("merge_request");
+    expect(wkr!.last).not.toContain("Idle report");
     expect(wkr!.indented, "a worker is drawn under the manager that owns it").toBe(true);
 
     // The row's exit opens THAT session, never the first one the page could find.
@@ -344,7 +352,7 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     expect(narrow!.card, "the card cell survived the fold").toContain(seeded.workerCard);
     expect(narrow!.branch).toContain(seeded.workerBranch);
     expect(narrow!.context).toContain(`${WARM_PCT}%`);
-    expect(narrow!.last).toContain("merge_request");
+    expect(narrow!.last).toContain("Merge requested");
     expect(narrow!.agent).toContain(seeded.worker.agentName);
     expect(narrow!.state.toLowerCase()).toBe("idle");
     expect(narrow!.open.toLowerCase()).toContain("open");

@@ -79,8 +79,11 @@ test.describe("event triggers UI", () => {
     await expect(dialog(page)).toHaveCount(0);
     const row = page.locator("tr", { hasText: `${project.name} / ${agentName}` });
     await expect(row).toBeVisible();
-    await expect(row.getByText("Worker stuck")).toBeVisible();
+    // The label is the shared `eventKindLabel` wording the Timeline uses (card c77713ae), and the raw
+    // kind a human authored stays VISIBLE beside it — not only in the cell's tooltip.
+    await expect(row.getByText("Worker looks stuck")).toBeVisible();
     await expect(row.getByText("worker_stuck")).toBeVisible();
+    await expect(row.getByTestId("trigger-event-kind")).toHaveAttribute("data-event-kind", "worker_stuck");
     await expect(row.getByText("spawn", { exact: true })).toBeVisible();
 
     // AFTER (REST): the store the table is built from carries the trigger with its kind/mode/agent.

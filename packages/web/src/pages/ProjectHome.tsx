@@ -42,6 +42,7 @@ import {
   DEFAULT_ROSTER_SCOPE, filterRosterRows, filterScopedSessions, lastEventBySession, readRosterScope,
   rosterCardLabel, rosterRows, taskTitlesById, writeRosterScope, type RosterScope,
 } from "../lib/atlasProjectOverview";
+import { eventKindLabel } from "../lib/eventLabels";
 import { PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt } from "../nav";
 import { color, fs } from "../theme";
 
@@ -386,7 +387,7 @@ export default function ProjectHome() {
       context: ctx > 0
         ? { ratio, pct: Math.round(ratio * 100), tone: ratio >= 0.95 ? "danger" : ratio >= 0.8 ? "attn" : "accent" }
         : null,
-      lastEvent: e ? { kind: e.kind, at: relativeTime(e.ts) } : null,
+      lastEvent: e ? { kind: e.kind, label: eventKindLabel(e.kind, e.detail), at: relativeTime(e.ts) } : null,
     };
   };
 

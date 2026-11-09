@@ -4,6 +4,7 @@ import { errorText } from "../lib/loopbackCredential";
 import type { EventTrigger, EventTriggerEventKind } from "@loom/shared";
 import { EVENT_TRIGGER_EVENT_KINDS } from "@loom/shared";
 import { api } from "../lib/api";
+import { eventKindLabel } from "../lib/eventLabels";
 import { useAllAgentLabels } from "../lib/useAllAgents";
 import { Panel, Button, Select, SectionLabel, Badge, Chip, StatusPill } from "../components/ui";
 import { color, font, radius, fs } from "../theme";
@@ -12,13 +13,11 @@ function fmt(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "—";
 }
 
-// The event-kind allowlist is snake_case bus vocabulary (merge_rejected, worker_stuck, …). Humanize it
-// for the picker + table so a human reads "Merge rejected", not a raw identifier — the raw kind stays the
-// stored value. Sentence-case: first word capitalized, underscores → spaces.
-function humanizeKind(kind: string): string {
-  const spaced = kind.replace(/_/g, " ");
-  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
-}
+// The event-kind allowlist is snake_case bus vocabulary (merge_rejected, worker_stuck, …). The picker and
+// table label it with the SAME `eventKindLabel` the Timeline/Pulse/Replay rows use, so a trigger reads in
+// the words the feed it fires from uses. A trigger's kind is something a human AUTHORS, so the raw kind
+// stays visible beside the label (the table's mono line, the option's `· kind` suffix), never only in a
+// tooltip — the stored value is the raw kind.
 
 type ModalState = { mode: "create" } | { mode: "edit"; trigger: EventTrigger } | null;
 
@@ -111,8 +110,9 @@ export default function EventTriggers() {
                 <tr key={t.id} className="loom-sched-row"
                   onClick={() => setModal({ mode: "edit", trigger: t })}
                   style={{ cursor: "pointer", borderBottom: `1px solid ${color.line}` }}>
-                  <td style={{ padding: "10px 12px", color: color.text, fontWeight: 600, whiteSpace: "nowrap" }}>
-                    {humanizeKind(t.eventKind)}
+                  <td data-testid="trigger-event-kind" data-event-kind={t.eventKind} title={t.eventKind}
+                    style={{ padding: "10px 12px", color: color.text, fontWeight: 600, whiteSpace: "nowrap" }}>
+                    {eventKindLabel(t.eventKind)}
                     <span style={{ display: "block", color: color.text2, fontWeight: 400, fontFamily: font.mono, fontSize: fs.sm }}>{t.eventKind}</span>
                   </td>
                   <td style={{ padding: "10px 12px", color: t.projectId ? color.text2 : color.text3, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{projectName(t.projectId)}</td>
@@ -251,7 +251,7 @@ function EventTriggerModal({
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <span style={fieldLabel}>Event kind</span>
           <Select value={eventKind} onChange={(e) => setEventKind(e.target.value as EventTriggerEventKind)}>
-            {EVENT_TRIGGER_EVENT_KINDS.map((k) => <option key={k} value={k}>{humanizeKind(k)} · {k}</option>)}
+            {EVENT_TRIGGER_EVENT_KINDS.map((k) => <option key={k} value={k}>{eventKindLabel(k)} · {k}</option>)}
           </Select>
         </label>
 

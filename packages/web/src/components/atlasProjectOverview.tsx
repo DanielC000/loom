@@ -243,7 +243,9 @@ export interface RosterCell {
   card: { text: string; muted: boolean } | null;
   branch: string | null;
   context: { ratio: number; pct: number; tone: Tone } | null;
-  lastEvent: { kind: string; at: string } | null;
+  /** `label` is `eventKindLabel`'s wording; `kind` is the raw event kind, kept on the cell as its
+   *  `title` + `data-event-kind` so a reader debugging from the event table loses nothing. */
+  lastEvent: { kind: string; label: string; at: string } | null;
 }
 
 export function RosterTable({ rows, cellFor }: {
@@ -293,10 +295,11 @@ export function RosterTable({ rows, cellFor }: {
                 </>
               ) : <span style={{ color: color.text3 }}>no reading</span>}
             </span>
-            <span className="loom-ovroster-cell is-last">
+            <span className="loom-ovroster-cell is-last" data-testid="atlas-roster-last"
+              data-event-kind={c.lastEvent?.kind} title={c.lastEvent?.kind}>
               <span className="loom-ovroster-lbl">Last</span>
               {c.lastEvent
-                ? <>{c.lastEvent.kind} <span style={{ color: color.text3 }}>{c.lastEvent.at}</span></>
+                ? <>{c.lastEvent.label} <span style={{ color: color.text3 }}>{c.lastEvent.at}</span></>
                 : <span style={{ color: color.text3 }}>—</span>}
             </span>
             <span className="loom-ovroster-open">
