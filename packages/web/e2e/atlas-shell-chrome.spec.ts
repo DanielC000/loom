@@ -44,14 +44,13 @@ const WELCOME_DISMISSED_KEY = "loom.setupWelcomeDismissed";
 const FAKE_LATEST = "99.0.1";
 const UPDATE_DISMISS_KEY = `loom.updateDismissed.${FAKE_LATEST}`;
 
-// The bottom-right toast stack (App.tsx › ToastContainer). There is no testid on it, and this card is a
-// verification card that should not need to add one — so it is addressed by the three inline-style
-// properties that make it unique: `z-index: 2000` is shared with AtlasSwitchNotice, but that notice is
-// bottom-CENTRE (`left: 50%`, no `right`), so adding right+bottom disambiguates. Scoping matters here:
+// The bottom-right toast stack (App.tsx › ToastContainer), addressed by its corner test id. It used to be
+// matched by inline-style values (`z-index: 2000`, `bottom: 16px`), which went stale when the corner's
+// z-index dropped below dialogs and its `bottom` became dock-dependent. Scoping matters here:
 // Mission Control renders the SAME attention item as a row inside <main> (components/fleet.tsx ›
 // AttentionRow, which prints `item.kind` verbatim), so an unscoped text match would pass on the row and
 // never notice a missing toast.
-const TOAST_STACK = '#root div[style*="right: 16px"][style*="bottom: 16px"][style*="z-index: 2000"]';
+const TOAST_STACK = '[data-testid="toast-corner"]';
 
 const rail = (page: Page) => page.locator(".loom-rail");
 const atlasShell = (page: Page) => page.getByTestId("atlas-shell");
