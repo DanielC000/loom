@@ -228,3 +228,95 @@ test.describe("Atlas crumb trail at 420px (card 9477a5ed)", () => {
       await expect(page.locator(".loom-atlas-leave-icon")).toHaveCount(0);
     });
 });
+
+// ── Card c88ac078 (Atlas audit findings A-02 + A-14) ─────────────────────────────────────────────
+// A-02: a 186-character request title took every pixel of the row — "Workspace" and "Inbox" went to
+// 0px behind their own "/" separators, and the leave button wrapped onto two lines. A-14: at 390px a
+// three-segment trail clipped its leaf ("Agen…") while a long project name kept its room.
+const LONG_TITLE = "Should the reconciliation job retry failed ledger exports automatically overnight, or page the "
+  + "on-call engineer and hold every downstream invoice until a person reviews the export batch?";
+const LONG_PROJECT = "AUDIT-Delta Extremely Long Project Name For Reconciliation And Ledger Exports";
+
+test.describe("Atlas crumb ancestors stay visible beside a long leaf (card c88ac078)", () => {
+  test("1440px: a 186-character request title leaves every ancestor legible and the leave button on one line",
+    async ({ page, loomDaemon }) => {
+      test.setTimeout(180_000);
+      expect(LONG_TITLE.length, "the fixture is the audit's 186-character title").toBe(186);
+      const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "CrumbFloorMgr" });
+      const questionId = await loomDaemon.seedQuestion({
+        sessionId: mgr.sessionId, projectId: mgr.projectId, title: LONG_TITLE, body: "crumb floor fixture",
+      });
+      await pinProject(page, mgr.projectId);
+      await seedAtlasOn(page);
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`${loomDaemon.baseURL}/question/${questionId}`);
+      await expect(page.getByTestId("atlas-shell")).toBeVisible();
+      // POSITIVE ANCHOR: the leaf really is the long title, so the row really is over-full.
+      await expect(page.getByTestId("atlas-breadcrumb")).toContainText(LONG_TITLE.slice(0, 40));
+
+      const all = await crumbBoxes(page);
+      expect(all.length, "the request address is Workspace / Inbox / <title>").toBe(3);
+      expect(all.at(-1)?.clipped, "the leaf is genuinely too long for the row (else nothing here is tested)")
+        .toBe(true);
+      // ⭐ THE DISCRIMINATING MEASURE: on the pre-fix build both ancestors measured 0px wide.
+      for (const c of all.slice(0, -1)) {
+        expect(c.rendered, `"${c.text}" renders`).toBe(true);
+        expect(c.width, `the ancestor "${c.text}" keeps about four characters (got ${c.width}px)`)
+          .toBeGreaterThanOrEqual(Math.min(c.natural, c.fourChars) - 1);
+      }
+      // The right-hand chrome never yields: pre-fix the button wrapped to 46px tall.
+      const leave = await page.getByTestId("atlas-leave").evaluate((el) => {
+        const lh = parseFloat(getComputedStyle(el).lineHeight) || 20;
+        return { height: el.getBoundingClientRect().height, lineHeight: lh, flexShrink: getComputedStyle(el).flexShrink };
+      });
+      expect(leave.flexShrink, "the leave button does not shrink").toBe("0");
+      expect(leave.height, `the leave button is one line (height ${leave.height})`)
+        .toBeLessThan(leave.lineHeight * 2);
+    });
+
+  test("390px: a three-segment trail collapses the project crumb before the leaf gives anything up",
+    async ({ page, loomDaemon }) => {
+      test.setTimeout(180_000);
+      const project = await loomDaemon.createProject(LONG_PROJECT);
+      await pinProject(page, project.id);
+      await seedAtlasOn(page);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.goto(`${loomDaemon.baseURL}/agents`);
+      await expect(page.getByTestId("atlas-shell")).toBeVisible();
+      await expect(page.getByTestId("atlas-breadcrumb")).toContainText("Agents");
+
+      const all = await crumbBoxes(page);
+      // POSITIVE ANCHOR: this is the three-segment trail with the long project name in it.
+      expect(all.map((c) => c.text), "the Agents trail is Workspace / <project> / Agents")
+        .toEqual(["Workspace", LONG_PROJECT, "Agents"]);
+      expect(all.map((c) => c.rendered), "only the leaf renders").toEqual([false, false, true]);
+      expect(all[2]?.clipped, "the leaf reads in full; pre-fix it was \"Agen…\"").toBe(false);
+
+      const more = page.getByTestId("atlas-crumb-more");
+      await expect(more).toBeVisible();
+      await expect(more).toHaveAccessibleName("Show the full path");
+      await more.click();
+      await expect(more).toHaveAttribute("aria-expanded", "true");
+      const expanded = await crumbBoxes(page);
+      expect(expanded.every((c) => c.rendered), "the disclosure reveals the whole path").toBe(true);
+      expect(expanded[2]?.clipped, "the leaf still reads in full once expanded").toBe(false);
+    });
+
+  test("600px: the same three-segment trail is whole and offers no disclosure",
+    async ({ page, loomDaemon }) => {
+      test.setTimeout(180_000);
+      const project = await loomDaemon.createProject(LONG_PROJECT);
+      await pinProject(page, project.id);
+      await seedAtlasOn(page);
+      await page.setViewportSize({ width: 600, height: 844 });
+      await page.goto(`${loomDaemon.baseURL}/agents`);
+      await expect(page.getByTestId("atlas-shell")).toBeVisible();
+      await expect(page.getByTestId("atlas-breadcrumb")).toContainText("Agents");
+      const all = await crumbBoxes(page);
+      expect(all.length).toBe(3);
+      expect(all.every((c) => c.rendered), "nothing collapses above the phone breakpoint").toBe(true);
+      expect(all[2]?.clipped, "the leaf reads in full").toBe(false);
+      await expect(page.getByTestId("atlas-crumb-more")).toBeAttached();
+      await expect(page.getByTestId("atlas-crumb-more")).toBeHidden();
+    });
+});

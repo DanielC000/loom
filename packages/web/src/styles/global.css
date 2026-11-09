@@ -1983,6 +1983,10 @@ button.loom-atlas-node.is-branch.is-open {
   /* On the CLASS, never inline: a `style` padding would beat the square icon-sized padding the
      narrow rule below needs. The value is what the button carried inline before card 9477a5ed. */
   padding: 5px 12px;
+  /* Right-hand chrome never yields to the trail (card c88ac078): a 186-character request title
+     squeezed this to two lines at 1440. The trail is the one thing in this row built to shrink. */
+  flex: none;
+  white-space: nowrap;
 }
 /* The trail and its disclosure share a line. The gaps live here rather than inline so the narrow
    rule can tighten them: at 420px three separators' worth of gap is ~35px of a 233px nav. */
@@ -1993,7 +1997,11 @@ button.loom-atlas-node.is-branch.is-open {
   min-width: 0;
 }
 .loom-atlas-crumblist {
-  gap: 8px;
+  --loom-crumb-gap: 8px;
+  /* About four characters and then the ellipsis. Keep in step with AtlasShell's CRUMB_FLOOR_CHARS,
+     which decides which ancestors are long enough to need it. */
+  --loom-crumb-floor: 5ch;
+  gap: var(--loom-crumb-gap);
 }
 /* A segment's own layout belongs HERE, not on its inline `style`: inline beats class, so an inline
    `display: flex` shadows the narrow-width collapse rule below and every segment keeps rendering
@@ -2003,7 +2011,20 @@ button.loom-atlas-node.is-branch.is-open {
   display: flex;
   align-items: center;
   min-width: 0;
-  gap: 8px;
+  gap: var(--loom-crumb-gap);
+}
+.loom-atlas-crumblist > li > span[aria-hidden] {
+  flex: none;
+}
+/* An ancestor's legibility floor (card c88ac078). It sits on the `<li>`, not the label span: the
+   `<li>` is the flex item 1d3192dc's shrink ratio acts on, and a floor on its child alone would let
+   the `<li>` keep shrinking and paint the label over its neighbour. Hence the separator's ~1ch and
+   the gap are added back for every segment but the first, which has no separator. */
+.loom-atlas-crumblist > li.is-floored {
+  min-width: calc(var(--loom-crumb-floor) + 1ch + var(--loom-crumb-gap));
+}
+.loom-atlas-crumblist > li.is-floored:first-child {
+  min-width: var(--loom-crumb-floor);
 }
 
 /* ≤720px: the strip above becomes an OVERLAY drawer. At 420px that stacked strip was 33dvh of nav
@@ -2147,10 +2168,11 @@ button.loom-atlas-node.is-branch.is-open {
 
      @decision 9477a5ed — never derive this collapse by measuring rendered boxes, and never express
      it as a width cap on a segment. */
-  .loom-atlas-crumbnav,
-  .loom-atlas-crumblist,
-  .loom-atlas-crumblist > li {
+  .loom-atlas-crumbnav {
     gap: 5px;
+  }
+  .loom-atlas-crumblist {
+    --loom-crumb-gap: 5px;
   }
   .loom-atlas-crumblist.is-collapsible:not(.is-open) > li:nth-last-child(n+3) {
     display: none;
@@ -2197,6 +2219,28 @@ button.loom-atlas-node.is-branch.is-open {
        control floating beside the MIDDLE of the path it just opened. On the first line it reads as
        what it is: the thing the trail starts at. */
     align-self: flex-start;
+  }
+  /* A three-segment trail's disclosure only means something at phone width, below. */
+  .loom-atlas-crumbmore.is-phone-only {
+    display: none;
+  }
+}
+
+/* ≤480px: a THREE-segment trail collapses as well, down to its deepest segment (card c88ac078,
+   finding A-14). At 390px "Workspace / <project> / Agents" clipped the leaf to "Agen…" while a long
+   project name kept its room; the project crumb goes behind the same disclosure first, so the leaf
+   is the last thing to give up width. Count-based, like the four-segment rule above.
+   @decision 9477a5ed — never derive this collapse by measuring rendered boxes, and never express
+   it as a width cap on a segment. */
+@media (max-width: 480px) {
+  .loom-atlas-crumbmore.is-phone-only {
+    display: inline-flex;
+  }
+  .loom-atlas-crumblist.is-collapsible-phone:not(.is-open) > li:nth-last-child(n+2) {
+    display: none;
+  }
+  .loom-atlas-crumblist.is-collapsible-phone.is-open {
+    flex-wrap: wrap;
   }
 }
 

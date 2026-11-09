@@ -91,6 +91,10 @@ type NodeAddress = { crumbs: string[]; heading: string };
 
 /** The crumb trail's own id, so its narrow-width disclosure can `aria-controls` it. */
 const ATLAS_CRUMB_LIST_ID = "loom-atlas-crumblist";
+/** An ancestor crumb with more characters than this gets the `.is-floored` width floor; one with no
+ *  more than this renders whole and never shrinks. Keep in step with `--loom-crumb-floor` in
+ *  styles/global.css, which sizes the same floor in `ch`. */
+const CRUMB_FLOOR_CHARS = 5;
 
 /**
  * A re-homed cross-project address, redirected into its Workspace node tab — card 41eab0eb.
@@ -330,6 +334,13 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // @decision 9477a5ed — never derive this collapse by measuring rendered boxes, and never express it
   // as a width cap on a segment.
   const collapsibleTrail = crumbs.length > 3;
+  // A THREE-segment trail collapses too, but only at phone width (`.is-collapsible-phone`, ≤480px),
+  // and further: down to its deepest segment alone. At 390px "Workspace / <a long project name> /
+  // Agents" clipped the leaf to "Agen…" while the project kept its room (card c88ac078, finding A-14);
+  // the project crumb is the one the heading below does not need, so it goes behind the disclosure
+  // before the leaf gives anything up. Same count-based, CSS-chosen rule as above.
+  const phoneCollapsibleTrail = crumbs.length === 3;
+  const hasDisclosure = collapsibleTrail || phoneCollapsibleTrail;
   const [trailOpen, setTrailOpen] = useState(false);
   // Re-collapses on every address change: "what is above me" is a question about THIS node, so an
   // expanded trail carried into the next one would be answering it where it was not asked again.
@@ -379,8 +390,9 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                   (the path itself is the `title`, and activating it renders the real segments): a name
                   carrying the project or session name would be one more live page-wide text match for
                   an unrelated spec's by-name locator to collide with, the trap card c6160c7d hit. */}
-              {collapsibleTrail && (
-                <button type="button" className="loom-atlas-crumbmore" data-testid="atlas-crumb-more"
+              {hasDisclosure && (
+                <button type="button" data-testid="atlas-crumb-more"
+                  className={`loom-atlas-crumbmore${phoneCollapsibleTrail ? " is-phone-only" : ""}`}
                   aria-expanded={trailOpen} aria-controls={ATLAS_CRUMB_LIST_ID}
                   aria-label={trailOpen ? "Hide the full path" : "Show the full path"}
                   title={trailOpen ? "Hide the full path" : `Show the full path: ${crumbs.join(" / ")}`}
@@ -390,6 +402,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
               )}
               <ol id={ATLAS_CRUMB_LIST_ID}
                 className={`loom-atlas-crumblist${collapsibleTrail ? " is-collapsible" : ""}`
+                  + `${phoneCollapsibleTrail ? " is-collapsible-phone" : ""}`
                   + `${trailOpen ? " is-open" : ""}`}
                 style={{ display: "flex", alignItems: "center", listStyle: "none", margin: 0, padding: 0,
                   overflow: "hidden", fontSize: fs.sm, color: color.text3 }}>
@@ -408,8 +421,18 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                     // moved to `.loom-atlas-crumblist > li` because inline beats class: an inline
                     // `display: flex` silently shadowed the narrow-width collapse rule, which showed
                     // up as every segment still rendering at 420px with the disclosure beside them.
+                    //
+                    // The lopsided ratio alone let a long leaf take EVERY pixel: a 186-character request
+                    // title squeezed "Workspace" and "Inbox" to 0px and the trail read "/ /" (card
+                    // c88ac078, finding A-02). So an ancestor longer than the floor keeps a floor of
+                    // about four characters plus an ellipsis (`.is-floored`, styles/global.css), and one
+                    // no longer than the floor never shrinks at all — a `min-width` above a short label's
+                    // own width would pad it with blank space instead.
+                    // @decision c88ac078 — the floor goes on the ANCESTORS only; the deepest crumb keeps
+                    // no floor and no cap.
                     <li key={`${i}-${crumb}`} aria-current={last ? "page" : undefined}
-                      style={{ flexShrink: last ? 1 : 999,
+                      className={!last && crumb.length > CRUMB_FLOOR_CHARS ? "is-floored" : undefined}
+                      style={{ flexShrink: last ? 1 : crumb.length > CRUMB_FLOOR_CHARS ? 999 : 0,
                         color: last ? color.text : color.text3 }}>
                       {i > 0 && <span aria-hidden style={{ color: color.line }}>/</span>}
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{crumb}</span>
