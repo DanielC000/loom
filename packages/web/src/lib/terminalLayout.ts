@@ -21,8 +21,12 @@ export type GridColumns = (typeof GRID_COLUMN_CHOICES)[number];
  * The `auto` template, and the one the classic god-eye page keeps unconditionally. 560px is the width
  * `auto` refuses to wrap below — comfortable for a scaled pinned grid at this tile height. An explicit
  * column count is the reader trading that comfort for density, down to (but not past) the floor below.
+ *
+ * `min(100%, …)` (card 41a933d4): on a container narrower than the floor (a phone) the single tile takes
+ * the row instead of overflowing it sideways. Wherever the row is at least the floor wide it resolves to
+ * the floor itself, so the wrap point is unchanged there.
  */
-export const AUTO_GRID_TEMPLATE = "repeat(auto-fill, minmax(560px, 1fr))";
+export const AUTO_GRID_TEMPLATE = "repeat(auto-fill, minmax(min(100%, 560px), 1fr))";
 
 /**
  * The narrowest tile an explicit column count may produce, and the grid's own `gap` (pages/

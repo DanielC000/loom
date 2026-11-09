@@ -36,7 +36,7 @@ check("an explicit count shares the row N ways; auto gives the unchanged auto-fi
   assert.equal(gridTemplateColumns("auto"), AUTO_GRID_TEMPLATE);
   // `auto` keeps its OWN 560px wrap floor and none of the explicit form's share arithmetic. (Not
   // matched on `max(` — `minmax(` contains it, which would make the check pass for the wrong reason.)
-  assert.match(AUTO_GRID_TEMPLATE, /minmax\(560px, 1fr\)/);
+  assert.match(AUTO_GRID_TEMPLATE, /minmax\(min\(100%, 560px\), 1fr\)/);
   assert.doesNotMatch(AUTO_GRID_TEMPLATE, /320px|calc\(/);
 });
 
@@ -75,6 +75,19 @@ check("every explicit count carries both the floor and the 100% clamp", () => {
   for (const c of GRID_COLUMN_CHOICES.filter((x) => x !== "auto")) {
     assert.match(gridTemplateColumns(c), /max\(320px,/, `${c} must carry the tile floor`);
     assert.match(gridTemplateColumns(c), /minmax\(min\(100%,/, `${c} must clamp the floor to the container`);
+  }
+});
+
+// 3b) Card 41a933d4: `auto` carries the same clamp at EVERY pinned width — the default template (no
+//     geometry yet, 80 columns) as well as the raised readable floor — so a phone-width container gets
+//     one full-width tile instead of a sideways scrollbar. The floor inside the clamp is still the
+//     readable one, so eb516fba's rule holds wherever the row has room for it.
+check("auto clamps its tile floor to the container at every pinned width", () => {
+  for (const cols of [undefined, 80, 120, 200]) {
+    const t = gridTemplateColumns("auto", cols);
+    assert.match(t, /^repeat\(auto-fill, minmax\(min\(100%, \d+px\), 1fr\)\)$/, `auto @ ${cols} must clamp: ${t}`);
+    const floor = Number(t.match(/min\(100%, (\d+)px\)/)[1]);
+    assert.equal(floor, Math.max(560, readableTileFloorPx(cols) ?? 0), `auto @ ${cols} keeps its floor inside the clamp`);
   }
 });
 

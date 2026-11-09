@@ -4724,6 +4724,14 @@ button.loom-ovbrief-cell.is-open {
   flex: none;
   white-space: nowrap;
 }
+/* A `<select>` is as wide as its longest option, and a flex item never shrinks below that by default,
+   so one long project name pushed the whole page sideways at phone width (card 41a933d4: 646px wide
+   at a 390px viewport). Letting it shrink truncates the closed control instead; the open list still
+   shows every name in full. */
+.loom-sessionbar-group > select {
+  min-width: 0;
+  max-width: 100%;
+}
 /* The quick-start's own row: picker · rig line · spawn controls. It wraps INSIDE its group so the
    spawn button drops under the picker at narrow widths rather than being pushed off the bar. */
 .loom-quickstart {
