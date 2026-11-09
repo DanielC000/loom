@@ -3880,10 +3880,18 @@ button.loom-ovbrief-cell.is-open {
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px solid var(--loom-line);
-  font-family: var(--loom-font-mono);
-  font-size: 10.5px;
-  line-height: 1.6;
+  /* Sans, not mono, and held to a reading measure (card 006ed11f, audit B-20): in mono at full width
+     these explanatory notes ran ~200 characters a line and were the heaviest-looking text on the
+     page for its least important content. */
+  font-family: var(--loom-font-ui);
+  font-size: var(--loom-fs-sm);
+  line-height: 1.55;
   color: var(--loom-text-3);
+}
+/* The measure goes on the TEXT, not the footer box, so the rule above it still spans the card. */
+.loom-ovcard-foot > p {
+  margin: 0;
+  max-width: 72ch;
 }
 
 /* The work-in-flight roster. Fixed cells for every column whose content has a KNOWN natural
@@ -4006,20 +4014,70 @@ button.loom-ovbrief-cell.is-open {
   white-space: nowrap;
 }
 
+/* The empty roster's next step (card 006ed11f): the reason, then the action that fixes it. */
+.loom-ovempty {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 4px 0;
+}
+.loom-ovempty-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 /* The board's lanes as label+count chips under the bar — the whole board signal in one strip. */
+/* Gaps and top margin are the pre-link 7px / 16px / 10px less each chip's own 3px / 6px padding, so
+   the strip's visible rhythm is unchanged now that the chips carry a hit area. */
 .loom-ovlanes {
   display: flex;
   flex-wrap: wrap;
-  gap: 7px 16px;
-  margin-top: 10px;
+  gap: 1px 4px;
+  margin-top: 7px;
 }
 .loom-ovlane {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  /* A link now (card 006ed11f): the padding is its hit area. No negative margin to claw the old
+     rhythm back: the card body is an `overflow-y: auto` box, which clips BOTH axes, so a chip pulled
+     outside it lost the left edge of its focus ring (measured on the first chip). */
+  padding: 3px 6px;
+  border-radius: var(--loom-radius-sm);
   font-family: var(--loom-font-mono);
   font-size: 11.5px;
   color: var(--loom-text-2);
+  text-decoration: none;
+  transition: background 80ms linear, color 80ms linear;
+}
+.loom-ovlane:hover {
+  background: var(--loom-inset);
+  color: var(--loom-text);
+}
+/* Inset, for the same clipping reason as the padding note above. */
+.loom-ovlane:focus-visible {
+  outline: 2px solid var(--loom-ring);
+  outline-offset: -2px;
+}
+/* The lane a `?lane=` link landed on (pages/Board.tsx, card 006ed11f): a ring that fades out, so the
+   eye finds it once and the board is back to normal a moment later. Outline, never border or
+   box-shadow, both of which the lane sets inline for drag feedback. */
+[data-lane-flash] {
+  outline: 2px solid var(--loom-ring);
+  outline-offset: 2px;
+  animation: loom-lane-flash 1600ms cubic-bezier(0.2, 0, 0, 1) forwards;
+}
+@keyframes loom-lane-flash {
+  0%, 55% { outline-color: var(--loom-ring); }
+  100% { outline-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-lane-flash] {
+    animation: none;
+  }
 }
 .loom-ovlane-dot {
   flex: none;
@@ -4202,13 +4260,14 @@ button.loom-ovbrief-cell.is-open {
 }
 /* State + role as ONE cluster of fixed minimum width, so every row's identity text starts at the
    same x. `min-width` rather than `width`: a longer badge pushes its own row a pixel or two instead
-   of being clipped, and the widest real pair ("STARTING" + "★ OPERATOR") still fits inside it. */
+   of being clipped. Sized for the widest real pair since the row took `sessionStatus`'s vocabulary
+   (card 006ed11f): "waiting on you" + "◆ Manager". */
 .loom-wsession-state {
   display: inline-flex;
   align-items: center;
   gap: 7px;
   flex: none;
-  min-width: 168px;
+  min-width: 204px;
 }
 /* A flex row of its own so each part can ellipsise separately (card 73b41b5d, Atlas audit A-19). ORDER:
    the project gives way first, down to a stub; the tail (agent + id) never shrinks but is capped (inline,
@@ -4289,6 +4348,35 @@ button.loom-ovbrief-cell.is-open {
 @media (max-width: 820px) {
   .loom-wsession-state {
     min-width: 0;
+  }
+}
+.loom-wsession-spacer {
+  flex: 1;
+}
+/* Phone width (card 006ed11f, audit B-11). At 390 the pill + role cluster took the whole row and the
+   agent name clipped to "Orch…". Below 560 the row is two lines: the IDENTITY first (twist, name,
+   uptime), then the same two pills under it, indented to the name's own x. Nothing is dropped, and
+   the pills keep their role-badge partner, so a row still reads the same facts as at desktop. */
+@media (max-width: 560px) {
+  .loom-wsessionbtn {
+    flex-wrap: wrap;
+    row-gap: 5px;
+  }
+  .loom-wsessionbtn > .loom-wsession-id {
+    order: 1;
+    flex: 1 1 0;
+  }
+  .loom-wsessionbtn > span.loom-wsession-up {
+    order: 2;
+  }
+  .loom-wsessionbtn > span.loom-wsession-spacer {
+    display: none;
+  }
+  /* 19px = the twist's 12px + the row's 7px gap, so the pills start under the name. */
+  .loom-wsessionbtn > span.loom-wsession-state {
+    order: 3;
+    flex: 0 0 calc(100% - 19px);
+    margin-left: 19px;
   }
 }
 

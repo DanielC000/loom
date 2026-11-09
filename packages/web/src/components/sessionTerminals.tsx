@@ -24,9 +24,10 @@ import type { SessionListItem } from "@loom/shared";
 import { StatusPill } from "./ui";
 import { BandEmpty } from "./atlasHome";
 import { TerminalCard } from "./TerminalCard";
+import { sessionStatus } from "./fleet";
 import { RoleBadge } from "../lib/roleDisplay";
 import { relativeTime } from "../lib/atlasHome";
-import { goLiveSessionPill } from "../lib/sessions";
+import { usePendingDecisionsBySession } from "../lib/attention";
 import { canMountTerminal, liveExpandedSession, toggleExpandedSession } from "../lib/workspaceSessions";
 
 /** The expanded terminal's HUG cap. `TerminalCard` hugs its real content up to this, so a short
@@ -86,13 +87,16 @@ export function SessionTerminalList({ rows, ids, regionId, showProject = false, 
   const [wanted, setWanted] = useState<string | null>(null);
   const expandedId = liveExpandedSession(wanted, rows);
   const expanded = rows.find((s) => s.id === expandedId) ?? null;
+  // Sessions holding a PENDING owner Request — the same read, and so the same "waiting on you", the
+  // project Overview's roster pill uses one card up (card 006ed11f). Shared query key: no new fetch.
+  const decisions = usePendingDecisionsBySession();
 
   return (
     <>
       <div className="loom-wsessions-list" data-testid={ids.list}>
         {rows.map((s) => (
           <SessionRow key={s.id} s={s} open={s.id === expandedId} ids={ids} regionId={regionId}
-            showProject={showProject}
+            showProject={showProject} waitingOnYou={decisions.has(s.id)}
             onToggle={() => setWanted(toggleExpandedSession(expandedId, s.id))} />
         ))}
       </div>
@@ -122,10 +126,14 @@ export function SessionTerminalList({ rows, ids, regionId, showProject = false, 
 /**
  * One running session as a single dense line: state · role · project · agent · short id · uptime.
  *
- * The state pill is `goLiveSessionPill` (lib/sessions.ts), NOT `TileTitle`'s own — `TileTitle` reads
- * `busy` alone, so it prints "idle" over a `starting` row, which is exactly the misreport that
- * resolver exists to prevent (card 318b5a21). Everything else is kit: `RoleBadge` for the role and
- * the mono identity grammar `TileTitle` uses, so a session reads the same here as on its own node.
+ * The state pill is `sessionStatus` (components/fleet.tsx) — the SAME function the project
+ * Overview's "Work in flight" roster reads, so one session never wears two vocabularies on one page
+ * (card 006ed11f: the roster said "waiting on you" / "idle" while this row said "working" / "live").
+ * It is NOT `TileTitle`'s own pill, which reads `busy` alone and prints "idle" over a `starting` row
+ * (card 318b5a21); `sessionStatus` checks `processState` first, so a starting row reads "starting".
+ * Everything else is kit: `RoleBadge` for the role and the mono identity grammar `TileTitle` uses.
+ *
+ * @decision 006ed11f — never give this row a status function of its own. One session, one word.
  *
  * The row's expand target is a `<button>` and the `Open ↗` link is its SIBLING, never nested: an
  * anchor inside a button is invalid and unreachable by keyboard — the same trap `.loom-atlas-noderow`
@@ -137,11 +145,11 @@ const PROJECT_STUB_CH = 7;
 /** The " · " between the project and the agent, in mono `ch`. */
 const SEP_CH = 3;
 
-function SessionRow({ s, open, onToggle, ids, regionId, showProject }: {
+function SessionRow({ s, open, onToggle, ids, regionId, showProject, waitingOnYou }: {
   s: SessionListItem; open: boolean; onToggle: () => void;
-  ids: SessionListTestIds; regionId: string; showProject: boolean;
+  ids: SessionListTestIds; regionId: string; showProject: boolean; waitingOnYou: boolean;
 }) {
-  const pill = goLiveSessionPill(s);
+  const pill = sessionStatus(s, waitingOnYou);
   const uptime = relativeTime(s.createdAt).replace(" ago", "");
   // `data-atlas-wsession` carries the session id as a VALUE rather than baked into the testid, so a
   // spec can address the row set as ONE locator and read each row's identity off it — a testid stem
@@ -162,7 +170,8 @@ function SessionRow({ s, open, onToggle, ids, regionId, showProject }: {
             card 3b563642 kept the tree's own entity tier off. `min-width`, never a fixed `width`: a
             longer badge then pushes its own row by a pixel or two instead of being clipped. */}
         <span className="loom-wsession-state">
-          <StatusPill tone={pill.pending ? "work" : "live"} glow={pill.pending} label={pill.label} />
+          <StatusPill tone={pill.tone} glow={pill.glow} solid={pill.solid} label={pill.label}
+            data-testid="session-row-state" />
           <RoleBadge role={s.role ?? null} />
         </span>
         {/* The AGENT carries the weight, not the project. On the Workspace node rows are already
@@ -188,7 +197,7 @@ function SessionRow({ s, open, onToggle, ids, regionId, showProject }: {
             <span className="loom-wsession-short">{` · ${s.id.slice(0, 8)}`}</span>
           </span>
         </span>
-        <span style={{ flex: 1 }} />
+        <span className="loom-wsession-spacer" />
         <span className="loom-wsession-up" title={`Started ${relativeTime(s.createdAt)} · last activity ${relativeTime(s.lastActivity)}`}>
           {uptime}
         </span>

@@ -26,10 +26,10 @@ import {
   type NodeHeadPill,
 } from "../components/atlasHome";
 import {
-  BriefLine, BriefTrailing, LaneChips, OverviewCard, RosterScopeToggle, RosterTable,
+  BriefLine, BriefTrailing, EmptyNextStep, LaneChips, OverviewCard, RosterScopeToggle, RosterTable,
   type BriefReading, type RosterCell,
 } from "../components/atlasProjectOverview";
-import { AgentsQuickSpawn } from "../components/atlasAgents";
+import { AgentEditDialog, AgentsQuickSpawn } from "../components/atlasAgents";
 import { SessionTerminalList, type SessionListTestIds } from "../components/sessionTerminals";
 import { AttentionList, GateLaneList } from "./WorkspaceHome";
 import { splitRoster } from "../lib/atlasAgents";
@@ -143,6 +143,9 @@ export default function ProjectHome() {
   useEffect(() => {
     setRosterScope(projectId ? readRosterScope(projectId) : DEFAULT_ROSTER_SCOPE);
   }, [projectId]);
+  // The empty roster's "＋ New agent" (card 006ed11f, audit G-04) opens the Agents node's own editor
+  // dialog in place. Declared here, above the `!projectId` early return, with every other hook.
+  const [creatingAgent, setCreatingAgent] = useState(false);
   const chooseRosterScope = (next: RosterScope) => {
     setRosterScope(next);
     if (projectId) writeRosterScope(projectId, next);
@@ -546,7 +549,10 @@ export default function ProjectHome() {
                   reported as the first — a reader who has just hidden four running workers would
                   otherwise be told the project has nothing in flight. */}
               {rows.length === 0
-                ? <BandEmpty>No sessions in this project.</BandEmpty>
+                ? <EmptyNextStep hasAgents={(agentsQ.data?.length ?? 0) > 0} agentsLoaded={!!agentsQ.data}
+                    onNewAgent={() => setCreatingAgent(true)}
+                    spawn={<AgentsQuickSpawn projectId={projectId} projectName={project?.name}
+                      testId="atlas-overview-empty-spawn" trigger="button" />} />
                 : visibleRows.length === 0
                   ? <BandEmpty>
                       No agent you start by hand has a session here — {plural(rows.length, "session")}{" "}
@@ -621,6 +627,9 @@ export default function ProjectHome() {
             all re-derivable choices, not typed text), and keeping a polling usage query mounted behind
             nine other tabs would make every project address pay for a breakdown nobody opened. */}
         {tab === "usage" ? <ProjectUsage /> : null}
+        {creatingAgent && (
+          <AgentEditDialog projectId={projectId} agentId={null} onClose={() => setCreatingAgent(false)} />
+        )}
         {project && <span hidden data-testid="atlas-project-name">{project.name}</span>}
       </div>
     </HarnessMixProvider>

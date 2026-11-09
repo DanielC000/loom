@@ -183,7 +183,7 @@ export function OverviewCard({ label, count, controls, action, children, footer,
         style={bodyMaxHeight === undefined ? undefined : { maxHeight: bodyMaxHeight, overflowY: "auto" }}>
         {children}
       </div>
-      {footer && <div className="loom-ovcard-foot">{footer}</div>}
+      {footer && <div className="loom-ovcard-foot"><p>{footer}</p></div>}
     </Panel>
   );
 }
@@ -310,20 +310,61 @@ export function RosterTable({ rows, cellFor }: {
   );
 }
 
+/**
+ * "Work in flight" for a project with no sessions at all (card 006ed11f, audit G-04). The old line,
+ * "No sessions in this project.", stated the fact and stopped; a new user's first visit had no way
+ * forward from it. This names WHY nothing is running and offers the step that fixes it, in order:
+ * a project with no agents can only define one, a project with agents can spawn one.
+ *
+ * `spawn` is the caller's `AgentsQuickSpawn`, passed in rather than imported, so the go-live guard
+ * stays the one in `AgentActions` and this file keeps to its no-fetch contract. While the agent
+ * read is in flight neither sentence is claimed: a loading roster is not an empty one.
+ */
+export function EmptyNextStep({ hasAgents, agentsLoaded, onNewAgent, spawn }: {
+  hasAgents: boolean;
+  agentsLoaded: boolean;
+  onNewAgent: () => void;
+  spawn: ReactNode;
+}) {
+  if (!agentsLoaded) return <p className="loom-bandempty">No sessions in this project.</p>;
+  return (
+    <div className="loom-ovempty" data-testid="atlas-overview-empty">
+      <p className="loom-bandempty">
+        {hasAgents
+          ? "Nothing is running in this project. Spawn an agent to start a session."
+          : "This project has no agents yet. Define one, then spawn it to start work."}
+      </p>
+      <div className="loom-ovempty-acts">
+        {hasAgents && spawn}
+        <Button variant={hasAgents ? "default" : "primary"} onClick={onNewAgent}
+          data-testid="atlas-overview-empty-new-agent">
+          <span aria-hidden>＋</span> New agent
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /** The board's lanes as label+count chips under the lane bar — the whole board signal in one strip,
- *  using the SAME `columnTone` resolver the bar, the board header and the card borders all read. */
+ *  using the SAME `columnTone` resolver the bar, the board header and the card borders all read.
+ *
+ *  Each chip is a LINK to the Board tab at that lane (card 006ed11f, audit G-07): `?lane=<key>` is
+ *  consumed by pages/Board.tsx, which scrolls the lane into view and marks it briefly. Access only —
+ *  the summary itself is the owner's ruling (269f46ef) and is not widened into a board here. */
 export function LaneChips({ lanes }: { lanes: BoardLane[] }) {
   return (
     <div className="loom-ovlanes" data-testid="atlas-overview-lanechips">
       {lanes.map((l) => {
         const t = columnTone(l);
         const accent = l.accentColor ?? (t ? tone[t] : color.lineStrong);
+        const label = `Open the Board at ${l.label} (${l.count} ${l.count === 1 ? "card" : "cards"})`;
         return (
-          <span key={l.key} className="loom-ovlane" data-testid={`atlas-overview-lane-${l.key}`}>
+          <Link key={l.key} to={`/board?lane=${encodeURIComponent(l.key)}`} className="loom-ovlane"
+            data-testid={`atlas-overview-lane-${l.key}`} title={label} aria-label={label}>
             <span className="loom-ovlane-dot" style={{ background: l.count > 0 ? accent : color.line }} aria-hidden />
             {l.label}
             <span className="loom-ovlane-n" style={{ color: l.count > 0 ? accent : color.text3, fontFamily: font.mono }}>{l.count}</span>
-          </span>
+          </Link>
         );
       })}
     </div>

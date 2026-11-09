@@ -357,6 +357,24 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     setSearchParams((p) => { p.delete("task"); return p; }, { replace: true });
   }, [deepLinks, taskParam, board.data, setSearchParams]);
 
+  // `?lane=<key>` (card 006ed11f, audit G-07) — the Overview's lane legend lands here. Scroll that lane
+  // into view and mark it briefly so the eye finds it among seven, then clear the param exactly as
+  // `?task=` is cleared. Same `deepLinks` gate, for the same reason: a hidden board must not eat it.
+  // An unknown key (a lane renamed away) clears the param and leaves the board where it is.
+  const laneParam = searchParams.get("lane");
+  useEffect(() => {
+    if (!deepLinks || !laneParam || !board.data) return;
+    const el = rootRef.current?.querySelector<HTMLElement>(`[data-lane-key="${CSS.escape(laneParam)}"]`);
+    if (el) {
+      el.scrollIntoView({ block: "nearest", inline: "start" });
+      // No effect cleanup removes this: clearing the param below re-runs the effect at once, and a
+      // cleanup would wipe the mark before anyone saw it. A timer on a detached node is harmless.
+      el.dataset.laneFlash = "";
+      setTimeout(() => { delete el.dataset.laneFlash; }, 1600);
+    }
+    setSearchParams((p) => { p.delete("lane"); return p; }, { replace: true });
+  }, [deepLinks, laneParam, board.data, setSearchParams]);
+
   const openTask = board.data?.tasks.find((t) => t.id === openTaskId) ?? null;
   // The open card's resolved lane, for the modal header's state/lane chip (dossier header).
   const openColumn = openTask ? board.data?.columns.find((c) => c.key === openTask.columnKey) ?? null : null;
