@@ -294,8 +294,13 @@ function AtlasPlatformLayout({
   // end-user editions resolve different ones, so the frame's own "Platform" heading cannot stand in for
   // it) and WHAT that home is. Constant across tabs, like every other node's pills (card 5968d7e0) —
   // the scope phrase is identity, not a per-tab reading, so it must not move when a tab does.
+  // The home pill is dropped when the home's name is the frame's own "Platform" heading (the end-user
+  // edition), where it would only repeat the <h1> beside it.
+  const homeRepeatsHeading = project.name.trim().toLowerCase() === "platform";
   const headPills: NodeHeadPill[] = [
-    { key: "home", text: project.name, tone: "muted", title: "The reserved home this node resolved to" },
+    ...(homeRepeatsHeading ? [] : [
+      { key: "home", text: project.name, tone: "muted", title: "The reserved home this node resolved to" } as NodeHeadPill,
+    ]),
     // The PILL phrasing, never the classic page's full caption: MEASURED at 420px the full span is
     // 462px of text in a 388px box. A pill that wide now ellipsises (card 359bcdaa), but an ellipsised
     // clause is still a clause the reader cannot read, so the short phrasing stays. The caption rides
@@ -621,8 +626,9 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
     : live ? card.title.live : card.title.idle;
   return (
     <Panel style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <Badge tone={tone}>{card.badgeLabel}</Badge>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 22 }}>
+        {/* A badge that only repeats the agent's name ("Platform Platform") says nothing. */}
+        {card.badgeLabel !== agent.name && <Badge tone={tone}>{card.badgeLabel}</Badge>}
         <strong style={{ fontSize: fs.body, color: color.text }}>{agent.name}</strong>
         <span style={{ flex: 1 }} />
         {showLiveCount && liveCount > 0 && (

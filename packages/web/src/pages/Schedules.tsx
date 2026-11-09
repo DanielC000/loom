@@ -84,12 +84,9 @@ export default function Schedules() {
     <Panel>
       <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
         <SectionLabel style={{ margin: 0 }}>Schedules</SectionLabel>
-        {orch.data && (
-          <StatusPill
-            tone={orch.data.schedulerEnabled ? "live" : "attn"}
-            label={orch.data.schedulerEnabled ? "scheduler active" : "scheduler off"}
-            glow={orch.data.schedulerEnabled}
-          />
+        {/* Only the ON state gets a pill here: the OFF state is stated once, by the notice below. */}
+        {orch.data?.schedulerEnabled && (
+          <StatusPill tone="live" label="scheduler active" glow />
         )}
         <p style={{ color: color.text3, fontSize: fs.sm, margin: 0, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
           Cron triggers. On each due boundary the daemon boots a manager session in the target agent —

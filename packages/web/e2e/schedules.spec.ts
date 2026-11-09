@@ -128,8 +128,9 @@ test.describe("schedules UI (Direction B)", () => {
 
     await page.goto(`${loomDaemon.baseURL}/automation`);
 
-    // The header status pill reflects the resolved OFF state (distinct from the notice's own badge below).
-    await expect(page.getByText(/scheduler off/i).first()).toBeVisible();
+    // The OFF state is stated exactly once, by the notice's own badge; the header carries no second copy.
+    await expect(page.getByText(/scheduler off/i)).toHaveCount(1);
+    await expect(page.getByText(/scheduler off/i)).toBeVisible();
 
     // The inline notice names the consequence AND both ways to turn the scheduler on.
     const notice = page.getByRole("status").filter({ hasText: /will not fire/i });

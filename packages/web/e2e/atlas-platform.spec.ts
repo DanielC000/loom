@@ -1126,11 +1126,12 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     await page.goto(`${loomDaemon.baseURL}/platform`);
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
-    // POSITIVE: both readings the old strip carried are in the node head now — which reserved home
-    // resolved, and what that home is. Read through `atlas-nodehead-extras` so this cannot be satisfied
-    // by a pill rendered anywhere else on the page.
-    await expect(nodeHeadPill(page, "home")).toHaveText(home.project.name);
+    // POSITIVE: what the home is reads in the node head. Read through `atlas-nodehead-extras` so this
+    // cannot be satisfied by a pill rendered anywhere else on the page. The end-user home is named
+    // "Platform", the same as the <h1>, so its home pill is omitted rather than repeat the heading;
+    // the scope pill is asserted visible first so that zero count is not vacuous.
     await expect(nodeHeadPill(page, "scope")).toHaveText(/your cross-project workspace agent/i);
+    await expect(nodeHeadPill(page, "home")).toHaveCount(0);
     // The clause the PILL drops is not lost — the classic page's full caption is its title. Asserted
     // because the pill text alone would let that clause be deleted outright and still read green.
     await expect(nodeHeadPill(page, "scope"))
@@ -1155,8 +1156,8 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     // It is NODE-level, not per-tab (card 5968d7e0's rule): the same pills on a different tab. A pill
     // that moved with the tab would be a per-tab reading wearing an identity's clothes.
     await openTab(page, "Cadence");
-    await expect(nodeHeadPill(page, "home")).toHaveText(home.project.name);
     await expect(nodeHeadPill(page, "scope")).toHaveText(/your cross-project workspace agent/i);
+    await expect(nodeHeadPill(page, "home")).toHaveCount(0);
 
     // ── 420px: this node's COPY is short enough that neither pill is truncated at all — the claim is
     //    about the TEXT's own width, not the box's, because a box that fits proves nothing here.
@@ -1166,7 +1167,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     //    leg would pass just as happily on a pill that ellipsised, which is why it stays about copy.
     await page.setViewportSize({ width: 420, height: 900 });
     await page.goto(`${loomDaemon.baseURL}/platform`);
-    for (const key of ["home", "scope"]) {
+    for (const key of ["scope"]) {
       const pill = nodeHeadPill(page, key);
       await expect(pill).toBeVisible();
       const fits = await pill.evaluate((e) => ({ scroll: e.scrollWidth, client: e.clientWidth }));

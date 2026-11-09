@@ -4687,3 +4687,17 @@ button.loom-ovbrief-cell.is-open {
     opacity: 0.5;
   }
 }
+
+/* The collapsed startup-prompt preview renders its Markdown inline-sized: the caller's own type and
+   colour, no block margins or heading scale, so the 2-line clamp shows two lines of prose. */
+.loom-prompt-preview .loom-md {
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+.loom-prompt-preview .loom-md :is(h1, h2, h3, h4, h5, h6, p, ul, ol, li, pre, blockquote, table) {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: inherit;
+}

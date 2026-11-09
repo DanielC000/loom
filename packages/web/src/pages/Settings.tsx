@@ -292,8 +292,8 @@ function InterfacePanel() {
         />
       </div>
       <Hint style={{ display: "block", marginTop: 12, maxWidth: "68ch", lineHeight: 1.6 }}>
-        Atlas is the replacement shell being built now: one entity tree for projects, agents, boards and
-        sessions, in place of the nav rail. It is still going up, so expect it to be largely empty.
+        Atlas is the newer shell: one entity tree for projects, agents, boards and sessions, in place of
+        the nav rail. It is still in preview, so some pages may change.
         Classic stays the default and is unchanged by it. Stored in this browser alone, and the Atlas
         frame carries its own way back here.
       </Hint>
@@ -3101,7 +3101,7 @@ function ProjectLinksPanel() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {rows.length === 0 && !isLoading && (
-            <span style={{ color: color.text3, fontSize: fs.body }}>Noproject links yet.</span>
+            <span style={{ color: color.text3, fontSize: fs.body }}>No project links yet.</span>
           )}
           {rows.map((l) => (
             <div key={l.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.inset, border: `1px solid ${color.line}`, borderRadius: radius.sm, flexWrap: "wrap" }}>
@@ -3253,7 +3253,7 @@ function NodeModulesReclaimPanel() {
           git state. A worktree that is reused later reinstalls on its own.
         </p>
         <p style={{ color: color.text3, fontSize: fs.sm, margin: "8px 0 0", lineHeight: 1.5 }}>
-          This covers every project on this daemon, not just the one selected in the header. Sizes are
+          This covers every project on this daemon. Sizes are
           measured as each tree is removed, so nothing here estimates what you will get back before it runs
           — the figure you see afterwards is a real measurement.
         </p>

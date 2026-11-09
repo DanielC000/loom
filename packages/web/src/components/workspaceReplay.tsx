@@ -96,8 +96,8 @@ export function WorkspaceReplay() {
         </div>
         {inactive.length === 0 ? (
           <p className="loom-bandempty">
-            Every project with an archived session still has something running. A project whose whole
-            wave has exited is listed here, with what it was made of.
+            No inactive projects yet. A project whose sessions have all exited is listed here, with
+            what its wave was made of.
           </p>
         ) : (
           <>

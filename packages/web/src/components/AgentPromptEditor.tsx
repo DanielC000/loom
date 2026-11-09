@@ -6,6 +6,10 @@ import { Button } from "./ui";
 import { color, font, radius, fs } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 import { modEnterSubmit } from "../lib/modEnter";
+import Markdown from "./Markdown";
+
+const NO_FILES: string[] = [];
+const noop = () => {};
 
 // Reserved-home agent prompt editor (card 7cffd759) — the view/edit surface for a reserved-home agent's
 // `startupPrompt`: the kickoff injected as the FIRST turn of that agent's NEXT new session (never on
@@ -67,12 +71,14 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
       </button>
 
       {!open && (
-        // Collapsed: a quiet two-line preview of the persisted prompt (read-only).
-        <span title={saved || undefined}
+        // Collapsed: a quiet two-line preview of the persisted prompt (read-only), rendered as Markdown
+        // so the reader sees emphasis rather than its raw `**` source.
+        <div title={saved || undefined} className="loom-prompt-preview"
           style={{ fontSize: fs.sm, color: empty ? color.text3 : color.text2, lineHeight: 1.45,
-            display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", whiteSpace: "pre-wrap" }}>
-          {empty ? "No startup prompt — this agent boots inert until told what to do." : saved}
-        </span>
+            display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+          {empty ? "No startup prompt — this agent boots inert until told what to do."
+            : <Markdown source={saved} files={NO_FILES} onOpen={noop} untrusted />}
+        </div>
       )}
 
       {open && (
