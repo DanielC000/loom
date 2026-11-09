@@ -5,6 +5,7 @@ import type { SessionListItem } from "@loom/shared";
 import { Badge, Button, Panel, SectionLabel } from "./ui";
 import { ATLAS_TREE_ID, AtlasTree } from "./AtlasTree";
 import { OrchestrationChip, useOrchestrationPaused } from "./fleetControls";
+import { PALETTE_SHORTCUT, openCommandPalette } from "./CommandPalette";
 import {
   ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, PROJECT_NODE_PATH, PROJECT_NODE_TABS,
   QueryPreservingRedirect, atlasRetirementFor, isRehomedProjectTab, projectNodeTabAt, projectTabPath,
@@ -452,6 +453,23 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
               </ol>
             </nav>
             <span style={{ flex: 1 }} />
+            {/* The ⌘K palette's visible door (card bafbca40) — nothing on an Atlas node mentioned the
+                palette before. Below the breakpoint it becomes a search icon: a key hint means nothing
+                on a phone, and the icon is the same 34px square as the leave button beside it. */}
+            {/* `padding: undefined` drops the kit's inline padding, which would otherwise beat
+                `.loom-atlas-jump`'s own (inline wins over class) and squeeze the narrow icon. */}
+            <Button data-testid="atlas-jump" className="loom-atlas-jump" onClick={openCommandPalette}
+              style={{ padding: undefined }}
+              aria-label="Jump to a page, project, agent or session" aria-keyshortcuts="Control+K Meta+K"
+              title={`Jump to a page, project, agent or session (${PALETTE_SHORTCUT})`}>
+              <span className="loom-atlas-jump-word">Jump to</span>
+              <kbd aria-hidden>{PALETTE_SHORTCUT}</kbd>
+              <svg className="loom-atlas-jump-icon" width="16" height="16" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden focusable="false">
+                <circle cx="7" cy="7" r="4.5" />
+                <path d="M10.5 10.5 14 14" />
+              </svg>
+            </Button>
             {/* The daemon-global fleet state, on EVERY node, and the controls behind it (card
                 7b893d54). The Workspace root carries the same cluster as a full-width bar; this is the
                 mount that makes a paused fleet discoverable without navigating to the root. */}

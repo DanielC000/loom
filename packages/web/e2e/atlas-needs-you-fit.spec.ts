@@ -148,7 +148,7 @@ test.describe("Atlas Needs-you band: ask first, whole rows, overflow row (card 1
     const input = page.getByPlaceholder(/Jump to/);
     await expect(input).toBeVisible();
     await input.fill(seeded.short);
-    const label = page.locator("button span[title]", { hasText: seeded.longTitle }).first();
+    const label = page.locator('[role="option"] span[title]', { hasText: seeded.longTitle }).first();
     await expect(label).toBeVisible();
     const text = (await label.textContent()) ?? "";
     // "<verb> · <Kind> <title> · <project>": the title comes straight after the kind label.

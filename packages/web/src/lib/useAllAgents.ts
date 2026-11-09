@@ -22,8 +22,8 @@ const ALL_AGENTS_QUERY = { queryKey: ["allAgents"] as const, queryFn: ({ signal 
  * gate on `isSuccess`, never on `data` being truthy: an unresolved or failed fetch is NOT an answer, and
  * collapsing it into an empty list is how a privilege check silently passes. See lib/profileGrantReach.
  */
-export function useAllAgents() {
-  return useQuery(ALL_AGENTS_QUERY);
+export function useAllAgents(opts: { enabled?: boolean } = {}) {
+  return useQuery({ ...ALL_AGENTS_QUERY, enabled: opts.enabled ?? true });
 }
 
 /**

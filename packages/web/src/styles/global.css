@@ -2106,6 +2106,31 @@ button.loom-atlas-node.is-branch.is-open {
   flex: none;
   white-space: nowrap;
 }
+/* The ⌘K palette's visible door (card bafbca40): before it, nothing in Atlas said the palette
+   existed. Right-hand chrome like the leave button, so it never yields to the trail either. */
+.loom-atlas-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  /* 28px tall with the key below, the leave button's own height, so the crumb row does not grow. */
+  padding: 4px 4px 4px 10px;
+  flex: none;
+  white-space: nowrap;
+  color: var(--loom-text-2);
+}
+.loom-atlas-jump kbd {
+  font-family: var(--loom-font-mono);
+  font-size: var(--loom-fs-sm);
+  line-height: 1;
+  padding: 2px 5px;
+  border: 1px solid var(--loom-line-strong);
+  border-radius: 2px;
+  background: var(--loom-inset);
+  color: var(--loom-text-2);
+}
+.loom-atlas-jump-icon {
+  display: none;
+}
 /* The trail and its disclosure share a line. The gaps live here rather than inline so the narrow
    rule can tighten them: at 420px three separators' worth of gap is ~35px of a 233px nav. */
 .loom-atlas-crumbnav {
@@ -2266,6 +2291,24 @@ button.loom-atlas-node.is-branch.is-open {
     align-items: center;
     justify-content: center;
     flex: none;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+  }
+  /* The palette door becomes a search icon here, the same 34px square as the leave button: a key hint
+     means nothing on a phone, and the trail keeps the width the word took. The name is the
+     `aria-label`, so it does not move with the breakpoint either. */
+  .loom-atlas-jump-word,
+  .loom-atlas-jump kbd {
+    display: none;
+  }
+  .loom-atlas-jump-icon {
+    display: block;
+    /* Without this the button's flex row squeezes the 16px glyph to 8px wide (measured). */
+    flex: none;
+  }
+  .loom-atlas-jump {
+    justify-content: center;
     width: 34px;
     height: 34px;
     padding: 0;

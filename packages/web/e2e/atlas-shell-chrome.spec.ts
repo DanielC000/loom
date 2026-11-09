@@ -130,11 +130,14 @@ for (const shell of SHELLS) {
       await page.keyboard.press("Control+k");
       await expect(field).toBeVisible();
 
-      // RUN a command, to an observable: filter to one page row and click it. A palette row is a
-      // <button> whose accessible name is its label plus its "page" hint — the classic rail and the
-      // Atlas tree both reach Settings through an <a>, so this name can only be the palette's row.
+      // RUN a command, to an observable: filter to one page row and click it. A palette row is an
+      // `option` (card bafbca40) — the classic rail and the Atlas tree both reach Settings through an
+      // <a>, so this can only be the palette's row. Under Atlas there are TWO Settings pages (the
+      // project's tab and the workspace's node), told apart by their context; the project's is the
+      // one at `/settings`, and its context is never "Workspace".
       await field.fill("Settings");
-      const row = page.getByRole("button", { name: "Settings page" });
+      const row = page.getByRole("option")
+        .and(page.locator('[data-kind="page"][data-label="Settings"]:not([data-context="Workspace"])'));
       await expect(row).toHaveCount(1);
       await row.click();
 

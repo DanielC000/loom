@@ -277,14 +277,14 @@ test.describe("repository (Vault + Git consolidation)", () => {
 
   test("the Command Palette lists ONE 'Repository' page and no lingering 'Vault' / 'Git' entries", async ({ page, loomDaemon }) => {
     await page.goto(`${loomDaemon.baseURL}/`);
-    // Open the ⌘/Ctrl-K launcher and constrain the fuzzy filter to page rows (hint = "page").
+    // Open the ⌘/Ctrl-K launcher and constrain the fuzzy filter to page rows (kind = "page").
     await page.keyboard.press("ControlOrMeta+k");
-    const search = page.getByPlaceholder("Jump to…  (Esc to close)");
+    const search = page.getByPlaceholder(/^Jump to/);
     await expect(search).toBeVisible();
 
     // Exactly one "Repository" page command surfaces (nav derives the palette from NAV_PAGES).
     await search.fill("Repository");
-    const rows = page.locator("button", { has: page.getByText("page", { exact: true }) });
+    const rows = page.locator('[role="option"][data-kind="page"]');
     await expect(rows.filter({ hasText: "Repository" })).toHaveCount(1);
 
     // The old page labels are gone — no "Vault" or "Git" page command remains.

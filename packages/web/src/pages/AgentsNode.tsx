@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useActiveProject } from "../lib/activeProject";
 import { rosterTally, useAgentRoster, type RosterAgent } from "../lib/atlasAgents";
@@ -40,6 +40,16 @@ export default function AgentsNode() {
   // `null` = closed; `{ agentId: null }` = the create form; `{ agentId: "…" }` = that agent's editor.
   // A wrapper object rather than a bare `string | null`, because `null` has to mean two things.
   const [editing, setEditing] = useState<{ agentId: string | null } | null>(null);
+  // `?agent=<id>` opens that agent's editor (card bafbca40: the ⌘K palette's agent rows land here).
+  // Consumed once and stripped with `replace`, so closing the editor does not leave a URL that would
+  // reopen it on a reload or a back press.
+  const [params, setParams] = useSearchParams();
+  const deepLinkedAgent = params.get("agent");
+  useEffect(() => {
+    if (!deepLinkedAgent) return;
+    setEditing({ agentId: deepLinkedAgent });
+    setParams((prev) => { const next = new URLSearchParams(prev); next.delete("agent"); return next; }, { replace: true });
+  }, [deepLinkedAgent, setParams]);
   // Every agent in this project, spawnable rigs and worker rigs alike — what the Schedules panel
   // below filters the god-eye schedule list down to. Declared ABOVE the `!projectId` early return
   // with the other hooks' results, so both render paths read the same roster.

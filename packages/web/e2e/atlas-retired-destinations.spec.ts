@@ -117,21 +117,18 @@ async function railLabels(page: Page): Promise<Map<string, string>> {
 /**
  * The palette's own PAGE rows, opened with the real accelerator — each as its label alone.
  *
- * A row is a <button> holding two spans, the label and the `hint` ("page" for a nav destination,
- * "session"/"review"/"question" for an attention item), so the label is read off the FIRST span and
- * the hint is what filters the list down to nav destinations. Read span-by-span rather than from the
- * button's `textContent`, which concatenates the two with no separator ("Mission Controlpage") and
- * would make every comparison here a comparison against a string the UI never shows.
+ * A row is a `role="option"` carrying its kind ("page" for a destination; "project", "agent",
+ * "session", "review" or "request" otherwise) and its label as `data-kind` / `data-label` (card
+ * bafbca40). Read off those rather than the option's `textContent`, which concatenates the label, its
+ * context and its kind with no separator — a string the UI never shows.
  */
 async function paletteRows(page: Page): Promise<string[]> {
   await page.keyboard.press("Control+k");
   const field = page.getByPlaceholder(/^Jump to/);
   await expect(field, "the Command Palette did not open").toBeVisible();
-  const rows = await page.getByRole("button").evaluateAll((els) =>
-    els.map((el) => Array.from(el.querySelectorAll("span"))
-      .map((s) => (s.textContent ?? "").replace(/\s+/g, " ").trim()))
-      .filter((spans) => spans[1] === "page")
-      .map((spans) => spans[0] ?? ""));
+  const rows = await page.getByRole("option").evaluateAll((els) =>
+    els.filter((el) => el.getAttribute("data-kind") === "page")
+      .map((el) => el.getAttribute("data-label") ?? ""));
   await page.keyboard.press("Escape");
   await expect(field, "the Command Palette did not close").toHaveCount(0);
   return rows;
