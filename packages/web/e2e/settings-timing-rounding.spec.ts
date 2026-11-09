@@ -71,9 +71,10 @@ test("a fractional daemon-global timing entry saves as a WHOLE millisecond integ
   const recency = field(page, "Recency window (h)");
   await expect(gitPush).toBeVisible();
 
-  // BEFORE: the global form is clean (the LAST "saved" marker is the global section's) and no range error
-  // is showing anywhere.
-  await expect(page.getByText("saved", { exact: true }).last()).toBeVisible();
+  // BEFORE: the global form is clean (its Save is disabled, and it claims no "saved" because nothing has
+  // been saved yet, card f58b1250) and no range error is showing anywhere.
+  await expect(page.getByRole("button", { name: "Save", exact: true }).last()).toBeDisabled();
+  await expect(page.getByTestId("platform-config-saved")).toHaveCount(0);
   await expect(box(page, "Git push (s)").getByRole("alert")).toHaveCount(0);
 
   await gitPush.fill("16.1");
@@ -99,7 +100,7 @@ test("a fractional daemon-global timing entry saves as a WHOLE millisecond integ
     .toEqual([16_100, 966_000, 3_960_000]);
 
   // The save genuinely succeeded (no inline server error left on the form) and the form is clean again.
-  await expect(page.getByText("saved", { exact: true }).last()).toBeVisible();
+  await expect(page.getByTestId("platform-config-saved")).toHaveText("saved");
 
   // And it round-trips: a reload re-seeds each field from the stored ms in its OWN unit.
   await page.reload();

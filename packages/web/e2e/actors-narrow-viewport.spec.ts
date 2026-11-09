@@ -241,13 +241,14 @@ test.describe("Actors narrow viewport — classic shell (card a9476319)", () => 
     expect(box, "the Name field has no layout box at 390px").not.toBeNull();
     expect(box!.width, `the Name field is only ${box!.width}px wide at 390px`).toBeGreaterThan(140);
 
-    // The editor's own dirty pair (Profiles.tsx): clean shows a "saved" caption with Save disabled;
-    // dirty swaps that caption for a Reset button and enables Save. Asserting BOTH sides of the swap,
-    // rather than one of them, is what makes this a real before/after rather than a render check.
+    // The editor's own dirty pair (Profiles.tsx): clean has Save disabled and no Reset (and no "saved"
+    // either: nothing has been saved yet, card f58b1250); dirty shows a Reset button and enables Save.
+    // Asserting BOTH sides of the swap, rather than one of them, is what makes this a real before/after
+    // rather than a render check.
     const saved = scope.getByText("saved", { exact: true });
     const reset = scope.getByRole("button", { name: "Reset", exact: true });
     const save = scope.getByRole("button", { name: "Save", exact: true });
-    await expect(saved).toHaveCount(1);
+    await expect(saved).toHaveCount(0);
     await expect(reset).toHaveCount(0);
     await expect(save).toBeDisabled();
 

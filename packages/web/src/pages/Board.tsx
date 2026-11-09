@@ -806,6 +806,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           links={taskLinks(detail)} linksUnavailable={taskDetail.isError && !detail}
           columns={board.data?.columns ?? []} titleById={titleById} cards={pickerCards} onOpenTask={setOpenTaskId}
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
+          saved={edit.isSuccess && edit.variables?.id === drawerTask.id}
           saveError={edit.error as TaskUpdateConflictError | null}
           onDismissConflict={() => edit.reset()}
           onMoveLane={(columnKey) => move.mutate({ id: openTask.id, columnKey })}
@@ -1720,8 +1721,11 @@ function shipVerificationStyle(verification: Task["mergedVerification"]): { colo
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, cards, onOpenTask, onClose, onSave, saving, saveError, onDismissConflict, onAddChild, onDelete, deleting, deleteError, onMoveLane, moving }:
-  { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string;
+function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff, links, linksUnavailable, columns, titleById, cards, onOpenTask, onClose, onSave, saving, saved, saveError, onDismissConflict, onAddChild, onDelete, deleting, deleteError, onMoveLane, moving }:
+  { task: Task;
+    /** A Save of THIS card made in this session has landed (card f58b1250, audit A-12): the only thing
+     *  that may put "saved" beside the button. An untouched card has not been saved. */
+    saved: boolean; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string;
     /** The session working this card, if any — the same `workerByTask` pick the board card shows. */
     worker?: SessionListItem;
     /** Card 67c43038 — move this card to another lane NOW (the keyboard twin of dragging it). Not part of
@@ -2316,7 +2320,7 @@ function TaskDrawer({ task, column, worker, repos, primaryRepoPath, trailersOff,
           })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
             ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); setParentDraft(null); setParentEditing(false); setRelationDraft(null); }}>Reset</Button>
-            : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
+            : saved && <span data-testid="task-dialog-saved" style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
           {dirty && (
             <span data-testid="task-dialog-unsaved" aria-live="polite"
               style={{ display: "inline-flex", alignItems: "center", gap: 6, color: color.attnText, fontSize: fs.sm }}>

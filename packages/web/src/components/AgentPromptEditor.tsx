@@ -103,7 +103,9 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
               ? <span style={{ color: color.text3, fontSize: fs.sm }}>read-only in this preview</span>
               : dirty
                 ? <span style={{ color: color.attnText, fontSize: fs.sm }}>unsaved changes</span>
-                : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
+                // "saved" only after a save in this session landed (card f58b1250, audit A-12), never on
+                // an untouched prompt. `isSuccess` resets on the next attempt, so a refusal can't read saved.
+                : save.isSuccess && <span data-testid={`agent-prompt-editor-saved-${agent.id}`} style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
             <span style={{ flex: 1 }} />
             {save.isError && (
               <span style={{ color: color.danger, fontSize: fs.sm, textAlign: "right" }}>

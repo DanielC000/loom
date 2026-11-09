@@ -85,6 +85,7 @@ export default function Profiles() {
       qc.setQueryData(["profile", p.id], p); // sync editor to bundled fields (the reset response carries computed state)
       qc.invalidateQueries({ queryKey: ["profiles"] });
       setReloadNonce((n) => n + 1); // remount the editor onto the restored fields
+      save.reset(); // the fields now hold the bundled values, not what the last Save wrote
     },
   });
   // Adopt the shipped update: empty resolutions one-clicks a clean auto-merge; a per-conflict-field map
@@ -98,6 +99,7 @@ export default function Profiles() {
       qc.invalidateQueries({ queryKey: ["profiles"] });
       qc.invalidateQueries({ queryKey: ["profile", p.id, "update-diff"] });
       setReloadNonce((n) => n + 1);
+      save.reset(); // the fields now hold the merged values, not what the last Save wrote
     },
   });
 
@@ -152,6 +154,7 @@ export default function Profiles() {
           {selected && current.data ? (
             <ProfileEditor key={`${selected}:${reloadNonce}`} profile={current.data}
               onSave={(patch) => save.mutate({ id: selected, patch })} saving={save.isPending}
+              saved={save.isSuccess && save.variables?.id === selected}
               saveError={save.error as Error | null}
               onDelete={() => remove.mutate({ id: selected, name: current.data!.name })} deleting={remove.isPending}
               onRevert={() => revert.mutate(selected)} reverting={revert.isPending}
@@ -404,8 +407,10 @@ const normCodexProvider = (p: CodexProvider | null): CodexProvider | null => {
 
 // Remounted per profile (key=id:nonce) so the fields reset on switch / revert / adopt; after Save the
 // query updates and `dirty` clears against the new values. Mirrors the Skills / agent-preset editors.
-function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
-  { profile: ProfileSummary; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean; saveError: Error | null;
+function ProfileEditor({ profile, onSave, saving, saved, saveError, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
+  { profile: ProfileSummary; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean;
+    /** A Save of THIS profile made in this session has landed (card f58b1250, audit A-12). */
+    saved: boolean; saveError: Error | null;
     onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean;
     onAdopt: (resolutions?: Record<string, ProfileFieldResolution>) => void; adopting: boolean; adoptError: Error | null }) {
   const bundled = profile.bundled;
@@ -909,7 +914,7 @@ function ProfileEditor({ profile, onSave, saving, saveError, onDelete, deleting,
         </Button>
         {dirty
           ? <Button onClick={reset}>Reset</Button>
-          : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
+          : saved && <span data-testid="profile-saved" style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
         <span style={{ flex: 1 }} />
         {bundled && (confirmRevert ? (
           <>

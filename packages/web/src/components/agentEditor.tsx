@@ -186,7 +186,8 @@ export function AgentEditor(
     grantsError: Error | null; grantsErrorAgentId: string | undefined; deleting: boolean;
     // A CLOSABLE frame's dirty-close guard (card dd83149f). The frame owns the close request (it hears
     // Escape / the scrim / ×) and arms `closeArmed`; the editor owns the bar, because only it holds the
-    // draft a Save would write. A frame with no close (Projects' third pane) passes none of these.
+    // draft a Save would write. Projects' third pane has no close, but arms the same bar when a pick
+    // elsewhere on the page would replace this editor (card f58b1250).
     onDirtyChange?: (dirty: boolean) => void; closeArmed?: boolean;
     onDiscardClose?: () => void; onKeepEditing?: () => void },
 ) {

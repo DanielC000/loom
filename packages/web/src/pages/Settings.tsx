@@ -1415,9 +1415,11 @@ function ConfigEditor({ project }: { project: Project }) {
           onClick={() => (codexSwitch ? setConfirmCodex(true) : submitSave())}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
+        {/* "saved" only after a Save in this session landed (card f58b1250, audit A-12), never on an
+            untouched form. `isSuccess` resets on the next attempt, so a refused save can't read saved. */}
         {dirty
           ? <span style={{ color: color.attnText, fontSize: fs.sm }}>unsaved changes</span>
-          : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
+          : save.isSuccess && <span data-testid="project-config-saved" style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
         {/* Card 65aa951c. A field the human has NOT touched silently adopts whatever landed while this
             page was open — that is just the truth arriving. A field they ARE editing cannot be adopted,
             so Save will overwrite the other write: name those, with the two real options. */}
@@ -2264,9 +2266,10 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           onClick={() => (codexSwitch ? setConfirmCodex(true) : save.mutate())}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
+        {/* Same session-save rule as the project form above (card f58b1250, audit A-12). */}
         {dirty
           ? <span style={{ color: color.attnText, fontSize: fs.sm }}>unsaved changes</span>
-          : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
+          : save.isSuccess && <span data-testid="platform-config-saved" style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
         <span style={{ flex: 1 }} />
         {/* A blocked Save is never silent about WHICH entry blocks it — the range errors take the error
             slot ahead of any server error, mirroring the project form's own blockingErrors row. */}

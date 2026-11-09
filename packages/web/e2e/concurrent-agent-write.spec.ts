@@ -159,12 +159,13 @@ test("Settings: saving the column layout does not make the config form below rea
   await page.goto(`${loomDaemon.baseURL}/settings`);
 
   // The project-config Save is the FIRST "Save" button in DOM order (the column editor's is "Save layout",
-  // RepoPathEditor's is "Rebind"). Disabled + "saved" is the clean baseline this test needs to start from.
+  // RepoPathEditor's is "Rebind"). Disabled with no "unsaved changes" is the clean baseline this test
+  // needs to start from. (No "saved" either: nothing has been saved yet, card f58b1250.)
   const configSave = page.getByRole("button", { name: "Save", exact: true }).first();
   await expect(field(page, "Gate command")).toBeVisible();
   await expect(configSave).toBeDisabled();
-  const savedChip = page.getByText("saved", { exact: true }).first();
-  await expect(savedChip).toBeVisible();
+  await expect(page.getByText("unsaved changes", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("project-config-saved")).toHaveCount(0);
 
   // EXERCISE — rename a lane through the column editor's own atomic endpoint. It invalidates ["projects"],
   // which is what used to push a changed `kanbanColumns` into the config form's cloned baseline below.
@@ -361,7 +362,10 @@ test("Settings: a refetch adopts an untouched field without arming Save", async 
   await expect(workers).toHaveValue("9");
   await expect(configSave).toBeDisabled();
   await expect(page.getByTestId("config-conflict-notice")).toHaveCount(0);
-  await expect(page.getByText("saved", { exact: true }).first()).toBeVisible();
+  // The layout's own Save landed; the config form was never saved, so it stays clean without claiming it.
+  await expect(page.getByTestId("columns-saved")).toBeVisible();
+  await expect(page.getByText("unsaved changes", { exact: true })).toHaveCount(0);
+  await expect(page.getByTestId("project-config-saved")).toHaveCount(0);
 });
 
 test("Settings: the conflict notice appears on a touched field and retires after this form's own save", async ({ page, loomDaemon }) => {

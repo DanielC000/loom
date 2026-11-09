@@ -87,10 +87,11 @@ test("a long card keeps its footer in view, reads Title → Priority → Relatio
   expect(Math.abs(holdBox.y - deferBox.y)).toBeLessThan(2);
   expect(deferBox.x).toBeGreaterThan(holdBox.x + holdBox.width - 1);
 
-  // Staging: clean → "saved" + disabled Save; toggle Hold → "Unsaved changes" + enabled Save + Reset.
+  // Staging: clean → disabled Save and NO "saved" (nothing has been saved yet, card f58b1250); toggle
+  // Hold → "Unsaved changes" + enabled Save + Reset.
   const save = footer.getByRole("button", { name: "Save", exact: true });
   await expect(save).toBeDisabled();
-  await expect(footer.getByText("saved", { exact: true })).toBeVisible();
+  await expect(footer.getByTestId("task-dialog-saved")).toHaveCount(0);
   await expect(footer.getByTestId("task-dialog-unsaved")).toHaveCount(0);
   await hold.click();
   await expect(hold).toHaveAttribute("aria-checked", "true");
@@ -103,9 +104,9 @@ test("a long card keeps its footer in view, reads Title → Priority → Relatio
   await expect(dialog.getByText("Discard unsaved changes?", { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
 
-  // Save lands on the daemon and the footer returns to "saved".
+  // Save lands on the daemon and only now does the footer read "saved".
   await save.click();
-  await expect(footer.getByText("saved", { exact: true })).toBeVisible();
+  await expect(footer.getByTestId("task-dialog-saved")).toHaveText("saved");
   await expect(footer.getByTestId("task-dialog-unsaved")).toHaveCount(0);
   const stored = await (await fetch(`${loomDaemon.baseURL}/api/tasks/${seed.epicId}`)).json() as { held?: boolean };
   expect(stored.held).toBe(true);

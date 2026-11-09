@@ -147,8 +147,31 @@ export default function Projects() {
   const selectedProject = projects.data?.find((p) => p.id === projectId) ?? null;
   const selectedAgent = agents.data?.find((t) => t.id === agentId) ?? null;
 
-  const pickProject = (id: string) => { setProjectId(id); setAgentId(null); setCreating(null); };
-  const pickAgent = (id: string) => { setAgentId(id); setCreating(null); };
+  // The editor pane has no close of its own, but picking another agent, another project or a create form
+  // replaces (remounts) it, which used to drop a typed draft silently (card f58b1250). Every such pick goes
+  // through `guardPick`: a clean editor switches at once; a dirty one keeps the pick pending and arms the
+  // editor's UnsavedCloseBar, the same two-step as the Atlas agent dialog (card dd83149f).
+  //
+  // @decision dd83149f — never replace a dirty agent editor without an explicit Discard.
+  const [editorDirty, setEditorDirty] = useState(false);
+  const [closeArmed, setCloseArmed] = useState(false);
+  const pendingPick = useRef<(() => void) | null>(null);
+  // A replaced editor never reports clean on its way out, so the flags reset with the pane's occupant.
+  useEffect(() => { setEditorDirty(false); setCloseArmed(false); pendingPick.current = null; }, [agentId, creating, projectId]);
+  const guardPick = (go: () => void) => {
+    if (editorDirty) { pendingPick.current = go; setCloseArmed(true); } else go();
+  };
+  const discardAndPick = () => { const go = pendingPick.current; pendingPick.current = null; setCloseArmed(false); setEditorDirty(false); go?.(); };
+  const keepEditing = () => { pendingPick.current = null; setCloseArmed(false); };
+
+  const pickProject = (id: string) => {
+    guardPick(() => { setProjectId(id); setAgentId(null); setCreating(null); });
+  };
+  const pickAgent = (id: string) => {
+    if (id === agentId && !creating) return;
+    guardPick(() => { setAgentId(id); setCreating(null); });
+  };
+  const toggleCreating = (kind: "project" | "agent") => guardPick(() => setCreating((c) => (c === kind ? null : kind)));
 
   const q = filter.trim().toLowerCase();
   const filteredProjects = (projects.data ?? []).filter((p) => !q || p.name.toLowerCase().includes(q));
@@ -178,7 +201,7 @@ export default function Projects() {
           {/* Create sits at the TOP of the rail — the primary action is reachable without scrolling past the
               list (owner ask, card ee742d5b). The reveal-collapsed form still opens in the roomy Editor pane. */}
           <Button variant={creating === "project" ? "primary" : "default"} style={{ textAlign: "center" }}
-            onClick={() => setCreating((c) => (c === "project" ? null : "project"))}>
+            onClick={() => toggleCreating("project")}>
             ＋ New project
           </Button>
           <div style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: "56vh", overflowY: "auto", marginRight: -4, paddingRight: 4 }}>
@@ -230,7 +253,7 @@ export default function Projects() {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                 <SectionLabel style={{ margin: 0 }}>Agents</SectionLabel>
                 <Button variant={creating === "agent" ? "primary" : "ghost"} style={{ padding: "2px 8px" }}
-                  onClick={() => setCreating((c) => (c === "agent" ? null : "agent"))}>＋ New agent</Button>
+                  onClick={() => toggleCreating("agent")}>＋ New agent</Button>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 1, maxHeight: "56vh", overflowY: "auto", marginRight: -4, paddingRight: 4 }}>
                 {(agents.data ?? []).map((t) => {
@@ -272,7 +295,8 @@ export default function Projects() {
               onDelete={() => deleteAgent.mutate(selectedAgent.id)}
               saving={updateAgent.isPending} savingGrants={saveAgentGrants.isPending} grantsError={saveAgentGrants.error as Error | null}
               grantsErrorAgentId={saveAgentGrants.variables?.id}
-              deleting={deleteAgent.isPending} />
+              deleting={deleteAgent.isPending}
+              onDirtyChange={setEditorDirty} closeArmed={closeArmed} onDiscardClose={discardAndPick} onKeepEditing={keepEditing} />
           ) : (
             <EmptyPane project={!!selectedProject} />
           )}

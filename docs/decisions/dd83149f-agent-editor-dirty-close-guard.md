@@ -22,9 +22,14 @@ The bar's Save writes and dismisses the bar but does not close the dialog. Closi
 - **Do not close `AgentEditDialog` over a dirty draft without an explicit Discard.** Escape, the scrim and × must all go through `requestClose`. A new exit path that calls `onClose` directly reopens A-04 on that path alone.
 - **Do not replace the bar with a draft kept across close.** See above: the draft would vanish on reload, with no sign it was ever kept.
 - **Do not make the bar's Save close the dialog** unless the close waits for a confirmed successful write.
-- **Do not go back to rendering "saved" on `!dirty` alone** at the three sites this card fixed. An untouched field has not been saved.
+- **Do not go back to rendering "saved" on `!dirty` alone** at the three sites this card fixed, or at any site card f58b1250 extended it to. An untouched field has not been saved.
+- **Do not let a Projects-pane pick replace a dirty agent editor directly.** Route it through `guardPick`.
 - **Do not set the Skills "saved" marker from the "Save to trust" re-save.** It writes the value already served, so a refused re-save would read as saved.
 
-## Not covered
+## Extended by card f58b1250
 
-Other `!dirty → "saved"` sites have the same pre-save shape and were out of this card's scope: `AgentPromptEditor.tsx`, `ColumnManager.tsx`, `Board.tsx` (task drawer), `Profiles.tsx`, and two more in `Settings.tsx` (the config editors). Projects' third pane (`pages/Projects.tsx`) hosts the same `AgentEditor` but has no close, so it passes none of the guard props. Selecting another agent there still remounts the editor and drops a draft. That host was not named by the audit.
+The same rule now covers the remaining editors: `AgentPromptEditor.tsx`, `ColumnManager.tsx` (a Save or a Reset-to-preset sets a local `landed` flag, cleared when either starts), the `Board.tsx` task drawer and `Profiles.tsx` (each scoped to the card or profile the mutation's `variables.id` names; Profiles also resets the save on Revert and Adopt, which replace the fields), and both config forms in `Settings.tsx`. Each shows "saved" only on `!dirty` plus a successful save made in this session.
+
+Projects' third pane (`pages/Projects.tsx`) has no close, but a pick elsewhere on the page (another agent, another project, either create form) replaces its editor. Every such pick goes through `guardPick`: a clean editor switches at once, a dirty one holds the pick and arms the same `UnsavedCloseBar`. Discard performs the held pick. Covered by `packages/web/e2e/projects-pane-draft-guard.spec.ts`.
+
+Still not covered: a project switch made from outside this page (the header's active-project picker) swaps the pane's agent list without passing through `guardPick`.

@@ -172,10 +172,15 @@ export function ColumnManager({ project }: { project: Project }) {
   const dirty = JSON.stringify(desired) !== baseline.current;
   const error = validate(rows);
 
+  // "saved" is a claim about a write THIS session made (card f58b1250, audit A-12): set when a Save or a
+  // Reset-to-preset lands, cleared the moment either starts, so an untouched layout, a refused write and a
+  // drift re-base all read without it.
+  const [landed, setLanded] = useState(false);
   const save = useMutation({
     mutationFn: () => api.updateProjectColumns(project.id, desired, baseKeys.current),
     meta: { inlineError: true }, // surfaced inline below (no blocking window.alert)
-    onSuccess: (res) => { reseedFrom(res.columns); setWarnings(res.warnings); },
+    onMutate: () => setLanded(false),
+    onSuccess: (res) => { reseedFrom(res.columns); setWarnings(res.warnings); setLanded(true); },
     onError: onDrift, // a drifted 409 re-bases the staged rows (below); any other error shows inline
   });
 
@@ -185,7 +190,8 @@ export function ColumnManager({ project }: { project: Project }) {
   const applyPreset = useMutation({
     mutationFn: () => api.updateProjectColumns(project.id, presetToDesired(presetById(resetPresetId)), baseKeys.current),
     meta: { inlineError: true },
-    onSuccess: (res) => { reseedFrom(res.columns); setWarnings(res.warnings); setResetConfirming(false); },
+    onMutate: () => setLanded(false),
+    onSuccess: (res) => { reseedFrom(res.columns); setWarnings(res.warnings); setResetConfirming(false); setLanded(true); },
     onError: onDrift,
   });
 
@@ -273,7 +279,7 @@ export function ColumnManager({ project }: { project: Project }) {
           ? <span style={{ color: color.danger, fontSize: fs.sm }}>{error}</span>
           : dirty
             ? <span style={{ color: color.attnText, fontSize: fs.sm }}>unsaved changes</span>
-            : <span style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
+            : landed && <span data-testid="columns-saved" style={{ color: color.liveFg, fontSize: fs.sm }}>saved</span>}
         <span style={{ flex: 1 }} />
         {save.isError && !(save.error instanceof ColumnsDriftedError) && (
           <span style={{ color: color.danger, fontSize: fs.sm, textAlign: "right" }}>
