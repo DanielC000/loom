@@ -109,7 +109,9 @@ export default function Skills() {
         </p>
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           {skills.data?.map((s) => (
-            <Button key={s.name} variant={s.name === selected ? "primary" : "default"}
+            // Selection reads as `loom-btn-on`, never the primary CTA fill, so the muted "· bundled" stays
+            // legible on a selected row (audit A-09). Same treatment as the Profiles list.
+            <Button key={s.name} className={s.name === selected ? "loom-btn-on" : undefined} aria-pressed={s.name === selected}
               style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 6 }}
               onClick={() => setSelected(s.name)} title={s.description || s.name}>
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>

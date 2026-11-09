@@ -123,9 +123,14 @@ export default function Profiles() {
             {/* The companion's assistant-role rig is HIDDEN here — companion config lives entirely under
                 Companion → Manage now, so it never shows among the agent rigs. */}
             {agentProfiles(profiles.data ?? []).map((p) => (
-              <Button key={p.id} variant={p.id === selected ? "primary" : "default"} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
+              // A selected row is a SELECTION, not a call to action: the kit's `loom-btn-on` (neutral selected
+              // fill + ink edge), never the primary fill, which inverted the row and left the role label's
+              // muted grey at ~2:1 (audit A-09). Same treatment as the Skills list.
+              <Button key={p.id} className={p.id === selected ? "loom-btn-on" : undefined} aria-pressed={p.id === selected}
+                style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 8 }}
                 onClick={() => setSelected(p.id)} title={p.description || p.name}>
-                {p.icon && <span>{p.icon}</span>}
+                {/* A fixed icon slot, empty when the profile has none, so every name starts at the same x (A-16). */}
+                <span aria-hidden="true" style={{ flex: "0 0 18px", width: 18, display: "inline-flex", justifyContent: "center", lineHeight: 1 }}>{p.icon}</span>
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
                 {/* A rig that spawns a DIFFERENT vendor binary should be identifiable without opening it
                     (card fa2277b6 item 5). Only codex is marked — claude is the default, so badging every

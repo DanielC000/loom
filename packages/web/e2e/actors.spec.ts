@@ -116,6 +116,64 @@ test.describe("actors (Profiles + Skills consolidation)", () => {
     await expect(page).toHaveURL(/\/actors\?tab=skills/);
   });
 
+  // Card 4d3418cb (audit A-09 + A-16). A selected list row used the primary CTA fill, which inverted the row
+  // and left its muted secondary text (role label / "· bundled") at ~2:1. It now reads as the kit's neutral
+  // `loom-btn-on` selection, so the muted text clears WCAG AA. Profile names also start at one x, because the
+  // icon slot is a fixed width whether or not the profile has an icon. Measured in BOTH themes, since the
+  // tokens differ per theme.
+  for (const theme of ["dark", "light"] as const) {
+    test(`a selected Profiles/Skills row keeps its secondary text >= 4.5:1, and profile names align (${theme})`, async ({ page, loomDaemon }) => {
+      await page.goto(`${loomDaemon.baseURL}/actors`);
+      await page.evaluate((t) => localStorage.setItem("loom.theme", t), theme);
+      await page.reload();
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+
+      // Selected row's background vs each of its text runs, as a WCAG contrast ratio. Colors go through a 1px
+      // canvas so an oklch() token resolves to the sRGB the screen actually shows.
+      const measure = (row: import("@playwright/test").Locator) => row.evaluate((b: HTMLElement) => {
+        const rgb = (c: string) => { const x = document.createElement("canvas").getContext("2d")!; x.fillStyle = c; x.fillRect(0, 0, 1, 1); return [...x.getImageData(0, 0, 1, 1).data].slice(0, 3); };
+        const lum = (c: number[]) => { const [r = 0, g = 0, bl = 0] = c.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * bl; };
+        const bg = lum(rgb(getComputedStyle(b).backgroundColor));
+        const leaves = [...b.querySelectorAll("span")].filter((s) => !s.children.length && /\w/.test(s.textContent ?? ""));
+        return { cls: b.className, ratios: leaves.map((s) => { const l = lum(rgb(getComputedStyle(s).color)); return (Math.max(l, bg) + 0.05) / (Math.min(l, bg) + 0.05); }) };
+      });
+
+      // Measure the row at REST, not hovered: park the pointer at the right edge (the left edge would hover
+      // the nav rail open over the content).
+      const parkPointer = async () => { const v = page.viewportSize()!; await page.mouse.move(v.width - 2, v.height / 2); };
+
+      const profileRows = page.locator(".loom-actor-split > :first-child button[title]");
+      const qa = profileRows.filter({ hasText: "QA Tester" });
+      await qa.click();
+      // Soft assertions throughout, so one run reports every check that fails rather than only the first.
+      await expect.soft(qa).toHaveAttribute("aria-pressed", "true");
+      await expect.soft(profileRows.and(page.locator("[aria-pressed=true]"))).toHaveCount(1);
+      await parkPointer();
+      const p = await measure(qa);
+      expect.soft(p.cls).not.toContain("loom-btn-primary");
+      expect.soft(p.ratios.length).toBeGreaterThanOrEqual(2); // the name AND the role label
+      for (const r of p.ratios) expect.soft(r).toBeGreaterThanOrEqual(4.5);
+
+      // A-16: every profile name starts at the same x, iconed or not (the seeded set has both kinds).
+      const lefts = await profileRows.evaluateAll((rows) => rows.map((r) => {
+        const name = [...r.querySelectorAll("span")].find((s) => getComputedStyle(s).flexGrow === "1");
+        return Math.round(name!.getBoundingClientRect().left);
+      }));
+      expect(lefts.length).toBeGreaterThan(1);
+      expect.soft(new Set(lefts).size).toBe(1);
+
+      await page.getByRole("radio", { name: "Skills" }).click();
+      const worker = page.locator(".loom-actor-split > :first-child button[title]").filter({ hasText: /^worker/ });
+      await worker.click();
+      await expect.soft(worker).toHaveAttribute("aria-pressed", "true");
+      await parkPointer();
+      const s = await measure(worker);
+      expect.soft(s.cls).not.toContain("loom-btn-primary");
+      expect.soft(s.ratios.length).toBeGreaterThanOrEqual(1); // the "· bundled" run
+      for (const r of s.ratios) expect.soft(r).toBeGreaterThanOrEqual(4.5);
+    });
+  }
+
   test("the dev-only 'Publish to repo' gate is preserved on the Skills tab (hidden in the shipping edition)", async ({ page, loomDaemon }) => {
     await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
 
