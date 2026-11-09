@@ -2990,7 +2990,10 @@ export class PlatformMcpRouter {
           "cards. Reuses the existing agent_create + task-insert writers only, no new writer surface. " +
           "Fail-closed: an unknown templateName, an unknown projectId, an unknown profileName, or a " +
           "template whose agent resolves to an elevated profile role (platform/auditor/workspace-auditor) " +
-          "are all rejected and nothing is written.",
+          "are all rejected and nothing is written. A template agent whose exact name (case-insensitive) " +
+          "already exists in the project is skipped and listed in `skipped` (with `promptDiffers` and " +
+          "`profileDiffers`), not an error; it is an error only when every agent already exists. A starter card " +
+          "whose title already exists is not seeded again (`skippedCards`).",
         inputSchema: strictShape({
           projectId: z.string(),
           templateName: z.string(),

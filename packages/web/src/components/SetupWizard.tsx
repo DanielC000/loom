@@ -715,6 +715,11 @@ function StepDone({
         <Stat n={cardCount} label={`starter card${cardCount === 1 ? "" : "s"}`} />
         <Stat check label="board ready" />
       </div>
+      {(result?.skipped?.length ?? 0) > 0 && (
+        <p style={{ fontSize: fs.body, color: color.text2, margin: "-8px 0 20px" }}>
+          {result!.skipped!.length} already in this project, kept as-is.
+        </p>
+      )}
 
       <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
         <Button variant="primary" onClick={onBoard} style={{ padding: "7px 16px", fontSize: fs.body }}>Go to the board →</Button>

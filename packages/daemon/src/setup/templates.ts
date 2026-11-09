@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
-import type { Agent, Task } from "@loom/shared";
+import type { Agent, Profile, Task } from "@loom/shared";
 import type { Db } from "../db.js";
 import { agentAssignableProfileError } from "../profiles/validate.js";
 import { reservedProjectManagerProfileError } from "../agents/clone-core.js";
@@ -33,6 +33,24 @@ export interface WorkflowTemplateAgent {
 export interface WorkflowTemplateCard {
   title: string;
   body: string;
+}
+
+/**
+ * A template agent that was NOT created because the project already has an agent with that exact name
+ * (case-insensitive). The existing agent is kept untouched; `promptDiffers` / `profileDiffers` say only whether
+ * its startup prompt / bound profile differ from the template's (booleans, the text is never returned).
+ */
+export interface SkippedTemplateAgent {
+  name: string;
+  existingAgentId: string;
+  promptDiffers: boolean;
+  profileDiffers: boolean;
+}
+
+/** A starter card NOT seeded because the project already has a card with that title (any column). */
+export interface SkippedTemplateCard {
+  title: string;
+  existingTaskId: string;
 }
 
 /** A workflow template: the agents to stand up + the starter board cards to seed. */
@@ -135,7 +153,9 @@ export function templateAssignableProfileError(db: Db, template: WorkflowTemplat
  *
  * ATOMIC: a pre-flight VALIDATION pass resolves + checks EVERY `template.agents` entry BEFORE any write —
  * so a mixed-validity template (a valid agent before an invalid one) throws with NOTHING written, rather
- * than leaking the valid agents inserted before the throw.
+ * than leaking the valid agents inserted before the throw. The write phase itself runs in one transaction.
+ * An agent whose exact name (case-insensitive) already exists is skipped and reported in `skipped`; if that
+ * leaves nothing to add, the apply throws.
  *
  * @decision 3de74275 — every resolved profile is checked via `agentAssignableProfileError(profile,
  * { humanAuthorized: opts?.humanAuthorized })`: ROLE is unconditional on every caller, REST included
@@ -148,7 +168,7 @@ export function templateAssignableProfileError(db: Db, template: WorkflowTemplat
 export function applyWorkflowTemplate(
   db: Db, template: WorkflowTemplate, projectId: string,
   opts?: { humanAuthorized?: boolean },
-): { agents: Agent[]; tasks: Task[] } {
+): { agents: Agent[]; tasks: Task[]; skipped: SkippedTemplateAgent[]; skippedCards: SkippedTemplateCard[] } {
   const project = db.getProject(projectId);
   if (!project) throw new Error(`applyWorkflowTemplate: project not found: ${projectId}`);
 
@@ -160,7 +180,19 @@ export function applyWorkflowTemplate(
   // already holds "QA Tester", throws here with nothing written instead of minting a twin.
   const nameScope = newAgentNameScope(db, projectId);
   const siblings = [...nameScope.siblings];
-  const resolved = template.agents.map((spec) => {
+  const existingAgents = db.listAgents(projectId);
+  // A template that names one agent twice (name or slug twin) is malformed whatever the project holds, so it is
+  // checked across ALL specs BEFORE the skip below — otherwise a duplicate of an already-present name would be
+  // skipped twice instead of refused.
+  const seenInTemplate: { id: string; name: string }[] = [];
+  for (const spec of template.agents) {
+    const dup = resolveAgentName(spec.name, { siblings: seenInTemplate, reservedNames: [] });
+    if (!dup.ok) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${dup.error}`);
+    seenInTemplate.push({ id: `spec:${seenInTemplate.length}`, name: dup.name });
+  }
+  const skipped: SkippedTemplateAgent[] = [];
+  const resolved: { spec: WorkflowTemplate["agents"][number]; profile: Profile; name: string }[] = [];
+  for (const spec of template.agents) {
     const profile = profilesByName.get(spec.profileName);
     if (!profile) throw new Error(`applyWorkflowTemplate: unknown bundled profile "${spec.profileName}" for agent "${spec.name}"`);
     const assignErr = agentAssignableProfileError(profile, { humanAuthorized: opts?.humanAuthorized });
@@ -169,47 +201,89 @@ export function applyWorkflowTemplate(
       const reservedErr = reservedProjectManagerProfileError(project, profile);
       if (reservedErr) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${reservedErr}`);
     }
+    // An agent already in the project under this exact name (case-insensitive) is KEPT as-is and skipped, so a
+    // roster can be upgraded onto a project that ran a smaller template. A reserved built-in name is never a
+    // skip (it falls through to the refusal below), and a slug-only twin is not a name match either.
+    const lower = spec.name.trim().toLowerCase();
+    const existing = nameScope.reservedNames.some((r) => r.toLowerCase() === lower)
+      ? undefined
+      : existingAgents.find((a) => a.name.toLowerCase() === lower);
+    if (existing) {
+      skipped.push({
+        name: existing.name, existingAgentId: existing.id, promptDiffers: existing.startupPrompt !== spec.startupPrompt,
+        profileDiffers: existing.profileId !== profile.id,
+      });
+      continue;
+    }
     const named = resolveAgentName(spec.name, { siblings, reservedNames: nameScope.reservedNames });
     if (!named.ok) throw new Error(`applyWorkflowTemplate: agent "${spec.name}" — ${named.error}`);
     siblings.push({ id: `template:${siblings.length}`, name: named.name });
-    return { spec, profile, name: named.name };
-  });
-
-  const agents: Agent[] = resolved.map(({ spec, profile, name }) => {
-    const agent: Agent = {
-      id: randomUUID(),
-      projectId,
-      name,
-      startupPrompt: spec.startupPrompt,
-      position: spec.position,
-      profileId: profile.id,
-      endpoint: false, // a templated agent is never an API endpoint — human-only REST publishes one
-      ioSchema: null,
-    };
-    db.insertAgent(agent);
-    return agent;
-  });
+    resolved.push({ spec, profile, name: named.name });
+  }
+  if (resolved.length === 0 && skipped.length > 0) {
+    throw new Error(
+      `applyWorkflowTemplate: every agent in this template already exists in this project (${skipped.map((s) => `"${s.name}"`).join(", ")}) — nothing to add`,
+    );
+  }
 
   const cols = resolveConfig(project.config).kanbanColumns;
   const landing = columnKeyForRole(cols, "defaultLanding") ?? cols[0]?.key ?? "backlog";
   const now = new Date().toISOString();
 
-  const tasks: Task[] = template.boardSeed.map((card, i) => {
-    const task: Task = {
-      id: randomUUID(),
-      projectId,
-      title: card.title,
-      body: card.body,
-      columnKey: landing,
-      position: i,
-      priority: "p2",
-      createdAt: now,
-      updatedAt: now,
-      version: 1,
-    };
-    db.insertTask(task);
-    return task;
+  // Added agents continue the project's own ordering (max existing position + 1, +2, ... in template order) so
+  // they never tie with an existing agent; a project with no agents starts at 0.
+  const basePosition = existingAgents.reduce((m, a) => Math.max(m, a.position), -1) + 1;
+  // A starter card whose trimmed title already exists on the project (any column, case-insensitive) is not
+  // seeded again — the cards two templates share (and a re-apply after deleting one agent) land once.
+  const existingByTitle = new Map<string, string>();
+  for (const t of db.listTasks(projectId)) {
+    const key = t.title.trim().toLowerCase();
+    if (!existingByTitle.has(key)) existingByTitle.set(key, t.id);
+  }
+  const skippedCards: SkippedTemplateCard[] = [];
+  const cardsToSeed = template.boardSeed.filter((card) => {
+    const existingId = existingByTitle.get(card.title.trim().toLowerCase());
+    if (existingId === undefined) return true;
+    skippedCards.push({ title: card.title, existingTaskId: existingId });
+    return false;
   });
 
-  return { agents, tasks };
+  // One transaction for the whole write phase: a failing insert (e.g. a card) rolls back the agents already
+  // inserted instead of stranding a half-applied project. At least one agent is being added here (the
+  // all-skipped case threw above); cards are deduped by title as computed above.
+  return db.runInTransaction(() => {
+    const agents: Agent[] = resolved.map(({ spec, profile, name }, i) => {
+      const agent: Agent = {
+        id: randomUUID(),
+        projectId,
+        name,
+        startupPrompt: spec.startupPrompt,
+        position: basePosition + i,
+        profileId: profile.id,
+        endpoint: false, // a templated agent is never an API endpoint — human-only REST publishes one
+        ioSchema: null,
+      };
+      db.insertAgent(agent);
+      return agent;
+    });
+
+    const tasks: Task[] = cardsToSeed.map((card, i) => {
+      const task: Task = {
+        id: randomUUID(),
+        projectId,
+        title: card.title,
+        body: card.body,
+        columnKey: landing,
+        position: i,
+        priority: "p2",
+        createdAt: now,
+        updatedAt: now,
+        version: 1,
+      };
+      db.insertTask(task);
+      return task;
+    });
+
+    return { agents, tasks, skipped, skippedCards };
+  });
 }

@@ -225,7 +225,13 @@ export interface SetupTemplate {
 }
 // The POST /api/setup/templates/apply result: the agents + starter board cards actually created in the
 // target project (the authoritative counts the Done screen shows). Mirrors applyWorkflowTemplate's return.
-export interface TemplateApplyResult { agents: Agent[]; tasks: Task[]; }
+export interface TemplateApplyResult {
+  agents: Agent[]; tasks: Task[];
+  /** Template agents not created because the project already had one with that name (kept as-is). */
+  skipped?: { name: string; existingAgentId: string; promptDiffers: boolean; profileDiffers: boolean }[];
+  /** Starter cards not seeded because a card with that title already existed. */
+  skippedCards?: { title: string; existingTaskId: string }[];
+}
 
 // @decision 9ccedbee — every non-GET /api/* write (+ /ws/term) needs this token as
 // `Authorization: Bearer <token>`, captured into localStorage. Under pnpm web's dev proxy the SPA is a

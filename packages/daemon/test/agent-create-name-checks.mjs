@@ -255,10 +255,12 @@ const connect = async (router, sessionId) => {
   db.insertProject({ id: "pT2", name: "T2", repoPath: "pT2", vaultPath: "pT2", config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: "tExisting", projectId: "pT1", name: first.name.toUpperCase(), startupPrompt: "", position: 0, profileId: null });
   let threw = null;
+  // A slug-only twin of an existing agent is still refused (not a name match, so never a skip), nothing written.
+  db.insertAgent({ id: "tTwin", projectId: "pT1", name: slugifyAgentName(tpl.agents[3].name), startupPrompt: "", position: 1, profileId: null });
   try { applyWorkflowTemplate(db, tpl, "pT1", { humanAuthorized: true }); } catch (e) { threw = e; }
-  check("(5) applying onto a project that already holds one of its names throws, naming the agent",
-    !!threw && new RegExp(`agent "${first.name}"`).test(String(threw.message)));
-  check("(5) ...and NOTHING was written (atomic)", countIn("pT1") === 1);
+  check("(5) a slug-only twin of an existing agent still throws, naming the agent",
+    !!threw && new RegExp(`agent "${tpl.agents[3].name}"`).test(String(threw.message)));
+  check("(5) ...and NOTHING was written (atomic)", countIn("pT1") === 2);
   const twice = { ...tpl, agents: [tpl.agents[0], { ...tpl.agents[0], name: slugifyAgentName(tpl.agents[0].name) }] };
   threw = null;
   try { applyWorkflowTemplate(db, twice, "pT2", { humanAuthorized: true }); } catch (e) { threw = e; }

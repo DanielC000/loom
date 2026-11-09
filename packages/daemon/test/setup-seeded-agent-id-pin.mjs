@@ -136,7 +136,7 @@ for (const s of SEEDERS) {
     const gone = named(db, home, s.name)[0];
     db.deleteAgent(gone.id);
     insert(db, home.id, `human-${s.label}`, s.name, 60); // a HUMAN agent that happens to carry the bundled name
-    check(`(4 ${s.label}) deleted seeded agent + a human agent of the same name: reboot seeds a NEW one`, s.fn(db) === s.name && named(db, home, s.name).length === 2);
+    check(`(4 ${s.label}) deleted seeded agent + a human agent of the same name: reboot seeds a NEW one (under a free name)`, s.fn(db) === `${s.name} 2` && named(db, home, s.name).length === 1 && named(db, home, `${s.name} 2`).length === 1);
     check(`(4 ${s.label}) ...the marker is NOT the human's agent`, db.getMeta(s.key) !== `human-${s.label}` && !!db.getAgent(db.getMeta(s.key)));
     check(`(4 ${s.label}) ...and the human's agent is untouched`, db.getAgent(`human-${s.label}`)?.name === s.name);
     db.close();
@@ -149,7 +149,7 @@ for (const s of SEEDERS) {
     db.setMeta(s.key, `foreign-${s.label}`); // marker pointing at an agent outside the home
     insert(db, home.id, `human-${s.label}`, s.name, 60);
     check(`(4 ${s.label}) a marker pointing into another project is invalid: re-seeds, does not adopt the same-named human agent`,
-      s.fn(db) === s.name && db.getMeta(s.key) !== `foreign-${s.label}` && db.getMeta(s.key) !== `human-${s.label}`);
+      s.fn(db) === `${s.name} 2` && db.getMeta(s.key) !== `foreign-${s.label}` && db.getMeta(s.key) !== `human-${s.label}`);
     db.close();
   }
 }
@@ -181,7 +181,7 @@ for (const s of SEEDERS) {
   for (const s of SEEDERS) s.fn(db); // a reboot with the flag still off
   check("(8) operator: a reboot with the flag off does not adopt the later same-named agent", !db.getMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY));
   db.setPlatformConfig({ operatorEnabled: true });
-  check("(8) operator: flipping the flag seeds the bundled operator", seed.seedOperatorAgent(db) === seed.OPERATOR_AGENT_NAME);
+  check("(8) operator: flipping the flag seeds the bundled operator (under a free name)", seed.seedOperatorAgent(db) === `${seed.OPERATOR_AGENT_NAME} 2`);
   check("(8) ...the marker is the NEW agent, not the human's", db.getMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY) !== "human-op" && !!db.getAgent(db.getMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY)));
   check("(8) ...and a reboot after that still leaves the human's agent alone", seed.seedOperatorAgent(db) === null && db.getAgent("human-op")?.name === seed.OPERATOR_AGENT_NAME);
   db.close();
@@ -192,8 +192,8 @@ for (const s of SEEDERS) {
   migrateSeededHomeAgentMarker(db, home, s.key, s.name);
   check(`(8 ${s.label}) fixture: migration ran with no match, so no marker`, !db.getMeta(s.key) && !!db.getMeta(seededMarkerMigratedKey(s.key)));
   insert(db, home.id, `later-${s.label}`, s.name, 80); // ...and a human creates the name afterwards
-  check(`(8 ${s.label}) migrated-with-no-match then a later same-named agent: a boot seeds a NEW one and never adopts it`,
-    s.fn(db) === s.name && db.getMeta(s.key) !== `later-${s.label}` && named(db, home, s.name).length === 2);
+  check(`(8 ${s.label}) migrated-with-no-match then a later same-named agent: a boot seeds a NEW one (under a free name) and never adopts it`,
+    s.fn(db) === `${s.name} 2` && db.getMeta(s.key) !== `later-${s.label}` && named(db, home, s.name).length === 1 && named(db, home, `${s.name} 2`).length === 1);
   const marker = db.getMeta(s.key);
   check(`(8 ${s.label}) ...a second boot adopts nothing either`, s.fn(db) === null && db.getMeta(s.key) === marker);
   db.close();

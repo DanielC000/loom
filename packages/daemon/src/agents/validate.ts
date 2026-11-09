@@ -102,8 +102,10 @@ export type AgentNameScope = {
 
 /**
  * Card b0495d0b: validate and normalize an agent rename. An agent NAME is an identity, not just a label:
- * worker_spawn resolves `agentId` by case-insensitive name and then by slug, and the setup home's seeders
- * decide "already seeded" by exact name. So the new name is trimmed and must be non-empty, may not
+ * worker_spawn resolves `agentId` by case-insensitive name and then by slug, and the setup home's name-keyed
+ * lookups (the "Platform" lead and its legacy name) find their agent by exact name; the auditor, operator and
+ * companion are pinned by an id marker instead and re-seed under a free name (`freeSeededAgentName`,
+ * setup/seed.ts). So the new name is trimmed and must be non-empty, may not
  * collide (by name, case-insensitively, or by slug) with another agent in the same project, and a
  * name-keyed seeded agent can neither be renamed nor have its name taken. Re-saving the current name
  * always passes, and so does a case-only change of an ordinary agent's own name.
@@ -150,8 +152,9 @@ export type NewAgentNameScope = {
 
 /**
  * Card 46d1faa5: the CREATE-side twin of `resolveAgentRename` — same rules (shared `checkNameAgainstSiblings`),
- * no self to exclude and no "current name" shortcut. Seeders do NOT call this: they find their agent by exact
- * name and skip when present, which is what keeps boot idempotent.
+ * no self to exclude and no "current name" shortcut. The seeders reach it through `freeSeededAgentName`
+ * (setup/seed.ts) when they re-seed a deleted standing agent, with no reserved names; what keeps boot
+ * idempotent is their id marker, not a name lookup.
  */
 export function resolveAgentName(raw: string, scope: NewAgentNameScope): { ok: true; name: string } | { ok: false; error: string } {
   const name = raw.trim();

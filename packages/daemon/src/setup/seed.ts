@@ -21,6 +21,7 @@ import {
   resolveSetupHome,
   resolveLiveSetupHome,
 } from "../projects/reserved-home-markers.js";
+import { resolveAgentName, uniqueAgentName } from "../agents/validate.js";
 import type { AgentNameScope, NewAgentNameScope } from "../agents/validate.js";
 export { SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_HOME_LEAD_AGENT_ID_KEY, resolveLiveSetupHome };
 
@@ -616,6 +617,24 @@ Your audit + suggestion tools and the "Review my workspace" trigger are live —
 ];
 
 /**
+ * The name a (re-)seeded standing agent is inserted under in the setup home: the bundled `name` when it is
+ * free, else the first free numbered variant ("Workspace Auditor 2"). A seeded agent is found by its id
+ * marker, not its name, and its name is not reserved against humans — so after the seeded agent is deleted a
+ * user may hold the bundled name (or its slug twin) by the time the next boot re-seeds. Checked with the same
+ * name + slug rules a user-created agent faces; never throws (past the suffix limit it falls back to `name`).
+ */
+function freeSeededAgentName(db: Db, home: Project, name: string): string {
+  const scope: NewAgentNameScope = {
+    siblings: db.listAgents(home.id).map((a) => ({ id: a.id, name: a.name })),
+    reservedNames: [], // the seeded names are not reserved; only existing agents can collide
+  };
+  const direct = resolveAgentName(name, scope);
+  if (direct.ok) return direct.name;
+  const suffixed = uniqueAgentName(name, scope, 2);
+  return suffixed.ok ? suffixed.name : name;
+}
+
+/**
  * B4 backfill — seed the bundled Workspace Auditor agent into the SAME reserved "Platform" setup home as
  * the operator (one home, two agents), SEED-IF-ABSENT BY ID MARKER (with a one-shot boot name migration for
  * a pre-marker install). Run at boot AFTER seedSetupHome.
@@ -642,7 +661,7 @@ export function seedSetupAuditorAgent(db: Db): string | null {
   const agent: Agent = {
     id: randomUUID(),
     projectId: home.id,
-    name: SETUP_AUDITOR_AGENT_NAME,
+    name: freeSeededAgentName(db, home, SETUP_AUDITOR_AGENT_NAME),
     startupPrompt: WORKSPACE_AUDITOR_PROMPT,
     position: agents.length, // after the operator (position 0) — keeps the operator first in the home
     profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
@@ -652,7 +671,7 @@ export function seedSetupAuditorAgent(db: Db): string | null {
     db.insertAgent(agent);
     db.setMeta(SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, agent.id);
   });
-  return SETUP_AUDITOR_AGENT_NAME;
+  return agent.name;
 }
 
 /** The bundled profile the Elevated Operator agent runs under (seeded ungated by seedDefaultProfiles). */
@@ -706,7 +725,7 @@ export function seedOperatorAgent(db: Db): string | null {
   const agent: Agent = {
     id: randomUUID(),
     projectId: home.id,
-    name: OPERATOR_AGENT_NAME,
+    name: freeSeededAgentName(db, home, OPERATOR_AGENT_NAME),
     startupPrompt: OPERATOR_PROMPT,
     position: agents.length,
     profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
@@ -716,7 +735,7 @@ export function seedOperatorAgent(db: Db): string | null {
     db.insertAgent(agent);
     db.setMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY, agent.id);
   });
-  return OPERATOR_AGENT_NAME;
+  return agent.name;
 }
 
 /** The bundled profile the Companion agent runs under (seeded ungated by seedDefaultProfiles). */
@@ -845,7 +864,7 @@ export function seedCompanionAgent(db: Db): string | null {
   const agent: Agent = {
     id: randomUUID(),
     projectId: home.id,
-    name: COMPANION_AGENT_NAME,
+    name: freeSeededAgentName(db, home, COMPANION_AGENT_NAME),
     startupPrompt: COMPANION_PROMPT,
     position: agents.length, // after the operator + auditor — keeps the operator first in the home
     profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
@@ -855,5 +874,5 @@ export function seedCompanionAgent(db: Db): string | null {
     db.insertAgent(agent);
     db.setMeta(SETUP_HOME_COMPANION_AGENT_ID_KEY, agent.id);
   });
-  return COMPANION_AGENT_NAME;
+  return agent.name;
 }

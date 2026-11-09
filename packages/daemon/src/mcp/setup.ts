@@ -718,7 +718,10 @@ export class SetupMcpRouter {
           "cards. Fail-closed: an unknown templateName, projectId or profileName, a template whose " +
           "agent resolves to a role other than manager/worker/null, one whose resolved profile carries a " +
           "human-only field, or a reserved/system projectId (the workspace home) are all rejected and " +
-          "nothing is written.",
+          "nothing is written. A template agent whose exact name (case-insensitive) already exists in the " +
+          "project is skipped and listed in `skipped` (with `promptDiffers` and `profileDiffers`), not an error; it is an " +
+          "error only when every agent already exists. A starter card whose title already exists is not " +
+          "seeded again (`skippedCards`).",
         inputSchema: strictShape({
           projectId: z.string(),
           templateName: z.string(),

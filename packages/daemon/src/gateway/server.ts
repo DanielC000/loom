@@ -5824,7 +5824,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // PERMANENTLY delete an agent (CASCADE its sessions + their wakes/snapshots, its schedules, its runs).
   // HUMAN-only; no archive intermediate (an agent has no soft-archive). GUARD: refuse while any of the
-  // agent's sessions is live ("stop the fleet first"). The web hides this for the reserved project's agents.
+  // agent's sessions is live ("stop the fleet first"). Nothing else guards it: the web shows the delete
+  // button for every agent (the reserved home's seeded ones included), and the next boot re-seeds a deleted
+  // standing agent of the setup home under a free name.
   app.delete("/api/agents/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     try {
