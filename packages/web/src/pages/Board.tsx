@@ -1,7 +1,7 @@
-import { useState, useEffect, useId, useLayoutEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { Fragment, useState, useEffect, useId, useLayoutEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { DndContext, DragOverlay, useDraggable, useDroppable, type DragEndEvent, type DragOverEvent, type DragStartEvent, type Announcements } from "@dnd-kit/core";
+import { DndContext, DragOverlay, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragOverEvent, type DragStartEvent, type Announcements } from "@dnd-kit/core";
 import { LaneMenu, boardCollision, laneDragId, movedKeys, useCollapsedLanes, type BoardDragData } from "../components/boardLanes";
 import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge, RepoRegistryEntry } from "@loom/shared";
 // The done lane's order lives in shared, not here: the server picks WHICH cards a `?doneLimit=` window
@@ -309,15 +309,26 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // on the target lane, and the "Release to place…" hint. Card drags leave both null.
   const [dragLane, setDragLane] = useState<string | null>(null);
   const [overLane, setOverLane] = useState<string | null>(null);
+  // The card being dragged (card 68800f89): drives its DragOverlay preview and the insertion line in the
+  // lane it is over. `overLane` is shared with the lane drag — only one drag runs at a time.
+  const [dragCard, setDragCard] = useState<string | null>(null);
   const dataOf = (d: { data: { current?: unknown } } | null | undefined) => d?.data.current as BoardDragData | undefined;
   const onDragStart = (e: DragStartEvent) => {
     const d = dataOf(e.active);
     if (d?.type === "lane") { setDragLane(d.key); setOverLane(d.key); }
+    else { setDragCard(String(e.active.id)); setOverLane(null); }
   };
   const onDragOver = (e: DragOverEvent) => {
-    if (dataOf(e.active)?.type === "lane") setOverLane(e.over ? String(e.over.id) : null);
+    setOverLane(e.over ? String(e.over.id) : null);
   };
-  const clearLaneDrag = () => { setDragLane(null); setOverLane(null); };
+  const clearLaneDrag = () => { setDragLane(null); setDragCard(null); setOverLane(null); };
+  // A card drags from anywhere on its face with a mouse or pen, once the pointer has travelled 6px — so a
+  // plain click (open) and a Ctrl/Shift-click (select) never turn into a drag. Touch drags from the grip
+  // only (Card filters by pointerType), so a swipe on a card still scrolls the lane on a phone.
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor),
+  );
   const onDragEnd = (e: DragEndEvent) => {
     const d = dataOf(e.active);
     clearLaneDrag();
@@ -416,6 +427,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   const drawerError = needsBodyFetch && !drawerTask && taskDetail.isError;
 
   const allTasks = board.data?.tasks ?? [];
+  const draggedTask = dragCard ? allTasks.find((t) => t.id === dragCard) ?? null : null;
   // Hierarchy lookups (card 1ae4f88c), both built off the UNFILTERED list on purpose:
   //  · titleById resolves a card's `parentId` to a title for its board-card chip. The board response
   //    carries every task in the project, so the parent is normally right here — no extra request, and
@@ -753,7 +765,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
           )}
           <div style={{ display: "flex", gap: 10, marginTop: laneEdges.before.length > 0 || laneEdges.after.length > 0 ? 6 : 10, alignItems: "stretch" }}>
             <DndContext onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={clearLaneDrag}
-              collisionDetection={boardCollision} accessibility={{ announcements }}>
+              sensors={sensors} collisionDetection={boardCollision} accessibility={{ announcements }}>
               {/* Responsive lane grid (.loom-board-grid): equal 1fr lanes when they fit, horizontal
                   scroll with a usable per-lane min width when they don't (narrow viewport / many lanes)
                   — so the board degrades gracefully instead of crushing every lane. A collapsed lane
@@ -787,6 +799,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                     collapsed={collapsedLanes.has(col.key)} onCollapse={(on) => setCollapsed(col, on)}
                     onMoveLane={(to) => moveLane(col.key, to, true)} reordering={reorder.isPending}
                     laneDragging={dragLane === col.key}
+                    dropCard={draggedTask && overLane === col.key && draggedTask.columnKey !== col.key ? draggedTask : null}
                     dropEdge={dragLane && overLane === col.key && overLane !== dragLane
                       ? (board.data!.columns.findIndex((c) => c.key === dragLane) > colIndex ? "before" : "after")
                       : null} />
@@ -794,9 +807,12 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
               </div>
               </BoardNavContext.Provider>
               {/* The lifted lane's preview: its header only, so it reads as "this lane" without dragging a
-                  4,000-card list across the screen. No drop animation: the lane snaps into its new slot. */}
+                  4,000-card list across the screen. No drop animation: the lane snaps into its new slot.
+                  A lifted CARD gets its own preview (card 68800f89): the overlay renders above every lane's
+                  scroll container, so the card follows the pointer instead of clipping inside its lane. */}
               <DragOverlay dropAnimation={null}>
-                {dragLane ? <LaneDragPreview col={board.data.columns.find((c) => c.key === dragLane)} /> : null}
+                {dragLane ? <LaneDragPreview col={board.data.columns.find((c) => c.key === dragLane)} />
+                  : draggedTask ? <CardDragPreview task={draggedTask} /> : null}
               </DragOverlay>
             </DndContext>
           </div>
@@ -930,7 +946,7 @@ function LaneDragPreview({ col }: { col: KanbanColumn | undefined }) {
 }
 
 function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multiRepo, repos, primaryRepoPath, titleById, cardCount, laneTotal, onRevealMore, revealPending,
-  index, laneCount, collapsed, onCollapse, onMoveLane, reordering, laneDragging, dropEdge }:
+  index, laneCount, collapsed, onCollapse, onMoveLane, reordering, laneDragging, dropEdge, dropCard }:
   { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>;
     policyByTask: Record<string, CardPolicyCardStatus>; onOpen: (id: string) => void; multiRepo: boolean;
     repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; cardCount: number;
@@ -942,7 +958,9 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
     /** This lane is the one being dragged (it stays in place, ghosted, while its preview follows the pointer). */
     laneDragging: boolean;
     /** This lane is the current lane-drag target: the dragged lane lands on this side of it. */
-    dropEdge: "before" | "after" | null }) {
+    dropEdge: "before" | "after" | null;
+    /** Card 68800f89 — a card from ANOTHER lane is being dragged over this one (else null). */
+    dropCard: BoardTask | null }) {
   const { setNodeRef, isOver, active } = useDroppable({ id: col.key, data: { type: "lane", key: col.key } satisfies BoardDragData });
   // A lane is ALSO draggable, by its header (card 67c43038). Only the header's handle carries the
   // listeners; the ⋯ button sits outside it so a click there never starts a drag.
@@ -974,6 +992,18 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
   // lane would re-pay the whole payload the window exists to avoid. So the button offers a page (or
   // just the remainder, when that is smaller), and `hidden` stays the honest count behind it.
   const step = serverWindowed ? Math.min(DONE_LANE_PAGE, hidden) : hidden;
+  // Where a card dragged in from another lane will LAND (card 68800f89). A lane move keeps the card's
+  // priority and position, and the lane renders sorted, so the honest insertion point is wherever this
+  // lane's own comparator puts it — not under the pointer. A done lane sorts newest-first, and the move
+  // stamps updatedAt, so there it lands on top. Past the rendered page, the line sits under the last card.
+  const dropIndex = dropCard
+    ? Math.min(visible.length, (() => {
+        const incoming: BoardTask = doneLane ? { ...dropCard, updatedAt: new Date().toISOString() } : dropCard;
+        const cmp = doneLane ? byRecentlyDone : byPriorityThenPosition;
+        const at = visible.findIndex((t) => cmp(incoming, t) < 0);
+        return at < 0 ? visible.length : at;
+      })())
+    : -1;
   // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
   // the header label, and each card's left border so all three agree. null = un-accented: transparent
   // bar, neutral AA-safe label, neutral hairline card border.
@@ -1071,7 +1101,13 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
           onMove={onMoveLane} onCollapse={() => onCollapse(true)} navItem={NAV_HEAD} tabIndex={tabFor(NAV_HEAD)} />
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
-        {visible.map((task) => <Card key={task.id} task={task} worker={workers.get(task.id)} policy={policyByTask[task.id]} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} tabIndex={tabFor(task.id)} />)}
+        {visible.map((task, i) => (
+          <Fragment key={task.id}>
+            {i === dropIndex && <CardDropLine first={i === 0} />}
+            <Card task={task} worker={workers.get(task.id)} policy={policyByTask[task.id]} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} tabIndex={tabFor(task.id)} />
+          </Fragment>
+        ))}
+        {dropIndex === visible.length && visible.length > 0 && <CardDropLine first={false} />}
         {/* The reveal for the done-lane page. Sits INSIDE the lane's own scroll region (so it trails the
             last rendered card rather than pinning to the lane footer) and is full-width so it reads as
             the continuation of the list it extends, not as a card. One-way: revealing more is not a
@@ -1482,11 +1518,40 @@ function MergeTrack({ merge }: { merge: MergeDisplay }) {
 const cardStateTag: React.CSSProperties = { flexShrink: 0, fontFamily: font.ui, fontSize: fs.xs, fontWeight: 600,
   borderRadius: radius.pill, padding: "1px 7px", lineHeight: "16px" };
 
+// Card 68800f89 — the insertion line a card drag shows in its target lane: a 2px cobalt rule, the same
+// accent the lane-drag insertion edge uses. Between cards it sits inside the 8px gap (negative margins,
+// so the lane does not reflow under the pointer); above the first card there is no gap, so it takes 8px.
+function CardDropLine({ first }: { first: boolean }) {
+  return <div data-testid="card-drop-line" aria-hidden
+    style={{ height: 2, borderRadius: radius.pill, background: color.accent, margin: first ? "0 0 6px" : "-5px 0 3px" }} />;
+}
+
+// Card 68800f89 — the lifted card's DragOverlay preview: the card's priority and title on the card
+// surface, lifted with the pop shadow. dnd-kit sizes the overlay to the source card, so it reads as the
+// card itself; it never mounts a second <Card> (that would register a second draggable under one id).
+function CardDragPreview({ task }: { task: BoardTask }) {
+  return (
+    <div data-testid="card-drag-preview"
+      style={{ height: "100%", boxSizing: "border-box", display: "flex", alignItems: "flex-start", gap: 6,
+        padding: "8px 10px", background: color.cardBg, border: `1px solid ${color.lineStrong}`, borderRadius: radius.base,
+        boxShadow: shadow.pop, transform: "rotate(-1deg)", cursor: "grabbing", fontSize: fs.sm, color: color.text, overflow: "hidden" }}>
+      <span aria-hidden style={{ color: color.text3, fontFamily: font.mono, fontSize: fs.mono, lineHeight: "16px", flexShrink: 0,
+        display: "inline-flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, margin: "-4px -6px -4px -11px" }}>⠿</span>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: 6, minWidth: 0, flex: 1 }}>
+        <PriorityChip priority={prio(task)} />
+        {/* The card face's own title type (Card's card-title span), so the lifted card reads as the card. */}
+        <span style={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "break-word", fontFamily: font.ui, fontSize: fs.body,
+          fontWeight: 500, lineHeight: 1.4 }}>{task.title}</span>
+      </div>
+    </div>
+  );
+}
+
 function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleById, isDoneLane, onOpen, tabIndex }:
   { task: BoardTask; worker?: SessionListItem; policy?: CardPolicyCardStatus; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; isDoneLane: boolean; onOpen: () => void;
     /** The board's roving Tab stop (card 591fe6ed): 0 on the one focusable item, -1 everywhere else. */
     tabIndex: number }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id, data: { type: "card" } satisfies BoardDragData });
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: task.id, data: { type: "card" } satisfies BoardDragData });
   // One shared react-query key, so every card reads the same cached request list (no extra polling).
   const decisions = usePendingDecisionsBySession();
   const st = worker ? workerStatus(worker, decisions.has(worker.id)) : null;
@@ -1499,8 +1564,13 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
   const nav = useBoardNav();
   const selected = !!nav?.selected.has(task.id);
   return (
+    // Card 68800f89 — with a mouse or pen the whole face starts a drag (after the sensor's 6px, so a click
+    // still opens and a modified click still selects). Touch is left to the grip, so a swipe across a card
+    // scrolls its lane instead of grabbing it. Only the pointer listener rides the face: the keyboard
+    // listener stays on the grip, so Enter/Space on the open target can never start a drag.
     <div ref={setNodeRef}
-      className="loom-board-card" data-selected={selected ? "" : undefined}
+      onPointerDown={(e) => { if (e.pointerType !== "touch") listeners?.onPointerDown?.(e); }}
+      className="loom-board-card" data-selected={selected ? "" : undefined} data-dragging={isDragging ? "" : undefined}
       style={{
         // position:relative anchors the merge-gate hairline (MergeTrack), which is absolutely positioned
         // flush at the card's bottom edge so it adds no height.
@@ -1515,19 +1585,26 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
         borderLeft: task.held ? `3px solid ${color.text3}` : `1px solid ${selected ? color.accentEdge : color.cardBorder}`, borderRadius: radius.base,
         boxShadow: selected ? `inset 0 0 0 1px ${color.accentEdge}` : shadow.card, padding: "8px 10px", marginBottom: 8,
         background: selected ? color.selected : color.cardBg,
-        opacity: isDragging ? 0.5 : 1,
-        transform: transform ? `translate(${transform.x}px, ${transform.y}px)` : undefined,
+        // The source stays in place, ghosted, while its preview (the DragOverlay) follows the pointer.
+        opacity: isDragging ? 0.4 : 1,
         fontSize: fs.sm, color: color.text,
       }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
-        {/* Drag is confined to this grip so a click on the card body opens the detail drawer instead.
-            The grip keeps the mono face: the sans has no braille glyph, and the fallback face draws ⠿
+        {/* The grip is the drag affordance, and the only drag handle on touch. The grip keeps the mono face: the sans has no braille glyph, and the fallback face draws ⠿
             wider, which pushes a reflowed title off the card's left edge on a tight lane. */}
         {/* tabIndex -1 over dnd-kit's own 0: the grip is a pointer handle, and leaving it a Tab stop would
             put two stops on every card and break the board's single one (card 591fe6ed). A keyboard user
             moves a card from its dialog's "Move to lane". */}
-        <span {...listeners} {...attributes} tabIndex={-1} title="Drag to move"
-          style={{ cursor: "grab", color: color.text3, fontFamily: font.mono, fontSize: fs.mono, lineHeight: "16px", touchAction: "none", userSelect: "none" }}>⠿</span>
+        {/* Card 68800f89: a 24×24 hit area (was the 7×16 glyph), so it is a real touch target. The negative
+            margins spend the card's own left padding + border on it and leave a 7px layout footprint (the
+            glyph's own width), so the title does not move — board.spec's tight-lane reflow guard pins the
+            title's x within 40px of the lane edge, and a wider footprint breaks it. Its pointerdown
+            is the same handler the face calls; dnd-kit marks the event captured, so the bubble to the
+            face's handler is a no-op rather than a second drag. */}
+        <span {...listeners} {...attributes} tabIndex={-1} title="Drag to move" className="loom-card-grip"
+          style={{ cursor: "grab", color: color.text3, fontFamily: font.mono, fontSize: fs.mono, lineHeight: "16px", touchAction: "none", userSelect: "none",
+            display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+            width: 24, height: 24, margin: "-4px -6px -4px -11px" }}>⠿</span>
         {/* The card's open target is a real control, not a clickable div (card a6d7a102): the detail
             dialog had no keyboard way in at all, and with nothing focused when it opened, Esc left a
             keyboard user at <body> with the whole page to re-Tab through. role=button + Enter/Space is
