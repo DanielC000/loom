@@ -81,7 +81,7 @@ const { explicitRoleGrantCarryoverError } = await import("../dist/profiles/valid
 const humanGrantOpts = { allowEndpointFlags: false, allowCredentialGrants: true };
 const validCaps = validateAgentPatch({ capabilities: [{ slug: "gh-mcp", connectionId: "conn1" }] }, () => true, humanGrantOpts);
 check("(validate-agent) a well-formed capabilities grant validates ok", validCaps.ok === true && JSON.stringify(validCaps.patch.capabilities) === JSON.stringify([{ slug: "gh-mcp", connectionId: "conn1" }]));
-check("(validate-agent) capabilities is left UNTOUCHED (undefined) when absent from the patch", (() => { const r = validateAgentPatch({ name: "A" }, () => true, humanGrantOpts); return r.ok === true && r.patch.capabilities === undefined; })());
+check("(validate-agent) capabilities is left UNTOUCHED (undefined) when absent from the patch", (() => { const r = validateAgentPatch({ name: "A" }, () => true, { ...humanGrantOpts, nameScope: { agentId: "ag", currentName: "Old", siblings: [], reservedNames: [] } }); return r.ok === true && r.patch.capabilities === undefined; })());
 check("(validate-agent) the agent-facing path (no allowCredentialGrants) never sets capabilities or connections", (() => {
   const r = validateAgentPatch({ capabilities: [{ slug: "x" }], connections: ["c1"] }, () => true, { allowEndpointFlags: false });
   return r.ok === true && r.patch.capabilities === undefined && r.patch.connections === undefined;

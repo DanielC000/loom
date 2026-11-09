@@ -130,7 +130,7 @@ export default function Projects() {
   // only what happens AFTERWARDS in its own pane. Select the new agent so the editor pane switches
   // straight to its prompt: the create form was the pane's transient occupant; hand it back to the
   // freshly-made agent. On a delete, drop the selection if it was the agent that went.
-  const { create: createAgent, update: updateAgent, saveGrants: saveAgentGrants, remove: deleteAgent } = useAgentWrites(projectId, {
+  const { create: createAgent, update: updateAgent, saveGrants: saveAgentGrants, rename: renameAgent, remove: deleteAgent } = useAgentWrites(projectId, {
     onCreated: (agent) => { setAgentId(agent.id); setCreating(null); },
     onDeleted: (id) => { if (agentId === id) setAgentId(null); },
   });
@@ -295,6 +295,8 @@ export default function Projects() {
               onDelete={() => deleteAgent.mutate(selectedAgent.id)}
               saving={updateAgent.isPending} savingGrants={saveAgentGrants.isPending} grantsError={saveAgentGrants.error as Error | null}
               grantsErrorAgentId={saveAgentGrants.variables?.id}
+              onRename={(name) => renameAgent.mutate({ id: selectedAgent.id, name })} renaming={renameAgent.isPending}
+              renameError={renameAgent.error as Error | null} renameErrorAgentId={renameAgent.variables?.id}
               deleting={deleteAgent.isPending}
               onDirtyChange={setEditorDirty} closeArmed={closeArmed} onDiscardClose={discardAndPick} onKeepEditing={keepEditing} />
           ) : (

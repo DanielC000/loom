@@ -19,6 +19,7 @@ import { resolveAlias, strictShape } from "./arg-alias.js";
 import { instrumentServer } from "./call-record.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir, resolveProjectInitTarget } from "../setup/bootstrap.js";
+import { agentNameScope } from "../setup/seed.js";
 import { expandTilde, PORT, isLoomDev, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
 import { isForbiddenAllowedHost, canonicalHost, canonicalTrustedProxyOrigin } from "../gateway/trust-tier.js";
 import { checkRepoRebind } from "../projects/rebind.js";
@@ -1564,7 +1565,7 @@ export class PlatformMcpRouter {
           return ok({ error: (e as Error).message });
         }
         if (resolvedStartupPrompt !== undefined) rawPatch.startupPrompt = resolvedStartupPrompt;
-        const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
+        const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false, nameScope: agentNameScope(db, resolved) });
         if (!v.ok) return ok({ error: v.error });
         // @decision 3de74275 — a non-null profileId is validated to EXIST above, so getProfile resolves;
         // elevated roles are allowed here (administering the Lead's own rigs is this surface's job), but

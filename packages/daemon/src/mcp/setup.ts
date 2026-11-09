@@ -10,6 +10,7 @@ import { CommondirPinConflictError } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir, resolveProjectInitTarget } from "../setup/bootstrap.js";
+import { agentNameScope } from "../setup/seed.js";
 import { expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS } from "../paths.js";
 import { validateProfile, agentProfileKeyError, agentAssignableProfileError, agentCredentialGrantRoleChangeOnRebindError, roleChangeCapabilityCarryoverError, boundAgentCredentialGrantRoleChangeError, agentLockedRoleSkillsError, roleChangeLockedSkillsCarryoverError, LOCKED_PROFILE_ROLES } from "../profiles/validate.js";
 import { recordProfileGrantReach, recordAgentProfileRebindReach, grantFieldsOf, setupVisibleGrantReach, rebindWideningFields } from "../profiles/grantReach.js";
@@ -639,7 +640,7 @@ export class SetupMcpRouter {
           return ok({ error: (e as Error).message });
         }
         if (resolvedStartupPrompt !== undefined) rawPatch.startupPrompt = resolvedStartupPrompt;
-        const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
+        const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false, nameScope: agentNameScope(db, resolved) });
         if (!v.ok) return ok({ error: v.error });
         // LEAST-PRIVILEGE (setup-only, ON TOP of the shared validator): a non-null profileId is validated to
         // EXIST by validateAgentPatch above, so getProfile resolves — reject if its role is elevated, or if

@@ -16,6 +16,7 @@ import {
   resolveSetupHome,
   resolveLiveSetupHome,
 } from "../projects/reserved-home-markers.js";
+import type { AgentNameScope } from "../agents/validate.js";
 export { SETUP_PROJECT_NAME, SETUP_AGENT_NAME, SETUP_HOME_LEAD_AGENT_ID_KEY, resolveLiveSetupHome };
 
 /**
@@ -710,6 +711,29 @@ const COMPANION_PROFILE_NAME = "Companion";
  * standing agents in the reserved home never collide).
  */
 export const COMPANION_AGENT_NAME = "Companion";
+
+/**
+ * Card b0495d0b: every name a boot seeder or the setup-lead fallback finds a setup-home agent BY (the same
+ * constants those lookups compare with `===`). Renaming one of these agents would make the next boot seed
+ * a duplicate beside it, so the rename check refuses it. Add a constant here when a new seeder keys on one.
+ */
+const NAME_KEYED_SETUP_HOME_AGENT_NAMES: readonly string[] = [
+  SETUP_AGENT_NAME, LEGACY_SETUP_AGENT_NAME, SETUP_AUDITOR_AGENT_NAME, OPERATOR_AGENT_NAME, COMPANION_AGENT_NAME,
+];
+
+/**
+ * Build the rename scope for `agent` (agents/validate.ts › resolveAgentRename): its project's agents, and the
+ * name-keyed seeded names when that project is the setup home, resolved the same way the seeders resolve it.
+ */
+export function agentNameScope(db: Db, agent: Agent): AgentNameScope {
+  const isSetupHome = resolveSetupHome(db)?.id === agent.projectId;
+  return {
+    agentId: agent.id,
+    currentName: agent.name,
+    siblings: db.listAgents(agent.projectId).map((a) => ({ id: a.id, name: a.name })),
+    reservedNames: isSetupHome ? NAME_KEYED_SETUP_HOME_AGENT_NAMES : [],
+  };
+}
 
 /**
  * The default startup prompt shipped for the Companion agent (user-editable after seed). LIGHT — persona

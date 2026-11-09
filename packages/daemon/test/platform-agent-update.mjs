@@ -123,6 +123,9 @@ try {
   // ===================== (2) 404 on an unknown agent id =====================
   const ghost = await call("agent_update", { agentId: "no-such-agent", name: "x" });
   check("(2) unknown agent id → structured 'agent not found'", ghost.error === "agent not found");
+  // Card b0495d0b: the shared validator's rename check reaches this surface too.
+  const blank = await call("agent_update", { agentId: "agentA", name: "   " });
+  check("(2) a whitespace-only rename is refused and nothing is written", /must not be empty/.test(blank.error ?? "") && db.getAgent("agentA").name === "Renamed2");
 
   // ===================== (3) validator REUSE — bogus profileId rejected identically on MCP + REST =====================
   const mcpBad = await call("agent_update", { agentId: "agentA", profileId: "no-such-profile" });
@@ -137,7 +140,7 @@ try {
   // The shared validator is the single source of truth both paths call — exercise it directly too.
   const direct = validateAgentPatch({ profileId: "no-such-profile" }, () => false, { allowEndpointFlags: false });
   check("(3) validateAgentPatch itself rejects a bogus profileId as notFound", direct.ok === false && direct.kind === "notFound" && direct.error === "profile not found");
-  const directOmit = validateAgentPatch({ name: "only-name" }, () => true);
+  const directOmit = validateAgentPatch({ name: "only-name" }, () => true, { allowEndpointFlags: false, nameScope: { agentId: "x", currentName: "old", siblings: [], reservedNames: [] } });
   check("(3) validateAgentPatch builds a patch with ONLY present keys (startupPrompt/profileId absent)",
     directOmit.ok === true && "name" in directOmit.patch && !("startupPrompt" in directOmit.patch) && !("profileId" in directOmit.patch));
 

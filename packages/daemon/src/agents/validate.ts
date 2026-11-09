@@ -81,17 +81,75 @@ export function resolveStartupPromptEdit(
   return patch.startupPrompt;
 }
 
+/**
+ * Slugify an agent name the way worker_spawn's `agentId` name/slug resolution does: lowercase, collapse any
+ * run of non-alphanumerics to a single hyphen, trim leading/trailing hyphens. Deterministic and
+ * dependency-free, so "QA Tester" and "qa-tester" both resolve to that agent. Shared with the rename check
+ * below so a rename can never mint two agents one slug would resolve to.
+ */
+export function slugifyAgentName(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/**
+ * What a rename has to be checked against, built from the Db by the caller (`agentNameScope`,
+ * setup/seed.ts) so this module stays Db-free, the same way `hasProfile` is injected.
+ */
+export type AgentNameScope = {
+  /** The agent being renamed. It may appear in `siblings`; it never collides with itself. */
+  agentId: string;
+  currentName: string;
+  /** Every agent in the renamed agent's own project. */
+  siblings: readonly { id: string; name: string }[];
+  /** Names Loom's own boot seeders find an agent of this project BY (empty outside the setup home). */
+  reservedNames: readonly string[];
+};
+
+/**
+ * Card b0495d0b: validate and normalize an agent rename. An agent NAME is an identity, not just a label:
+ * worker_spawn resolves `agentId` by case-insensitive name and then by slug, and the setup home's seeders
+ * decide "already seeded" by exact name. So the new name is trimmed and must be non-empty, may not
+ * collide (by name, case-insensitively, or by slug) with another agent in the same project, and a
+ * name-keyed seeded agent can neither be renamed nor have its name taken. Re-saving the current name
+ * always passes, and so does a case-only change of an ordinary agent's own name.
+ */
+export function resolveAgentRename(raw: string, scope: AgentNameScope): { ok: true; name: string } | { ok: false; error: string } {
+  const name = raw.trim();
+  if (name === "") return { ok: false, error: "name must not be empty" };
+  if (name === scope.currentName) return { ok: true, name };
+  if (scope.reservedNames.includes(scope.currentName)) {
+    return { ok: false, error: `"${scope.currentName}" is a built-in agent that Loom finds by this exact name when it starts, so it can't be renamed (a renamed copy would be seeded again beside it)` };
+  }
+  const lower = name.toLowerCase();
+  if (scope.reservedNames.some((r) => r.toLowerCase() === lower)) {
+    return { ok: false, error: `"${name}" is reserved for a built-in agent of this project` };
+  }
+  const others = scope.siblings.filter((a) => a.id !== scope.agentId);
+  const sameName = others.find((a) => a.name.toLowerCase() === lower);
+  if (sameName) return { ok: false, error: `another agent in this project is already named "${sameName.name}"` };
+  const slug = slugifyAgentName(name);
+  const sameSlug = slug ? others.find((a) => slugifyAgentName(a.name) === slug) : undefined;
+  if (sameSlug) {
+    return { ok: false, error: `"${name}" is too close to the agent "${sameSlug.name}": a worker spawned by name would read both as "${slug}"` };
+  }
+  return { ok: true, name };
+}
+
 export function validateAgentPatch(
   raw: unknown,
   hasProfile: (id: string) => boolean,
-  opts: { allowEndpointFlags: boolean; allowCredentialGrants?: boolean } = { allowEndpointFlags: false },
+  opts: { allowEndpointFlags: boolean; allowCredentialGrants?: boolean; nameScope?: AgentNameScope } = { allowEndpointFlags: false },
 ): { ok: true; patch: AgentPatch } | { ok: false; kind: "invalid" | "notFound"; error: string } {
   const b = (raw ?? {}) as Record<string, unknown>;
   const patch: AgentPatch = {};
 
   if ("name" in b) {
     if (typeof b.name !== "string") return { ok: false, kind: "invalid", error: "name must be a string" };
-    patch.name = b.name;
+    // Fail closed: a caller that forgot to pass the scope can't write an unchecked name.
+    if (!opts.nameScope) return { ok: false, kind: "invalid", error: "name can't be changed here (no rename scope was supplied)" };
+    const r = resolveAgentRename(b.name, opts.nameScope);
+    if (!r.ok) return { ok: false, kind: "invalid", error: r.error };
+    patch.name = r.name;
   }
   if ("startupPrompt" in b) {
     if (typeof b.startupPrompt !== "string") return { ok: false, kind: "invalid", error: "startupPrompt must be a string" };

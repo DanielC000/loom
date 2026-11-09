@@ -515,7 +515,7 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
   // until the query settles so an end user never flashes a dev-layer rig mid-load.
   const platformHomeQ = useQuery({ queryKey: ["platformHome"], queryFn: ({ signal }) => api.platformHome(signal), retry: false });
   const isDev = platformHomeQ.isSuccess && !!platformHomeQ.data?.project;
-  const { create, update, saveGrants, remove } = useAgentWrites(projectId, {
+  const { create, update, saveGrants, rename, remove } = useAgentWrites(projectId, {
     // The create form's draft is now the agent, so nothing is unsaved until the editor says otherwise.
     onCreated: (agent) => { setDirty(false); setCloseArmed(false); setEditing(agent.id); },
     onDeleted: onClose,
@@ -568,6 +568,8 @@ export function AgentEditDialog({ projectId, agentId, onClose }: {
             onDelete={() => remove.mutate(agent.id)}
             saving={update.isPending} savingGrants={saveGrants.isPending} grantsError={saveGrants.error as Error | null}
             grantsErrorAgentId={saveGrants.variables?.id}
+            onRename={(name) => rename.mutate({ id: agent.id, name })} renaming={rename.isPending}
+            renameError={rename.error as Error | null} renameErrorAgentId={rename.variables?.id}
             deleting={remove.isPending}
             onDirtyChange={setDirty} closeArmed={closeArmed} onDiscardClose={onClose} onKeepEditing={keepEditing} />
         ) : (

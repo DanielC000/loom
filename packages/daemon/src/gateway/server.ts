@@ -105,7 +105,7 @@ import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
-import { resolveLiveSetupHome, COMPANION_AGENT_NAME, seedOperatorAgent } from "../setup/seed.js";
+import { resolveLiveSetupHome, COMPANION_AGENT_NAME, seedOperatorAgent, agentNameScope } from "../setup/seed.js";
 import { resolveHomeLeadAgent, isSanctionedPlatformLeadAgent } from "../projects/live-lead-home.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
@@ -6069,7 +6069,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // HUMAN-only endpoint/ioSchema (Agent Runs R1) writable here — the MCP path passes false.
     // Card caca806c: allowCredentialGrants:true, same posture — connections/capabilities are HUMAN-only,
     // and no MCP agent_update/agent_create inputSchema ever declares either key.
-    const v = validateAgentPatch(req.body, (pid) => !!deps.db.getProfile(pid), { allowEndpointFlags: true, allowCredentialGrants: true });
+    const v = validateAgentPatch(req.body, (pid) => !!deps.db.getProfile(pid), { allowEndpointFlags: true, allowCredentialGrants: true, nameScope: agentNameScope(deps.db, existing) });
     if (!v.ok) return reply.code(v.kind === "notFound" ? 404 : 400).send({ error: v.error });
     // Card caca806c: write-time refusal for a credential grant this agent's own project can't reach
     // (mirrors connections/store.ts's isConnectionUsableByProject), plus the oauth2-can't-statically-

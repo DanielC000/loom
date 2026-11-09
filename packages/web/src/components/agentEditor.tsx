@@ -121,6 +121,15 @@ export function useAgentWrites(
     // ["allAgents"] too: the Connections page's per-connection "Granted to N agents" reads that cache.
     onSuccess: () => { invalidateAgents(); qc.invalidateQueries({ queryKey: ["allAgents"] }); },
   });
+  // The rename (card b0495d0b) gets its own inline-error mutation for the same reason as `saveGrants`:
+  // the daemon's refusal (duplicate name/slug, a built-in seeded agent) is shown verbatim beside the
+  // name field, and a refused rename must not touch the prompt's or the grants' pending state.
+  const rename = useMutation({
+    meta: { inlineError: true },
+    mutationFn: (v: { id: string; name: string }) => api.updateAgent(v.id, { name: v.name }),
+    // Session lists carry the agent's name too, joined server-side, so they go stale on a rename.
+    onSuccess: () => { invalidateAgents(); qc.invalidateQueries({ queryKey: ["allAgents"] }); qc.invalidateQueries({ queryKey: ["allSessions"] }); },
+  });
   const remove = useMutation({
     mutationFn: (id: string) => api.deleteAgent(id),
     onSuccess: (_r, id) => {
@@ -129,7 +138,28 @@ export function useAgentWrites(
       hooks.onDeleted?.(id);
     },
   });
-  return { create, update, saveGrants, remove };
+  return { create, update, saveGrants, rename, remove };
+}
+
+/**
+ * The client half of the daemon's rename check (agents/validate.ts › resolveAgentRename): trimmed,
+ * non-empty, and no case-insensitive name or slug clash with another agent in the project. The server
+ * stays the authority (it also refuses renaming a built-in seeded agent); this only says so before a
+ * round trip. The slug mirrors the daemon's slugifyAgentName, which is what worker_spawn resolves by.
+ */
+const agentSlug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+function renameProblem(draft: string, self: Agent, siblings: readonly Agent[]): string | null {
+  const name = draft.trim();
+  if (name === "") return "A name can't be empty.";
+  if (name === self.name) return null;
+  const others = siblings.filter((a) => a.id !== self.id);
+  const lower = name.toLowerCase();
+  const sameName = others.find((a) => a.name.toLowerCase() === lower);
+  if (sameName) return `Another agent in this project is already named "${sameName.name}".`;
+  const slug = agentSlug(name);
+  const sameSlug = slug ? others.find((a) => agentSlug(a.name) === slug) : undefined;
+  if (sameSlug) return `Too close to "${sameSlug.name}": spawning by name would read both as "${slug}".`;
+  return null;
 }
 
 /** Canonical per-grant JSON (key-sorted, order-insensitive) — mirrors the Profile editor's own
@@ -175,10 +205,14 @@ export function AgentForm({ onCreate, pending, onCancel, onDirtyChange }: {
 // textarea + assignment reset on switch; after Save the query refetches and `dirty` clears.
 export function AgentEditor(
   { agent, profiles, isDev, liveCount, onAssignProfile, onSavePrompt, onSaveGrants, onDelete, saving, savingGrants, grantsError, grantsErrorAgentId, deleting,
+    onRename, renaming, renameError, renameErrorAgentId,
     onDirtyChange, closeArmed = false, onDiscardClose, onKeepEditing }:
   { agent: Agent; profiles: EditorProfile[]; isDev: boolean;
     liveCount: number; onAssignProfile: (profileId: string | null) => void; onSavePrompt: (startupPrompt: string) => void;
     onSaveGrants: (patch: { connections: string[]; capabilities: CapabilityGrant[] }) => void;
+    // The rename (card b0495d0b), scoped to this agent the same way the grants error is.
+    onRename: (name: string) => void; renaming: boolean;
+    renameError: Error | null; renameErrorAgentId: string | undefined;
     onDelete: () => void; saving: boolean; savingGrants: boolean;
     // @decision caca806c (round 3, item 5) — `grantsError` is the SHARED `saveGrants` mutation's error,
     // not one scoped to this agent; `grantsErrorAgentId` (its `variables?.id`) scopes it IN HERE, by
@@ -232,7 +266,50 @@ export function AgentEditor(
   );
   const grantsDirty = grantSync.dirty;
   const grantsConflict = grantSync.conflicts.length > 0;
-  useEffect(() => { onDirtyChange?.(dirty || grantsDirty); }, [dirty, grantsDirty, onDirtyChange]);
+
+  // --- Name (card b0495d0b): read-only until Rename is pressed, so the identity line is never an
+  // accidental edit target. An agent's NAME is how worker_spawn and a manager's brief find it, which is
+  // what the hint under the field says.
+  const siblingsQ = useQuery({ queryKey: ["agents", agent.projectId], queryFn: ({ signal }) => api.agents(agent.projectId, signal) });
+  const [nameDraft, setNameDraft] = useState<string | null>(null); // null = not editing
+  // The name the row carried when Rename opened (or when the reader last chose between their draft and
+  // a newer name). The draft is measured against THIS, never the live row — the prompt's useFormSync
+  // seed, for one field. Against the live row, a rename made elsewhere while the field is open (the
+  // Platform Lead's agent_update, the Setup operator's) would make an untouched draft read as an edit,
+  // and Save would silently put the old name back.
+  const [nameBase, setNameBase] = useState<string | null>(null);
+  const [submittedName, setSubmittedName] = useState<string | null>(null);
+  const nameEditing = nameDraft !== null;
+  const nameTrimmed = nameDraft?.trim() ?? "";
+  // Our own write landing also moves the row off the baseline; that is a save, not a conflict.
+  const nameOwnWrite = submittedName !== null && agent.name === submittedName;
+  const nameMoved = nameEditing && nameBase !== null && agent.name !== nameBase && !nameOwnWrite;
+  const nameDirty = nameEditing && nameTrimmed !== nameBase && nameTrimmed !== agent.name;
+  // Typed over a name that has since changed elsewhere: stated, and Save waits for the reader to pick.
+  const nameConflict = nameMoved && nameDirty;
+  const nameProblem = nameEditing ? renameProblem(nameDraft, agent, siblingsQ.data ?? []) : null;
+  // The server's refusal, shown only for THIS agent and only while the draft is still the name it refused.
+  const scopedRenameError = renameErrorAgentId === agent.id && !renaming && nameEditing && submittedName === nameTrimmed
+    ? renameError : null;
+  const canSaveName = nameDirty && !nameConflict && !nameProblem && !renaming;
+  const saveName = () => { if (!canSaveName) return; setSubmittedName(nameTrimmed); onRename(nameTrimmed); };
+  const openRename = () => { setSubmittedName(null); setNameBase(agent.name); setNameDraft(agent.name); };
+  const takeTheirName = () => { setNameBase(agent.name); setNameDraft(agent.name); };
+  const keepMyName = () => setNameBase(agent.name);
+  // An UNTOUCHED draft follows a rename made elsewhere — there is nothing of the reader's to keep.
+  useEffect(() => {
+    if (nameMoved && nameTrimmed === nameBase) { setNameBase(agent.name); setNameDraft(agent.name); }
+  }, [nameMoved, nameTrimmed, nameBase, agent.name]);
+  // A save closes the field only once the agent row actually carries the new name AND the field still
+  // holds that name; "renamed" follows the same rule as the prompt's "saved" (card dd83149f): a refused
+  // write never reaches the row. The field is disabled while the write is in flight, and the draft check
+  // is the backstop: text that differs from what was sent is never thrown away by the close.
+  useEffect(() => {
+    if (nameEditing && nameOwnWrite && !renaming && nameTrimmed === submittedName) setNameDraft(null);
+  }, [nameEditing, nameOwnWrite, renaming, nameTrimmed, submittedName]);
+  const nameShowsSaved = !nameEditing && !renaming && submittedName !== null && submittedName === agent.name;
+
+  useEffect(() => { onDirtyChange?.(dirty || grantsDirty || nameDirty); }, [dirty, grantsDirty, nameDirty, onDirtyChange]);
 
   // "saved" is a claim about a save THIS session made (card dd83149f, audit A-12) — not "nothing is
   // dirty", which is also true of a field nobody has touched. Each Save records the value it wrote; the
@@ -246,7 +323,9 @@ export function AgentEditor(
   const grantsShowSaved = !grantsDirty && !savingGrants && savedGrants !== null && savedGrants === grantsKey(grantSync.seed);
   const savePrompt = () => { setSavedPrompt(prompt); onSavePrompt(prompt); };
   const saveGrantsNow = () => { setSavedGrants(grantsKey({ connections, capabilities })); onSaveGrants({ connections, capabilities }); };
-  const unsavedWhat = dirty && grantsDirty ? "prompt and grants" : dirty ? "prompt" : "grants";
+  const unsavedParts = [nameDirty && "name", dirty && "prompt", grantsDirty && "grants"].filter(Boolean) as string[];
+  const unsavedWhat = unsavedParts.length > 1
+    ? `${unsavedParts.slice(0, -1).join(", ")} and ${unsavedParts[unsavedParts.length - 1]}` : unsavedParts[0] ?? "changes";
   // The P1 credential store's connections — the menu of what this agent's egress allowlist can grant.
   // Filtered to what THIS agent could actually be granted (mirrors the daemon's own write-time
   // agentCredentialGrantCrossProjectError / connections/store.ts's isConnectionUsableByProject): a GLOBAL
@@ -302,14 +381,35 @@ export function AgentEditor(
       {/* The frame asked to close over unsaved work: keep the draft, say so, let the reader choose. Save
           writes and dismisses the bar (the dialog stays, now clean, showing "saved"), so a refused write
           is never followed by a close that throws the draft away. */}
-      {closeArmed && (dirty || grantsDirty) && onDiscardClose && onKeepEditing && (
-        <UnsavedCloseBar what={unsavedWhat} saveDisabled={saving || savingGrants}
-          onSave={() => { if (dirty) savePrompt(); if (grantsDirty) saveGrantsNow(); onKeepEditing(); }}
+      {closeArmed && (dirty || grantsDirty || nameDirty) && onDiscardClose && onKeepEditing && (
+        <UnsavedCloseBar what={unsavedWhat} saveDisabled={saving || savingGrants || renaming || (nameDirty && (!!nameProblem || nameConflict))}
+          onSave={() => { if (dirty) savePrompt(); if (grantsDirty) saveGrantsNow(); if (nameDirty) saveName(); onKeepEditing(); }}
           onDiscard={onDiscardClose} onKeepEditing={onKeepEditing} />
       )}
-      {/* Editor header: identity + profile assignment + delete */}
+      {/* Editor header: identity (rename) + profile assignment + delete */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>{agent.name}</span>
+        {nameEditing ? (
+          <>
+            {/* Enter saves and Escape cancels; Escape stops here so a dialog frame doesn't also close. */}
+            <Input value={nameDraft} onChange={(e) => setNameDraft(e.target.value)} autoFocus disabled={renaming}
+              aria-label="Agent name" aria-invalid={!!(nameProblem || scopedRenameError)}
+              data-testid={`agent-name-input-${agent.id}`} style={{ width: 260, maxWidth: "100%" }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); saveName(); }
+                else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setNameDraft(null); }
+              }} />
+            <Button variant="primary" disabled={!canSaveName} data-testid={`agent-name-save-${agent.id}`}
+              onClick={saveName}>{renaming ? "Saving…" : "Save name"}</Button>
+            <Button data-testid={`agent-name-cancel-${agent.id}`} onClick={() => setNameDraft(null)}>Cancel</Button>
+          </>
+        ) : (
+          <>
+            <span data-testid={`agent-name-${agent.id}`} style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>{agent.name}</span>
+            <Button variant="ghost" data-testid={`agent-rename-${agent.id}`} title="Rename this agent"
+              onClick={openRename}>Rename</Button>
+            {nameShowsSaved && <span data-testid={`agent-name-saved-${agent.id}`} style={{ color: color.liveFg, fontSize: fs.sm }}>renamed</span>}
+          </>
+        )}
         <span style={{ flex: 1 }} />
         <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: fs.sm, color: color.text3 }}>
           profile
@@ -337,6 +437,30 @@ export function AgentEditor(
           {deleting ? "Deleting…" : "Delete agent"}
         </Button>
       </div>
+      {nameConflict && (
+        // Unlike the prompt's notice, Save is held until the reader picks: a name is how spawns and briefs
+        // find the agent, so silently reverting someone else's rename costs more than one extra click.
+        <div role="alert" data-testid={`agent-name-conflict-${agent.id}`}
+          style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
+          <span style={{ flex: 1, minWidth: 200 }}>
+            Renamed elsewhere to "{agent.name}" since you started. Keep yours to save over it, or take theirs.
+          </span>
+          <Button data-testid={`agent-name-keep-mine-${agent.id}`} onClick={keepMyName}>Keep mine</Button>
+          <Button data-testid={`agent-name-take-theirs-${agent.id}`} onClick={takeTheirName}>Take theirs</Button>
+        </div>
+      )}
+      {nameEditing && (
+        // The refusal (client pre-check, else the daemon's own words) outranks the hint; both sit under the field.
+        nameProblem || scopedRenameError ? (
+          <span role="alert" data-testid={`agent-name-error-${agent.id}`} style={{ color: color.danger, fontSize: fs.sm, lineHeight: 1.5 }}>
+            {nameProblem ?? errorText(scopedRenameError as Error)}
+          </span>
+        ) : (
+          <span data-testid={`agent-name-hint-${agent.id}`} style={{ color: color.text3, fontSize: fs.sm, lineHeight: 1.5 }}>
+            Briefs, notes and spawns that name this agent "{agent.name}" won't follow the rename. Update them to the new name.
+          </span>
+        )
+      )}
       {boundBindsPlain && (
         <div data-testid="agent-profile-plain-bind" style={{ display: "flex", alignItems: "baseline", gap: 6, color: color.attnText, fontSize: fs.sm, lineHeight: 1.5 }}>
           <span aria-hidden style={{ fontFamily: font.mono }}>△</span>

@@ -28,7 +28,7 @@ import { removeClaudeConfigEntryForWorktree } from "../pty/claude-config.js";
 import { contextTelemetryFor } from "../pty/adapter.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
-import { resolveStartupPromptEdit } from "../agents/validate.js";
+import { resolveStartupPromptEdit, resolveAgentRename, slugifyAgentName } from "../agents/validate.js";
 import { managerSessionBarredFrom, reservedProjectManagerProfileError, MANAGER_SESSION_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR } from "../agents/clone-core.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { nulFilledNoticeLine, type NulFilledScan } from "../git/worktrees.js";
@@ -109,7 +109,7 @@ import { appendTaskBodySection, checkTitleHtmlEntities } from "../mcp/tasks.js";
 import { cancelQuestionForAgent } from "../mcp/questionTool.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
 import { resolveLiveLeadHome, resolveHomeLeadAgent, isSanctionedPlatformLeadAgent, liveOtherPlatformLead } from "../projects/live-lead-home.js";
-import { resolveLiveSetupHome } from "../setup/seed.js";
+import { resolveLiveSetupHome, agentNameScope } from "../setup/seed.js";
 import { checkPeerMessageRateLimit, checkNotifyLeadRateLimit } from "./peer-message-guard.js";
 import { planColumnLayout, planColumnReorder, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
 import { resolveIdPrefix, getByIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
@@ -2050,14 +2050,6 @@ class PostEffectPersistError extends Error {
  */
 type EmergencyRedirectOutcome = { fired: true; result: RedirectResult } | { fired: false; reason: string };
 
-/**
- * PL Auditor finding #10: slugify an agent name for the worker_spawn `agentId` name/slug path — lowercase,
- * collapse any run of non-alphanumerics to a single hyphen, trim leading/trailing hyphens. Deterministic +
- * dependency-free. So "QA Tester" ⇄ "qa-tester" both resolve to that agent.
- */
-function slugifyAgentName(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
 
 /** worker_spawn agentId resolution outcome: a unique hit, an ambiguous id-PREFIX (the candidate ids), or none. */
 type WorkerAgentResolution =
@@ -19287,7 +19279,14 @@ export class SessionService {
     // three differently-privileged surfaces. This call site's own requireManager/requireOwnProject
     // above are this surface's OWN privilege checks; they stay here, not inside the shared helper.
     const startupPrompt = resolveStartupPromptEdit(agent.startupPrompt, patch);
-    this.db.updateAgent(agent.id, { name: patch.name, startupPrompt });
+    // Card b0495d0b: the same rename check validateAgentPatch applies (this path bypasses that validator).
+    let name: string | undefined;
+    if (patch.name !== undefined) {
+      const r = resolveAgentRename(patch.name, agentNameScope(this.db, agent));
+      if (!r.ok) throw new Error(`agent_update: ${r.error}`);
+      name = r.name;
+    }
+    this.db.updateAgent(agent.id, { name, startupPrompt });
     this.auditManage(managerSessionId, "agent_update", { agentId: agent.id, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
     const updated = this.db.getAgent(agent.id)!;
     // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts. This is the
