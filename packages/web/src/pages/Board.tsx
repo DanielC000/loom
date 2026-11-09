@@ -11,6 +11,7 @@ import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, Ques
 import { byRecentlyDone, columnKeyForRole } from "@loom/shared";
 import { api, type TaskUpdateConflictError, type TaskUpdatePatch } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
+import { useBottomDock } from "../lib/bottomDock";
 import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } from "../components/ui";
 import { useOpenRequest, RequestTypeTag, RequestProvenance } from "../components/requests";
 import { DecisionStateChip } from "../components/decisions";
@@ -1070,8 +1071,12 @@ function BulkBar({ count, columns, pending, result, onDismissResult, onClear, on
     onPriority: (p: TaskPriority) => void; onHold: (held: boolean) => void }) {
   const busy = pending !== null;
   const actionSelect: React.CSSProperties = { fontSize: fs.sm, padding: "3px 8px", maxWidth: 220, borderRadius: radius.base };
+  // Sticky at the viewport's bottom edge, so it shares the request pill's corner — register it so the
+  // pill rises above "Clear selection" instead of sitting on it (lib/bottomDock.ts, card 3094c4aa).
+  const dockRef = useRef<HTMLDivElement>(null);
+  useBottomDock(dockRef);
   return (
-    <div data-testid="board-bulk-bar" data-board-bulk-bar="" aria-busy={busy || undefined}
+    <div ref={dockRef} data-testid="board-bulk-bar" data-board-bulk-bar="" aria-busy={busy || undefined}
       style={{ position: "sticky", bottom: 12, zIndex: 2, marginTop: 10, background: color.surface, borderRadius: radius.lg,
         boxShadow: shadow.panel, border: `1px solid ${color.line}`, padding: "8px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
       {count > 0 && (

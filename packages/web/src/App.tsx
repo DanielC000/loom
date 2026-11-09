@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES } from "./nav";
@@ -16,6 +16,7 @@ import { RequestModalProvider } from "./components/requests";
 import { api } from "./lib/api";
 import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionKindLabel, attentionOpenTarget, isAnswerableRequest, type AttentionItem } from "./lib/attention";
 import { useDismissable } from "./lib/useDismissable";
+import { useDockClearance } from "./lib/bottomDock";
 import { ActiveProjectProvider } from "./lib/activeProject";
 import { useAtlasUi } from "./lib/atlasUi";
 import { color, font, radius, shadow, tone, wash, fs } from "./theme";
@@ -114,6 +115,24 @@ let nextToastId = 0;
 // `/projects`, and it covers both its sub-tabs, whose `?tab=` query `pathname` drops.
 const REQUEST_PILL_SUPPRESSED_ROUTES = new Set(["/", "/overview", "/inbox", "/home", "/project"]);
 
+// The toast/pill corner's stacking level — BELOW every overlay in the app, above page content.
+// Dialog scrims start at 50 (board card, agent editor, shell picker, maximized terminal) and go up to
+// 1600 (the setup wizard); the narrow-width tree drawer is 45 over its 44 scrim; popovers/menus are 60.
+// Page content tops out at the composer's 31, and the classic rail (40) is on the opposite edge.
+// It used to be 2000, which floated the pill over the open agent editor and its scrim (Atlas audit
+// A-01, card 3094c4aa). A stacking floor rather than "detect an open dialog": several overlays carry
+// no `role="dialog"` at all (command palette, shell picker, task drawer, maximized terminal), so a
+// DOM query would miss exactly those — while a level under 44 is below all of them by construction.
+const TOAST_CORNER_Z = 43;
+
+// The pill's own footprint (its height + the 16px offset + a gap), published as a CSS custom property
+// so `.loom-atlas-content` can reserve that much bottom padding at narrow widths (global.css). Without
+// it the last button on a page — "Submit answer" on /question/:id at 390px — scrolls to rest UNDER the
+// pill and can never be reached. Unset whenever the pill is not on screen, so no page pays for it then.
+const PILL_RESERVE_VAR = "--loom-request-pill-reserve";
+const PILL_OFFSET_PX = 16;
+const PILL_GAP_PX = 8;
+
 function ToastContainer() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -160,10 +179,14 @@ function ToastContainer() {
     if (requestCount < dismissedAtCount) setDismissedAtCount(requestCount);
   }, [requestCount, dismissedAtCount]);
   const showPill = requestCount > dismissedAtCount && !REQUEST_PILL_SUPPRESSED_ROUTES.has(location.pathname);
+  // Rise above any bottom-docked control (board bulk bar, a session composer) that sits in the corner —
+  // see lib/bottomDock.ts for why this lifts rather than suppressing the pill on those routes.
+  const [pillSize, setPillSize] = useState<{ width: number; height: number } | null>(null);
+  const bottom = useDockClearance(showPill ? pillSize : null, PILL_OFFSET_PX, PILL_OFFSET_PX, PILL_GAP_PX);
 
   if (toasts.length === 0 && !showPill) return null;
   return (
-    <div style={{ position: "fixed", right: 16, bottom: 16, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8, zIndex: 2000, maxWidth: 380 }}>
+    <div data-testid="toast-corner" style={{ position: "fixed", right: PILL_OFFSET_PX, bottom, transition: "bottom 160ms ease", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8, zIndex: TOAST_CORNER_Z, maxWidth: 380 }}>
       {toasts.map(({ id, item }) => (
         <Toast key={id} item={item}
           onDismiss={() => dismiss(id)}
@@ -176,7 +199,7 @@ function ToastContainer() {
           }} />
       ))}
       {showPill && (
-        <RequestCountPill count={requestCount}
+        <RequestCountPill count={requestCount} onSize={setPillSize}
           onOpen={() => navigate("/inbox")}
           onDismiss={() => setDismissedAtCount(requestCount)} />
       )}
@@ -187,15 +210,32 @@ function ToastContainer() {
 // The collapsed pending-Request signal — ONE compact pill ("N requests need you → inbox") in place of the
 // former per-request toast stack. Clicking the body jumps to /inbox; the × dismisses it (a larger batch
 // re-surfaces it — see dismissedAtCount above). Cyan = the signed "actionable request" tone.
-function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen: () => void; onDismiss: () => void }) {
+function RequestCountPill({ count, onOpen, onDismiss, onSize }: { count: number; onOpen: () => void; onDismiss: () => void; onSize: (s: { width: number; height: number }) => void }) {
   const [shown, setShown] = useState(false);
   useEffect(() => {
     const raf = requestAnimationFrame(() => setShown(true));
     return () => cancelAnimationFrame(raf);
   }, []);
+  // Publish the footprint while mounted (see PILL_RESERVE_VAR); re-measured if the pill reflows.
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const root = document.documentElement;
+    // The reserve is the BASE footprint, never the lifted offset: a lift is caused by a dock, and a
+    // reserve that grew with it would push that dock up again and feed back into the lift.
+    const publish = () => {
+      root.style.setProperty(PILL_RESERVE_VAR, `${el.offsetHeight + PILL_OFFSET_PX + PILL_GAP_PX}px`);
+      onSize({ width: el.offsetWidth, height: el.offsetHeight });
+    };
+    publish();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(publish) : null;
+    ro?.observe(el);
+    return () => { ro?.disconnect(); root.style.removeProperty(PILL_RESERVE_VAR); };
+  }, []);
   const c = tone.attn;
   return (
-    <div onClick={onOpen} role="button" title="open the Inbox" data-testid="request-count-pill"
+    <div ref={ref} onClick={onOpen} role="button" title="open the Inbox" data-testid="request-count-pill"
       style={{
         display: "flex", alignItems: "center", gap: 8,
         background: color.surface, border: `1px solid ${color.lineStrong}`, borderLeft: `3px solid ${c}`,

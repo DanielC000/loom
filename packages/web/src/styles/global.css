@@ -2049,6 +2049,15 @@ button.loom-atlas-node.is-branch.is-open {
   .loom-atlas-tree:focus-visible {
     outline: none;
   }
+  /* At this width the request pill (App.tsx › RequestCountPill) spans most of the row, so whatever the
+     page puts last — a Submit button, a Save — scrolls to rest UNDER it. The pill publishes its own
+     footprint as `--loom-request-pill-reserve` while it is on screen, and the scroller reserves exactly
+     that much below its normal 20px; unset (pill dismissed, suppressed, or no requests) costs nothing.
+     Narrow only: on a wide row the pill sits in the corner beside the content, and the extra padding
+     would steal height from every full-height page (terminals, board) for no gain. */
+  .loom-atlas-content {
+    padding-bottom: calc(20px + var(--loom-request-pill-reserve, 0px));
+  }
   .loom-atlas-scrim {
     display: block;
     position: fixed;
