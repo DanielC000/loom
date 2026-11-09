@@ -21,7 +21,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { commitAll } from "./_git-commit.mjs";
 
@@ -63,7 +63,22 @@ db.insertSession({ id: mgrId, projectId: projId, agentId, engineSessionId: null,
 const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
 fs.writeFileSync(path.join(worktreePath, "change.txt"), "worker change\n");
 commitAll(worktreePath, "change", GIT_ID);
-execSync(`git ${GIT_ID} merge --squash ${branch} && git ${GIT_ID} commit -q -m "LESM-STALE" -m "Loom-Worker-Branch: ${branch}"`, { cwd: repo });
+{
+  // Separate calls (a chained execSync can't say which half failed), staged diff asserted non-empty before
+  // committing, and any failure throws with git's own stdout+stderr decoded as text.
+  const idArgs = GIT_ID.split(" ").filter(Boolean);
+  const run = (label, args) => {
+    try {
+      return execFileSync("git", [...idArgs, ...args], { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      throw new Error(`squash fixture: 'git ${label}' failed in ${repo} (status ${err.status})\nstdout: ${JSON.stringify(String(err.stdout ?? ""))}\nstderr: ${JSON.stringify(String(err.stderr ?? ""))}`);
+    }
+  };
+  run("merge --squash", ["merge", "--squash", branch]);
+  const staged = run("diff --cached --name-only", ["diff", "--cached", "--name-only"]).trim();
+  if (!staged) throw new Error(`squash fixture: nothing staged after 'git merge --squash ${branch}' in ${repo}\nstatus: ${run("status --short", ["status", "--short"])}`);
+  run("commit", ["commit", "-q", "-m", "LESM-STALE", "-m", `Loom-Worker-Branch: ${branch}`]);
+}
 
 // Row1: visited FIRST (later lastActivity). NO pre-existing events at all — its landing is discovered
 // and fully finalized LIVE, during this run.
