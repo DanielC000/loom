@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionRoute, OrchestrationEventKind, Project, Question, Session, SessionRole, Task, TaskPriority } from "@loom/shared";
-import { resolveConfig } from "@loom/shared";
+import { resolveConfig, PERMISSION_ANSWERS } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
@@ -33,6 +33,7 @@ import type { GitWriter } from "../git/writer.js";
 import { resolveOperationalHomeToplevelRefusal } from "../git/writer.js";
 import { resolveVaultGitTarget, isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 
+import { permissionGrant } from "../mcp/questionTool.js";
 import { requestAnsweredTriggerNotice } from "../orchestration/deferred-trigger-notice.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -678,6 +679,26 @@ function decisionSurfaceSignature(q: Pick<Question, "state" | "chosenOption" | "
   return `${q.state}|${q.chosenOption ?? ""}|${q.answeredAt ?? ""}|${q.consumedAt ?? ""}|${q.title}|${q.body}|${(q.options ?? []).join(",")}`;
 }
 
+/**
+ * The owner's recorded answer for an `answered` decision row (empty object for any other state), spread
+ * into a full `decisions_list`/`decision_get` row. Returned exactly as stored. A `credential` row's answer
+ * is an envelope-encrypted secret that never reaches this object, so it carries `answeredAt` only —
+ * never `chosenOption`/`note` (never-echo, same posture as `questionAnswerByType`). A `permission` row
+ * also carries the decided grant (`approved`, then `scope`/`expiresAt`/`lapsed` via the shared `permissionGrant`, the same
+ * key names question_pull returns; advisory only).
+ */
+function decisionAnswerFields(q: Question): Record<string, unknown> {
+  if (q.state !== "answered") return {};
+  if (q.type === "credential") return { answeredAt: q.answeredAt };
+  const base = { chosenOption: q.chosenOption, note: q.note, answeredAt: q.answeredAt };
+  if (q.type === "permission") {
+    return {
+      ...base, approved: q.chosenOption === PERMISSION_ANSWERS[0], ...permissionGrant(q),
+    };
+  }
+  return base;
+}
+
 /** The single refusal for an id-keyed decision lookup that must not reveal whether the id exists
  *  (decision_get, decision_resolve). */
 const NO_SUCH_DECISION = "no such decision";
@@ -690,14 +711,16 @@ const DECISIONS_RELAY: CompanionCapability = {
       "decisions_list",
       {
         description:
-          "Read-only view of PENDING decision-inbox questions (manager asks awaiting a human answer) in " +
+          "Read-only view of pending or answered decision-inbox questions (manager asks awaiting or given a human answer) in " +
           "your granted project(s). Optionally pass `project` (a project id) to narrow to ONE of your " +
           "granted projects — passing a project you were NOT granted is rejected with an {error}; " +
           "omitting it returns every granted project's pending decisions. Each entry carries " +
           "`alreadySurfaced`: true means you already read this EXACT decision (same state, same answer) on " +
           "a prior call — do NOT re-narrate it to the owner again on its own; only mention it if the owner " +
           "asks or something else prompts it. false means it's new or its state/answer changed since you " +
-          "last saw it (e.g. it was just answered) — that's genuinely worth surfacing. Optional `since` — " +
+          "last saw it (e.g. it was just answered) — that's genuinely worth surfacing. An answered entry " +
+          "carries the owner's answer exactly as stored (`chosenOption`, `note`, `answeredAt`; a permission " +
+          "request also `approved`, `scope`, `expiresAt`, `lapsed`). Optional `since` — " +
           "pass back the `asOf` timestamp this tool returned on your LAST call — SLIMS the response: an " +
           "entry that is BOTH unchanged (`alreadySurfaced:true`) AND already existed at `since` comes back " +
           "as just `{questionId, projectId, projectName, title, state, alreadySurfaced:true, " +
@@ -755,6 +778,7 @@ const DECISIONS_RELAY: CompanionCapability = {
             questionId: q.id, projectId: q.projectId, projectName: q.projectName,
             sessionId: q.sessionId, title: q.title, body: q.body, options: q.options,
             recommendation: q.recommendation, state: q.state, createdAt: q.createdAt,
+            ...decisionAnswerFields(q),
             alreadySurfaced,
           };
         });
@@ -785,7 +809,9 @@ const DECISIONS_RELAY: CompanionCapability = {
           "cancelled are not readable). Returns {decision, asOf} with " +
           "the same `alreadySurfaced` flag decisions_list reports, or {error:\"no such decision\"} when the id " +
           "does not exist, is not in your granted project(s), is a notice, or is no longer readable — those " +
-          "cases are deliberately indistinguishable.",
+          "cases are deliberately indistinguishable. For an answered decision the row also carries the owner's " +
+          "answer exactly as stored: `chosenOption`, `note`, `answeredAt` (a permission request also carries " +
+          "`approved`, `scope`, `expiresAt`, `lapsed`; a credential request carries only `answeredAt`).",
         inputSchema: { questionId: z.string() },
       },
       async ({ questionId }) => {
@@ -807,6 +833,7 @@ const DECISIONS_RELAY: CompanionCapability = {
             questionId: q.id, projectId: q.projectId, projectName: q.projectName,
             sessionId: q.sessionId, title: q.title, body: q.body, options: q.options,
             recommendation: q.recommendation, state: q.state, createdAt: q.createdAt,
+            ...decisionAnswerFields(q),
             alreadySurfaced,
           },
           asOf: now,

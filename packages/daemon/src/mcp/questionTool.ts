@@ -402,7 +402,7 @@ function credentialAck(q: Question): string {
  * @decision sha:df2f5e17 — advisory-display only: Loom never itself enforces, revokes, or re-checks a
  * live grant against `lapsed` — the manager holding the grant must read it and honor it.
  */
-function permissionGrant(q: Question): { scope: PermissionScope | null; expiresAt: string | null; lapsed: boolean } {
+export function permissionGrant(q: Question): { scope: PermissionScope | null; expiresAt: string | null; lapsed: boolean } {
   return {
     scope: q.decidedScope,
     expiresAt: q.decidedExpiresAt,
