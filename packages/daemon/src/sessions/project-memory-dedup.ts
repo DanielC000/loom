@@ -1,4 +1,5 @@
 import type { NearDuplicateCandidate } from "../db.js";
+import { extractWikilinkKeys } from "./project-memory-backlinks.js";
 
 /**
  * Card b1f34988 — the near-duplicate advisory's signal + thresholds, exported as ONE shared helper so a
@@ -28,6 +29,28 @@ export function isNearDuplicateCandidate(
     candidate.score <= NEAR_DUPLICATE_BM25_THRESHOLD &&
     candidate.coverage >= NEAR_DUPLICATE_COVERAGE_THRESHOLD
   );
+}
+
+/**
+ * Card 938dfcb8 — the PERIODIC sweep's actionability filters. A pair that clears
+ * {@link isNearDuplicateCandidate} is only worth a review card when merging it is actually possible, and
+ * measured reviews (cards 91096dd8, fed07a54, 9f5b6661) found almost none were: the corpus is written at
+ * the per-note byte cap and most flagged pairs already cross-link on purpose. These are SWEEP-only; the
+ * write-time advisory deliberately does not use them. Both are pure so the caller supplies the cap
+ * (`mcp/memory.ts`'s MAX_TEXT_BYTES — imported there, not here, to avoid a value-import cycle).
+ *
+ * @decision 938dfcb8
+ */
+export function isOversizePair(textA: string, textB: string, capBytes: number): boolean {
+  return Buffer.byteLength(textA, "utf8") + Buffer.byteLength(textB, "utf8") > capBytes;
+}
+
+/** True iff either note's text `[[wikilink]]`s the other's key (one direction is enough). */
+export function areCrossLinked(
+  a: { key: string; text: string },
+  b: { key: string; text: string },
+): boolean {
+  return extractWikilinkKeys(a.text).includes(b.key) || extractWikilinkKeys(b.text).includes(a.key);
 }
 
 /** The write-time advisory's informational signal — never a rejection, mirrors the sibling

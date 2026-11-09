@@ -33,7 +33,7 @@ const KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
  *  units, ~4× apart in what they mean: FOUR notes maxed against THIS cap alone exhaust the ENTIRE default
  *  read budget, before anything else (any other pinned note, any related-tier match) gets a byte. See
  *  config.ts's `memory.budgetTokens` doc comment for the arithmetic from the other direction. */
-const MAX_TEXT_BYTES = 4000;
+export const MAX_TEXT_BYTES = 4000;
 const MAX_TITLE_CHARS = 200;
 
 /**

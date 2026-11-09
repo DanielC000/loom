@@ -27,8 +27,9 @@ const { Db } = await import("../dist/db.js");
 const { writeProjectMemory } = await import("../dist/mcp/memory.js");
 const {
   findDuplicateReportCandidates, sweepProjectMemoryDuplicates,
-  reportCardMetaKey, lastSweepMetaKey, REPORT_CARD_TITLE,
+  reportCardMetaKey, lastSweepMetaKey, omittedCountsMetaKey, REPORT_CARD_TITLE,
 } = await import("../dist/sessions/project-memory-dedup-report.js");
+const { isOversizePair, areCrossLinked } = await import("../dist/sessions/project-memory-dedup.js");
 const { MemoryDedupWatcher } = await import("../dist/orchestration/memory-dedup-watcher.js");
 const { resolveConfig, columnKeyForRole } = await import("@loom/shared");
 
@@ -295,6 +296,71 @@ try {
     check("(1, setup) the sweep over a dense 180-note corpus completed without being stopped", stopped === false);
     check(`(1) the event loop regained control MULTIPLE times during the sweep (yieldCount=${yieldCount}, sweepMs=${sweepMs.toFixed(0)}) — not blocked for the whole duration`,
       yieldCount > 1);
+  }
+
+  // ===================== (8) card 938dfcb8 — oversize / already-cross-linked pairs are omitted, counted =====================
+  {
+    const projId = "proj-actionable-filter";
+    db.insertProject({ id: projId, name: "Actionable Filter", repoPath: now, vaultPath: now, config: {}, createdAt: now, archivedAt: null });
+    fillerNotes(db, projId, 25);
+    // DISJOINT vocabulary per theme (shared boilerplate words made unrelated themes match each other —
+    // the hazard this file's header warns about), so only a theme's own two notes can pair.
+    const vocab = {
+      quokka: "quokka marsupial burrow eucalyptus wallaby outback",
+      turbine: "turbine rotor stator impeller gearbox nacelle",
+      mango: "mango orchard ripening grafting cultivar pruning",
+      zebra: "zebra savanna stripes herd migration waterhole",
+      lumen: "lumen photon diode luminance filament spectrum",
+    };
+    const sentence = (theme) => vocab[theme].split(" ").map((w) => `${w} ${w}s`).join(", ") + ".";
+    // FITS the cap, NOT linked — the one pair that must survive.
+    writeProjectMemory(db, projId, { key: "fit-a", title: "Quokka ledger", text: sentence("quokka") });
+    writeProjectMemory(db, projId, { key: "fit-b", text: sentence("quokka") + " Done." });
+    // Combined text over the cap, NOT linked.
+    const big = (theme, tail) => Array.from({ length: 30 }, () => sentence(theme)).join(" ") + tail;
+    writeProjectMemory(db, projId, { key: "big-a", title: "Turbine ledger", text: big("turbine", "") });
+    writeProjectMemory(db, projId, { key: "big-b", text: big("turbine", " Done.") });
+    // FITS the cap, linked one way (a -> b only).
+    writeProjectMemory(db, projId, { key: "link-a", title: "Mango ledger", text: sentence("mango") + " See [[link-b]]." });
+    writeProjectMemory(db, projId, { key: "link-b", text: sentence("mango") + " Done." });
+    // FITS the cap, linked the OTHER way (b -> a only).
+    writeProjectMemory(db, projId, { key: "rev-a", title: "Zebra ledger", text: sentence("zebra") });
+    writeProjectMemory(db, projId, { key: "rev-b", text: sentence("zebra") + " Back to [[rev-a]]." });
+    // Over the cap AND linked — must be counted exactly once, as oversize.
+    writeProjectMemory(db, projId, { key: "both-a", title: "Lumen ledger", text: big("lumen", " See [[both-b]].") });
+    writeProjectMemory(db, projId, { key: "both-b", text: big("lumen", " Done.") });
+
+    const snapshot = () => JSON.stringify(db.listProjectMemory(projId).map((n) => [n.key, n.version, n.text, n.updatedAt, n.title]).sort());
+    const before = snapshot();
+    const r = await findDuplicateReportCandidates(db, projId, () => false);
+    const surviving = r.pairs.map((p) => `${p.keyA}|${p.keyB}`).sort();
+    check(`(8) exactly the fits-and-unlinked pair survives (got ${JSON.stringify(surviving)})`,
+      surviving.length === 1 && surviving[0] === "fit-a|fit-b");
+    check(`(8) omitted counts are 2 oversize (incl. the oversize+linked pair) / 2 linked (got ${JSON.stringify(r.omitted)})`,
+      r.omitted.oversize === 2 && r.omitted.linked === 2);
+    const reasons = Object.fromEntries(r.omittedPairs.map((p) => [`${p.a}|${p.b}`, p.reason]));
+    check(`(8) each omitted pair carries its own reason (got ${JSON.stringify(reasons)})`,
+      reasons["big-a|big-b"] === "oversize" && reasons["both-a|both-b"] === "oversize" &&
+      reasons["link-a|link-b"] === "linked" && reasons["rev-a|rev-b"] === "linked" && r.omittedPairs.length === 4);
+
+    await sweepProjectMemoryDuplicates(db, projId, () => false, new Date());
+    const card = db.getTask(db.getMeta(reportCardMetaKey(projId)));
+    check("(8) the card body states the omitted counts on one line", card.body.includes("2 oversize / 2 already-linked pairs omitted"));
+    const marker = JSON.parse(card.body.match(/<!--\s*memory-dedup-pairs:\s*([\s\S]*?)\s*-->/)[1]);
+    check("(8) the JSON marker lists only the surviving pair", marker.pairs.length === 1 && marker.pairs[0].a === "fit-a" && marker.pairs[0].b === "fit-b");
+    check("(8) omitted pairs never appear in the card body", !/big-a|link-a|rev-a|both-a/.test(card.body));
+    check("(8) the omitted counts are recorded in app_meta",
+      db.getMeta(omittedCountsMetaKey(projId)) === JSON.stringify({ oversize: 2, linked: 2 }));
+    check("(8) the sweep never wrote, edited or forgot a note", snapshot() === before);
+
+    check("(8) predicate: combined bytes == cap is NOT oversize, cap+1 is",
+      isOversizePair("a".repeat(2000), "a".repeat(2000), 4000) === false &&
+      isOversizePair("a".repeat(2000), "a".repeat(2001), 4000) === true);
+    check("(8) predicate: bytes (not chars) are measured", isOversizePair("é".repeat(1500), "é".repeat(1500), 4000) === true);
+    check("(8) predicate: links count in either direction only by exact key",
+      areCrossLinked({ key: "x", text: "[[y]]" }, { key: "y", text: "" }) === true &&
+      areCrossLinked({ key: "x", text: "" }, { key: "y", text: "[[x]]" }) === true &&
+      areCrossLinked({ key: "x", text: "[[yy]]" }, { key: "y", text: "" }) === false);
   }
 } catch (err) {
   console.error(err);

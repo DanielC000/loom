@@ -2,7 +2,11 @@ import { columnKeyForRole, isProjectMemoryExpired, resolveConfig } from "@loom/s
 import type { Task } from "@loom/shared";
 import type { Db } from "../db.js";
 import { createProjectTask } from "../mcp/tasks.js";
-import { isNearDuplicateCandidate } from "./project-memory-dedup.js";
+import { MAX_TEXT_BYTES } from "../mcp/memory.js";
+import { areCrossLinked, isNearDuplicateCandidate, isOversizePair } from "./project-memory-dedup.js";
+
+/** Card 938dfcb8 — how many candidate pairs the sweep's actionability filters omitted, by reason. */
+export interface OmittedPairCounts { oversize: number; linked: number }
 
 /**
  * The Db-touching pairing pass + the one board card's lifecycle for the periodic, zero-LLM duplicate-
@@ -75,20 +79,40 @@ export async function findDuplicateReportCandidates(
   projectId: string,
   isStopped: () => boolean,
   now: Date = new Date(),
-): Promise<{ pairs: DuplicateCandidatePair[]; stopped: boolean }> {
+): Promise<{ pairs: DuplicateCandidatePair[]; stopped: boolean; omitted: OmittedPairCounts; omittedPairs: Array<{ a: string; b: string; reason: "oversize" | "linked" }> }> {
   const notes = db.listProjectMemory(projectId);
   const byKey = new Map(notes.map((n) => [n.key, n]));
   const pairs = new Map<string, DuplicateCandidatePair>();
+  const omittedByPair = new Map<string, "oversize" | "linked">();
+  const summarize = () => {
+    const omittedPairs = [...omittedByPair].map(([k, reason]) => {
+      const [a = "", b = ""] = k.split("::");
+      return { a, b, reason };
+    });
+    return {
+      omitted: {
+        oversize: omittedPairs.filter((p) => p.reason === "oversize").length,
+        linked: omittedPairs.filter((p) => p.reason === "linked").length,
+      },
+      omittedPairs,
+    };
+  };
   const nowMs = now.getTime();
   let chunkStart = performance.now();
   for (const note of notes) {
-    if (isStopped()) return { pairs: [...pairs.values()], stopped: true };
+    if (isStopped()) return { pairs: [...pairs.values()], stopped: true, ...summarize() };
     const candidate = db.findNearDuplicateProjectMemory(projectId, note.title, note.text, note.key);
     if (isNearDuplicateCandidate(candidate)) {
       const other = byKey.get(candidate.key);
       if (other && !isProjectMemoryExpired(note, nowMs) && !isProjectMemoryExpired(other, nowMs)) {
         const pairKey = canonicalPairKey(note.key, candidate.key);
-        if (!pairs.has(pairKey)) {
+        // @decision 938dfcb8 — oversize/cross-linked pairs are unmergeable noise; count, never report.
+        // Oversize wins when both apply, so each omitted pair is counted exactly once.
+        const omitReason = isOversizePair(note.text, other.text, MAX_TEXT_BYTES) ? "oversize"
+          : areCrossLinked(note, other) ? "linked" : undefined;
+        if (omitReason) {
+          omittedByPair.set(pairKey, omitReason);
+        } else if (!pairs.has(pairKey)) {
           const [keyA, keyB] = sortPair(note.key, candidate.key);
           pairs.set(pairKey, {
             keyA, keyB, score: candidate.score, coverage: candidate.coverage,
@@ -104,7 +128,7 @@ export async function findDuplicateReportCandidates(
       chunkStart = performance.now();
     }
   }
-  return { pairs: [...pairs.values()], stopped: false };
+  return { pairs: [...pairs.values()], stopped: false, ...summarize() };
 }
 
 export const REPORT_CARD_TITLE = "chore(memory): review likely-duplicate memory notes";
@@ -138,7 +162,7 @@ function parseReviewedPairs(body: string): Map<string, ReportedPair> {
  * whether a pair reviewed via this card (moved to a terminal column) is still reviewed, or has resurfaced
  * because one of the two notes changed since.
  */
-function formatReportBody(pairs: readonly DuplicateCandidatePair[]): string {
+function formatReportBody(pairs: readonly DuplicateCandidatePair[], omitted: OmittedPairCounts): string {
   const sorted = [...pairs].sort((x, y) => x.score - y.score); // most negative (strongest match) first
   const shown = sorted.slice(0, TOP_N_SHOWN);
   const list = shown.length === 0
@@ -160,6 +184,8 @@ function formatReportBody(pairs: readonly DuplicateCandidatePair[]): string {
     "— treat every entry below as a CANDIDATE to review, never a confirmed duplicate. This sweep NEVER " +
     "auto-merges, deletes, or rewrites a note.\n\n" +
     `${list}\n\n` +
+    `${omitted.oversize} oversize / ${omitted.linked} already-linked pairs omitted (merging an oversize pair ` +
+    "would exceed the per-note byte cap; linked notes are deliberately split).\n\n" +
     "Move this card to a terminal column once reviewed — a listed pair will not resurface on a later sweep " +
     "unless either note's content changes afterward.\n\n" +
     `<!-- ${PAIR_JSON_MARKER}: ${json} -->`
@@ -171,6 +197,11 @@ const LAST_SWEEP_META_PREFIX = "memory-dedup-last-sweep:";
 
 export function reportCardMetaKey(projectId: string): string {
   return `${REPORT_CARD_META_PREFIX}${projectId}`;
+}
+
+/** `app_meta` key holding the last completed sweep's {@link OmittedPairCounts} as JSON (card 938dfcb8). */
+export function omittedCountsMetaKey(projectId: string): string {
+  return `memory-dedup-omitted:${projectId}`;
 }
 
 export function lastSweepMetaKey(projectId: string): string {
@@ -192,8 +223,9 @@ export async function sweepProjectMemoryDuplicates(
   isStopped: () => boolean,
   now: Date = new Date(),
 ): Promise<void> {
-  const { pairs, stopped } = await findDuplicateReportCandidates(db, projectId, isStopped, now);
+  const { pairs, stopped, omitted } = await findDuplicateReportCandidates(db, projectId, isStopped, now);
   if (stopped) return;
+  db.setMeta(omittedCountsMetaKey(projectId), JSON.stringify(omitted));
 
   const project = db.getProject(projectId);
   if (!project) return;
@@ -214,7 +246,7 @@ export async function sweepProjectMemoryDuplicates(
         return !prior || prior.aVersion !== p.aVersion || prior.bVersion !== p.bVersion;
       });
 
-  const body = formatReportBody(toReport);
+  const body = formatReportBody(toReport, omitted);
   if (existingCard && !cardIsTerminal) {
     db.updateTask(existingCard.id, { body });
   } else if (toReport.length > 0) {
