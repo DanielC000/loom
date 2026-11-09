@@ -1,7 +1,8 @@
 import { Fragment, useState, useEffect, useId, useLayoutEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { DndContext, DragOverlay, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragOverEvent, type DragStartEvent, type Announcements } from "@dnd-kit/core";
+import { useQuery, useMutation, useQueryClient, useIsMutating, keepPreviousData } from "@tanstack/react-query";
+import { DndContext, DragOverlay, KeyboardSensor, PointerSensor, useDraggable, useDroppable, useSensor, useSensors, type DragEndEvent, type DragMoveEvent, type DragOverEvent, type DragStartEvent, type Announcements } from "@dnd-kit/core";
+import { bandSlots, clampSlot, planReorder, slotForPointer } from "../lib/laneReorder";
 import { LaneMenu, boardCollision, laneDragId, movedKeys, useCollapsedLanes, type BoardDragData } from "../components/boardLanes";
 import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge, RepoRegistryEntry } from "@loom/shared";
 // The done lane's order lives in shared, not here: the server picks WHICH cards a `?doneLimit=` window
@@ -166,7 +167,11 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // The key EXTENDS `["board", projectId]` rather than replacing it: that exact entry stays the full,
   // unwindowed set its four other consumers read, while `invalidateQueries(["board", projectId])` below
   // still reaches every windowed entry too, because react-query matches a key by prefix.
-  const board = useQuery({ queryKey: ["board", projectId, doneLimit], queryFn: ({ signal }) => api.board(projectId, doneLimit ?? undefined, signal), enabled: !!projectId, refetchInterval: 4000, placeholderData: keepPreviousData });
+  // A within-lane card reorder (card 139cfc3d) can be several sequential writes; the poll is paused until
+  // they settle, so a refetch landing mid-sequence never paints a half-renumbered band.
+  const cardReorderKey = ["board-card-reorder", projectId];
+  const cardReordering = useIsMutating({ mutationKey: cardReorderKey }) > 0;
+  const board = useQuery({ queryKey: ["board", projectId, doneLimit], queryFn: ({ signal }) => api.board(projectId, doneLimit ?? undefined, signal), enabled: !!projectId, refetchInterval: cardReordering ? false : 4000, placeholderData: keepPreviousData });
   // True while a DIFFERENT window (or the windowed↔full switch) is in flight and the lane is still
   // showing the previous response — the reveal button's loading state.
   const windowPending = board.isPlaceholderData;
@@ -321,7 +326,28 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   const onDragOver = (e: DragOverEvent) => {
     setOverLane(e.over ? String(e.over.id) : null);
   };
-  const clearLaneDrag = () => { setDragLane(null); setDragCard(null); setOverLane(null); };
+  // Card 139cfc3d — a card dragged over its OWN live lane is a reorder. The slot follows the lifted
+  // preview's vertical centre against the other cards' midpoints, then clamps into the card's priority
+  // band, so the line shows where it will really land; null while the drop would leave it where it is.
+  const [reorderSlot, setReorderSlot] = useState<number | null>(null);
+  const onDragMove = (e: DragMoveEvent) => {
+    const d = dataOf(e.active);
+    const rect = e.active.rect.current.translated;
+    const task = d?.type === "card" ? allTasks.find((t) => t.id === String(e.active.id)) : undefined;
+    const col = task && board.data?.columns.find((c) => c.key === task.columnKey);
+    let slot: number | null = null;
+    if (task && col && rect && e.over && String(e.over.id) === col.key && !isDoneColumn(col) && !cardReordering) {
+      const lane = laneTasks(col);
+      const others = lane.filter((t) => t.id !== task.id);
+      const els = new Map([...(gridRef.current?.querySelectorAll<HTMLElement>(`[data-lane-key="${CSS.escape(col.key)}"] [data-card-id]`) ?? [])]
+        .map((el) => [el.dataset.cardId!, el]));
+      const mids = others.map((t) => { const r = els.get(t.id)?.getBoundingClientRect(); return r ? r.top + r.height / 2 : -Infinity; });
+      const to = clampSlot(others, prio(task), slotForPointer(mids, rect.top + rect.height / 2));
+      slot = to === lane.findIndex((t) => t.id === task.id) ? null : to;
+    }
+    setReorderSlot((s) => (s === slot ? s : slot));
+  };
+  const clearLaneDrag = () => { setDragLane(null); setDragCard(null); setOverLane(null); setReorderSlot(null); };
   // A card drags from anywhere on its face with a mouse or pen, once the pointer has travelled 6px — so a
   // plain click (open) and a Ctrl/Shift-click (select) never turn into a drag. Touch drags from the grip
   // only (Card filters by pointerType), so a swipe on a card still scrolls the lane on a phone.
@@ -331,6 +357,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   );
   const onDragEnd = (e: DragEndEvent) => {
     const d = dataOf(e.active);
+    const slot = reorderSlot;
     clearLaneDrag();
     if (d?.type === "lane") {
       const cols = board.data?.columns ?? [];
@@ -338,7 +365,16 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
       if (to >= 0) moveLane(d.key, to, false);
       return;
     }
-    if (e.over && e.active.id !== e.over.id) move.mutate({ id: String(e.active.id), columnKey: String(e.over.id) });
+    if (!e.over) return;
+    const task = allTasks.find((t) => t.id === String(e.active.id));
+    // Dropped back on its own lane: a reorder when the line showed a new slot, else nothing at all. (A
+    // same-lane columnKey write used to go out here, which only stamped updatedAt — and in the done lane,
+    // which sorts by it, jumped the card to the top.)
+    if (task && task.columnKey === String(e.over.id)) {
+      if (slot !== null) reorderCardTo(task, slot);
+      return;
+    }
+    move.mutate({ id: String(e.active.id), columnKey: String(e.over.id) });
   };
   // Screen-reader narration for the drag itself, in lane LABELS and card TITLES rather than dnd-kit's
   // default raw ids ("Picked up draggable item lane:in_progress").
@@ -477,6 +513,58 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     taskMatchesSearch(t, q) &&
     (priFilter.size === 0 || priFilter.has(prio(t))) &&
     matchesDetails(t));
+  // A lane's cards as rendered: filtered, then in the lane's own order.
+  const laneTasks = (col: KanbanColumn) => shownTasks.filter((t) => t.columnKey === col.key)
+    .sort(isDoneColumn(col) ? byRecentlyDone : byPriorityThenPosition);
+
+  // ── Within-lane reorder (card 139cfc3d) ──────────────────────────────────────
+  // The writes go out ONE AT A TIME, in band order. The new order is painted optimistically; if any write
+  // fails, the board refetches and shows what the server actually holds, with the error beside it — a
+  // half-renumbered band is never left on screen looking saved.
+  const [cardOrderError, setCardOrderError] = useState<string | null>(null);
+  const reorderCards = useMutation({
+    mutationKey: cardReorderKey,
+    meta: { inlineError: true }, // surfaced beside the board, never a blocking alert
+    mutationFn: async ({ writes }: { writes: { id: string; position: number }[]; label: string }) => {
+      for (const w of writes) await api.updateTask(w.id, { position: w.position });
+    },
+    onMutate: async ({ writes }) => {
+      await qc.cancelQueries({ queryKey: ["board", projectId] });
+      const next = new Map(writes.map((w) => [w.id, w.position]));
+      qc.setQueriesData<BoardData>({ queryKey: ["board", projectId] }, (old) => old && {
+        ...old, tasks: old.tasks.map((t) => (next.has(t.id) ? { ...t, position: next.get(t.id)! } : t)),
+      });
+      setCardOrderError(null);
+    },
+    onError: (err, { label }) => {
+      setCardOrderError(errorText(err));
+      setAnnouncement(`${label} not reordered: ${errorText(err)}. Showing the saved order.`);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
+  });
+  /** Move `task` to `slot` (counted with the card itself removed) within its lane, and say so. Returns
+   *  false when nothing moved. */
+  const reorderCardTo = (task: BoardTask, slot: number): boolean => {
+    const col = board.data?.columns.find((c) => c.key === task.columnKey);
+    if (!col || isDoneColumn(col) || reorderCards.isPending) return false;
+    const lane = laneTasks(col);
+    const fullBand = allTasks.filter((t) => t.columnKey === col.key && prio(t) === prio(task));
+    const plan = planReorder(lane, task.id, slot, fullBand);
+    if (!plan || plan.writes.length === 0) return false;
+    const [start, end] = bandSlots(lane.filter((t) => t.id !== task.id), prio(task));
+    const label = task.title;
+    setAnnouncement(`${label} moved to ${plan.slot - start + 1} of ${end - start + 1} in ${PRIORITY_META[prio(task)].short}, ${col.label}`);
+    reorderCards.mutate({ writes: plan.writes, label });
+    return true;
+  };
+  // Where the reorder line sits in `col`'s rendered list (the index of the card it sits above, or the
+  // list's length for "last"), or -1 when this lane is not the target of a reorder drag.
+  const reorderIndexFor = (col: KanbanColumn) => {
+    if (reorderSlot === null || !draggedTask || draggedTask.columnKey !== col.key) return -1;
+    const lane = laneTasks(col);
+    const next = lane.filter((t) => t.id !== draggedTask.id)[reorderSlot];
+    return next ? lane.indexOf(next) : lane.length;
+  };
   // Chip counts, over the whole fetched board (not the filtered view), so a chip's number never moves
   // as other chips toggle.
   const counts = useMemo(() => {
@@ -672,6 +760,24 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
     });
   };
   const onGridKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // Alt+↑/↓ on a focused card moves it one slot within its priority band (card 139cfc3d) — the keyboard
+    // twin of a within-lane drag. Focus stays on the card; the live region says where it went, or that
+    // it is already at its band's edge. Not offered in the done lane, which sorts by recency.
+    if (!e.defaultPrevented && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      const id = (e.target as HTMLElement).dataset?.boardNav;
+      const task = id && id !== NAV_HEAD && id !== NAV_MORE ? allTasks.find((t) => t.id === id) : undefined;
+      const col = task && board.data?.columns.find((c) => c.key === task.columnKey);
+      if (!task || !col || isDoneColumn(col)) return;
+      e.preventDefault();
+      if (reorderCards.isPending) return;
+      const from = laneTasks(col).findIndex((t) => t.id === task.id);
+      if (!reorderCardTo(task, from + (e.key === "ArrowUp" ? -1 : 1))) {
+        setAnnouncement(`${task.title} is already ${e.key === "ArrowUp" ? "first" : "last"} of the ${PRIORITY_META[prio(task)].short} cards in ${col.label}`);
+        return;
+      }
+      requestAnimationFrame(() => { if (gridRef.current) navElement(gridRef.current, col.key, task.id)?.focus(); });
+      return;
+    }
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     const el = e.target as HTMLElement;
     const item = el.dataset?.boardNav;
@@ -777,6 +883,13 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
               <Button variant="ghost" onClick={() => setLaneError(null)}>Dismiss</Button>
             </div>
           )}
+          {cardOrderError && (
+            <div role="alert" data-testid="card-reorder-error"
+              style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, color: color.attnText, fontSize: fs.sm }}>
+              <span style={{ flex: 1 }}>Couldn’t save the new card order: {cardOrderError}. The board shows the saved order.</span>
+              <Button variant="ghost" onClick={() => setCardOrderError(null)}>Dismiss</Button>
+            </div>
+          )}
           {/* Lanes behind an edge (card c315f579): a row of its own, only while some lane is cut off. */}
           {/* The one-time keyboard hint (card 78eaac95) borrows this row's left side: above the grid, so it
               never covers the focused card, and in the row the overflow chips already use, so it never
@@ -790,7 +903,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
             </div>
           )}
           <div style={{ display: "flex", gap: 10, marginTop: showLaneRow ? 6 : 10, alignItems: "stretch" }}>
-            <DndContext onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={clearLaneDrag}
+            <DndContext onDragStart={onDragStart} onDragMove={onDragMove} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={clearLaneDrag}
               sensors={sensors} collisionDetection={boardCollision} accessibility={{ announcements }}>
               {/* Responsive lane grid (.loom-board-grid): equal 1fr lanes when they fit, horizontal
                   scroll with a usable per-lane min width when they don't (narrow viewport / many lanes)
@@ -810,8 +923,8 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
                   // done-lane reveal state alive across the 4s poll (same key ⇒ re-render, not remount)
                   // while a project switch remounts the lane and collapses it back to one page.
                   <Column key={`${projectId}:${col.key}`} col={col}
-                    tasks={shownTasks.filter((t) => t.columnKey === col.key)
-                      .sort(isDoneColumn(col) ? byRecentlyDone : byPriorityThenPosition)}
+                    tasks={laneTasks(col)}
+                    reorderIndex={reorderIndexFor(col)}
                     filterActive={filterActive} workers={workerByTask} policyByTask={policyByTask} onOpen={setOpenTaskId}
                     multiRepo={multiRepo} repos={repos} primaryRepoPath={project?.repoPath ?? ""}
                     titleById={titleById}
@@ -973,7 +1086,7 @@ function LaneDragPreview({ col }: { col: KanbanColumn | undefined }) {
 }
 
 function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multiRepo, repos, primaryRepoPath, titleById, cardCount, laneTotal, onRevealMore, revealPending,
-  index, laneCount, collapsed, onCollapse, onMoveLane, reordering, laneDragging, dropEdge, dropCard }:
+  index, laneCount, collapsed, onCollapse, onMoveLane, reordering, laneDragging, dropEdge, dropCard, reorderIndex }:
   { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>;
     policyByTask: Record<string, CardPolicyCardStatus>; onOpen: (id: string) => void; multiRepo: boolean;
     repos: RepoRegistryEntry[]; primaryRepoPath: string; titleById: Map<string, string>; cardCount: number;
@@ -987,7 +1100,10 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
     /** This lane is the current lane-drag target: the dragged lane lands on this side of it. */
     dropEdge: "before" | "after" | null;
     /** Card 68800f89 — a card from ANOTHER lane is being dragged over this one (else null). */
-    dropCard: BoardTask | null }) {
+    dropCard: BoardTask | null;
+    /** Card 139cfc3d — this lane's OWN card is being dragged to a new slot: the index of the rendered card
+     *  the line sits above (the list's length for "last"), else -1. Never set on the done lane. */
+    reorderIndex: number }) {
   const { setNodeRef, isOver, active } = useDroppable({ id: col.key, data: { type: "lane", key: col.key } satisfies BoardDragData });
   // A lane is ALSO draggable, by its header (card 67c43038). Only the header's handle carries the
   // listeners; the ⋯ button sits outside it so a click there never starts a drag.
@@ -1031,6 +1147,9 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
         return at < 0 ? visible.length : at;
       })())
     : -1;
+  // One line per lane: a card from another lane (comparator slot, above), or this lane's own card being
+  // reordered (card 139cfc3d — the pointer's slot, clamped to the card's priority band by Board).
+  const lineIndex = dropCard ? dropIndex : reorderIndex;
   // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
   // the header label, and each card's left border so all three agree. null = un-accented: transparent
   // bar, neutral AA-safe label, neutral hairline card border.
@@ -1130,11 +1249,11 @@ function Column({ col, tasks, filterActive, workers, policyByTask, onOpen, multi
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
         {visible.map((task, i) => (
           <Fragment key={task.id}>
-            {i === dropIndex && <CardDropLine first={i === 0} />}
+            {i === lineIndex && <CardDropLine first={i === 0} />}
             <Card task={task} worker={workers.get(task.id)} policy={policyByTask[task.id]} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} titleById={titleById} isDoneLane={doneLane} onOpen={() => onOpen(task.id)} tabIndex={tabFor(task.id)} />
           </Fragment>
         ))}
-        {dropIndex === visible.length && visible.length > 0 && <CardDropLine first={false} />}
+        {lineIndex === visible.length && visible.length > 0 && <CardDropLine first={false} />}
         {/* The reveal for the done-lane page. Sits INSIDE the lane's own scroll region (so it trails the
             last rendered card rather than pinning to the lane footer) and is full-width so it reads as
             the continuation of the list it extends, not as a card. One-way: revealing more is not a
@@ -1597,7 +1716,7 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
     // listener stays on the grip, so Enter/Space on the open target can never start a drag.
     <div ref={setNodeRef}
       onPointerDown={(e) => { if (e.pointerType !== "touch") listeners?.onPointerDown?.(e); }}
-      className="loom-board-card" data-selected={selected ? "" : undefined} data-dragging={isDragging ? "" : undefined}
+      className="loom-board-card" data-card-id={task.id} data-selected={selected ? "" : undefined} data-dragging={isDragging ? "" : undefined}
       style={{
         // position:relative anchors the merge-gate hairline (MergeTrack), which is absolutely positioned
         // flush at the card's bottom edge so it adds no height.
@@ -1645,6 +1764,7 @@ function Card({ task, worker, policy, multiRepo, repos, primaryRepoPath, titleBy
             pill is a real link to its session, and a link may not sit inside role=button. */}
         <div style={{ flex: 1, minWidth: 0 }}>
         <div role="button" tabIndex={tabIndex} data-board-nav={task.id} className="loom-board-open"
+          aria-keyshortcuts={isDoneLane ? undefined : "Alt+ArrowUp Alt+ArrowDown"}
           onMouseDown={(e) => { if (e.ctrlKey || e.metaKey || e.shiftKey) e.preventDefault(); }}
           onClick={(e) => { if (!nav?.press(task.id, e)) onOpen(); }}
           onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
