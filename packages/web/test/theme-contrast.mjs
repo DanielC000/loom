@@ -93,6 +93,11 @@ const PAIRS = [
   ["Working capsule text", "work-text", "work-soft", 4.5],
   ["Needs-you capsule text", "attn-text", "attn-soft", 4.5],
   ["Needs-you text on panel", "attn-text", "surface", 4.5],
+  ["Amber text on page", "attn-fg", "bg", 4.5],
+  ["Amber text on panel", "attn-fg", "surface", 4.5],
+  ["Amber text on a raised row", "attn-fg", "surface-2", 4.5],
+  ["Amber text in an inset block", "attn-fg", "inset", 4.5],
+  ["Amber glyph on a needs-you band", "attn-fg", "attn-band", 4.5],
   ["Error capsule text", "danger-text", "danger-soft", 4.5],
   ["Error text on panel", "danger-text", "surface", 4.5],
   ["Danger button label", "on-danger", "danger-fill", 4.5],
@@ -125,6 +130,13 @@ for (const [theme, t] of Object.entries(THEMES)) {
     assert.ok(lum(t["term-bg"]) < 0.05, `--loom-term-bg in ${theme} is ${toHex(t["term-bg"])}, not a dark well`);
   });
 }
+
+// The text-safe signal shades only exist to fix LIGHT text; dark must render exactly what it did before
+// (cards 92d197ed, 9e67a900), so each -fg token repeats its fill byte-for-byte in the dark block.
+check("dark: --loom-live-fg and --loom-attn-fg equal their fill tokens exactly", () => {
+  assert.deepEqual(RAW.dark["live-fg"], RAW.dark.live);
+  assert.deepEqual(RAW.dark["attn-fg"], RAW.dark.attn);
+});
 
 check("the light theme really is light and the dark theme really is dark", () => {
   assert.ok(lum(THEMES.light.bg) > 0.8, `light --loom-bg is ${toHex(THEMES.light.bg)}`);

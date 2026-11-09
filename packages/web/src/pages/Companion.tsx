@@ -1842,7 +1842,7 @@ function ShieldBolt() {
 }
 // A grants/keeps disclosure row: a leading icon + rich text. `tone` tints the icon (red = a grant, amber = a keep).
 function DiscItem({ tone: t, children }: { tone: "danger" | "attn"; children: ReactNode }) {
-  const c = t === "danger" ? color.danger : color.attn;
+  const c = t === "danger" ? color.danger : color.attnFg;
   return (
     <li style={{ display: "flex", gap: 9, alignItems: "flex-start", fontSize: fs.sm, lineHeight: 1.55, color: color.text2 }}>
       <svg viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", marginTop: 2, width: 13, height: 13 }} aria-hidden>
@@ -2807,7 +2807,7 @@ function Callout({ tone, children, testId }: { tone: "attn"; children: ReactNode
   const c = tone === "attn" ? color.attn : color.lineStrong;
   return (
     <div data-testid={testId} style={{ display: "flex", gap: 8, padding: "8px 10px", border: `1px solid ${c}`, borderRadius: radius.base, background: wash(color.attn, 6) }}>
-      <span aria-hidden style={{ color: c }}>▲</span>
+      <span aria-hidden style={{ color: tone === "attn" ? color.attnFg : c }}>▲</span>
       <span style={{ fontSize: fs.sm, color: color.text2, lineHeight: 1.5 }}>{children}</span>
     </div>
   );

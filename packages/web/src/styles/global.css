@@ -66,6 +66,9 @@
   --loom-attn-text: oklch(0.86 0.155 76);
   --loom-attn-soft: oklch(0.34 0.095 66);
   --loom-on-attn: oklch(0.18 0.04 66);
+  /* Amber as bare small text or a glyph on a page surface (▲, "refused" counts and marks). Dark keeps the
+     fill value byte-for-byte; light drops to a shade that clears 4.5:1 (card 9e67a900). */
+  --loom-attn-fg: oklch(0.82 0.17 70);
   --loom-danger: oklch(0.68 0.22 25);
   --loom-danger-text: oklch(0.76 0.17 24);
   --loom-danger-soft: oklch(0.31 0.11 25);
@@ -135,6 +138,7 @@
   --loom-attn-text: oklch(0.5 0.14 55);
   --loom-attn-soft: oklch(0.94 0.08 80);
   --loom-on-attn: oklch(0.18 0.04 60);
+  --loom-attn-fg: oklch(0.5 0.14 55);
   --loom-danger: oklch(0.56 0.23 25);
   --loom-danger-text: oklch(0.5 0.21 25);
   --loom-danger-soft: oklch(0.945 0.045 25);
@@ -2784,7 +2788,7 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-ocx.ok { color: var(--loom-live-fg); }
 .loom-mcp-ocx.error { color: var(--loom-danger); }
 .loom-mcp-ocx.pending { color: var(--loom-text-3); }
-.loom-mcp-ocx.refused { color: var(--loom-attn); cursor: help; }
+.loom-mcp-ocx.refused { color: var(--loom-attn-fg); cursor: help; }
 .loom-mcp-right {
   grid-column: 2;
   grid-row: 1 / span 2;
@@ -2797,7 +2801,7 @@ button.loom-atlas-node.is-branch.is-open {
   font-variant-numeric: tabular-nums;
 }
 .loom-mcp-errn { color: var(--loom-danger); }
-.loom-mcp-refn { color: var(--loom-attn); }
+.loom-mcp-refn { color: var(--loom-attn-fg); }
 .loom-mcp-chev {
   display: inline-block;
   margin-left: 8px;
@@ -3043,9 +3047,9 @@ button.loom-atlas-node.is-branch.is-open {
 }
 .loom-mcp-blk.error { color: var(--loom-danger); border-color: color-mix(in oklab, var(--loom-danger) 40%, var(--loom-line)); }
 .loom-mcp-blk.pending { color: var(--loom-text-3); }
-.loom-mcp-blk.refused { color: var(--loom-attn); border-color: color-mix(in oklab, var(--loom-attn) 40%, var(--loom-line)); }
+.loom-mcp-blk.refused { color: var(--loom-attn-fg); border-color: color-mix(in oklab, var(--loom-attn) 40%, var(--loom-line)); }
 .loom-mcp-hint { margin: 5px 0 0; font-family: var(--loom-font-ui); font-size: 11px; color: var(--loom-text-3); }
-.loom-mcp-hint.refused { color: color-mix(in oklab, var(--loom-attn) 70%, var(--loom-text-2)); }
+.loom-mcp-hint.refused { color: color-mix(in oklab, var(--loom-attn-fg) 70%, var(--loom-text-2)); }
 /* A recorded (codex) call's detail: no Asked/Answered columns, so its note spans the row (card d4d3481e). */
 .loom-mcp-obnote { grid-column: 1 / -1; }
 .loom-mcp-obnote > .loom-mcp-hint:first-child { margin-top: 0; }

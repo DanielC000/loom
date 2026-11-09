@@ -211,6 +211,11 @@ test("the main contrast pairs clear AA in both themes, read from live token valu
     ["working capsule text", "--loom-work-text", "--loom-work-soft", 4.5],
     ["needs-you capsule text", "--loom-attn-text", "--loom-attn-soft", 4.5],
     ["needs-you text on panel", "--loom-attn-text", "--loom-surface", 4.5],
+    ["amber text on page", "--loom-attn-fg", "--loom-bg", 4.5],
+    ["amber text on panel", "--loom-attn-fg", "--loom-surface", 4.5],
+    ["amber text on a raised row", "--loom-attn-fg", "--loom-surface-2", 4.5],
+    ["amber text in an inset block", "--loom-attn-fg", "--loom-inset", 4.5],
+    ["amber glyph on a needs-you band", "--loom-attn-fg", ATTN_BAND, 4.5],
     ["error capsule text", "--loom-danger-text", "--loom-danger-soft", 4.5],
     ["error text on panel", "--loom-danger-text", "--loom-surface", 4.5],
     ["danger button label", "--loom-on-danger", "--loom-danger-fill", 4.5],
@@ -254,7 +259,7 @@ test("every token in the contrast table is defined, so no pair is measured again
     "--loom-ring", "--loom-track", "--loom-meter-ok",
     "--loom-live", "--loom-live-text", "--loom-live-soft", "--loom-live-fg", "--loom-surface-2",
     "--loom-work", "--loom-work-text", "--loom-work-soft",
-    "--loom-attn", "--loom-attn-text", "--loom-attn-soft", "--loom-on-attn",
+    "--loom-attn", "--loom-attn-text", "--loom-attn-soft", "--loom-on-attn", "--loom-attn-fg", "--loom-inset",
     "--loom-danger", "--loom-danger-text", "--loom-danger-soft", "--loom-danger-fill", "--loom-on-danger",
   ];
   await page.goto(loomDaemon.baseURL + "/settings");

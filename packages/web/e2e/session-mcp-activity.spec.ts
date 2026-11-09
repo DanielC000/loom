@@ -214,7 +214,9 @@ test.describe("session Loom MCP activity strip", () => {
     await expect(page.getByTestId("mcp-activity-refused-count")).toHaveText("· 1 refused");
     await expect(page.getByTestId("mcp-activity-refused-count")).toHaveAttribute("title", /error field/);
     await expect(bar).not.toContainText("error");
+    // The bead is a fill (--loom-attn); the "!" mark and the answer are text (--loom-attn-fg, card 9e67a900).
     const amber = await cssColor(page, "--loom-attn");
+    const amberText = await cssColor(page, "--loom-attn-fg");
     await expect(bar.locator(".loom-mcp-bead.refused")).toHaveCount(1);
     await expect(bar.locator(".loom-mcp-bead.refused")).toHaveCSS("border-top-color", amber);
 
@@ -225,7 +227,7 @@ test.describe("session Loom MCP activity strip", () => {
     await expect(refusedRow).toContainText("Tried to spawn a worker for card 7e2a90b4");
     const mark = refusedRow.getByRole("img", { name: "refused" });
     await expect(mark).toHaveText("!");
-    await expect(mark).toHaveCSS("color", amber);
+    await expect(mark).toHaveCSS("color", amberText);
     // The plain ok call and the call whose answer was cut at 2 KB both stay ok.
     await expect(page.getByTestId("mcp-call-1")).toHaveAttribute("data-outcome", "ok");
     await expect(page.getByTestId("mcp-call-3")).toHaveAttribute("data-outcome", "ok");
@@ -256,7 +258,7 @@ test.describe("session Loom MCP activity strip", () => {
     // The answer is the refusal body, in amber, with the heuristic stated beside it.
     await refusedRow.click();
     await expect(page.getByTestId("mcp-call-2-answer")).toContainText("concurrency cap reached");
-    await expect(page.getByTestId("mcp-call-2-answer")).toHaveCSS("color", amber);
+    await expect(page.getByTestId("mcp-call-2-answer")).toHaveCSS("color", amberText);
     await expect(page.getByTestId("mcp-call-2-detail")).toContainText("Read as refused.");
   });
 

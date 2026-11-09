@@ -46,6 +46,8 @@ export const color = {
   attnText: "var(--loom-attn-text)",
   attnSoft: "var(--loom-attn-soft)",
   onAttn: "var(--loom-on-attn)",
+  // Amber for bare small text / glyphs on a page surface. Same as `attn` in dark; text-safe in light.
+  attnFg: "var(--loom-attn-fg)",
   danger: "var(--loom-danger)",
   dangerText: "var(--loom-danger-text)",
   dangerSoft: "var(--loom-danger-soft)",

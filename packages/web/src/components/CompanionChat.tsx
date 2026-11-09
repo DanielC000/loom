@@ -588,7 +588,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
           data-session-id={sessionId}
           role="alert"
         >
-          <span aria-hidden style={{ fontFamily: font.mono, color: color.attn }}>▲</span>
+          <span aria-hidden style={{ fontFamily: font.mono, color: color.attnFg }}>▲</span>
           <span>
             <strong style={{ color: color.text }}>{name}'s home route is refused.</strong>{" "}
             Proactive delivery (heartbeat/reminder/attention-push) can't reach it — fix the home under{" "}
@@ -599,7 +599,7 @@ export function CompanionChat({ sessionId, title, armed, visible = true, onConve
 
       {armed === false && (
         <div style={notice("attn")} role="status">
-          <span aria-hidden style={{ fontFamily: font.mono, color: color.attn }}>▲</span>
+          <span aria-hidden style={{ fontFamily: font.mono, color: color.attnFg }}>▲</span>
           <span>
             This companion has no in-app route yet, so a message won't reach it — bind one under{" "}
             <strong style={{ color: color.text }}>Manage</strong> first.
