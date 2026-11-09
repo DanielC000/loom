@@ -1,8 +1,9 @@
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import type { Schedule } from "@loom/shared";
+import { describeCron, type Schedule } from "@loom/shared";
 import { api } from "../lib/api";
 import { Panel, SectionLabel, Chip } from "./ui";
+import { relativeResets } from "./atlasHome";
 import { color, font, fs, radius } from "../theme";
 
 // THE PROJECT'S CRON SCHEDULES, read-only — one component, two mounts.
@@ -50,15 +51,53 @@ export function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string
   );
 }
 
+// One schedule: name first, then its cadence in words, then who it fires; the status sits at the far
+// end. The whole row is a link to the Automation page's Time tab (where the edit lives), never a control
+// of its own. The row wraps instead of squeezing, so at phone width the chip and the status drop to a
+// second line rather than breaking a word one letter per line.
+//
+// The cadence text is the shared `describeCron`, the same words the Automation table shows, and it
+// returns the raw cron for any shape it doesn't model. The raw cron is always on the hover title.
 function ScheduleRow({ s, agentName }: { s: Schedule; agentName: string }) {
+  const navigate = useNavigate();
+  const cadence = describeCron(s.cron);
+  const exact = s.nextFireAt ? exactMinute(s.nextFireAt) : null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: font.mono, fontSize: fs.mono, color: color.text2,
-      border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 8px" }}>
-      <span style={{ color: color.text2 }}>{s.cron}</span>
-      <Chip label="agent" value={agentName} />
-      <span style={{ fontSize: fs.xs, color: color.text3 }}>kind:{s.kind}</span>
-      <span style={{ flex: 1 }}>next · {s.nextFireAt ? new Date(s.nextFireAt).toLocaleString() : "—"}</span>
-      <span style={{ fontSize: fs.xs, color: s.enabled ? color.live : color.text3 }}>{s.enabled ? "ON" : "OFF"}</span>
-    </div>
+    <button type="button" className="loom-projsched-row" data-testid="project-schedule-row"
+      onClick={() => navigate("/automation")}
+      title={`${s.name}: ${s.cron}. Edit it on the Automation page.`}
+      style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", columnGap: 10, rowGap: 4, width: "100%",
+        textAlign: "left", cursor: "pointer", color: color.text2, borderRadius: radius.sm, padding: "6px 8px" }}>
+      <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 500, color: color.text, minWidth: 0, overflowWrap: "break-word" }}>{s.name}</span>
+      <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>{cadence}</span>
+      <Chip label="agent" value={agentName} style={{ whiteSpace: "nowrap", flexShrink: 0 }} />
+      <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3, whiteSpace: "nowrap" }}>kind:{s.kind}</span>
+      <span style={{ marginLeft: "auto", fontFamily: font.mono, fontSize: fs.xs, whiteSpace: "nowrap", color: color.text3 }}
+        title={s.enabled && exact ? exact : undefined}>
+        {s.enabled
+          ? <>next <span style={{ color: color.text2 }}>{nextFireLabel(s.nextFireAt)}</span></>
+          : "paused"}
+      </span>
+    </button>
   );
+}
+
+// "in 2h 19m" within a week (the countdown grammar the fleet gauges use), a short date beyond it, where
+// "in 203d 22h" stops being readable. No seconds and no locale-long timestamp either way.
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+function nextFireLabel(nextFireAt: string | null): string {
+  if (!nextFireAt) return "—";
+  const at = Date.parse(nextFireAt);
+  if (Number.isFinite(at) && at - Date.now() > WEEK_MS) {
+    return `on ${new Date(at).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}`;
+  }
+  return relativeResets(nextFireAt);
+}
+
+// The exact local fire time for the hover title: "2026-11-09 03:00". A cron fires on the minute, so
+// seconds would only add noise, and a fixed shape avoids the browser-locale timestamp.
+function exactMinute(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }

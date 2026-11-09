@@ -315,7 +315,8 @@ test.describe("project Overview — empty Schedules collapses to a one-line poin
     seededScheduleIds.push(created.id);
 
     await page.goto(`${loomDaemon.baseURL}/overview`);
-    await expect(page.locator("main").getByText(cron, { exact: true })).toBeVisible();
+    // The row shows the cadence in words (card fe689a28: "0 9 * * *" reads "Every day at 9:00 AM").
+    await expect(page.locator("main").getByText("Every day at 9:00 AM", { exact: true })).toBeVisible();
     await expect(page.locator("main").getByRole("button", { name: /add one on the Automation page/i })).toHaveCount(0);
   });
 });

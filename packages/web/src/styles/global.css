@@ -1239,6 +1239,23 @@ button.loom-cardtab:focus-visible {
   background-color: var(--loom-inset) !important;
 }
 
+/* A project's read-only schedule rows (components/projectSchedules.tsx): each row links to the
+   Automation page, so it gets the same quiet wash on hover plus a firmer edge. Border and background live
+   here, not inline, or the hover rules would be inert. */
+.loom-projsched-row {
+  background: transparent;
+  border: 1px solid var(--loom-line);
+  transition: background-color 80ms linear, border-color 80ms linear;
+}
+.loom-projsched-row:hover {
+  background-color: var(--loom-inset);
+  border-color: var(--loom-line-strong);
+}
+.loom-projsched-row:focus-visible {
+  outline: 2px solid var(--loom-ring);
+  outline-offset: 2px;
+}
+
 /* Vault file-tree rows + breadcrumb segments: a quiet hover wash, no layout shift. */
 .loom-tree-row {
   transition: background-color 80ms linear;

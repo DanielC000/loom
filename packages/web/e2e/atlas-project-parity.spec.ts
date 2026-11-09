@@ -72,14 +72,27 @@ test.describe("the project node's Agents tab carries this project's schedules (c
     await pointer.click();
     await expect(page).toHaveURL(/\/home\?tab=automation/);
 
-    // NON-EMPTY polarity: seed a schedule for THIS project's agent and come back.
+    // NON-EMPTY polarity: seed two schedules for THIS project's agent (one left ON, one switched OFF)
+    // and come back.
     const cron = "0 9 * * *";
-    const res = await fetch(`${loomDaemon.baseURL}/api/schedules`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: uniq("AtlasSched"), agentId: agent.id, cron }),
+    const schedName = uniq("AtlasSched");
+    const pausedName = uniq("PausedSched");
+    const seed = async (name: string, c: string) => {
+      const r = await fetch(`${loomDaemon.baseURL}/api/schedules`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, agentId: agent.id, cron: c }),
+      });
+      expect(r.ok).toBeTruthy();
+      const id = ((await r.json()) as { id: string }).id;
+      seededScheduleIds.push(id);
+      return id;
+    };
+    await seed(schedName, cron);
+    const pausedId = await seed(pausedName, "0 9 * * 1");
+    const off = await fetch(`${loomDaemon.baseURL}/api/schedules/${pausedId}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: false }),
     });
-    expect(res.ok).toBeTruthy();
-    seededScheduleIds.push(((await res.json()) as { id: string }).id);
+    expect(off.ok).toBeTruthy();
 
     await page.goto(loomDaemon.baseURL + "/agents");
     await expect(page.getByTestId("atlas-agents-node")).toBeVisible();
@@ -91,15 +104,30 @@ test.describe("the project node's Agents tab carries this project's schedules (c
     // claim, since any occurrence of the string anywhere on the page satisfied it.
     const strip = page.getByTestId("atlas-agents-schedules");
     await expect(strip).toBeVisible();
-    await expect(strip.getByText(cron, { exact: true })).toBeVisible();
+    // Card fe689a28: each row leads with the schedule's NAME and reads its cadence in words (the shared
+    // describeCron, the same text the Automation table shows), keeping the raw cron on the hover title.
+    const row = strip.getByTestId("project-schedule-row").filter({ hasText: schedName });
+    await expect(row).toBeVisible();
+    await expect(row.getByText("Every day at 9:00 AM", { exact: true })).toBeVisible();
+    await expect(row).toHaveAttribute("title", new RegExp(`: ${cron.replace(/\*/g, "\\*")}\\.`));
+    await expect(row).toContainText(/next in /);
     await expect(strip.getByText(agentName, { exact: true }).first()).toBeVisible();
+    // An OFF schedule says "paused" and shows no next fire time.
+    const pausedRow = strip.getByTestId("project-schedule-row").filter({ hasText: pausedName });
+    await expect(pausedRow).toContainText("paused");
+    await expect(pausedRow).not.toContainText("next");
     // And the agent's own card says it is on a clock — a DIFFERENT statement in a different place
     // (which agents are scheduled, at a glance), not this readout rendered twice. Both are asserted
     // so the pair stays deliberate: a future reader sees two intended sites, not one duplicate.
-    await expect(page.getByTestId(`atlas-agent-card-${agent.id}`).locator(".loom-baychip.is-cron"))
+    // (The card carries one chip per schedule, so this picks the ON schedule's chip out of the two.)
+    await expect(page.getByTestId(`atlas-agent-card-${agent.id}`).locator(".loom-baychip.is-cron", { hasText: cron }))
       .toHaveText(cron);
     // ...and only NOW the absence: the pointer is gone because the section un-collapsed.
     await expect(page.getByRole("button", { name: /add one on the Automation page/i })).toHaveCount(0);
+
+    // EXERCISE the row: it is read-only here, so a click goes to where the edit lives.
+    await row.click();
+    await expect(page).toHaveURL(/\/home\?tab=automation/);
   });
 
   test("switch OFF: the classic /overview still renders the same seeded schedule", async ({ page, loomDaemon }) => {
@@ -116,7 +144,8 @@ test.describe("the project node's Agents tab carries this project's schedules (c
     // No seedAtlasOn — this is the classic shell, where the extraction must have changed NOTHING.
     await pinProject(page, project.id);
     await page.goto(loomDaemon.baseURL + "/overview");
-    await expect(page.locator("main").getByText(cron, { exact: true })).toBeVisible();
+    // Same component as the Atlas mount, so it shows the cadence in words ("30 7 * * *").
+    await expect(page.locator("main").getByText("Every day at 7:30 AM", { exact: true })).toBeVisible();
     await expect(page.getByTestId("atlas-agents-node")).toHaveCount(0);
   });
 });
