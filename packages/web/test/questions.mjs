@@ -5,7 +5,7 @@
 //   node --experimental-strip-types packages/web/test/questions.mjs
 import assert from "node:assert/strict";
 import {
-  DECISION_WATCHDOG_MS, relativeAge, isDecisionWatchdog, questionStateChip, decisionAttentionText,
+  DECISION_WATCHDOG_MS, relativeAge, isDecisionWatchdog, questionStateChip, decisionAttentionText, decisionRoutingLabel,
   requestAttentionLabel, requestOutcome,
   requestFilerLabel, requestRoutedLabel, requestProvenanceText,
   formatAttachmentSize, attachmentDetail, attachmentCountChip, attachmentStateChip,
@@ -97,16 +97,19 @@ check("requestOutcome: a cancelled request reads 'cancelled' + its reason, check
 // Card 5b22b262 — the attention row carries the CURRENT ROUTING TARGET ("who will act on this"),
 // FRAMED as a destination. The old `mgr <id8>` read as the ASKER while carrying a mutable id, so it
 // misattributed the ask after any recycle. Compact surface ⇒ one id, deliberately, not both.
-check("decisionAttentionText: routed to mgr <id8> · <project> — <title>", () => {
+// Card 104a31a4 — the visible text LEADS with the ask, because every surface ellipsizes it at the end;
+// the routing target moves to the row's hover tooltip (decisionRoutingLabel).
+check("decisionAttentionText: <title> · <project>, the ask first and no routing id", () => {
   assert.equal(
     decisionAttentionText({ sessionId: "7a3f91c2aaaa", title: "Rate-limit strategy", projectName: "Loom" }),
-    "routed to mgr 7a3f91c2 · Loom — Rate-limit strategy",
+    "Rate-limit strategy · Loom",
   );
-  // no project name → still renders the routing target + title
-  assert.equal(
-    decisionAttentionText({ sessionId: "b2d40f18bbbb", title: "Protected main" }),
-    "routed to mgr b2d40f18 — Protected main",
-  );
+  // no project name → the title alone
+  assert.equal(decisionAttentionText({ sessionId: "b2d40f18bbbb", title: "Protected main" }), "Protected main");
+  assert.ok(!decisionAttentionText({ sessionId: "b2d40f18bbbb", title: "x" }).includes("b2d40f18"));
+});
+check("decisionRoutingLabel: routed to mgr <id8>, framed as a destination", () => {
+  assert.equal(decisionRoutingLabel({ sessionId: "7a3f91c2aaaa" }), "routed to mgr 7a3f91c2");
 });
 
 // Card 5b22b262 — provenance vs routing. `filedBySessionId` is the IMMUTABLE filer; `sessionId` is the

@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import type { EventTrigger, OrchestrationEvent, Project, QuestionInboxItem, Schedule, SessionListItem, UsageLimitsStatus, UsageWindow } from "@loom/shared";
@@ -274,7 +274,7 @@ export default function WorkspaceHome() {
   const needsPanel = (
     <BandPanel label="Needs you" count={attention.length} action={{ to: "/inbox", label: "Inbox" }}
       testId="atlas-band-needs" style={{ gridColumn: "span 1" }}>
-      <AttentionList items={attention} cap={6} />
+      <AttentionList items={attention} cap={6} fitPanel />
     </BandPanel>
   );
   // The standing, cross-project operators — the complement of the fleet counts above, which
@@ -538,33 +538,123 @@ function attentionSummary(kinds: string[]): string {
  * Control and the project Overview both filter MERGE REQUEST out and render the rich card instead.
  * `compact` (card d0d430d4) rides on that same fact — this is the only Atlas-side AttentionRow caller.
  */
-export function AttentionList({ items, cap }: { items: ReturnType<typeof useAttention>["items"]; cap: number }) {
+export function AttentionList({ items, cap, fitPanel }: {
+  items: ReturnType<typeof useAttention>["items"];
+  cap: number;
+  /** Band panel only (card 104a31a4): show just the rows that fit WHOLE inside the panel's max-height,
+   *  then the "+N more" row, instead of letting the last row clip mid-button at the panel edge. */
+  fitPanel?: boolean;
+}) {
   const navigate = useNavigate();
   const openRequest = useOpenRequest();
+  const listRef = useRef<HTMLDivElement>(null);
+  const capped = items.slice(0, cap);
+  const { n: fitted, measuring } = useFitRows(listRef, !!fitPanel && items.length > 0, capped.map((i) => i.key).join("|"), items.length);
   if (items.length === 0) return <BandEmpty>Nothing needs you right now.</BandEmpty>;
-  const shown = items.slice(0, cap);
+  const shown = fitPanel && !measuring ? capped.slice(0, fitted ?? capped.length) : capped;
+  const hidden = items.length - shown.length;
+  if (fitPanel) {
+    return (
+      <div ref={listRef} data-testid="attention-list">
+        {shown.map((item) => attentionRow(item))}
+        {/* While measuring, the row is always present (with any count) so its own height is part of
+            the sum; the layout effect settles the real count before the browser paints. */}
+        {(hidden > 0 || measuring) && (
+          <Link to="/inbox" className="loom-attn-more" data-testid="attention-more"
+            title="Open the Inbox to see everything waiting on you">
+            +{Math.max(hidden, 1)} more in Inbox <span aria-hidden>↗</span>
+          </Link>
+        )}
+      </div>
+    );
+  }
   return (
     <>
-      {shown.map((item) => {
-        const workerId = item.kind === "MERGE REQUEST" ? item.workerSessionId : null;
-        const footer = workerId
-          ? <CompactMergeAction workerId={workerId} onReview={() => navigate(`/review/${workerId}`)} />
-          : undefined;
-        return (
-          <AttentionRow key={item.key} item={item} footer={footer} compact
-            onOpen={footer
-              ? undefined
-              : item.questionId
-                ? () => openRequest(item.questionId!)
-                : (() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
-            onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
-        );
-      })}
-      {items.length > shown.length && (
-        <BandFoot>+{items.length - shown.length} more in the Inbox</BandFoot>
+      {shown.map((item) => attentionRow(item))}
+      {hidden > 0 && (
+        <BandFoot>+{hidden} more in the Inbox</BandFoot>
       )}
     </>
   );
+
+  function attentionRow(item: (typeof items)[number]) {
+    const workerId = item.kind === "MERGE REQUEST" ? item.workerSessionId : null;
+    const footer = workerId
+      ? <CompactMergeAction workerId={workerId} onReview={() => navigate(`/review/${workerId}`)} />
+      : undefined;
+    return (
+      <AttentionRow key={item.key} item={item} footer={footer} compact
+        onOpen={footer
+          ? undefined
+          : item.questionId
+            ? () => openRequest(item.questionId!)
+            : (() => { const t = attentionOpenTarget(item); return t ? () => navigate(t) : undefined; })()}
+        onDismiss={item.dismissKey ? () => dismissAttention(item.dismissKey!) : undefined} />
+    );
+  }
+}
+
+/**
+ * How many of a list's rows fit WHOLE inside its band panel's `max-height`, leaving room for the
+ * trailing "+N more" row (card 104a31a4). Measures off the real DOM: a row's height depends on its
+ * kind (a merge row carries a footer) and on the column width, so a fixed row count would clip at one
+ * width and waste space at another.
+ *
+ * The room is read from the panel's MAX-height, never its current height or the body's clientHeight:
+ * both of those shrink as rows are removed, so measuring against them would cut again on every pass.
+ * Re-measures only when the panel's WIDTH or the row set changes — not the body's width, which moves
+ * with the scrollbar that the measuring pass itself can cause, and would loop.
+ */
+function useFitRows(listRef: RefObject<HTMLDivElement | null>, enabled: boolean, rowsKey: string, total: number) {
+  const [panelWidth, setPanelWidth] = useState(0);
+  const [fontsTick, setFontsTick] = useState(0);
+  const [fit, setFit] = useState<{ sig: string; n: number } | null>(null);
+  const sig = `${panelWidth}|${fontsTick}|${total}|${rowsKey}`;
+  const measuring = enabled && fit?.sig !== sig;
+
+  useLayoutEffect(() => {
+    const panel = listRef.current?.parentElement?.parentElement;
+    if (!enabled || !panel) return;
+    const ro = new ResizeObserver(() => setPanelWidth(Math.round(panel.getBoundingClientRect().width)));
+    ro.observe(panel);
+    return () => ro.disconnect();
+  }, [enabled, listRef]);
+
+  useEffect(() => {
+    let live = true;
+    document.fonts?.ready.then(() => { if (live) setFontsTick((t) => t + 1); });
+    return () => { live = false; };
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!measuring) return;
+    const list = listRef.current;
+    const body = list?.parentElement;
+    const panel = body?.parentElement;
+    if (!list || !body || !panel) return;
+    const rows = Array.from(list.querySelectorAll<HTMLElement>(':scope > [data-testid="attention-row"]'));
+    const ps = getComputedStyle(panel);
+    const maxH = parseFloat(ps.maxHeight);
+    if (!Number.isFinite(maxH)) { setFit({ sig, n: rows.length }); return; }
+    const top = list.getBoundingClientRect().top + body.scrollTop;
+    // Border-box (global `* { box-sizing: border-box }`): the list's room is the panel's max-height
+    // minus everything above the list and the panel's own bottom padding + border.
+    const room = maxH - (top - panel.getBoundingClientRect().top)
+      - parseFloat(ps.paddingBottom) - parseFloat(ps.borderBottomWidth);
+    const more = list.querySelector<HTMLElement>('[data-testid="attention-more"]');
+    const moreH = more ? more.offsetHeight + parseFloat(getComputedStyle(more).marginTop) : 0;
+    let n = 0;
+    rows.forEach((row, i) => {
+      const r = row.getBoundingClientRect();
+      const bottom = r.bottom + body.scrollTop - top + parseFloat(getComputedStyle(row).marginBottom);
+      const needsMore = i + 1 < total;
+      if (bottom + (needsMore ? moreH : 0) <= room + 0.5) n = i + 1;
+    });
+    // Never zero: one row always shows, and the body's own scroll still reaches it whole.
+    setFit({ sig, n: Math.max(1, n) });
+  }, [measuring, sig, total, listRef]);
+
+  return { n: fit?.n ?? null, measuring };
 }
 
 /**

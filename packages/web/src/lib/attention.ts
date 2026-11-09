@@ -3,7 +3,7 @@ import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, BrowserNotificationKind } from "@loom/shared";
 import { api } from "./api";
 import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, deriveContextExhaustedAlerts, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isBailed, isRateLimited, isStuckBusy, rateLimitBailedDismissKey, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey, showsAsRateLimited } from "./fleet";
-import { decisionAttentionText, requestAttentionLabel } from "./questions";
+import { decisionAttentionText, decisionRoutingLabel, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
 // isRateLimited / isStuckBusy (+ its exclusion helpers) moved to lib/fleet.ts (a JSX-free, runtime-
@@ -516,13 +516,16 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     // row returns, which is the point. Hiding never touches the Request: it stays pending and answerable
     // in the inbox either way.
     const qDismissKey = requestDismissKey(q, now);
+    // Card 104a31a4 — the visible text leads with the ask; the routing target rides the hover tooltip,
+    // after the full untruncated text, so hovering still reveals both.
+    const withRoute = (text: string) => ({ text, hoverText: `${text} · ${decisionRoutingLabel(q)}` });
     items.push(q.sessionOrphaned
       ? {
           key: `q-${q.id}`, tone: "attn", notify: "request", kind: label.replace(" NEEDED", " ORPHANED"), questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           dismissKey: qDismissKey,
           dismissHint: "Hide this alert — this request can never be consumed by its asking session; it stays in the inbox for you to cancel or answer.",
-          text: `${decisionAttentionText(q)} — asking session is gone; may never be consumed`,
+          ...withRoute(`${decisionAttentionText(q)} — asking session is gone; may never be consumed`),
         }
       : stale
       ? {
@@ -533,14 +536,14 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
           // Structural marker for the Snooze affordance (AttentionRow) — set ONLY on this exact branch, so
           // "snooze" never shows on a cyan/amber/orphaned row where there's nothing stale to suppress.
           staleQuestionId: q.id,
-          text: `${decisionAttentionText(q)} — pending since ${new Date(q.createdAt).toLocaleDateString()}, unanswered`,
+          ...withRoute(`${decisionAttentionText(q)} — pending since ${new Date(q.createdAt).toLocaleDateString()}, unanswered`),
         }
       : {
           key: `q-${q.id}`, tone: "attn", notify: "request", kind: label, questionId: q.id, sessionId: q.sessionId,
           projectId: q.projectId,
           dismissKey: qDismissKey,
           dismissHint: "Hide this alert — it returns if this request goes stale or its asking session dies. The request stays pending and answerable in the inbox.",
-          text: decisionAttentionText(q),
+          ...withRoute(decisionAttentionText(q)),
         });
   }
   // Card 68f27faf: a `notice` lands `state:"notice"` immediately (never "pending"), so the loop above —
@@ -562,6 +565,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
       dismissKey: `q:${q.id}:notice`,
       dismissHint: "Hide this alert — it stays until you open it in the Inbox (which marks it read and clears it on its own).",
       text: decisionAttentionText(q),
+      hoverText: `${decisionAttentionText(q)} · ${decisionRoutingLabel(q)}`,
     });
   }
   // A genuinely-pending review keeps its WORKER session alive on the worktree (the worker is only

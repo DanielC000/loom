@@ -28,7 +28,7 @@ The fix is a layout change scoped to the band, via a new **opt-in `compact`** pr
 
 A one-line row is not reachable at 299px. The fixed parts alone — dot, the kind pill, the PENDING chip, "Answer →" and the × — need about 306px of the 279px content box before the text gets a single pixel. Something has to leave that line. So in `compact`:
 
-- **head line** — dot, kind pill, text, and the dismiss ×; `flex-wrap: wrap`.
+- **head line** — dot, kind pill, text, and the dismiss ×. Originally `flex-wrap: wrap` with the title on it. Since card `104a31a4` the head line is `nowrap` and carries only the dot, the kind label (which ellipsizes) and the × (`flex: none`; the wrap had dropped it onto a line of its own). The title moved to its own line below, clamped to two lines. See `docs/decisions/104a31a4-needs-you-ask-first-and-fit-to-panel.md`; the `flex-wrap` paragraph below describes the original shape.
 - **action line** — the chip, the rate-limit/snooze affordances and the open button, right-aligned, `flex-wrap: wrap`. Rendered only when at least one exists.
 - **footer** — the `c2968651` slot, unchanged, below both.
 
@@ -59,5 +59,5 @@ This is the same two-line grammar the band's own operator and agent rows already
 
 - **Do not make `compact` unconditional, item-derived, or passed from a classic surface.** Mission Control, the project Overview and the merge-gate escalation (`components/mergeGate.tsx`) must keep the one-line shape, with `head` as the frame's own direct flex children and **no wrapper element inserted around them** — the text's ellipsis and the `flex: 1` spacer both measure against that element. This is `c2968651`'s prohibition restated, and `atlas-band-row-shape.spec.ts`'s switch-OFF leg is what holds it: it pins the classic row to one DOM child level, one text line, and the absence of the action line.
 - **Do not "simplify" the hoisted row parts back into one inline `head` fragment.** The parts exist so the band can re-order the same children without a second copy of any of them; a fragment emits no DOM node, which is what keeps the classic render identical.
-- **Do not give the compact text `flex: auto`, drop its `nowrap`, or re-add a `flex: 1` spacer to the head line.** Each one on its own restores the 0px-wide, 486px-tall span.
+- **Do not put the compact text back on a shrinking flex line without a floor, or re-add a `flex: 1` spacer to the head line.** That is what produced the 0px-wide, 486px-tall span. Since card `104a31a4` the text has its own full-width line, clamped to two lines (`-webkit-line-clamp: 2`), which holds its height instead of `nowrap`.
 - **Do not fix this in `styles/global.css` against `.loom-bandbody`.** The row's layout is inline-styled per shape; a stylesheet rule keyed to the band would also have to reach the KPI pop-over's copy of the same list, and the two would drift.

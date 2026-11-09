@@ -3088,11 +3088,10 @@ button.loom-kpi.is-open {
    a neighbouring column wider, and do not flatten this track back toward 1fr: at 1fr the band
    gives Pulse less room at 1440 than the phone layout gives it at 420.
 
-   ⚠️ The FIRST track's 1.7fr is pinned from the other end, and by a different card: below
-   ~300px of panel body the compact attention row's HEAD line wraps, taking the row from 64px
-   to 85px and reddening `atlas-band-row-shape.spec.ts`'s `<= 80` guard (card d0d430d4) at the
-   1600px width that spec pins. 1.7fr holds that track at 329px there, just past the 325px it
-   had before this budget. Lowering it to widen another column re-breaks that guard.
+   ⚠️ The FIRST track's 1.7fr is pinned from the other end, and by a different card: it is the
+   Needs-you column, and the narrower it gets the less of each compact attention row's ask fits
+   in its two clamped lines (cards d0d430d4, 104a31a4). 1.7fr holds that track at 329px at
+   1600px. Lowering it to widen another column costs the reader the ask itself.
 
    @decision b4442d27 — the fifth track is Pulse on BOTH nodes and its budget is additive, not
    proportional. Never return it to a bare 1fr and never remove or lower the 308px floor. */
@@ -3101,7 +3100,10 @@ button.loom-kpi.is-open {
   grid-template-columns:
     minmax(0, 1.7fr) minmax(0, 1.3fr) minmax(0, 0.9fr) minmax(0, 0.8fr) minmax(308px, 1.9fr);
   gap: 10px;
-  align-items: stretch;
+  /* `start`, not `stretch` (card 104a31a4): stretched, every panel took the height of the tallest
+     (usually Needs you), leaving the quiet ones as ~260px of empty frame at 1920. A panel is now as
+     tall as its content, up to `.loom-bandpanel`'s max-height. */
+  align-items: start;
 }
 /* ⛔ REQUIRED by the disclosure below (card 44f725fe), and the same trap card 25c08fba's own
    record names from the tab-body side: the `display: grid` directly above is an AUTHOR rule, so it
@@ -3185,10 +3187,38 @@ button.loom-kpi.is-open {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  /* A fixed height is what makes the band a BAND — five panels on one line, each owning its
-     own scroll — rather than five columns of wildly different length. */
-  height: 320px;
+  /* A capped height is what makes the band a BAND — five panels on one line, each owning its
+     own scroll — rather than five columns of wildly different length. A cap, not a fixed height
+     (card 104a31a4): a quiet panel collapses to its one-line empty state instead of standing as
+     an empty frame, and `AttentionList`'s `fitPanel` reads THIS value to decide how many rows fit. */
+  max-height: 320px;
   padding: 10px 12px 12px;
+}
+/* The Needs-you panel's explicit overflow row (card 104a31a4): the rows that did not fit, and the
+   way to them. A link with the row's own frame, so it reads as the list's last entry rather than
+   as a footnote, and so a clipped list never looks like a rendering error. */
+.loom-attn-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  /* Slim on purpose: at the 320px cap three compact rows (68.5px + 6px gap each) leave ~29px, and a
+     31px overflow row would cost the reader a whole third row. */
+  padding: 4px 10px;
+  border: 1px dashed var(--loom-line-strong);
+  border-radius: var(--loom-radius-sm);
+  font-size: var(--loom-fs-sm);
+  line-height: 1.4;
+  color: var(--loom-text-2);
+  text-decoration: none;
+}
+.loom-attn-more:hover {
+  color: var(--loom-text);
+  border-color: var(--loom-text-3);
+}
+.loom-attn-more:focus-visible {
+  outline: 2px solid var(--loom-ring);
+  outline-offset: 2px;
 }
 .loom-bandslot {
   background: transparent;
@@ -4013,10 +4043,9 @@ button.loom-ovbrief-cell.is-open {
   }
 }
 @media (max-width: 820px) {
-  .loom-bandpanel {
-    height: auto;
-    max-height: 300px;
-  }
+  /* `.loom-bandpanel` keeps its 320px cap here too (card 104a31a4). This rule used to release the
+     fixed height to `auto` under a 300px cap; the base rule is a cap now, and Needs-you renders only
+     whole rows, so 300 bought nothing but the loss of a second row at phone width. */
   /* The second fold. Two of three, never the five 148px columns `auto-fit` used to derive here —
      which orphaned tile six at phone width exactly as it did at 1440 (card 14e48890). */
   .loom-kpideck {

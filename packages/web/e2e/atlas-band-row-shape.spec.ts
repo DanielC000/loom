@@ -14,9 +14,9 @@
 //   * The action is MEASURED against the band body's own box at BOTH widths, and then CLICKED, with
 //     the shared Request modal appearing as the observable — "inside the panel" and "actually
 //     reachable" are two different claims and a clipped button can still satisfy one of them.
-//   * The text leg asserts a NON-ZERO width AND a one-line height AND `white-space: nowrap`. The
-//     width is the half that fails if only `nowrap` is added (the span still shrinks to 0 and shows
-//     nothing); the height is the half that fails if only the flex basis is fixed.
+//   * The text leg asserts a real width AND a bounded height AND the two-line clamp. Since card
+//     104a31a4 the ask has its own line under the kind label, clamped to two lines, so the width is
+//     that whole line's and the clamp is what holds the height to two lines.
 //   * The overflow sweep is the card's own sound check — `scrollWidth > clientWidth` over boxes whose
 //     COMPUTED `overflow-x` is `visible`. Skipping boxes with an x-scrollable ancestor would be
 //     vacuous here: the band body is `overflow-y:auto`, which forces its own `overflow-x` to `auto`.
@@ -121,7 +121,7 @@ async function measureBand(page: Page, managerSessionId: string) {
     }
     return {
       body: box(body), row: box(row), text: box(text),
-      textWhiteSpace: text ? getComputedStyle(text).whiteSpace : null,
+      textLineClamp: text ? getComputedStyle(text).getPropertyValue("-webkit-line-clamp") : null,
       spilling,
     };
   }, managerSessionId);
@@ -185,12 +185,15 @@ test.describe("Atlas Needs-you band row shape (card d0d430d4)", () => {
       // …and nothing in the row spills horizontally at all, by the card's own sound check.
       expect.soft(m.spilling, `${at}: boxes with overflow-x:visible whose scrollWidth exceeds clientWidth`).toEqual([]);
 
-      // ── DEFECT (2): one line, with text actually ON it. 0px wide and 486px tall was the bug.
-      expect.soft(m.textWhiteSpace, `${at}: the title must not wrap`).toBe("nowrap");
-      expect.soft(textBox.w, `${at}: rendered title width`).toBeGreaterThan(40);
-      expect.soft(textBox.h, `${at}: rendered title height — one 12px mono line is ~18px`).toBeLessThanOrEqual(24);
-      // The row is the head line plus its action line, not a 500px column of single characters.
-      expect.soft(rowBox.h, `${at}: row height`).toBeLessThanOrEqual(80);
+      // ── DEFECT (2): text actually ON its line, at most two lines tall. 0px wide and 486px tall was
+      //    the bug. Since card 104a31a4 the ask has its own full-width line under the kind label,
+      //    clamped to two lines so it can be READ (sharing the head line left ~12 characters at 1440).
+      //    The clamp is what bounds the height, so it is pinned alongside the box.
+      expect.soft(m.textLineClamp, `${at}: the ask is clamped to two lines`).toBe("2");
+      expect.soft(textBox.w, `${at}: rendered ask width — its own line, not a squeezed sliver`).toBeGreaterThan(150);
+      expect.soft(textBox.h, `${at}: rendered ask height — two 12px lines at 1.35 are ~33px`).toBeLessThanOrEqual(40);
+      // The row is head + ask + action line, not a 500px column of single characters.
+      expect.soft(rowBox.h, `${at}: row height`).toBeLessThanOrEqual(120);
       // And the row never widens past its column.
       expect.soft(rowBox.right, `${at}: row right edge vs band body right ${body.right}`).toBeLessThanOrEqual(body.right);
 
@@ -239,7 +242,7 @@ test.describe("Atlas Needs-you band row shape (card d0d430d4)", () => {
     const popRow = pop.locator(`[data-testid="attention-row"][data-session-id="${seeded.mgr.sessionId}"]`);
     await expect(popRow).toBeVisible();
     await expect(popRow.getByTestId("attention-row-actions")).toHaveCount(1);
-    await expect(popRow.getByTestId("attention-row-text")).toHaveCSS("white-space", "nowrap");
+    await expect(popRow.getByTestId("attention-row-text")).toHaveCSS("-webkit-line-clamp", "2");
   });
 
   test("switch OFF: the classic Overview keeps the one-line row — direct-child text that still wraps, its spacer, and no action line", async ({ page, loomDaemon }) => {

@@ -763,8 +763,11 @@ test.describe("request provenance vs routing (card 5b22b262)", () => {
     // The attention queue is a COMPACT surface where the roomy "filed by X · now routed to Y" does not
     // fit, so it deliberately carries ONE id — the CURRENT routing target, i.e. who will act on this —
     // and FRAMES it as a destination. The bare `mgr <id>` it replaced read as the asker while carrying a
-    // mutable id, which is the same misattribution the rows above fix.
-    await expect(row).toContainText(`routed to mgr ${short(routed.sessionId)}`);
+    // mutable id, which is the same misattribution the rows above fix. Card 104a31a4 moved it off the
+    // visible line into the hover tooltip, so the ask leads and is never the part the ellipsis eats.
+    await expect(row).toHaveAttribute("title", new RegExp(`routed to mgr ${short(routed.sessionId)}`));
+    await expect(row).not.toContainText("routed to mgr");
+    expect(((await row.textContent()) ?? "").startsWith(title)).toBe(true);
     // ⛔ And NOT the filer: on this surface the filer is the id that CANNOT be acted on.
     await expect(row).not.toContainText(short(filed));
     await shoot(page, "provenance-attention-row.png");

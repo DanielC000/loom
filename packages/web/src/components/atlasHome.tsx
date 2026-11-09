@@ -598,8 +598,9 @@ export function BandPanel({ label, count, action, children, style, testId }: {
   return (
     // Horizontal padding stays at the pre-Graphite 12px, not the kit Panel's 16: the band's five tracks
     // are budgeted to the pixel (card b4442d27, atlas-pulse-band-width.spec.ts), and 8px more padding on
-    // the Pulse track starves its project chip below its 1440 floor.
-    <Panel data-testid={testId} className="loom-bandpanel" style={{ paddingLeft: 12, paddingRight: 12, ...style }}>
+    // the Pulse track starves its project chip below its 1440 floor. The bottom is the stylesheet's 12px
+    // too (card 104a31a4): the kit's 16 cost the Needs-you list the last 4px a third row needs at the cap.
+    <Panel data-testid={testId} className="loom-bandpanel" style={{ paddingLeft: 12, paddingRight: 12, paddingBottom: 12, ...style }}>
       <div className="loom-bandhead">
         {/* nowrap on both: a band column is NARROW — MEASURED at 1440 on a 1156px content column,
             the five tracks are 287 / 220 / 152 / 135 / 321 px, so three of the five are under

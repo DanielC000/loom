@@ -191,9 +191,8 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   // and a fragment adds no DOM node, so the classic `head` below renders the element sequence it
   // always did, attributes and inline styles included.
   const dot = <Dot tone={item.tone} glow={item.tone === "attn"} />;
-  const kindLabel = (
-    <span style={{ fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: tone[item.tone], whiteSpace: "nowrap" }}>{attentionKindLabel(item.kind)}</span>
-  );
+  const kindStyle = { fontFamily: font.ui, fontSize: fs.sm, fontWeight: 600, color: tone[item.tone], whiteSpace: "nowrap" } as const;
+  const kindLabel = <span style={kindStyle}>{attentionKindLabel(item.kind)}</span>;
   const textBase = { fontSize: fs.sm, color: color.text2, overflow: "hidden", textOverflow: "ellipsis" } as const;
   /* `title` (card ed0858dc): the row ellipsizes, and some kinds carry detail too long for one line
      (the isolation-gap `reason` strings run to a paragraph each) — so hover reveals `hoverText` when
@@ -215,7 +214,7 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   const dismissButton = onDismiss && (
     <Button variant="ghost" onClick={onDismiss} aria-label="Dismiss this alert"
       title={`${item.dismissHint || DISMISS_FALLBACK_HINT} ${DISMISS_INVARIANT}`}
-      style={{ padding: "0 6px", fontSize: fs.lg, lineHeight: 1 }}>×</Button>
+      style={{ padding: "0 6px", fontSize: fs.lg, lineHeight: 1, flex: "none" }}>×</Button>
   );
   const head = (
     <>
@@ -254,20 +253,28 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   // merge-gate escalation) must keep the one-line shape below, with `head` as the frame's own direct
   // flex children and no wrapper element inserted around them.
   if (compact) {
-    // `nowrap` is what stops the 0px/486px collapse; `wrap` guarantees the title drops to its own
-    // full-width line rather than being squeezed to nothing (also the long-kind net); `flex: 1 1 80px`
-    // — not `auto` — is what keeps it ON the head line, so the row stays two lines. The × rides the
-    // head line because dismissing is a VIEW action on the ROW (see DISMISS_INVARIANT), not a sibling
-    // of its answer. Each was reverted alone and re-measured; the record has which leg each one moves.
+    // Three lines (card 104a31a4): the head line (dot, kind, ×), then the ASK on its own full-width
+    // line clamped to two, then the actions. Sharing the head line left the ask ~12 characters at
+    // 1440; its own line shows ~60+. The head line never wraps: the kind label is what ellipsizes
+    // (full kind on hover), and the × is `flex: none`, because dismissing is a VIEW action on the ROW
+    // (see DISMISS_INVARIANT), not a sibling of its answer. The ask is indented under the kind label
+    // (8px dot + 10px gap).
+    //
+    // @decision 104a31a4 — the ask keeps its own clamped line; never put it back beside the kind label.
     const actions = [stateChip, clearRateLimit, snooze, openButton].filter(Boolean);
+    const kindText = attentionKindLabel(item.kind);
     return (
-      <div {...hooks} style={{ display: "flex", flexDirection: "column", gap: 6, ...frame }}>
-        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, rowGap: 4, minWidth: 0 }}>
+      <div {...hooks} style={{ display: "flex", flexDirection: "column", gap: 4, ...frame }}>
+        <div style={{ display: "flex", flexWrap: "nowrap", alignItems: "center", gap: 10, minWidth: 0 }}>
           {dot}
-          {kindLabel}
-          {textSpan({ whiteSpace: "nowrap", flex: "1 1 80px", minWidth: 0 })}
+          <span data-testid="attention-row-kind" title={kindText}
+            style={{ ...kindStyle, flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{kindText}</span>
           {dismissButton}
         </div>
+        {textSpan({
+          display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 2,
+          whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35, paddingLeft: 18, minWidth: 0,
+        })}
         {actions.length > 0 && (
           <div data-testid="attention-row-actions"
             style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 8, rowGap: 6 }}>

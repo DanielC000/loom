@@ -291,6 +291,11 @@ test.describe("the Workspace node's dashboard disclosure (card 4a0ad464)", () =>
     await expect(page.getByTestId("atlas-banddisc-summary")).toBeEmpty();
 
     const expanded = await gridBox(page);
+    // The band's own height, read unfolded. Since card 104a31a4 the band aligns to start and its panels
+    // are capped rather than fixed at 320px, so a quiet daemon's band is shorter than it used to be: the
+    // lift is asserted against what the band actually occupied, not a remembered constant.
+    const bandHeight = (await page.getByTestId("atlas-dashboard-band").boundingBox())!.height;
+    expect(bandHeight, "the unfolded band occupies real height").toBeGreaterThan(60);
 
     // ── THE FOLD ACTUALLY MOVES THE PRIMARY SURFACE. ──
     await bar(page).click();
@@ -306,8 +311,8 @@ test.describe("the Workspace node's dashboard disclosure (card 4a0ad464)", () =>
     expect(stillShowing, "a band panel is still on screen with the dashboard folded").toEqual([]);
 
     const collapsed = await gridBox(page);
-    expect(collapsed.top, `grid top: ${expanded.top} unfolded → ${collapsed.top} folded`)
-      .toBeLessThan(expanded.top - 200);
+    expect(expanded.top - collapsed.top, `grid top: ${expanded.top} unfolded → ${collapsed.top} folded, band ${bandHeight}px`)
+      .toBeGreaterThanOrEqual(bandHeight - 1);
     // ── THE WIDTH IS NOT THE PRICE — the retired Deck tab spent 330px of it on a standing rail. ──
     expect(collapsed.width, `grid width: ${expanded.width} unfolded vs ${collapsed.width} folded`)
       .toBe(expanded.width);

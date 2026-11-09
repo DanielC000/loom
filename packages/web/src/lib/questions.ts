@@ -109,16 +109,24 @@ export function requestProvenanceText(q: Pick<Question, "sessionId" | "filedBySe
   return `${requestFilerLabel(q)} · ${requestRoutedLabel(q)}`;
 }
 
-// The attention-queue row text for a pending decision: "routed to mgr <id8> · <project> — <title>". Kept
-// terse so it reads at a glance beside the other attention kinds; the full ask lives on the answer page.
-// This is a COMPACT surface where the full "filed by X · now routed to Y" does not fit, so it carries the
-// CURRENT ROUTING TARGET only — "who will act on this" is the useful thing on an attention row, and it is
-// what the human's answer actually reaches. It is FRAMED as a destination ("routed to mgr …") rather than
-// as the asker, which is the defect: `mgr <id8>` alone read as provenance while carrying a mutable id.
-export function decisionAttentionText(q: Pick<Question, "sessionId" | "title"> & { projectName?: string }): string {
-  const mgr = `routed to mgr ${q.sessionId.slice(0, 8)}`;
+// The attention-queue row text for a pending decision: "<title> · <project>". The ASK leads (card
+// 104a31a4): every surface that shows this string (the Needs-you rows, the ⌘K palette) ellipsizes it at
+// the end, so whatever comes first is what survives. With the routing id first, the question itself was
+// the part cut off, at every width up to 1920px.
+//
+// @decision 104a31a4 — never put the routing id (or anything else) ahead of the title in this string.
+export function decisionAttentionText(q: Pick<Question, "title"> & { projectName?: string }): string {
   const proj = q.projectName ? ` · ${q.projectName}` : "";
-  return `${mgr}${proj} — ${q.title}`;
+  return `${q.title}${proj}`;
+}
+
+// The CURRENT ROUTING TARGET for an attention row, carried in its hover tooltip rather than its visible
+// text (card 104a31a4). This is a COMPACT surface where the full "filed by X · now routed to Y" does not
+// fit, so it names one id: "who will act on this" is the useful fact on an attention row, and it is what
+// the human's answer actually reaches. It is FRAMED as a destination ("routed to mgr …") rather than as
+// the asker (card 5b22b262): `mgr <id8>` alone read as provenance while carrying a mutable id.
+export function decisionRoutingLabel(q: Pick<Question, "sessionId">): string {
+  return `routed to mgr ${q.sessionId.slice(0, 8)}`;
 }
 
 // ── Request-type facet (card 695ebab0 — the Requests Inbox) ─────────────────────────────────────

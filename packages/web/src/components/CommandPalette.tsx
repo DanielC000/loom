@@ -40,7 +40,7 @@ export function CommandPalette() {
   if (!open) return null;
 
   const commands = [
-    ...navPages.map((p) => ({ label: p.label, hint: "page", run: () => navigate(p.to) })),
+    ...navPages.map((p) => ({ label: p.label, tooltip: p.label, hint: "page", run: () => navigate(p.to) })),
     ...attention.flatMap((a) => {
       const target = attentionOpenTarget(a);
       if (!target) return [];
@@ -59,7 +59,10 @@ export function CommandPalette() {
       // A REQUEST opens the shared in-place modal (the provider renders it, so the closing palette can't
       // race the mount); everything else navigates to its route. `go()` closes the palette after `run`.
       const run = isRequest ? () => openRequest(a.questionId!) : () => navigate(target);
-      return [{ label: `${verb} · ${attentionKindLabel(a.kind)} ${a.text}`, hint, run }];
+      const label = `${verb} · ${attentionKindLabel(a.kind)} ${a.text}`;
+      // Card 104a31a4 — `text` leads with the ask; anything a kind keeps OFF the line (a Request's
+      // routing target) is in `hoverText`, so the long label stays reachable on hover here too.
+      return [{ label, tooltip: a.hoverText ? `${verb} · ${attentionKindLabel(a.kind)} ${a.hoverText}` : label, hint, run }];
     }),
   ].filter((c) => c.label.toLowerCase().includes(q.toLowerCase()));
 
@@ -79,7 +82,8 @@ export function CommandPalette() {
           {commands.map((c, i) => (
             <button key={i} onClick={() => go(c.run)}
               style={{ display: "flex", width: "100%", textAlign: "left", justifyContent: "space-between", gap: 8, background: "transparent", border: "none", borderBottom: `1px solid ${color.line}`, color: color.text, padding: "8px 12px", fontFamily: font.ui, fontSize: fs.body, cursor: "pointer" }}>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
+              <span title={c.tooltip}
+                style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.label}</span>
               <span style={{ color: color.text3, fontSize: fs.sm }}>{c.hint}</span>
             </button>
           ))}
