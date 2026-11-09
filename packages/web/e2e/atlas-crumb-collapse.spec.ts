@@ -292,6 +292,14 @@ test.describe("Atlas crumb ancestors stay visible beside a long leaf (card c88ac
       expect(all.map((c) => c.rendered), "only the leaf renders").toEqual([false, false, true]);
       expect(all[2]?.clipped, "the leaf reads in full; pre-fix it was \"Agen…\"").toBe(false);
 
+      // Card d3a17f31: the kit Button's inline padding beat the narrow rule's `padding: 0`, squeezing
+      // the leave glyph to 8px of its 16 inside the 34px square. Both icon Buttons keep the full glyph.
+      for (const [id, icon] of [["atlas-leave", ".loom-atlas-leave-icon"], ["atlas-jump", ".loom-atlas-jump-icon"]] as const) {
+        const w = await page.getByTestId(id).evaluate((el, sel) =>
+          el.querySelector(sel)!.getBoundingClientRect().width, icon);
+        expect(w, `the ${id} icon keeps its 16px width at 390px (got ${w}px)`).toBe(16);
+      }
+
       const more = page.getByTestId("atlas-crumb-more");
       await expect(more).toBeVisible();
       await expect(more).toHaveAccessibleName("Show the full path");

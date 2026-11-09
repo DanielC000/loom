@@ -2150,8 +2150,9 @@ button.loom-atlas-node.is-branch.is-open {
 }
 .loom-atlas-leave {
   /* On the CLASS, never inline: a `style` padding would beat the square icon-sized padding the
-     narrow rule below needs. The value is what the button carried inline before card 9477a5ed. */
-  padding: 5px 12px;
+     narrow rule below needs. The button passes `classPadding`, so the kit sets none inline either
+     (card d3a17f31); the value is the kit's own, so the wide button renders exactly as before. */
+  padding: 4px 12px;
   /* Right-hand chrome never yields to the trail (card c88ac078): a 186-character request title
      squeezed this to two lines at 1440. The trail is the one thing in this row built to shrink. */
   flex: none;

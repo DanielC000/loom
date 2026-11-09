@@ -456,10 +456,10 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
             {/* The ⌘K palette's visible door (card bafbca40) — nothing on an Atlas node mentioned the
                 palette before. Below the breakpoint it becomes a search icon: a key hint means nothing
                 on a phone, and the icon is the same 34px square as the leave button beside it. */}
-            {/* `padding: undefined` drops the kit's inline padding, which would otherwise beat
-                `.loom-atlas-jump`'s own (inline wins over class) and squeeze the narrow icon. */}
+            {/* `classPadding`: `.loom-atlas-jump` owns the padding at every width, so the kit's inline
+                padding cannot beat the narrow rule's and squeeze the icon. */}
             <Button data-testid="atlas-jump" className="loom-atlas-jump" onClick={openCommandPalette}
-              style={{ padding: undefined }}
+              classPadding
               aria-label="Jump to a page, project, agent or session" aria-keyshortcuts="Control+K Meta+K"
               title={`Jump to a page, project, agent or session (${PALETTE_SHORTCUT})`}>
               <span className="loom-atlas-jump-word">Jump to</span>
@@ -490,8 +490,8 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                 at.
 
                 Its padding is `.loom-atlas-leave`'s, NOT inline: inline beats class, so a `style`
-                here would shadow the square icon-sized padding the narrow rule needs. */}
-            <Button data-testid="atlas-leave" onClick={() => setAtlasUi(false)}
+                here (or the kit's own, hence `classPadding`) would shadow the narrow rule's. */}
+            <Button data-testid="atlas-leave" onClick={() => setAtlasUi(false)} classPadding
               aria-label="Switch to the classic UI"
               title="Turn the Atlas preview off and return to the classic UI"
               className="loom-atlas-leave">

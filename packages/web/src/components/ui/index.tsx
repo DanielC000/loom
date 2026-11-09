@@ -80,9 +80,17 @@ export function Panel({
 // @decision db040811 — keep chrome in the class rules.
 type ButtonVariant = "default" | "primary" | "danger" | "ghost";
 
+// `classPadding`: the caller's className owns the padding, so the kit sets none inline. For a button
+// that collapses to a square icon at a breakpoint: inline beats class, so the kit's own padding would
+// shadow the media rule's `padding: 0` and squeeze the icon (8px of a 16px glyph, card d3a17f31). The
+// caller's class must then also set the wide padding itself. Every other Button is unchanged.
+type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant; classPadding?: boolean; ref?: Ref<HTMLButtonElement>;
+};
+
 export function Button({
-  variant = "default", style, className, ...rest
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant; ref?: Ref<HTMLButtonElement> }) {
+  variant = "default", classPadding = false, style, className, ...rest
+}: ButtonProps) {
   // React 19 passes `ref` as a plain prop, so it rides `rest` onto the <button> (a caller that must return
   // focus to a trigger needs it).
   return (
@@ -91,7 +99,7 @@ export function Button({
       className={`loom-btn loom-btn-${variant}${className ? ` ${className}` : ""}`}
       style={{
         borderRadius: radius.base,
-        padding: "4px 12px",
+        ...(classPadding ? null : { padding: "4px 12px" }),
         fontFamily: font.ui,
         fontSize: fs.body,
         fontWeight: 500,
