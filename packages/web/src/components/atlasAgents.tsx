@@ -314,7 +314,7 @@ export function RosterEmpty({ workers, projectName, testId = "atlas-agents-empty
  * exists only under a pointer cannot answer it on a touch screen, and is the last thing a reader
  * finds on a desktop.
  */
-export function AgentsQuickSpawn({ projectId, projectName, testId = "atlas-quickspawn", trigger = "plus" }: {
+export function AgentsQuickSpawn({ projectId, projectName, testId = "atlas-quickspawn", trigger = "plus", tabIndex }: {
   projectId: string;
   projectName?: string;
   /**
@@ -331,6 +331,9 @@ export function AgentsQuickSpawn({ projectId, projectName, testId = "atlas-quick
    * identical — this prop adds a SECOND trigger shape, never a second dialog or a second guard.
    */
   trigger?: "plus" | "button";
+  /** The `"plus"` trigger's tabIndex. The tree's project rows pass -1 except on the row holding the
+   *  tree's roving Tab stop (card fa8a2887). Unset = the button's native order. */
+  tabIndex?: number;
 }) {
   const [open, setOpen] = useState(false);
   const label = projectName ? `Spawn an agent in ${projectName}` : "Spawn an agent";
@@ -342,7 +345,7 @@ export function AgentsQuickSpawn({ projectId, projectName, testId = "atlas-quick
           Spawn <span aria-hidden>+</span>
         </Button>
       ) : (
-        <button type="button" className="loom-atlas-plus" data-testid={`${testId}-open`}
+        <button type="button" className="loom-atlas-plus" data-testid={`${testId}-open`} tabIndex={tabIndex}
           aria-label={label} title={label} aria-expanded={open} onClick={() => setOpen(true)}>+</button>
       )}
       {open && (

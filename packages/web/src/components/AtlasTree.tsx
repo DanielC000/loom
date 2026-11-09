@@ -6,9 +6,18 @@
 // here, colour there.
 
 // A <nav>, not an <aside>: with real nodes in it this IS the app's primary navigation (P1-0 Code
-// Review finding, carried on P1-1). Plain links in document order rather than a role="tree" with
-// roving tabindex — the navigation contract is Tab/Enter, which links give natively, and claiming
-// tree semantics without arrow keys would be a worse lie than the <aside> it replaces.
+// Review finding, carried on P1-1).
+//
+// Keyboard (card fa8a2887): the tree is ONE Tab stop with the tree-view arrow keys, the same
+// roving-tabindex approach as the board (lib/boardFocus.ts, card 591fe6ed). Every row control is
+// marked `data-atlas-tree-item` and the order is read off the DOM at keypress time, so it can never
+// disagree with what is rendered. ↑↓ move, Home/End jump, → expands then steps into the first child,
+// ← collapses then steps out to the parent, Enter activates the row natively. The twists leave the
+// Tab order (→← replace them); a project row's `＋` stays reachable, but only on the row holding the
+// stop. Rows keep their native link/button roles: specs and screen readers both address them that way.
+//
+// @decision fa8a2887 — one Tab stop for the whole tree; never put a twist or a non-current `＋` back
+// in the Tab order, or the stop count grows with the project count again.
 
 // ⛔ Every tier is DERIVED — projects from ActiveProjectProvider's own list, destinations from
 // src/nav.tsx. A hand-copied list shows a node for a page that no longer exists, or silently drops a
@@ -24,7 +33,10 @@
 // @decision ec1aa18e — a declared PROJECT_NODE_TABS destination is never a tree row; the project's
 // Home row carries the landed mark for all of them, as the Workspace home does for its own tabs. The
 // project tier is ordered running-first, alphabetical within each group (lib/projectOrder).
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type FocusEvent, type KeyboardEvent, type ReactNode,
+} from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { CONTEXT_WARN_RATIO, contextWindowForModel, type Project, type SessionListItem } from "@loom/shared";
@@ -117,6 +129,32 @@ function NodeBadge({ count, title }: { count: number; title: string }) {
   return <span className="loom-atlas-nodebadge" title={title}>{count}</span>;
 }
 
+// ── Roving focus (card fa8a2887) ─────────────────────────────────────────────────────────────────
+// The id of the ONE row holding the tree's Tab stop. AtlasTree resolves it against the rendered DOM
+// after every render (see `useLayoutEffect` there); each row only asks "is it me".
+const TREE_ITEM_ATTR = "data-atlas-tree-item";
+const TreeStopContext = createContext<string | null>(null);
+
+/** The props that make one row control a roving-tabindex item. */
+function useTreeItem(id: string) {
+  const stop = useContext(TreeStopContext);
+  return { [TREE_ITEM_ATTR]: id, tabIndex: stop === id ? 0 : -1 } as const;
+}
+
+/** Every row control the tree renders, in document (= visual) order. */
+function treeItems(root: HTMLElement): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(`[${TREE_ITEM_ATTR}]`)];
+}
+
+/** The twist that opens and closes a row, when it has one: its sibling in the same flex row. */
+function rowTwist(item: HTMLElement): HTMLButtonElement | null {
+  const row = item.parentElement;
+  if (!row?.classList.contains("loom-atlas-noderow")) return null;
+  return row.querySelector<HTMLButtonElement>(":scope > .loom-atlas-twistbtn");
+}
+
+const TREE_KEYS: ReadonlySet<string> = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"]);
+
 /** What a row needs to draw a working twist. `fallback` is its state before anyone has touched it. */
 interface Twist {
   expanded: boolean;
@@ -138,10 +176,11 @@ interface Twist {
 // an <a> that must keep its own 2px left border — that border IS the phosphor landed edge, and it
 // has to sit at the same x as every sibling row's. Overlaying keeps the anchor structurally
 // identical to a childless row (so every label in the tier stays on one text origin) and still
-// leaves the button a real sibling. It comes FIRST in the DOM so Tab reaches the twist, then the row.
+// leaves the button a real sibling. It is out of the Tab order (card fa8a2887): → and ← on the row do
+// its job from the keyboard.
 function TwistButton({ twist }: { twist: Twist }) {
   return (
-    <button type="button" className={`loom-atlas-twistbtn${twist.expanded ? " is-expanded" : ""}`}
+    <button type="button" tabIndex={-1} className={`loom-atlas-twistbtn${twist.expanded ? " is-expanded" : ""}`}
       aria-expanded={twist.expanded} aria-label={twist.label} title={twist.label}
       data-testid={twist.testId} onClick={twist.onToggle}>
       <span aria-hidden>▸</span>
@@ -172,6 +211,7 @@ function TreeNode({ page, activeTo, active = true, testId, metric, onNavigate, c
   onNavigate?: () => void;
   children?: ReactNode;
 }) {
+  const item = useTreeItem(`node:${testId}`);
   const body = (
     <>
       {/* A DESTINATION's twist column is reserved and blank: there is nothing under a destination to
@@ -193,12 +233,12 @@ function TreeNode({ page, activeTo, active = true, testId, metric, onNavigate, c
          tree would be the one part of the frame disagreeing about where you are. */
       <NavLink to={page.to} end={page.end} onClick={onNavigate}
         className={({ isActive }) => `loom-atlas-node${isActive || page.to === activeTo ? " is-active" : ""}`}
-        data-testid={testId}>
+        data-testid={testId} {...item}>
         {body}
       </NavLink>
     )
     : (
-      <Link to={page.to} onClick={onNavigate} className="loom-atlas-node" data-testid={testId}>
+      <Link to={page.to} onClick={onNavigate} className="loom-atlas-node" data-testid={testId} {...item}>
         {body}
       </Link>
     );
@@ -248,6 +288,7 @@ function EntityRow({ entity, to, testId, label, title, dot, metric, active, acti
   onNavigate?: () => void;
   children?: ReactNode;
 }) {
+  const item = useTreeItem(`node:${testId}`);
   const body = (
     <>
       <span className="loom-atlas-twist" aria-hidden />
@@ -259,13 +300,13 @@ function EntityRow({ entity, to, testId, label, title, dot, metric, active, acti
   const link = active
     ? (
       <NavLink to={to} end onClick={onNavigate} title={title} data-testid={testId} data-atlas-entity={entity}
-        className={({ isActive }) => `loom-atlas-node${isActive || to === activeTo ? " is-active" : ""}`}>
+        className={({ isActive }) => `loom-atlas-node${isActive || to === activeTo ? " is-active" : ""}`} {...item}>
         {body}
       </NavLink>
     )
     : (
       <Link to={to} onClick={onNavigate} title={title} data-testid={testId} data-atlas-entity={entity}
-        className="loom-atlas-node">
+        className="loom-atlas-node" {...item}>
         {body}
       </Link>
     );
@@ -328,6 +369,7 @@ function HomeNode({ home, testId, active = true, trailing, metric, onNavigate }:
   metric?: ReactNode;
   onNavigate?: () => void;
 }) {
+  const item = useTreeItem(`node:${testId}`);
   const body = (
     <>
       <span className="loom-atlas-twist" aria-hidden />
@@ -343,11 +385,11 @@ function HomeNode({ home, testId, active = true, trailing, metric, onNavigate }:
         ? (
           <NavLink to={home.to} end={false} onClick={onNavigate}
             className={({ isActive }) => `loom-atlas-node${isActive ? " is-active" : ""}`}
-            data-testid={testId}>
+            data-testid={testId} {...item}>
             {body}
           </NavLink>
         )
-        : <Link to={home.to} onClick={onNavigate} className="loom-atlas-node" data-testid={testId}>{body}</Link>}
+        : <Link to={home.to} onClick={onNavigate} className="loom-atlas-node" data-testid={testId} {...item}>{body}</Link>}
       {trailing}
     </li>
   );
@@ -405,6 +447,7 @@ function ProjectNode({ project, selected, expanded, metrics, onSelect, onToggle,
   children?: ReactNode;
 }) {
   const twistLabel = `${expanded ? "Collapse" : "Expand"} ${project.name}`;
+  const item = useTreeItem(`project:${project.id}`);
   return (
     <li>
       {/* `is-open` is mirrored onto the ROW as well as the selector: the phosphor edge has to sit at
@@ -412,7 +455,7 @@ function ProjectNode({ project, selected, expanded, metrics, onSelect, onToggle,
           starts there. The class stays on the button too — that is what "the branch you are inside"
           has meant since P1-4, and what atlas-project-selection.spec.ts reads. */}
       <div className={`loom-atlas-noderow is-branchrow${selected ? " is-open" : ""}`}>
-        <button type="button" className={`loom-atlas-twistbtn${expanded ? " is-expanded" : ""}`}
+        <button type="button" tabIndex={-1} className={`loom-atlas-twistbtn${expanded ? " is-expanded" : ""}`}
           aria-expanded={expanded} aria-label={twistLabel} title={twistLabel}
           data-testid={`atlas-project-twist-${project.id}`}
           onClick={() => onToggle(project.id)}>
@@ -426,7 +469,7 @@ function ProjectNode({ project, selected, expanded, metrics, onSelect, onToggle,
           data-testid={selected ? "atlas-project-node" : undefined}
           aria-current={selected ? "true" : undefined}
           title={selected ? project.name : `Scope to ${project.name}`}
-          onClick={() => onSelect(project.id)}>
+          onClick={() => onSelect(project.id)} {...item}>
           <span className="loom-atlas-ico" aria-hidden><NavIcon to="/projects" /></span>
           <span className="loom-atlas-lbl">{project.name}</span>
           {metrics}
@@ -436,9 +479,11 @@ function ProjectNode({ project, selected, expanded, metrics, onSelect, onToggle,
             `＋`, which only ever sees the selected one. It is `projectId`-addressed, never
             active-project-addressed, so a spawn from here lands where the row says it will.
             Its own testid stem (`atlas-project-quickspawn-<id>`): a workspace has many project rows,
-            so the Agents node's shared `atlas-quickspawn-open` would resolve N elements. */}
+            so the Agents node's shared `atlas-quickspawn-open` would resolve N elements.
+            In the Tab order only while this row holds the tree's stop (card fa8a2887), so the tree
+            costs at most two stops however many projects there are. */}
         <AgentsQuickSpawn projectId={project.id} projectName={project.name}
-          testId={`atlas-project-quickspawn-${project.id}`} />
+          testId={`atlas-project-quickspawn-${project.id}`} tabIndex={item.tabIndex} />
       </div>
       {expanded && children}
     </li>
@@ -522,7 +567,75 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
     nav.focus({ preventScroll: true });
     nav.querySelector(".loom-atlas-node.is-active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [open]);
-  const isSubOpen = (key: string, fallback: boolean) => openSubBranches[key] ?? fallback;
+
+  // ── Roving focus (card fa8a2887) ─────────────────────────────────────────────────────────────────
+  // `focusId` is the row the user last focused (keyboard or pointer, via the nav's delegated onFocus);
+  // `stopId` is that row resolved against what is actually rendered, falling back to the landed row and
+  // then the first. Resolved in a LAYOUT effect so a stop whose row just left the DOM moves before paint.
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const [stopId, setStopId] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+    const ids = treeItems(nav).map((el) => el.getAttribute(TREE_ITEM_ATTR)!);
+    const landed = nav.querySelector<HTMLElement>(
+      `[${TREE_ITEM_ATTR}].is-active, [${TREE_ITEM_ATTR}][aria-current="true"]`)?.getAttribute(TREE_ITEM_ATTR);
+    const want = focusId !== null && ids.includes(focusId) ? focusId : landed ?? ids[0] ?? null;
+    if (want !== stopId) setStopId(want);
+  });
+  const stopElement = () => navRef.current?.querySelector<HTMLElement>(`[${TREE_ITEM_ATTR}][tabindex="0"]`) ?? null;
+  const onTreeFocus = (e: FocusEvent<HTMLElement>) => {
+    const id = (e.target as HTMLElement).getAttribute(TREE_ITEM_ATTR);
+    if (id !== null && id !== focusId) setFocusId(id);
+  };
+  // A focused row that is REMOVED (its session ended, its branch was collapsed by pointer) drops focus to
+  // <body>. Put it back on the stop, but only for a removal: a row still in the DOM lost focus because
+  // the user went somewhere else on purpose.
+  const onTreeBlur = (e: FocusEvent<HTMLElement>) => {
+    const from = e.target as HTMLElement;
+    if (e.relatedTarget !== null || !from.hasAttribute(TREE_ITEM_ATTR)) return;
+    requestAnimationFrame(() => {
+      if (!from.isConnected && (document.activeElement === null || document.activeElement === document.body)) {
+        stopElement()?.focus();
+      }
+    });
+  };
+  const onTreeKeyDown = (e: KeyboardEvent<HTMLElement>) => {
+    if (!TREE_KEYS.has(e.key) || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const nav = navRef.current;
+    if (!nav) return;
+    const target = e.target as HTMLElement;
+    // The drawer focuses the <nav> itself on open; any tree key from there goes to the stop.
+    if (target === nav) { e.preventDefault(); stopElement()?.focus(); return; }
+    if (!target.hasAttribute(TREE_ITEM_ATTR)) return; // a `＋` keeps its own keys
+    const items = treeItems(nav);
+    const at = items.indexOf(target);
+    const twist = rowTwist(target);
+    const expanded = twist?.getAttribute("aria-expanded") === "true";
+    let next: HTMLElement | undefined;
+    switch (e.key) {
+      case "ArrowDown": next = items[at + 1]; break;
+      case "ArrowUp": next = items[at - 1]; break;
+      case "Home": next = items[0]; break;
+      case "End": next = items[items.length - 1]; break;
+      case "ArrowRight":
+        if (twist && !expanded) twist.click();
+        else if (expanded) {
+          const child = items[at + 1];
+          if (child && target.closest("li")?.contains(child)) next = child;
+        }
+        break;
+      case "ArrowLeft":
+        if (twist && expanded) twist.click();
+        else next = target.closest("li")?.parentElement?.closest("li")
+          ?.querySelector<HTMLElement>(`[${TREE_ITEM_ATTR}]`) ?? undefined;
+        break;
+    }
+    e.preventDefault();
+    next?.focus();
+  };
+
+  const isSubOpen =(key: string, fallback: boolean) => openSubBranches[key] ?? fallback;
   const toggleSub = (key: string, fallback: boolean) =>
     setOpenSubBranches((prev) => ({ ...prev, [key]: !(prev[key] ?? fallback) }));
 
@@ -676,9 +789,11 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
     // selection split: a reader must be able to open a branch and look before committing to a row.
     // `tabIndex={-1}` makes the nav itself the focus target when the drawer opens; it is never in the
     // tab order, so nothing changes above the breakpoint.
+    <TreeStopContext.Provider value={stopId}>
     <nav id={ATLAS_TREE_ID} ref={navRef} tabIndex={-1}
       className={`loom-atlas-tree${open ? " is-open" : ""}`}
       onClick={onNavigate ? (e) => { if ((e.target as HTMLElement).closest("a")) onNavigate(); } : undefined}
+      onFocus={onTreeFocus} onBlur={onTreeBlur} onKeyDown={onTreeKeyDown}
       aria-label="Primary navigation" data-testid="atlas-tree">
       <div className="loom-atlas-treehead">
         <Logo size={20} />
@@ -771,5 +886,6 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
         )}
       </div>
     </nav>
+    </TreeStopContext.Provider>
   );
 }

@@ -19,6 +19,9 @@ import { useActiveProject } from "../lib/activeProject";
 import { api } from "../lib/api";
 import { color, font, fs } from "../theme";
 
+/** The skip link's target: the shell's <main> (card fa8a2887). */
+const ATLAS_CONTENT_ID = "atlas-content";
+
 // The Atlas shell — cards 757c80dd (P1-0, the frame) and 8cbb2ac2 (P1-1, the nodes). What Atlas is,
 // and which card builds what: docs/plans/atlas-ui/02-architecture.md + 03-decomposition.md.
 //
@@ -349,6 +352,13 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
 
   return (
     <div className="loom-atlas" data-testid="atlas-shell">
+      {/* The shell's first Tab stop (card fa8a2887): hidden until focused, then focuses <main>, so a
+          keyboard reader skips the tree and the top bar. Focus is moved by hand rather than by the
+          hash, so the URL never gains a `#` the router would read. */}
+      <a href={`#${ATLAS_CONTENT_ID}`} className="loom-skiplink" data-testid="atlas-skip-link"
+        onClick={(e) => { e.preventDefault(); document.getElementById(ATLAS_CONTENT_ID)?.focus(); }}>
+        Skip to content
+      </a>
       {overlays}
       <AtlasTree activeTo={activeNodeTo} open={treeDrawerOpen} onNavigate={closeTreeDrawer} />
       {/* The scrim is the drawer's own dismiss surface, and it is deliberately NOT a modal backdrop:
@@ -492,7 +502,7 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
 
         {banners}
 
-        <main className="loom-atlas-content">
+        <main className="loom-atlas-content" id={ATLAS_CONTENT_ID} tabIndex={-1}>
           <AtlasNodeHeadContext.Provider value={nodeHeadSlot}>
           <Routes>
             {/* Each destination's own component, rendered exactly as the legacy shell renders it —

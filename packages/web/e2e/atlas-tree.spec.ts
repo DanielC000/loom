@@ -25,8 +25,9 @@
 //      A node-TAB destination is fingerprinted at its own `atlas-tabpanel-<key>` wrapper rather than
 //      at `main`: card 41eab0eb re-FRAMED those pages without rebuilding them, so the identity claim
 //      still holds exactly — it just has to be made about the panel the component is mounted in.
-//   3. KEYBOARD. Tab reaches the nodes in document order, Enter activates one, and the focused node
-//      carries a real computed focus ring.
+//   3. KEYBOARD. Tab reaches the tree's one stop, the arrow keys walk the nodes in document order
+//      (card fa8a2887; atlas-tree-keyboard.spec.ts owns the full key contract), Enter activates one,
+//      and the focused node carries a real computed focus ring.
 //
 // Every absence/equality claim carries a POSITIVE CONTROL: a fingerprint comparison and a
 // zero-console-error count read exactly the same whether the instrument works or is silently broken,
@@ -888,7 +889,7 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
       .toEqual([]);
   });
 
-  test("the tree is navigable by Tab and Enter, with a visible focus ring", async ({ page, loomDaemon }) => {
+  test("the tree is navigable by Tab, arrows and Enter, with a visible focus ring", async ({ page, loomDaemon }) => {
     await pinProject(page, (await loomDaemon.createProject()).id);
     await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + "/");
@@ -915,16 +916,22 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
 
     // Start from the document, not from a programmatic focus(): :focus-visible is what carries the
-    // ring, and only a real keyboard interaction sets it. Tab until the first node takes focus — the
-    // chrome ahead of the tree (the Command Palette and friends) owns an unknown number of stops, so
-    // counting them here would encode an unrelated component's shape into this assertion.
+    // ring, and only a real keyboard interaction sets it. Tab until the tree's ONE stop takes focus
+    // (card fa8a2887) — the chrome ahead of the tree (the skip link and friends) owns an unknown number
+    // of stops, so counting them here would encode an unrelated component's shape into this assertion.
+    // Then Home, the tree-view key for "first node".
     const first = nodes.first();
     let reached = false;
     for (let i = 0; i < 40 && !reached; i++) {
       await page.keyboard.press("Tab");
-      reached = await first.evaluate((el) => el === document.activeElement);
+      reached = await page.evaluate(() =>
+        !!document.activeElement?.closest("[data-testid=atlas-tree]") &&
+        document.activeElement.hasAttribute("data-atlas-tree-item"));
     }
-    expect(reached, "Tab never reached the tree's first node").toBe(true);
+    expect(reached, "Tab never reached the tree's stop").toBe(true);
+    await page.keyboard.press("Home");
+    expect(await first.evaluate((el) => el === document.activeElement),
+      "Home did not move focus to the tree's first node").toBe(true);
 
     // The ring is really painted, read off computed style rather than inferred from the stylesheet.
     const ring = await first.evaluate((el) => {
@@ -939,14 +946,15 @@ test.describe("Atlas tree nodes (card 8cbb2ac2)", () => {
     expect(unfocused, "positive control: an unfocused node also reports an outline, so the ring read proves nothing")
       .toBe("none");
 
-    // Tab moves to the NEXT node in document order (document order IS the visual order here).
-    await page.keyboard.press("Tab");
+    // ArrowDown moves to the NEXT node in document order (document order IS the visual order here; the
+    // first two nodes are both workspace-tier anchors, so no project button sits between them).
+    await page.keyboard.press("ArrowDown");
     expect(await nodes.nth(1).evaluate((el) => el === document.activeElement),
-      "Tab did not advance to the second tree node").toBe(true);
-    // ...and Shift+Tab comes back, which is also how focus returns to the node Enter is pressed on.
-    await page.keyboard.press("Shift+Tab");
+      "ArrowDown did not advance to the second tree node").toBe(true);
+    // ...and ArrowUp comes back, which is also how focus returns to the node Enter is pressed on.
+    await page.keyboard.press("ArrowUp");
     expect(await first.evaluate((el) => el === document.activeElement),
-      "Shift+Tab did not return to the first tree node").toBe(true);
+      "ArrowUp did not return to the first tree node").toBe(true);
 
     // Enter activates it — an observable navigation, not just a styled control.
     //
