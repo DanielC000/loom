@@ -4251,7 +4251,7 @@ function keptOnlyReasonFor(refs: string[]): string {
  *  still-pending siblings. Unlike {@link keptOnlyReasonFor}, the cleared claimant itself is NOT exempt: it
  *  shares that file, so it may re-divert on the next boot until the shared latch is cleared (882d6cff). */
 function sharedLatchKeptAfterGraduatedClearReasonFor(refs: string[]): string {
-  return `this identity's own graduated quarantine record is lifted, but it shares a corrupt/unreadable latch file that is still needed by ${refs.length} other pending claimant(s) (${refs.join(", ")}) — the file stays on disk, so this identity MAY RE-DIVERT from that shared latch on the next restart, along with those claimants, until the shared latch is cleared by its own 24-hex id (POST /internal/merge-quarantine/clear-by-path with {id}), which lifts this identity and the named claimants together (see stillBlockedCoOccupants).`;
+  return `this identity's own quarantine record is lifted, but it shares a corrupt/unreadable latch file that is still needed by ${refs.length} other pending claimant(s) (${refs.join(", ")}) — the file stays on disk, so this identity MAY RE-DIVERT from that shared latch on the next restart, along with those claimants, until the shared latch is cleared by its own 24-hex id (POST /internal/merge-quarantine/clear-by-path with {id}), which lifts this identity and the named claimants together (see stillBlockedCoOccupants).`;
 }
 
 /** Picks the kept-latch reason for an identity-wide clear's `refs` by SUBSET: any ref in `sharedGraduatedRefs`
@@ -4263,6 +4263,50 @@ function keptReasonForRefs(refs: string[], sharedGraduatedRefs: ReadonlySet<stri
   return otherRefs.length === 0 ? sharedLatchKeptAfterGraduatedClearReasonFor(refs) : mixedKeptReasonAfterGraduatedClearFor(graduatedRefs, otherRefs);
 }
 export function keptReasonForRefsTestOnly(refs: string[], sharedGraduatedRefs: string[]): string { return keptReasonForRefs(refs, new Set(sharedGraduatedRefs)); }
+
+/** True when `file` (a latch basename) is still present in the quarantine dir. */
+function latchBasenameStillOnDisk(file: string): boolean {
+  try { return fs.existsSync(path.join(MERGE_QUARANTINE_DIR, file)); } catch { return true; }
+}
+
+/** The still-pending identities among `refs` that are fan-out claimants of a shared corrupt latch file that is
+ *  STILL ON DISK: at least one pending entry of the identity carries the in-memory `sharedCorruptLatch` mint-time
+ *  fact and that entry's own file survives. For these the cleared claimant re-arms on the next boot too,
+ *  so the pending-branch text must not claim it will NOT re-divert (card 7d767b90). Decided from the live
+ *  pending state, never from content shape; a ref with no pending entry is simply not counted (fails toward
+ *  the unchanged wording). */
+function sharedCorruptPendingRefsAmong(refs: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const ref of refs) {
+    const id = directPathIdentity(ref);
+    const mine = pendingUnresolvedQuarantines.filter((p) => directPathIdentity(p.entry.repoPath) === id);
+    // SOME tagged entry still having its file on disk is the shared fact: in a two-file shape (a shared corrupt
+    // `<hash>.json` beside a tmp/safety-tmp residue of the same hash) each claimant carries one pending entry
+    // per file, and the clear removes only the residue — the surviving json still re-arms every claimant.
+    if (mine.some((p) => p.sharedCorruptLatch === true && latchBasenameStillOnDisk(p.sourceFile))) out.add(ref);
+  }
+  return out;
+}
+
+/** The subset of `refs` whose latch file(s) the SAME clear has already removed from disk: the identity has
+ *  pending entries, none of which still has its `sourceFile` or any `orphanLatchFiles` file on disk, and no
+ *  active entry. Such a ref is blocked in THIS process only — a restart rebuilds from disk and does not re-arm
+ *  it — so it must never be reported as a kept latch (card 7d767b90; the deletion itself is a separate card).
+ *  Decided from the actual disk outcome, never from the shape of the residue. */
+function refsWhoseLatchFilesWereRemoved(refs: string[]): string[] {
+  return refs.filter((ref) => {
+    const id = directPathIdentity(ref);
+    if ([...activeQuarantines.values()].some((e) => directPathIdentity(e.repoPath) === id)) return false;
+    const mine = pendingUnresolvedQuarantines.filter((p) => directPathIdentity(p.entry.repoPath) === id);
+    if (mine.length === 0) return false;
+    return mine.every((p) => !latchBasenameStillOnDisk(p.sourceFile) && !(p.entry.orphanLatchFiles ?? []).some(latchBasenameStillOnDisk));
+  });
+}
+
+/** The reason clause for claimants whose shared latch residue THIS clear removed from disk (card 7d767b90). */
+function sharedResidueRemovedReasonFor(removed: string[]): string {
+  return `a latch file shared with ${removed.length} other pending claimant(s) (${removed.join(", ")}) was removed from disk by this same clear — it does NOT stay on disk, and those claimants remain blocked IN THIS PROCESS ONLY and will NOT re-arm on the next restart (clear each by its own repoPath to release it now; see stillBlockedCoOccupants).`;
+}
 
 /** The reason text when a GRADUATED clear's referencers are a MIX: `graduatedRefs` (the shared-latch
  *  disclosure — the cleared claimant itself MAY re-divert) plus `otherRefs` (kept by another route). The
@@ -9155,7 +9199,22 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     // separately-tracked stale-sourceFile gap, cd5a3cf9/c93e9e7a) — over-warning stays the safe direction.
     // @decision 882d6cff — all-graduated-disclosure referencers: the cleared claimant DOES re-divert, so
     // `keptOnlyReasonFor`'s "will NOT itself re-divert" is false here. Pending-branch wording (182c01cc) untouched.
-    const keptReason = keptReasonForRefs(refs, sharedGraduatedRefs);
+    // @decision 882d6cff (Follow-up 7d767b90) — never report latchKept for a file this same clear removed;
+    // a pending ref fanning out from a still-present shared corrupt latch gets the MAY RE-DIVERT text.
+    // Disclosure only: what is lifted and deleted is unchanged.
+    const removedRefs = refsWhoseLatchFilesWereRemoved(refs);
+    const survivingRefs = refs.filter((r) => !removedRefs.includes(r));
+    const sharedRefs = new Set<string>([...sharedGraduatedRefs, ...sharedCorruptPendingRefsAmong(survivingRefs)]);
+    const baseKeptReason = survivingRefs.length === 0
+      ? sharedResidueRemovedReasonFor(removedRefs)
+      : removedRefs.length === 0 ? keptReasonForRefs(survivingRefs, sharedRefs) : `${keptReasonForRefs(survivingRefs, sharedRefs)} ${sharedResidueRemovedReasonFor(removedRefs)}`;
+    // When every ref was removed, the base text speaks only of the removal; a content keep or an unattributed
+    // keep that still fired is a real kept latch and must be composed back on, never dropped.
+    const keptReason = survivingRefs.length === 0
+      ? [baseKeptReason,
+          ...(keptContentRepoPaths.size > 0 ? [contentKeptOnlyReasonFor([...keptContentRepoPaths], keptContentBlockedBy)] : []),
+          ...(anyKeptUnattributed ? [unattributedKeptReasonFor()] : [])].join(" ")
+      : baseKeptReason;
     // @decision 182c01cc (round 3, M1) — a repoPath BOTH kept and relocated is named ONCE, with BOTH
     // routes, same fix as clearMergeQuarantineByKey's own dedupe — see the decision record.
     const relocatedSet = new Set(relocated.map((co) => co.repoPath));
@@ -9164,7 +9223,8 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       return keptCo !== undefined && !co.alsoClear ? mergeKeptAndRelocatedCoOccupant(co, keptCo) : co;
     });
     return { matched: true, result: {
-      wasQuarantined: true, latchKept: true, referencingRepoPaths: refs,
+      wasQuarantined: true,
+      ...(survivingRefs.length > 0 || keptContentRepoPaths.size > 0 || anyKeptUnattributed ? { latchKept: true as const, referencingRepoPaths: survivingRefs } : {}),
       liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep names no live entry, so it never
@@ -9992,7 +10052,7 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
         ? clearResult.reason
         : withUnlinkFailedClause(composeReasonWithRelocated(
             (clearResult.referencingRepoPaths?.length ?? 0) > 0
-              ? keptOnlyReasonFor(clearResult.referencingRepoPaths ?? [])
+              ? keptReasonForRefs(clearResult.referencingRepoPaths ?? [], sharedCorruptPendingRefsAmong(clearResult.referencingRepoPaths ?? []))
               : (clearResult.contentKeptRepoPaths?.length ?? 0) > 0
                 // @decision 25d0d45b (Round 5) — rebuild the repoPath-keyed Map `contentKeptOnlyReasonFor`
                 // wants from the array-shaped `contentKeptBlockedBy` this result actually carries.
@@ -10003,7 +10063,8 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
     };
   }
   if (stillBlocked.length > 0) {
-    return { wasQuarantined, stillBlockedCoOccupants: stillBlocked, reason: relocatedCoOccupantsReason(stillBlocked), liftedRepoPaths, ...provenanceUnknownFields };
+    // @decision 882d6cff (Follow-up 7d767b90) — an upstream reason about a residue this clear REMOVED (no latchKept) must survive; recomputing here would call the blocked siblings "relocated".
+    return { wasQuarantined, stillBlockedCoOccupants: stillBlocked, reason: clearResult?.latchKept !== true && clearResult?.reason !== undefined ? clearResult.reason : relocatedCoOccupantsReason(stillBlocked), liftedRepoPaths, ...provenanceUnknownFields };
   }
   return { wasQuarantined, stillBlockedCoOccupants: [], liftedRepoPaths, ...provenanceUnknownFields };
 }

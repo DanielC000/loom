@@ -434,6 +434,40 @@ Test: `merge-quarantine-c755eac8-shared-latch-disclosure-fanout-fact.mjs`.
 - Do not widen the disclosure to non-corrupt owners, and do not reuse `keptOnlyReasonFor` whenever any graduated
   ref is present.
 
+### Follow-up `7d767b90` — the pending-branch clear's disclosure follows the disk, not a fixed sentence
+
+Probe against the built dist (all claimants still PENDING, clear the first, then a fresh boot) found two false
+disclosures on the pending branch; both fixed in the DISCLOSURE only (a pre/post run of the new test's `STATE`
+lines is identical — nothing lifted, deleted or re-armed changed):
+
+1. **Shared corrupt `<hash>.json`.** The file survives and a fresh boot re-arms the cleared claimant AND every
+   sibling, yet the reason said the identity "will NOT itself re-divert". `keptReasonForRefs` is now also given
+   `sharedCorruptPendingRefsAmong(refs)` (a ref whose every pending entry carries the in-memory
+   `sharedCorruptLatch` fact and whose file is still present) at both call sites — the `latchKept` branch of
+   `tryClearMergeQuarantineByOwnIdentityBody` and `clearMergeQuarantineReporting`'s kept-only branch. One text
+   (`sharedLatchKeptAfterGraduatedClearReasonFor`, now worded neutrally: "own quarantine record is lifted").
+   `keptOnlyReasonFor` is left for non-shared keeps, where its clause is true.
+2. **Shared corrupt tmp / safety-tmp residue.** The same clear's tmp sweep UNLINKS the residue, but an earlier
+   sweep had already named the siblings, so the result said `latchKept`, "stays on disk", "WILL RE-DIVERT" — a
+   fresh boot arms nobody. `refsWhoseLatchFilesWereRemoved` decides from the pending entries' own files on disk
+   (never from the residue's shape); such refs are dropped from `latchKept`/`referencingRepoPaths` and the reason
+   (`sharedResidueRemovedReasonFor`) says the residue was removed and the siblings are blocked IN THIS PROCESS ONLY
+   and will NOT re-arm. `clearMergeQuarantineReporting`'s plain still-blocked branch now keeps that upstream reason
+   instead of recomputing "relocated" text. **The deletion itself (a residue other pending claimants still reference
+   is unlinked, so their quarantine is lost at reboot) is a STATE problem filed as its own card, not changed here.**
+
+Test: `merge-quarantine-7d767b90-pending-clear-kept-latch-disclosure.mjs` (each shape x 2/3 claimants x the three
+by-path routes, each claim checked against what a fresh boot arms). `merge-quarantine-c755eac8-...` `[parity]`
+checks were updated deliberately: the pending-branch clear no longer reports `latchKept` for a residue it removed.
+
+## Do not (7d767b90)
+
+- Do not claim `latchKept` / "stays on disk" / "WILL RE-DIVERT" for a file the SAME clear removed. Decide from the
+  actual disk outcome, never from the shape of the residue.
+- Do not use `keptOnlyReasonFor`'s "will NOT itself re-divert" when any kept ref fans out from a still-present
+  shared corrupt latch; the cleared claimant re-arms with it.
+- Do not "fix" the disclosure by changing what the clear deletes or lifts; that is the separate state card.
+
 ## Verification
 
 `test/merge-quarantine-pass1-degraded-key-writes.mjs`, SIXTEEN scenarios (each its own child process,

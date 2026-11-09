@@ -473,6 +473,14 @@ argument from scratch should re-verify this split still produces a correct stand
   own id a FIXED POINT for that repoPath, not a working route. Use `blockedCoOccupantForReferencer` at any
   such site instead; see its own doc and the "Round 5" MAJOR section above.
 
+## Follow-up `7d767b90`: the "will NOT itself re-divert" clause is conditional
+
+The wording below holds only for a kept referencer that is NOT a fan-out claimant of a shared corrupt latch. When
+the kept refs share a still-present corrupt latch file the cleared claimant re-arms with them, and when the same
+clear already removed the shared residue nothing is kept at all. Both are now disclosed truthfully; see
+`882d6cff`'s Follow-up `7d767b90` section and its Do-not list (never claim `latchKept` for a file the same clear
+removed).
+
 ## Follow-up: the stale-sourceFile root (cd5a3cf9/c93e9e7a) stays open
 
 Per the triage note on this same card: `clearMergeQuarantineByRecordedPath`'s own `latchKept` wording used
