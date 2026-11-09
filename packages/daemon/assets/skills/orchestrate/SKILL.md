@@ -203,6 +203,13 @@ Workers are yours to direct; their one channel up, `worker_report`, reaches **yo
    - **Never hand a worktree-bound worker a bare vault-relative path** (e.g. `Projects/…/Design/*.md`):
      it can live outside the worktree and be unreachable. Paste the excerpt or give an absolute,
      worktree-reachable path.
+   - **Name the tests to run as a test-file FAMILY, not a keyword filter**, and for a changed lookup or
+     identity key also name the fixtures that construct the entity directly: a keyword grep misses
+     hand-built state, so the red surfaces a review round or a gate later.
+   - **Sequence review before the full gate.** When a card needs Code Review, tell the worker to run
+     targeted tests only until review approves, then fire ONE `run_gate` on the approved tip
+     (`run_gate` is the worker's call only where the kickoff allows it; the merge gate stays
+     authoritative either way). A blocking review voids any gate already holding a slot.
    - **A card's cited file location is a HYPOTHESIS, not a scope fence.** Don't turn a guessed location
      into "touch only this file": a wrong guess forces the worker to block instead of tracing the real
      site. To de-conflict parallel workers, scope by SUBSYSTEM/TASK, not by a guessed path.
@@ -304,7 +311,7 @@ Workers are yours to direct; their one channel up, `worker_report`, reaches **yo
      RUNNING entry's elapsed time says how long the gate command has run.
    - **A decision you just made can turn a worker's OWN in-flight self-check into dead weight; cancel
      it.** If a worker is parked on its own `run_gate` and you decide to merge, reject, or recycle the
-     branch anyway, use `gate_cancel` on its `opId` (it settles as cancelled/superseded, never a false
+     branch anyway (or Code Review sends the card back, making that gate moot), use `gate_cancel` on its `opId` (it settles as cancelled/superseded, never a false
      pass or fail) to free the slot. Do it yourself; don't relay it down (a worker's own `gate_cancel`
      covers only its own self-check, for reasons visible from inside its turn).
    - **Can't tell healthy contention from a leaked slot? Read the whole queue.** `gate_status` answers
