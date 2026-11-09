@@ -143,6 +143,22 @@ check("requestProvenanceText: BOTH ids, in the owner's own form", () => {
   );
 });
 
+check("requestProvenanceText with names: the agent name LEADS each id, never replaces it (card defc70c1)", () => {
+  assert.equal(
+    requestProvenanceText({ filedBySessionId: "d3d3faf4dead", sessionId: "a3f48a8fbeef" }, { filer: "Orchestrator 1", routed: "Orchestrator 2" }),
+    "filed by Orchestrator 1 (d3d3faf4) · now routed to Orchestrator 2 (a3f48a8f)",
+  );
+  // A name the UI doesn't hold (null/blank) or the server's "?" deleted-agent fallback leaves the bare id.
+  assert.equal(
+    requestProvenanceText({ filedBySessionId: "d3d3faf4dead", sessionId: "a3f48a8fbeef" }, { filer: "?", routed: null }),
+    "filed by d3d3faf4 · now routed to a3f48a8f",
+  );
+  assert.equal(requestRoutedLabel({ sessionId: "a3f48a8fbeef" }, "  "), "now routed to a3f48a8f");
+  // ⛔ A legacy null filer stays "filer unknown" even when a name is passed — a name must never
+  // resurrect a filer the row cannot prove (decision 5b22b262).
+  assert.equal(requestFilerLabel({ filedBySessionId: null }, "Orchestrator 1"), "filer unknown");
+});
+
 check("requestAttentionLabel: type-aware global attention label, per Request type", () => {
   assert.equal(requestAttentionLabel("decision"), "DECISION NEEDED");
   assert.equal(requestAttentionLabel("input"), "INPUT NEEDED");

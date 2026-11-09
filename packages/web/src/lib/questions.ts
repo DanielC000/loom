@@ -93,20 +93,38 @@ export function questionStateChip(q: WatchdogInput, nowMs: number, thresholdMs =
 // existed, whose original filer was already overwritten by a recycle and is UNRECOVERABLE (see
 // Question.filedBySessionId). ⛔ NEVER fall back to `sessionId` here: that re-creates the exact
 // misattribution this exists to remove, and ⛔ never reconstruct a guess from timestamps.
-export function requestFilerLabel(q: Pick<Question, "filedBySessionId">): string {
-  return q.filedBySessionId ? `filed by ${q.filedBySessionId.slice(0, 8)}` : "filer unknown";
+export function requestFilerLabel(q: Pick<Question, "filedBySessionId">, name?: string | null): string {
+  return q.filedBySessionId ? `filed by ${sessionWho(q.filedBySessionId, name)}` : "filer unknown";
 }
 
 // The CURRENT routing target, short — "who will act on this", framed as a destination, never as the asker.
-export function requestRoutedLabel(q: Pick<Question, "sessionId">): string {
-  return `now routed to ${q.sessionId.slice(0, 8)}`;
+export function requestRoutedLabel(q: Pick<Question, "sessionId">, name?: string | null): string {
+  return `now routed to ${sessionWho(q.sessionId, name)}`;
+}
+
+// The agent names behind the two ids, when the UI holds them (card defc70c1, finding A-37). The FILER's
+// comes from the inbox row's own `agentName` (joined server-side off `filed_by_session_id`); the routing
+// target's from the session list the Atlas tree already fetches. Either may be absent: the id then
+// stands alone, exactly as before. A name never REPLACES an id, it only leads it.
+export interface RequestProvenanceNames { filer?: string | null; routed?: string | null }
+
+// "Orchestrator 1 (audit-lo)" when the name is known, the bare short id otherwise. "?" is the server's own
+// "agent/session was hard-deleted" fallback, so it counts as unknown rather than being printed.
+export function knownAgentName(name: string | null | undefined): string | null {
+  const n = name?.trim();
+  return n && n !== "?" ? n : null;
+}
+function sessionWho(sessionId: string, name?: string | null): string {
+  const n = knownAgentName(name);
+  return n ? `${n} (${sessionId.slice(0, 8)})` : sessionId.slice(0, 8);
 }
 
 // Both, in the owner's own form: "filed by 3f2a · now routed to 9b1c" (his decision on Request 68b06c50).
 // ALWAYS both, even when the two ids match — they are separate facts, and a row that renders only one
 // cannot reveal a divergence. Used verbatim as the `title` tooltip wherever the visible text ellipsizes.
-export function requestProvenanceText(q: Pick<Question, "sessionId" | "filedBySessionId">): string {
-  return `${requestFilerLabel(q)} · ${requestRoutedLabel(q)}`;
+// With `names`, each id is led by its agent's name: "filed by Orchestrator 1 (3f2a) · now routed to …".
+export function requestProvenanceText(q: Pick<Question, "sessionId" | "filedBySessionId">, names?: RequestProvenanceNames): string {
+  return `${requestFilerLabel(q, names?.filer)} · ${requestRoutedLabel(q, names?.routed)}`;
 }
 
 // The attention-queue row text for a pending decision: "<title> · <project>". The ASK leads (card

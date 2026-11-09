@@ -4894,3 +4894,39 @@ button.loom-ovbrief-cell.is-open {
   border: 0;
   font-size: inherit;
 }
+
+/* ── Inbox request row (components/requests.tsx RequestRow, card defc70c1) ────────────────────────
+   Body on the left, a type tag + needs chip + actions column on the right. Below 480px that column
+   squeezed the title to ~14 characters, so there it stacks UNDER the body as one wrapping row, with
+   the buttons pushed to the trailing edge. */
+.loom-req-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.loom-req-row-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.loom-req-row-buttons {
+  display: flex;
+  gap: 6px;
+}
+@media (max-width: 480px) {
+  .loom-req-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .loom-req-row-actions {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .loom-req-row-buttons {
+    margin-left: auto;
+  }
+}

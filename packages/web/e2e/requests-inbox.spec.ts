@@ -653,7 +653,10 @@ test.describe("request provenance vs routing (card 5b22b262)", () => {
     // Guard the fixture's own identity: a seed that silently collapsed to one id would make every
     // assertion below pass for the wrong reason (both halves would read the same 8 chars).
     expect(short(filed)).not.toEqual(short(routed.sessionId));
-    const both = `filed by ${short(filed)} · now routed to ${short(routed.sessionId)}`;
+    // The roomy form leads each id with its agent's name when the UI holds one (card defc70c1, A-37). The
+    // routed seat is a seeded live session, so its name is known; the filer is a retired plain id with no
+    // session row, so it stays a bare id — a name never REPLACES an id, and an unknown one is never guessed.
+    const both = `filed by ${short(filed)} · now routed to RoutedToMgr (${short(routed.sessionId)})`;
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
     const main = page.locator("main");
@@ -689,7 +692,7 @@ test.describe("request provenance vs routing (card 5b22b262)", () => {
     // `seedLiveSession` mints every id as `e2e-live-<uuid>`, their filer text is character-identical to
     // what a fallback on THIS row would produce. A page-wide assertion would fail on a correct build.
     const row = main.locator("div").filter({ hasText: title }).last();
-    await expect(row).toContainText(`filer unknown · now routed to ${short(routed.sessionId)}`);
+    await expect(row).toContainText(`filer unknown · now routed to LegacyFilerMgr (${short(routed.sessionId)})`);
     // ⛔ The regression this card removes: the routing id must NEVER appear in the FILER slot. This is the
     // load-bearing assertion — "filer unknown" rendering is worth nothing if a fallback also crept back in.
     // Asserting the WORDS are absent (not one particular id) catches a reconstruction from any source.
@@ -771,5 +774,92 @@ test.describe("request provenance vs routing (card 5b22b262)", () => {
     // ⛔ And NOT the filer: on this surface the filer is the id that CANNOT be acted on.
     await expect(row).not.toContainText(short(filed));
     await shoot(page, "provenance-attention-row.png");
+  });
+});
+
+// ── Atlas audit fixes on the inbox row (card defc70c1) ─────────────────────────────────────────────
+// A-37 the asker is named, not just an 8-char id · A-31 "Waiting on me" has History's search box ·
+// A-11 below 480px the action column stacks under the body so the title keeps the width.
+test.describe("inbox row: names, search and narrow stacking (card defc70c1)", () => {
+  const short = (id: string) => id.slice(0, 8);
+
+  test("a request filed by a known session names its agent beside the id, on both halves", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "NamedAskerMgr" });
+    const title = uniq("named-asker");
+    // filedBySessionId omitted = the real ask-time default (the filer IS the routed seat).
+    const id = await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title, type: "decision", options: ["A"] });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const row = page.locator(`[data-testid="request-row"][data-question-id="${id}"]`);
+    await expect(row).toBeVisible();
+    const s = short(mgr.sessionId);
+    await expect(row).toContainText(`filed by NamedAskerMgr (${s}) · now routed to NamedAskerMgr (${s})`);
+    // The tooltip/accessible name carries the same named form, so the words are never only visual.
+    await expect(row.getByTitle(`filed by NamedAskerMgr (${s}) · now routed to NamedAskerMgr (${s})`, { exact: true })).toBeVisible();
+  });
+
+  test("'Waiting on me' has a search box that narrows the rows, by title and by agent name", async ({ page, loomDaemon }) => {
+    const a = await loomDaemon.seedLiveSession({ role: "manager", agentName: `SearchAlpha${Date.now()}` });
+    const b = await loomDaemon.seedLiveSession({ role: "manager", agentName: "SearchBravoMgr" });
+    const tA = uniq("needle-ledger");
+    const tB = uniq("haystack-cache");
+    await loomDaemon.seedQuestion({ sessionId: a.sessionId, projectId: a.projectId, title: tA, type: "decision", options: ["A"] });
+    await loomDaemon.seedQuestion({ sessionId: b.sessionId, projectId: b.projectId, title: tB, type: "input" });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    await expect(main.getByText(tA, { exact: true })).toBeVisible();
+    await expect(main.getByText(tB, { exact: true })).toBeVisible();
+
+    const search = main.getByRole("textbox", { name: "Search requests" });
+    // Title match: the other row vanishes (OBSERVABLE narrowing), and the facets still render above.
+    await search.fill(tA);
+    await expect(main.getByText(tA, { exact: true })).toBeVisible();
+    await expect(main.getByText(tB, { exact: true })).toHaveCount(0);
+    // Agent-name match: the filer's agent is searchable, the same as History.
+    await search.fill(a.agentName);
+    await expect(main.getByText(tA, { exact: true })).toBeVisible();
+    await expect(main.getByText(tB, { exact: true })).toHaveCount(0);
+    // No match: the existing empty-filter copy, not a blank page.
+    await search.fill(uniq("no-such-request"));
+    await expect(main.getByText("No requests match this filter.")).toBeVisible();
+    // Cleared: both rows are back.
+    await search.fill("");
+    await expect(main.getByText(tA, { exact: true })).toBeVisible();
+    await expect(main.getByText(tB, { exact: true })).toBeVisible();
+  });
+
+  test("below 480px the action column stacks under the body; above it, the two sit side by side", async ({ page, loomDaemon }) => {
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "NarrowMgr" });
+    const title = `${uniq("narrow")} ${"a long request title that must keep its width on a phone ".repeat(3)}`.trim();
+    const id = await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title, type: "decision", options: ["A"] });
+    const row = page.locator(`[data-testid="request-row"][data-question-id="${id}"]`);
+    const titleEl = row.getByTitle(title, { exact: true });
+    const actions = row.locator(".loom-req-row-actions");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    await expect(titleEl).toBeVisible();
+    const rowBox = await row.boundingBox();
+    const tNarrow = await titleEl.boundingBox();
+    const aNarrow = await actions.boundingBox();
+    if (!rowBox || !tNarrow || !aNarrow) throw new Error("missing layout boxes at 390");
+    // Stacked: the actions start below the title, and the title takes most of the row's width (it was
+    // squeezed to ~14 characters beside the column before).
+    expect(aNarrow.y).toBeGreaterThan(tNarrow.y + tNarrow.height - 1);
+    expect(tNarrow.width).toBeGreaterThan(rowBox.width * 0.75);
+    // A short id never breaks mid-token: its run renders on ONE line.
+    const idRun = row.getByText(short(mgr.sessionId), { exact: true }).first();
+    const idBox = await idRun.boundingBox();
+    if (!idBox) throw new Error("missing id box");
+    expect(idBox.height).toBeLessThan(tNarrow.height * 1.6);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const tWide = await titleEl.boundingBox();
+    const aWide = await actions.boundingBox();
+    if (!tWide || !aWide) throw new Error("missing layout boxes at 1440");
+    // Side by side: the column sits to the right of the body, level with the title.
+    expect(aWide.x).toBeGreaterThan(tWide.x + tWide.width - 1);
+    expect(aWide.y).toBeLessThan(tWide.y + tWide.height);
   });
 });

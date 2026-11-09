@@ -16,7 +16,7 @@ import {
   isDecisionWatchdog, isUnread, relativeAge,
   REQUEST_TYPE_TONE, REQUEST_TYPE_ORDER,
   requestActionLabel, requestNeedsChip, requestAnswerBadge, requestHint, requestOutcome,
-  requestProvenanceText, sshClearAction, sshHoldStatus, isSshHold, type SshClearAction,
+  requestProvenanceText, knownAgentName, type RequestProvenanceNames, sshClearAction, sshHoldStatus, isSshHold, type SshClearAction,
   ATTACHMENT_CHIP_GLYPH, ATTACHMENT_GLYPH, attachmentCountChip, attachmentDetail, attachmentOpenRefusal,
   attachmentPreviewMode, attachmentStateChip, isViewerKind,
 } from "../lib/questions";
@@ -71,28 +71,53 @@ function RequestNeedsChip({ type }: { type: QuestionType }) {
 // re-create the one-id rendering this card removes, so density is bought with the arrow, not with a field.
 // Both spell the full owner-form text into `title` + `aria-label`, so the words are always one hover away
 // and the arrow is never the only carrier of meaning for assistive tech.
-export function RequestProvenance({ q, compact }: { q: Pick<QuestionInboxItem, "sessionId" | "filedBySessionId">; compact?: boolean }) {
-  const full = requestProvenanceText(q);
-  const routed = <span style={{ fontFamily: font.mono, color: color.text2 }}>{q.sessionId.slice(0, 8)}</span>;
+// The roomy form also leads each id with its AGENT NAME when the UI holds one (card defc70c1, A-37):
+// "filed by Orchestrator 1 (audit-lo) · now routed to …". The compact form stays ids-only — it is a single
+// ellipsized cell, and a name there would push the routing id out of view (the very failure named above).
+export function RequestProvenance({ q, compact }: { q: Pick<QuestionInboxItem, "sessionId" | "filedBySessionId"> & { agentName?: string }; compact?: boolean }) {
+  const routedName = useRoutedAgentName(q.sessionId, !compact);
+  const names: RequestProvenanceNames | undefined = compact ? undefined : { filer: q.agentName, routed: routedName };
+  const full = requestProvenanceText(q, names);
+  if (compact) {
+    return (
+      <span title={full} aria-label={full} style={{ minWidth: 0 }}>
+        {q.filedBySessionId
+          ? <span style={{ fontFamily: font.mono, color: color.text2 }}>{q.filedBySessionId.slice(0, 8)}</span>
+          : <>unknown</>}
+        <span aria-hidden> → </span>
+        <span style={{ fontFamily: font.mono, color: color.text2 }}>{q.sessionId.slice(0, 8)}</span>
+      </span>
+    );
+  }
   return (
     <span title={full} aria-label={full} style={{ minWidth: 0 }}>
-      {compact
-        ? <>
-            {q.filedBySessionId
-              ? <span style={{ fontFamily: font.mono, color: color.text2 }}>{q.filedBySessionId.slice(0, 8)}</span>
-              : <>unknown</>}
-            <span aria-hidden> → </span>
-            {routed}
-          </>
-        : <>
-            {q.filedBySessionId
-              ? <>filed by <span style={{ fontFamily: font.mono, color: color.text2 }}>{q.filedBySessionId.slice(0, 8)}</span></>
-              : <>filer unknown</>}
-            {" · now routed to "}
-            {routed}
-          </>}
+      {q.filedBySessionId
+        ? <>filed by <SessionWho id={q.filedBySessionId} name={names?.filer} /></>
+        : <>filer unknown</>}
+      {" · now routed to "}
+      <SessionWho id={q.sessionId} name={names?.routed} />
     </span>
   );
+}
+
+// One "who": the agent name (when known) then its short session id in parentheses, as ONE unbreakable
+// run. `nowrap` is the A-11 fix: at a narrow width the id used to break mid-token ("audit- / lo").
+function SessionWho({ id, name }: { id: string; name?: string | null }) {
+  const n = knownAgentName(name);
+  const short = <span style={{ fontFamily: font.mono, color: color.text2 }}>{id.slice(0, 8)}</span>;
+  return (
+    <span style={{ whiteSpace: "nowrap" }}>
+      {n ? <><span style={{ color: color.text2 }}>{n}</span> ({short})</> : short}
+    </span>
+  );
+}
+
+// The routing target's agent name, from the session list the UI already fetches (the Atlas tree, the
+// fleet and review surfaces all share the ["allSessions"] query, so this costs no extra request there).
+// Null when that list doesn't carry the session (archived, or not loaded yet): the id then stands alone.
+function useRoutedAgentName(sessionId: string, enabled: boolean): string | null {
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal), enabled });
+  return enabled ? sessions.data?.find((s) => s.id === sessionId)?.agentName ?? null : null;
 }
 
 // ── Nudge mgr (watchdog action) ─────────────────────────────────────────────────
@@ -546,9 +571,11 @@ function RequestAttachments({ question }: { question: QuestionInboxItem }) {
 // row action opens the detail MODAL in place (no route push); answered rows get a View that opens the same.
 function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onOpen: (id: string) => void }) {
   const watchdog = isDecisionWatchdog(q, now);
-  const typeTone = REQUEST_TYPE_TONE[q.type];
   const edge = q.state === "pending" || watchdog ? color.attn : "transparent";
-  const metaDot = q.state === "pending" || watchdog ? "attn" : "muted";
+  // Amber belongs to the edge and the needs chip alone (card defc70c1, A-26): when the meta dot and the
+  // hint line wore it too, nothing on the card stood out. The watchdog keeps its glowing dot, because on
+  // that row the dot IS the stale-pickup signal (it carries a state chip, not a needs chip).
+  const metaDot = watchdog ? "attn" : "muted";
   const clearAction = sshClearAction(q, now);
   const holdStatus = sshHoldStatus(q, now);
   const [confirmingClear, setConfirmingClear] = useState(false);
@@ -568,33 +595,39 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
     // to a sibling row's controls (the same collision class as the agent-row/project-name one).
     <Panel data-testid="request-row" data-question-id={q.id}
       style={{ display: "flex", flexDirection: "column", gap: 5, borderLeft: `3px solid ${edge}` }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+      {/* Layout lives in global.css (.loom-req-row*) so a narrow viewport can stack the action column
+          under the body (card defc70c1, A-11) — an inline flex-direction would beat the media query. */}
+      <div className="loom-req-row">
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
           <span style={{ fontSize: fs.body, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
           <span style={{ fontSize: fs.sm, color: color.text3, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            <Dot tone={metaDot} glow={watchdog} />
-            <span style={{ color: color.text2 }}>{q.projectName}</span>
+            {/* The dot rides INSIDE the project name's span so a long name wraps with it, rather than
+                leaving the dot alone on its own line at a narrow width (A-11). */}
+            <span style={{ color: color.text2 }}>
+              <Dot tone={metaDot} glow={watchdog} style={{ marginRight: 6, verticalAlign: "0.05em" }} />
+              {q.projectName}
+            </span>
             <span>· <RequestProvenance q={q} /></span>
             <span>· {q.state === "pending" ? "asked" : q.state === "notice" ? "posted" : "answered"} {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}</span>
             {q.taskId && <LinkedTaskChip taskId={q.taskId} columnKey={q.linkedTaskColumnKey} />}
             <RequestAttachmentChip attachments={q.attachments} />
           </span>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+        <div className="loom-req-row-actions">
           <RequestTypeTag type={q.type} />
           {q.state === "pending"
             ? <RequestNeedsChip type={q.type} />
             : <DecisionStateChip q={q} now={now} />}
           {q.state === "pending"
             ? (
-              <div style={{ display: "flex", gap: 6 }}>
+              <div className="loom-req-row-buttons">
                 <DismissButton q={q} />
                 <Button variant="primary" onClick={() => onOpen(q.id)}>{requestActionLabel(q.type)}</Button>
               </div>
             )
             : clearAction
               ? (
-                <div style={{ display: "flex", gap: 6 }}>
+                <div className="loom-req-row-buttons">
                   <Button ref={clearTrigger} variant="ghost" disabled={confirmingClear} title={SSH_CLEAR_COPY[clearAction].title}
                     aria-expanded={confirmingClear} data-testid="ssh-clear"
                     onClick={() => setConfirmingClear(true)}>
@@ -607,7 +640,7 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
                 ? <NudgeMgrButton q={q} />
                 : q.state === "notice" && q.dismissedAt == null
                   ? (
-                    <div style={{ display: "flex", gap: 6 }}>
+                    <div className="loom-req-row-buttons">
                       <DismissNoticeButton q={q} />
                       <Button variant="ghost" onClick={() => onOpen(q.id)} style={{ padding: "0 6px" }}>View</Button>
                     </div>
@@ -615,9 +648,10 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
                   : <Button variant="ghost" onClick={() => onOpen(q.id)} style={{ padding: "0 6px" }}>View</Button>}
         </div>
       </div>
-      {/* second line: the type-colored hint (pending) or the recorded outcome (answered/consumed). */}
+      {/* second line: the hint (pending) or the recorded outcome (answered/consumed). The hint is plain
+          secondary text, not the type tone: amber stays on the edge and the needs chip (A-26). */}
       {q.state === "pending" ? (
-        <span style={{ fontSize: fs.sm, color: tone[typeTone] }}>{requestHint(q)}</span>
+        <span style={{ fontSize: fs.sm, color: color.text2 }}>{requestHint(q)}</span>
       ) : (
         <span style={{ fontSize: fs.sm, color: watchdog ? color.attnText : color.text3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {q.state === "notice" ? "" : watchdog ? "answered, not picked up — " : "answered: "}
@@ -627,6 +661,25 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
       )}
       {clearAction && confirmingClear && <SshClearConfirm q={q} action={clearAction} onCancel={cancelClear} />}
     </Panel>
+  );
+}
+
+// ── Request search — ONE box and ONE matcher, shared by "Waiting on me" and History (card defc70c1, A-31) ──
+// `q.agentName` (card 24a8b8c3) names the IMMUTABLE FILER's agent, not whichever agent currently owns
+// the routing target — so searching by agent name matches "who asked this", surviving any recycle.
+// The short session ids are searchable too, since the rows print them.
+export function requestMatchesSearch(q: QuestionInboxItem, search: string): boolean {
+  const s = search.trim().toLowerCase();
+  if (s === "") return true;
+  return `${q.title} ${q.note ?? ""} ${q.chosenOption ?? ""} ${q.cancelledReason ?? ""} ${q.agentName} ${q.projectName} ${q.filedBySessionId?.slice(0, 8) ?? ""} ${q.sessionId.slice(0, 8)}`
+    .toLowerCase().includes(s);
+}
+
+function RequestSearchInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <input value={value} onChange={(e) => onChange(e.target.value)} placeholder="search titles / answers / agents…"
+      aria-label="Search requests"
+      style={{ flex: "1 1 220px", minWidth: 180, ...textareaStyle, resize: undefined }} />
   );
 }
 
@@ -655,6 +708,7 @@ export function RequestsInbox() {
   const [typeFacet, setTypeFacet] = useState<QuestionType | "all">("all");
   const [projFacet, setProjFacet] = useState<string>("all"); // projectId | "all"
   const [unreadOnly, setUnreadOnly] = useState(false);
+  const [search, setSearch] = useState("");
   const openRequest = useOpenRequest();
   const now = Date.now();
 
@@ -683,7 +737,8 @@ export function RequestsInbox() {
   const filtered = items.filter((q) =>
     (activeType === "all" || q.type === activeType) &&
     (activeProj === "all" || q.projectId === activeProj) &&
-    (!unreadOnly || isUnread(q)));
+    (!unreadOnly || isUnread(q)) &&
+    requestMatchesSearch(q, search));
   const pending = filtered.filter((q) => q.state === "pending");
   // A notice (card 59fa6403) is its own group, NOT "waiting on me" — nobody is waiting on anything for
   // it, so it must never inflate the header count or sit under the "waiting on manager pickup" label,
@@ -703,6 +758,13 @@ export function RequestsInbox() {
         <span style={{ flex: 1 }} />
         <Button variant="ghost" style={{ padding: "1px 8px", fontSize: fs.sm }} onClick={() => qc.invalidateQueries({ queryKey: ["openQuestions"] })}>Refresh</Button>
       </div>
+
+      {/* search — the same box History has (A-31); narrows alongside the facets below, never instead of them. */}
+      {items.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <RequestSearchInput value={search} onChange={setSearch} />
+        </div>
+      )}
 
       {/* type filter */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -1327,24 +1389,20 @@ export function RequestHistory() {
   };
   // A cancelled row's "when" is cancelledAt (it has no answeredAt — never answered).
   const resolvedAt = (q: QuestionInboxItem): string | null => q.state === "cancelled" ? q.cancelledAt : q.answeredAt;
-  const s = search.trim().toLowerCase();
-  // `q.agentName` (card 24a8b8c3) names the IMMUTABLE FILER's agent, not whichever agent currently owns
-  // the routing target — so searching by agent name matches "who asked this", surviving any recycle.
   const rows = terminal.filter((q) =>
     (typeF === "all" || q.type === typeF) &&
     (projF === "all" || q.projectId === projF) &&
     (outcomeF === "all" || outcomeOf(q) === outcomeF) &&
     (readF === "all" || isUnread(q)) &&
     withinDate(resolvedAt(q)) &&
-    (s === "" || `${q.title} ${q.note ?? ""} ${q.chosenOption ?? ""} ${q.cancelledReason ?? ""} ${q.agentName} ${q.projectName}`.toLowerCase().includes(s)));
+    requestMatchesSearch(q, search));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <SectionLabel style={{ margin: 0 }}>History ({terminal.length - cancelledCount - noticeCount} consumed{cancelledCount > 0 ? ` · ${cancelledCount} cancelled` : ""}{noticeCount > 0 ? ` · ${noticeCount} notice${noticeCount === 1 ? "" : "s"}` : ""})</SectionLabel>
       {/* filter bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="search titles / answers / agents…"
-          style={{ flex: "1 1 220px", minWidth: 180, ...textareaStyle, resize: undefined }} />
+        <RequestSearchInput value={search} onChange={setSearch} />
         <Select value={typeF} onChange={(e) => setTypeF(e.target.value as QuestionType | "all")}>
           <option value="all">all types</option>
           {REQUEST_TYPE_ORDER.map((t) => <option key={t} value={t}>{t}</option>)}
