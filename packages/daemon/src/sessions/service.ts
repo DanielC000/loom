@@ -17494,13 +17494,13 @@ export class SessionService {
         const { failedRefs } = this.carryPendingToSuccessor(workerSessionId, fresh.id, carried, carriedDurable);
         if (failedRefs.length > 0) {
           this.enqueueDurableNudge(managerSessionId, this.db.getSession(managerSessionId)?.role ?? null,
-            `[loom:recycle-carry-failed] worker ${workerSessionId.slice(0, 8)} -> ${fresh.id.slice(0, 8)} (task ${taskId ?? "none"}): ${failedRefs.length} of ${carried.length + carriedDurable.length} pending message(s) failed to carry onto the successor. A durable one stays on the (now-stopped) predecessor's own record, unresolved. Check events_search or worker_message the successor directly if context looks missing.`,
+            `[loom:recycle-carry-failed] worker ${workerSessionId} -> ${fresh.id} (task ${taskId ?? "none"}): ${failedRefs.length} of ${carried.length + carriedDurable.length} pending message(s) failed to carry onto the successor. A durable one stays on the (now-stopped) predecessor's own record, unresolved. Check events_search or worker_message the successor directly if context looks missing.`,
             taskId);
         }
       } catch (e) {
         console.error(`[sessions] carrying the predecessor's pending queue to the successor failed for ${fresh.id} (post-spawn bookkeeping, best-effort — the recycle itself already succeeded):`, (e as Error).message);
         this.enqueueDurableNudge(managerSessionId, this.db.getSession(managerSessionId)?.role ?? null,
-          `[loom:recycle-carry-failed] worker ${workerSessionId.slice(0, 8)} -> ${fresh.id.slice(0, 8)} (task ${taskId ?? "none"}): carrying the predecessor's queued messages onto the successor failed after the successor was already live (${carried.length} non-durable + ${carriedDurable.length} durable message(s) were pending). Some or all may not have reached the successor — check events_search or worker_message it directly if context looks missing.`,
+          `[loom:recycle-carry-failed] worker ${workerSessionId} -> ${fresh.id} (task ${taskId ?? "none"}): carrying the predecessor's queued messages onto the successor failed after the successor was already live (${carried.length} non-durable + ${carriedDurable.length} durable message(s) were pending). Some or all may not have reached the successor — check events_search or worker_message it directly if context looks missing.`,
           taskId);
       }
       this.bestEffortPostSpawn("recording the recycle_complete event", fresh.id, () => {

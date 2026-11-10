@@ -827,7 +827,7 @@ export class ContextWatcher {
     const pct = Math.round(r * 100);
     const kw = Math.round(window / 1000);
     const msg =
-      `${WORKER_CONTEXT_WARN_PREFIX} worker ${w.id.slice(0, 8)}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} ` +
+      `${WORKER_CONTEXT_WARN_PREFIX} worker ${w.id}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} ` +
       `is at ~${pct}% of its ${kw}k window — approaching exhaustion (auto-compact is OFF). Consider ` +
       `worker_recycle before it runs out, or nudge it to commit and report now.`;
     let result: { delivered: boolean; queued?: boolean };
@@ -905,7 +905,7 @@ export class ContextWatcher {
     // it must not learn about it only from the worker's own next report. Best-effort: the durable event
     // above already stands regardless of whether this notice is accepted.
     const noticeMsg =
-      `[loom:worker-context-interrupt] worker ${w.id.slice(0, 8)}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} ` +
+      `[loom:worker-context-interrupt] worker ${w.id}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} ` +
       `is at ~${pct}% context — Loom told it to commit and report. Recycle it once it reports.`;
     try { this.deps.pty.enqueueStdin(managerId, noticeMsg); } catch { /* manager not live — the durable event stands */ }
   }

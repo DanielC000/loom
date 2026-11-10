@@ -110,7 +110,7 @@ try {
     const client = await connect(server);
 
     // (T1) POSITIVE CONTROL — appendBody through the tasks_update ROUTER preserves the worker's report.
-    const appended = await call(client, "tasks_update", { id: "t-report", appendBody: "Manager triage: looks correct, merging." });
+    const appended = await call(client, "tasks_update", { id: "t-report", appendBody: "Manager triage: looks correct, merging.", returnFullTask: true });
     check("(T1) tasks_update+appendBody: no error", !appended.error);
     check("(T1) tasks_update+appendBody: the ORIGINAL worker report SURVIVES", appended.body?.includes("Ran the targeted test file, all green. Commit abc1234 on loom/e2756e47."));
     check("(T1) tasks_update+appendBody: the new note is present", appended.body?.includes("Manager triage: looks correct, merging."));

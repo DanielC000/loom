@@ -1519,6 +1519,10 @@ export async function updateProjectTask(
    *  `type(scope):`-shaped prefix whose type isn't in the allowed Conventional Commits set. Same
    *  only-consulted-when-`patch.title`-is-set convention as `allowHtmlEntities` above. */
   allowNonConventionalType?: boolean,
+  /** When true, an `appendBody` write returns the trimmed {@link TaskUpdateAck} (whose `changed` lists
+   *  `body`) instead of echoing the whole updated task. Default false: every other caller (companion
+   *  board_update, Platform project_task_update) keeps the full row. Ignored for a `body` replace. */
+  ackOnlyForAppend?: boolean,
 ): Promise<
   | (Task & { pendingRequestWarning?: PendingRequestWarning[] })
   | (TaskUpdateAck & { pendingRequestWarning?: PendingRequestWarning[] })
@@ -1968,7 +1972,7 @@ export async function updateProjectTask(
   // A patch that doesn't touch `body` doesn't need it echoed back — trim to the small fields. A patch
   // that DOES pass `body` returns the full task (the caller is intentionally editing it and wants to
   // see the result).
-  if (patch.body === undefined) {
+  if (patch.body === undefined || (appendBody !== undefined && ackOnlyForAppend === true)) {
     const { id, title, columnKey, priority, position, held, deferred, heldBy, heldRequestId, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version } = updated;
     const ack: TaskUpdateAck & { pendingRequestWarning?: PendingRequestWarning[] } = {
       id, title, columnKey, priority, position, held, deferred, heldBy, heldRequestId, repoKey, deferredUntilTaskId, deferredAt, deferredReason, deferredUntilEvent, updatedAt, version, changed: [...Object.keys(patch), ...structureKeys],

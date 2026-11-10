@@ -14,7 +14,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves:
 //   (1) tasks_list's MCP response is NDJSON — one JSON object per line, NOT a JSON array — and each
 //       line parses to the expected task summary;
-//   (2) an empty result list is an empty string (zero lines), not "[]";
+//   (2) an empty result list is an explicit envelope ({rows:[],total:0,...}), never an empty string;
 //   (3) idPrefix narrows to only tasks whose id starts with the given prefix;
 //   (4) titleContains narrows to only tasks whose title contains the substring (case-insensitive);
 //   (5) idPrefix/titleContains compose with the existing columns/excludeDone/minPriority filters and
@@ -105,7 +105,9 @@ try {
 
   // (2) an empty result is an empty string (zero lines), not "[]".
   const emptyText = await rawText({ idPrefix: "ffffffff" });
-  check("(2) an empty tasks_list result is an empty string, not '[]'", emptyText === "");
+  const emptyEnv = (() => { try { return JSON.parse(emptyText); } catch { return null; } })();
+  check("(2) an empty tasks_list result is an explicit non-empty envelope, not an empty string",
+    emptyText !== "" && emptyEnv !== null && Array.isArray(emptyEnv.rows) && emptyEnv.rows.length === 0 && emptyEnv.total === 0);
 
   // (3)/(4) idPrefix + titleContains over the MCP tool.
   const idFiltered = ndjson(await rawText({ idPrefix: "aaaa" })).map((t) => t.id).sort();

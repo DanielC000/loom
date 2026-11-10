@@ -21,6 +21,16 @@ import {
  *  1-64 chars, so a key is always safe to use as an identity (upsert target) without further escaping. */
 const KEY_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
+/** Names WHICH rule a rejected key broke — the first offending character (shown JSON-quoted so a space or
+ *  control byte is visible, with its position), else the leading-char or length rule. */
+function describeKeyViolation(key: string): string {
+  const chars = Array.from(key);
+  const badIdx = chars.findIndex((c) => !/[a-zA-Z0-9_-]/.test(c));
+  if (badIdx >= 0) return `offending character ${JSON.stringify(chars[badIdx])} at position ${badIdx + 1}`;
+  if (!/^[a-zA-Z0-9]/.test(key)) return `the first character ${JSON.stringify(chars[0])} must be a letter or digit`;
+  return `the key is ${chars.length} characters long (max 64)`;
+}
+
 /** Bounds hardening: a note is meant to be a short, curated fact — not a dumping ground. Caps `text` at a
  *  few KB so an accidental memory_write-in-a-loop (or a large paste) can't bloat every future kickoff or
  *  grow the DB unbounded; rejected with a clear error rather than silently truncated (silent truncation
@@ -339,7 +349,7 @@ export function writeProjectMemory(
   | MemoryWriteTooLong {
   const key = input.key?.trim();
   if (!key) return { error: "key is required" };
-  if (!KEY_RE.test(key)) return { error: "key must be a short slug: letters, digits, '-', '_' only, 1-64 chars" };
+  if (!KEY_RE.test(key)) return { error: `key must be a short slug: letters, digits, '-', '_' only, 1-64 chars — ${describeKeyViolation(key)}` };
   const existing = db.getProjectMemoryByKey(projectId, key);
   // Card 145e8d72: `text` is REQUIRED to create a brand-new key (nothing to fall back to), but OPTIONAL to
   // update an EXISTING one — omitting it there is a metadata-only patch that resends the row's OWN stored

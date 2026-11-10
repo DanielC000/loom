@@ -165,7 +165,7 @@ export class WorktreeVanishedWatcher {
         detail: { reason, worktreePath: w.worktreePath },
       });
 
-      const shortId = w.id.slice(0, 8);
+      const shortId = w.id; // full id: the manager's worker_* tools need it whole
       const taskPart = w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : "";
       const workerMsg =
         `[loom:worktree-vanished] Your worktree at ${w.worktreePath} appears gone or broken (${reason}). ` +

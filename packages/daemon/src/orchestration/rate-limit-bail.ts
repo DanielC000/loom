@@ -48,7 +48,7 @@ export function bailRateLimitEpisode(
   const parentId = db.getSession(sessionId)?.parentSessionId;
   if (parentId) {
     try {
-      pty.enqueueStdin?.(parentId, `[loom:${tag}] session ${sessionId.slice(0, 8)} hit ${mechanism} — auto-resume has been abandoned; see its lastError.`);
+      pty.enqueueStdin?.(parentId, `[loom:${tag}] session ${sessionId} hit ${mechanism} — auto-resume has been abandoned; see its lastError.`);
     } catch { /* best-effort — the durable event above already stands */ }
   }
 }

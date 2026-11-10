@@ -469,7 +469,7 @@ export class CrashRecoveryWatcher {
               try {
                 pty.enqueueStdin(
                   s.parentSessionId,
-                  `[loom:crash-loop] Your worker ${s.id.slice(0, 8)}${s.taskId ? ` (task ${s.taskId.slice(0, 8)})` : ""} ` +
+                  `[loom:crash-loop] Your worker ${s.id}${s.taskId ? ` (task ${s.taskId.slice(0, 8)})` : ""} ` +
                   `died ${attempts}× after auto-resume — Loom STOPPED auto-resuming it (crash-loop safety). It will ` +
                   `NOT come back on its own. Inspect its log, then recycle/re-task it or fix the cause.`,
                 );

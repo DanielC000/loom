@@ -143,7 +143,7 @@ export class BusyWorkerWatcher {
               // detail lags by however long the bounded read takes.
               tryReadLastCommitSummary(w.cwd).then((lastCommit) => {
                 const msg =
-                  `[loom:worker-context-exhausted] worker ${w.id.slice(0, 8)}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} ` +
+                  `[loom:worker-context-exhausted] worker ${w.id}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} ` +
                   `just hit the terminal "${exhaustion.matchedText}" — its context is EXHAUSTED and it can no longer take a turn. ` +
                   `busy has been cleared and any queued direction is HELD (not drained into the dead turn). ` +
                   `worker_recycle it — this keeps its worktree/branch intact for the successor.` +
@@ -196,7 +196,7 @@ export class BusyWorkerWatcher {
         detail: { reason: "busy_no_progress", minutesBusy: n, ctxPct },
       });
       const msg =
-        `[loom:worker-busy-long] worker ${w.id.slice(0, 8)}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} has been ` +
+        `[loom:worker-busy-long] worker ${w.id}${w.taskId ? ` (task ${w.taskId.slice(0, 8)})` : ""} has been ` +
         `in a single turn ~${n}min (context: ${ctxPct != null ? `~${ctxPct}%` : "unknown"}) — likely a long build/test gate. ` +
         `If that's unexpected, check on it with worker_status; re-nudge (worker_message) or recycle if it's genuinely ` +
         `stuck. (Informational — Loom does not auto-kill the worker.)`;

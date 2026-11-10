@@ -143,7 +143,7 @@ try {
   // REAL DB row (not a locally reconstructed guess) because appendBody's heading carries a server-stamped
   // timestamp this test cannot predict.
   const appendText = bigBody; // large enough alone to push the result over the spill cap
-  const appendResult = await call("tasks_update", { id: TASK_APPEND, appendBody: appendText });
+  const appendResult = await call("tasks_update", { id: TASK_APPEND, appendBody: appendText, returnFullTask: true });
   check("(B2) appendBody past the cap ALSO spills (not just a plain `body` write)", appendResult.body === undefined && typeof appendResult.bodyFile === "string" && appendResult.bodyChars > SPILL_INLINE_BUDGET_CHARS);
   const dbRowAfterAppend = db.getTask(TASK_APPEND);
   check("(B2) the appended text actually landed in the DB row's body", dbRowAfterAppend.body.includes("starts small too") && dbRowAfterAppend.body.includes(appendText) && dbRowAfterAppend.body.includes("Triage note"));
