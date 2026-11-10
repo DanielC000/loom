@@ -46,7 +46,7 @@ export interface ConnectionsDbStore {
     provider?: string | null; clientId?: string | null; authUrl?: string | null; tokenUrl?: string | null; scopes?: string | null;
     projectId?: string | null;
     sshPort?: number | null; sshUser?: string | null; sshHostKeyFingerprint?: string | null;
-    sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+    sshReadOnly?: boolean; sshShellSyntax?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
     allowPlainHttp?: boolean;
     apiKeyHeader?: string | null;
   }): ConnectionRow;
@@ -61,7 +61,7 @@ export interface ConnectionsDbStore {
   updateConnection(id: string, patch: {
     name?: string; host?: string; authScheme?: ConnectionAuthScheme; secretBlob?: string;
     sshPort?: number; sshUser?: string; sshHostKeyFingerprint?: string;
-    sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+    sshReadOnly?: boolean; sshShellSyntax?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
     allowPlainHttp?: boolean;
     apiKeyHeader?: string | null;
   }): void;
@@ -117,6 +117,7 @@ function toMetadata(row: ConnectionRow): ConnectionMetadata {
       user: row.sshUser ?? undefined,
       hostKeyFingerprint: row.sshHostKeyFingerprint ?? undefined,
       readOnly: row.sshReadOnly,
+      shellSyntax: row.sshShellSyntax,
       commandAllowlist: parseSshRuleListColumn(row.sshCommandAllowlist),
       riskyCommandPatterns: parseSshRuleListColumn(row.sshRiskyPatterns),
     };
@@ -321,11 +322,14 @@ export function validateSshHost(host: unknown): { ok: true } | { ok: false; erro
  * this function catches a key over `CONNECTION_SECRET_MAX` before ever touching the parser; a key that's
  * small enough but genuinely encrypted-without-a-passphrase is caught by `stripSshKeyPassphrase` instead.
  */
+/** `shellSyntax` (quoted/piped commands) is only ever effective on a read-write connection (card b2229239). */
+const SHELL_SYNTAX_READ_ONLY_ERROR = "shellSyntax requires a read-write connection (untick readOnly first, or set shellSyntax false)";
+
 export function validateSshConnectionInput(input: {
   name?: unknown; host?: unknown; port?: unknown; user?: unknown; privateKey?: unknown; passphrase?: unknown;
-  hostKeyFingerprint?: unknown; readOnly?: unknown; commandAllowlist?: unknown; riskyCommandPatterns?: unknown;
+  hostKeyFingerprint?: unknown; readOnly?: unknown; shellSyntax?: unknown; commandAllowlist?: unknown; riskyCommandPatterns?: unknown;
 }):
-  | { ok: true; port: number; readOnly: boolean; commandAllowlist: SshCommandRule[]; riskyCommandPatterns: SshCommandRule[] }
+  | { ok: true; port: number; readOnly: boolean; shellSyntax: boolean; commandAllowlist: SshCommandRule[]; riskyCommandPatterns: SshCommandRule[] }
   | { ok: false; error: string } {
   if (!isNonBlankStr(input.name, CONNECTION_NAME_MAX)) {
     return { ok: false, error: `name must be a non-empty string of at most ${CONNECTION_NAME_MAX} characters` };
@@ -352,13 +356,16 @@ export function validateSshConnectionInput(input: {
   if (typeof readOnly !== "boolean") {
     return { ok: false, error: "readOnly, when given, must be a boolean" };
   }
+  const shellSyntax = input.shellSyntax === undefined ? false : input.shellSyntax;
+  if (typeof shellSyntax !== "boolean") return { ok: false, error: "shellSyntax, when given, must be a boolean" };
+  if (shellSyntax && readOnly) return { ok: false, error: SHELL_SYNTAX_READ_ONLY_ERROR };
   const allow = validateSshCommandRuleList(input.commandAllowlist, "commandAllowlist");
   if (!allow.ok) return allow;
   const risky = input.riskyCommandPatterns === undefined
     ? { ok: true as const, value: [...DEFAULT_SSH_RISKY_COMMAND_PATTERNS] }
     : validateSshCommandRuleList(input.riskyCommandPatterns, "riskyCommandPatterns");
   if (!risky.ok) return risky;
-  return { ok: true, port, readOnly, commandAllowlist: allow.value, riskyCommandPatterns: risky.value };
+  return { ok: true, port, readOnly, shellSyntax, commandAllowlist: allow.value, riskyCommandPatterns: risky.value };
 }
 
 /** List every stored connection as metadata only — never the secret. */
@@ -421,7 +428,7 @@ export function createSshConnection(
   db: ConnectionsDbStore,
   input: {
     name: string; host: string; port?: number; user: string; privateKey: string; passphrase?: string;
-    hostKeyFingerprint: string; readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[];
+    hostKeyFingerprint: string; readOnly?: boolean; shellSyntax?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[];
     projectId?: string | null;
   },
   keyPath?: string,
@@ -441,6 +448,7 @@ export function createSshConnection(
     sshUser: input.user.trim(),
     sshHostKeyFingerprint: input.hostKeyFingerprint.trim(),
     sshReadOnly: v.readOnly,
+    sshShellSyntax: v.shellSyntax,
     sshCommandAllowlist: JSON.stringify(v.commandAllowlist),
     sshRiskyPatterns: JSON.stringify(v.riskyCommandPatterns),
   });
@@ -469,7 +477,7 @@ export function getSshPrivateKeyForUse(db: ConnectionsDbStore, id: string, keyPa
 export function updateSshConnectionConfig(
   db: ConnectionsDbStore,
   id: string,
-  patch: { readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[] },
+  patch: { readOnly?: boolean; shellSyntax?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[] },
 ): ConnectionMetadata {
   return updateSshConnection(db, id, patch).metadata;
 }
@@ -652,7 +660,7 @@ export function updateSshConnection(
   id: string,
   patch: {
     name?: string; host?: string; port?: number; user?: string; privateKey?: string; passphrase?: string;
-    hostKeyFingerprint?: string; readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[];
+    hostKeyFingerprint?: string; readOnly?: boolean; shellSyntax?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[];
   },
   keyPath?: string,
 ): ConnectionUpdateResult {
@@ -728,7 +736,11 @@ export function updateSshConnection(
     // codex binding to re-check here; the pin re-pin rule above is its host invariant.
     if (host !== row.host) next.host = host;
     if (port !== (row.sshPort ?? SSH_DEFAULT_PORT)) next.sshPort = port;
+    const shellSyntax = patch.shellSyntax === undefined ? row.sshShellSyntax : patch.shellSyntax;
+    if (typeof shellSyntax !== "boolean") throw new SshConnectionInputError("shellSyntax, when given, must be a boolean");
+    if (shellSyntax && readOnly) throw new SshConnectionInputError(SHELL_SYNTAX_READ_ONLY_ERROR);
     if (readOnly !== row.sshReadOnly) { next.sshReadOnly = readOnly; changed.push("readOnly"); }
+    if (shellSyntax !== row.sshShellSyntax) { next.sshShellSyntax = shellSyntax; changed.push("shellSyntax"); }
     const allowJson = JSON.stringify(allow.value);
     if (allowJson !== row.sshCommandAllowlist) { next.sshCommandAllowlist = allowJson; changed.push("commandAllowlist"); }
     const riskyJson = JSON.stringify(risky.value);

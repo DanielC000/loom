@@ -2960,7 +2960,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // --- SSH connections (design record a3d5c7f4) — a DEDICATED route (not the generic POST /api/connections
   // above), same precedent as the oauth2 route below: the field shape (port/user/privateKey/passphrase/
-  // hostKeyFingerprint/readOnly/commandAllowlist/riskyCommandPatterns) is structurally different from
+  // hostKeyFingerprint/readOnly/shellSyntax/commandAllowlist/riskyCommandPatterns) is structurally different from
   // api-key/bearer's single opaque `secret`. Human-only loopback, same trust posture as every connection
   // write — no MCP path. The private key never appears in this route's response (createSshConnection
   // returns ConnectionMetadata only). ---
@@ -2985,6 +2985,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         name: b.name, host: b.host, port: b.port as number | undefined, user: b.user,
         privateKey: b.privateKey, passphrase: b.passphrase as string | undefined,
         hostKeyFingerprint: b.hostKeyFingerprint, readOnly: b.readOnly as boolean | undefined,
+        shellSyntax: b.shellSyntax as boolean | undefined,
         commandAllowlist: b.commandAllowlist as never, riskyCommandPatterns: b.riskyCommandPatterns as never,
         projectId: scope.projectId,
       });
@@ -3027,6 +3028,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           user: b.user as string | undefined, privateKey: b.privateKey as string | undefined,
           passphrase: b.passphrase as string | undefined, hostKeyFingerprint: b.hostKeyFingerprint as string | undefined,
           readOnly: b.readOnly as boolean | undefined,
+          shellSyntax: b.shellSyntax as boolean | undefined,
           commandAllowlist: b.commandAllowlist as never,
           riskyCommandPatterns: b.riskyCommandPatterns as never,
         });

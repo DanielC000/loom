@@ -135,7 +135,7 @@ The form's risky-pattern section (`packages/web/src/components/sshConnection.tsx
 - Do not scope redemption to the agent id: concurrent workers share one agent. Bind to the filing session, its recycle chain and the same task.
 - Do not consume a deny on first report, and do not allow a standing ssh grant without an expiry.
 - Do not match an approval by connection alone, a prefix, or the Request's title/body — only by equality on the immutable `permission_action`; and do not let an approval widen a read-only connection or an allowlist.
-- Do not relax the shell-syntax refusal by inferring safety from `readOnly` or from the rule types — see the `ssh_exec` section above; shell syntax needs an explicit per-connection opt-in on a future card.
+- Do not relax the shell-syntax refusal by inferring safety from `readOnly` or from the rule types — see the `ssh_exec` section above; shell syntax is accepted only through the owner's per-connection `shellSyntax` opt-in and its closed grammar (record `b2229239-ssh-exec-shell-syntax-opt-in.md`), never on a read-only connection.
 - Do not evaluate an owner regex against agent text on the daemon event loop — only through `testRegexesBounded` (one worker, one total budget, fail closed, at most two workers daemon-wide).
 - Do not infer a `systemctl`/`docker` subcommand by skipping option words — an option's VALUE is also a bare word (`systemctl -o cat stop sshd`).
 - Do not write the `ssh_command_run` attempt row after any step that can throw, and do not let a caught path skip its outcome row.

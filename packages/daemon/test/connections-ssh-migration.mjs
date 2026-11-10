@@ -35,7 +35,7 @@ requireHermeticEnv();
 const dbFile = path.join(tmpHome, "pre-ssh.db");
 const legacyId = randomUUID();
 const PLAINTEXT = "ghp_LEGACY-pre-ssh-migration-secret-xyz789";
-const SSH_ADDED_COLUMNS = ["ssh_port", "ssh_user", "ssh_host_key_fingerprint", "ssh_read_only", "ssh_command_allowlist", "ssh_risky_patterns"];
+const SSH_ADDED_COLUMNS = ["ssh_port", "ssh_user", "ssh_host_key_fingerprint", "ssh_read_only", "ssh_shell_syntax", "ssh_command_allowlist", "ssh_risky_patterns"];
 
 // ===== Synthesize the REAL pre-ssh-phase `connections` shape directly, bypassing the Db class entirely =====
 {
@@ -108,13 +108,16 @@ try {
     // raw check is what actually proves the backfill happened rather than masking a missing default).
     const raw3 = new Database(dbFile, { readonly: true });
     let rawReadOnly;
+    let rawShellSyntax;
     try {
       rawReadOnly = raw3.prepare("SELECT ssh_read_only FROM connections WHERE id = ?").get(legacyId).ssh_read_only;
+      rawShellSyntax = raw3.prepare("SELECT ssh_shell_syntax FROM connections WHERE id = ?").get(legacyId).ssh_shell_syntax;
     } finally {
       raw3.close();
     }
     check("(3) legacy row's RAW ssh_read_only column backfilled to 1", rawReadOnly === 1);
     check("(3) legacy row's mapped sshReadOnly backfilled to true", legacyRow.sshReadOnly === true);
+    check("(3) legacy row's RAW ssh_shell_syntax column backfilled to 0 and maps to false (quotes/pipes stay refused)", rawShellSyntax === 0 && legacyRow.sshShellSyntax === false);
 
     // ===== (4) the legacy row still round-trips through the store's normal read paths post-migration =====
     const { listConnections, getConnectionMetadata, getSecretForUse } = await import("../dist/connections/store.js");

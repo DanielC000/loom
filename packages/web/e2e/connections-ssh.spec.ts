@@ -317,3 +317,46 @@ test("an unconfirmed fetched fingerprint is discarded when the host changes, and
     await server.close();
   }
 });
+
+test("the quoted-and-piped opt-in is off and disabled while read-only, and a read-write connection round-trips it through the editor", async ({ page, loomDaemon }) => {
+  const base = loomDaemon.baseURL;
+  const project = await loomDaemon.createProject(uniq("ssh-shell-ui"));
+  let connId: string | undefined;
+  try {
+    await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
+    await page.goto(`${base}/settings`);
+    await page.getByRole("button", { name: "New connection" }).click();
+    await page.getByRole("button", { name: "SSH host", exact: true }).click();
+    // Create form: off by default, and not tickable while Read-only is ticked.
+    const optIn = page.getByTestId("ssh-shell-syntax");
+    await expect(optIn).not.toBeChecked();
+    await expect(optIn).toBeDisabled();
+    await expect(page.getByText("the remote login shell is POSIX sh-compatible", { exact: false })).toBeVisible();
+    const readOnlyBox = page.locator("label", { hasText: "Read-only" }).locator('input[type="checkbox"]').first();
+    await readOnlyBox.uncheck();
+    await expect(optIn).toBeEnabled();
+    await optIn.check();
+    await readOnlyBox.check();
+    await expect(optIn, "re-ticking Read-only clears and disables the opt-in").not.toBeChecked();
+    await expect(optIn).toBeDisabled();
+
+    // Editor: a read-write connection created with the opt-in carries it, shows it ticked, and can switch it off.
+    const key = generateParseableEd25519(ssh2.utils);
+    const fp = `SHA256:${createHash("sha256").update(Buffer.from(uniq("fp"))).digest("base64").replace(/=+$/, "")}`;
+    const created = await apiJson<ConnRow & { shellSyntax?: boolean }>(`${base}/api/connections/ssh`, {
+      method: "POST",
+      body: JSON.stringify({ name: uniq("Shell NAS"), host: "127.0.0.1", port: 2222, user: "loom", privateKey: key.private, hostKeyFingerprint: fp, readOnly: false, shellSyntax: true, projectId: project.id }),
+    });
+    connId = created.id;
+    expect(created.shellSyntax, "control: the daemon stored the opt-in").toBe(true);
+    await page.goto(`${base}/settings`);
+    await page.getByTestId(`ssh-edit-open-${created.id}`).click();
+    const editOptIn = page.getByTestId(`ssh-edit-shell-syntax-${created.id}`);
+    await expect(editOptIn).toBeChecked();
+    await editOptIn.uncheck();
+    await page.getByRole("button", { name: "Save changes" }).click();
+    await expect.poll(async () => (await apiJson<Array<ConnRow & { shellSyntax?: boolean }>>(`${base}/api/connections`)).find((c) => c.id === created.id)?.shellSyntax, { timeout: 15_000 }).toBe(false);
+  } finally {
+    if (connId) await fetch(`${base}/api/connections/${connId}`, { method: "DELETE" });
+  }
+});

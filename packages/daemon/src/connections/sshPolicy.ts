@@ -16,9 +16,11 @@
  *
  * @decision a3d5c7f4 — shell syntax is refused on EVERY command, BEFORE any rule is matched, whatever
  * `readOnly` or the rule types say; never relax it by inference (unanchored `^ls` would pass `ls; reboot`).
+ * @decision b2229239 — the ONLY relaxation is the owner's per-connection `shellSyntax` opt-in (never on readOnly): the closed grammar in `sshShellParse.ts`.
  */
 import type { ConnectionMetadata, SshCommandRule } from "@loom/shared";
 import { testRegexesBounded } from "./sshRegex.js";
+import { SHELL_SYNTAX_CHARS, dequotedWordCarriesShellSyntax, parseSshShellCommand, shellExecutorHold, wordsForRiskyMatch, type ParsedSegment } from "./sshShellParse.js";
 
 /** Longest command text accepted (chars) — the cap is applied before any matching. */
 export const SSH_MAX_COMMAND_LENGTH = 4096;
@@ -34,8 +36,9 @@ export type SshPolicyVerdict = { allowed: true; requiresApproval?: true } | { al
 
 // After the ASCII/control gate, every character that could start an expansion, substitution, redirection,
 // job/command separator, quoting, escaping, globbing or comment is refused outright (a denylist of syntax
-// rather than a parser — quoting tricks are refused, not interpreted).
-const SHELL_METACHARS = /[;&|`$()<>{}[\]*?!~#\\"'^]/;
+// rather than a parser — quoting tricks are refused, not interpreted). The set is `SHELL_SYNTAX_CHARS`
+// (sshShellParse.ts), shared with the shell-mode de-quoted-word check so the two cannot drift.
+const SHELL_METACHARS = SHELL_SYNTAX_CHARS;
 
 // Read-only mode's fixed verb list. Deliberately small, and it limits which VERBS run — NOT what the
 // server-side user can read (cat/grep/ps can still read anything that user can). Verbs with a mutating
@@ -125,7 +128,7 @@ function riskyWordMatch(rule: SshCommandRule, words: string[], trimmed: string):
  * check names the refusal. Never throws.
  */
 export async function evaluateSshCommandPolicy(
-  conn: Pick<ConnectionMetadata, "readOnly" | "commandAllowlist" | "riskyCommandPatterns" | "id">,
+  conn: Pick<ConnectionMetadata, "readOnly" | "commandAllowlist" | "riskyCommandPatterns" | "id"> & { shellSyntax?: boolean },
   command: unknown,
 ): Promise<SshPolicyVerdict> {
   const refuse = (reason: SshRefusalReason): SshPolicyVerdict => ({ allowed: false, reason });
@@ -134,10 +137,23 @@ export async function evaluateSshCommandPolicy(
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(command)) return refuse("control-characters");
   if (/[^\x20-\x7e]/.test(command)) return refuse("non-ascii-characters");
-  if (SHELL_METACHARS.test(command)) return refuse("shell-metacharacters");
+  // Opt-in closed grammar (card b2229239): only on a connection the owner flagged `shellSyntax` AND that is
+  // not read-only (a read-only connection keeps the flat, syntax-free grammar). Anything the grammar does not
+  // name is still refused with the same reason.
+  const shellMode = conn.shellSyntax === true && !conn.readOnly;
+  let parsed: ParsedSegment[] | null = null;
+  if (shellMode) {
+    const p = parseSshShellCommand(command);
+    if (!p.ok) return refuse("shell-metacharacters");
+    parsed = p.segments;
+  } else if (SHELL_METACHARS.test(command)) {
+    return refuse("shell-metacharacters");
+  }
   const trimmed = command.trim();
   if (trimmed.length === 0) return refuse("invalid-command");
   const words = trimmed.split(/ +/);
+  // Each pipeline segment is screened on its own word list (a quoted payload is also split into pieces).
+  const segmentWords: string[][] = parsed ? parsed.map((s) => wordsForRiskyMatch(s.words)) : [words];
 
   const allowlist = conn.commandAllowlist ?? [];
   const risky = conn.riskyCommandPatterns ?? [];
@@ -155,21 +171,39 @@ export async function evaluateSshCommandPolicy(
     regexResults = res.results;
   }
 
-  let riskyHit = false;
+  // A program-executing word (shell, interpreter, xargs, find -exec, a pipe into a shell...) is a HOLD in
+  // shell mode whatever the risky list says: the word screen cannot see what it will run.
+  let riskyHit = parsed !== null && (shellExecutorHold(parsed) || dequotedWordCarriesShellSyntax(parsed));
   for (const rule of risky) {
+    if (riskyHit) break;
     // An uncompilable risky regex (null) fails closed as a match.
-    const hit = rule.kind === "regex" ? regexResults[regexSlot.get(rule)!] !== false : riskyWordMatch(rule, words, trimmed);
+    const hit = rule.kind === "regex"
+      ? regexResults[regexSlot.get(rule)!] !== false
+      : rule.kind === "exact"
+        // Shell mode also compares each segment's de-quoted words joined by single spaces, so
+        // `systemctl restart 'nginx'` matches `exact:"systemctl restart nginx"`.
+        ? riskyWordMatch(rule, words, trimmed) ||
+          (parsed !== null && parsed.some((s) => s.words.join(" ").toLowerCase() === rule.pattern.trim().toLowerCase()))
+        : segmentWords.some((w) => riskyWordMatch(rule, w, trimmed));
     if (hit) { riskyHit = true; break; }
   }
   // A risky match is only a HOLD when every other check would let the command run: owner approval never
   // widens a read-only connection or an allowlist, so those refusals come first and stay refusals.
   if (conn.readOnly && !isReadOnlyCommand(words)) return refuse("not-read-only-verb");
   if (allowlist.length > 0) {
-    const ok = allowlist.some((rule) => {
-      if (rule.kind === "exact") return trimmed === rule.pattern;
-      if (rule.kind === "prefix") return trimmed.startsWith(rule.pattern);
-      return regexResults[regexSlot.get(rule)!] === true;
-    });
+    const matches = (text: string, rule: SshCommandRule): boolean =>
+      rule.kind === "exact" ? text === rule.pattern : rule.kind === "prefix" ? text.startsWith(rule.pattern) : false;
+    const ok = parsed && parsed.length > 1
+      // A pipeline: a rule that matches the WHOLE text (an owner-written exact command) passes, otherwise
+      // EVERY segment must match an exact/prefix rule on its own text. A regex rule is evaluated against the
+      // whole text and `.*` would swallow a piped tail, so it cannot qualify a multi-segment command.
+      ? allowlist.some((rule) => rule.kind === "exact" && trimmed === rule.pattern) ||
+        parsed.every((seg) => allowlist.some((rule) => matches(seg.raw, rule)))
+      : allowlist.some((rule) => {
+        if (rule.kind === "exact") return trimmed === rule.pattern;
+        if (rule.kind === "prefix") return trimmed.startsWith(rule.pattern);
+        return regexResults[regexSlot.get(rule)!] === true;
+      });
     if (!ok) return refuse("not-in-allowlist");
   }
   return riskyHit ? { allowed: true, requiresApproval: true } : { allowed: true };

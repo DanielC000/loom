@@ -294,6 +294,10 @@ export interface ConnectionRow {
   /** `ssh` rows only — true = read-only (default ON at create time). Meaningless on a non-ssh row (always
    *  reads true there via the column's own NOT NULL DEFAULT — never consulted for one). */
   sshReadOnly: boolean;
+  /** `ssh` rows only (card b2229239) — true = the owner opted this connection into quoted/piped commands
+   *  (owner's attestation that the remote login shell is POSIX sh-compatible). Default false; decoded
+   *  FAIL-CLOSED (only an explicit 1 is true). Never consulted while `sshReadOnly` is true. */
+  sshShellSyntax: boolean;
   /** `ssh` rows only — NON-SECRET JSON-encoded `SshCommandRule[]` command allowlist. `'[]'` on a non-ssh row. */
   sshCommandAllowlist: string;
   /** `ssh` rows only — NON-SECRET JSON-encoded `SshCommandRule[]` risky-command pattern list (the shipped
@@ -1371,6 +1375,7 @@ CREATE TABLE IF NOT EXISTS connections (
   ssh_user TEXT,
   ssh_host_key_fingerprint TEXT,
   ssh_read_only INTEGER NOT NULL DEFAULT 1,
+  ssh_shell_syntax INTEGER NOT NULL DEFAULT 0,
   ssh_command_allowlist TEXT NOT NULL DEFAULT '[]',
   ssh_risky_patterns TEXT NOT NULL DEFAULT '[]',
   -- Opt-in plain http for a private/LAN host (card 1d882a8c). 0 on every pre-card row = https only. Added to
@@ -2810,6 +2815,8 @@ const CONNECTION_ADDED_COLUMNS: Record<string, string> = {
   ssh_user: "TEXT",
   ssh_host_key_fingerprint: "TEXT",
   ssh_read_only: "INTEGER NOT NULL DEFAULT 1",
+  // Opt-in quoted/piped ssh_exec commands (card b2229239): every legacy row backfills to 0 = refused.
+  ssh_shell_syntax: "INTEGER NOT NULL DEFAULT 0",
   ssh_command_allowlist: "TEXT NOT NULL DEFAULT '[]'",
   ssh_risky_patterns: "TEXT NOT NULL DEFAULT '[]'",
   // Opt-in plain http for a private/LAN host (card 1d882a8c): every legacy row backfills to 0 = https only.
@@ -6440,7 +6447,7 @@ export class Db {
     /** `ssh` rows only (design record a3d5c7f4) — see `ConnectionRow`'s own doc for each field. Omitted on
      *  every non-ssh create, exactly as before this phase existed. */
     sshPort?: number | null; sshUser?: string | null; sshHostKeyFingerprint?: string | null;
-    sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+    sshReadOnly?: boolean; sshShellSyntax?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
     allowPlainHttp?: boolean;
     apiKeyHeader?: string | null;
   }): ConnectionRow {
@@ -6451,14 +6458,14 @@ export class Db {
       tokenUrl: input.tokenUrl ?? null, scopes: input.scopes ?? null, tokenExpiresAt: null, oauthNeedsReauth: false,
       projectId: input.projectId ?? null,
       sshPort: input.sshPort ?? null, sshUser: input.sshUser ?? null, sshHostKeyFingerprint: input.sshHostKeyFingerprint ?? null,
-      sshReadOnly: input.sshReadOnly ?? true, sshCommandAllowlist: input.sshCommandAllowlist ?? "[]", sshRiskyPatterns: input.sshRiskyPatterns ?? "[]",
+      sshReadOnly: input.sshReadOnly ?? true, sshShellSyntax: input.sshShellSyntax === true, sshCommandAllowlist: input.sshCommandAllowlist ?? "[]", sshRiskyPatterns: input.sshRiskyPatterns ?? "[]",
       allowPlainHttp: input.allowPlainHttp === true,
       apiKeyHeader: input.apiKeyHeader ?? null,
     };
     this.db.prepare(
-      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at, provider, client_id, auth_url, token_url, scopes, token_expires_at, oauth_needs_reauth, project_id, ssh_port, ssh_user, ssh_host_key_fingerprint, ssh_read_only, ssh_command_allowlist, ssh_risky_patterns, allow_plain_http, api_key_header)
-       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt, @provider, @clientId, @authUrl, @tokenUrl, @scopes, @tokenExpiresAt, @oauthNeedsReauth, @projectId, @sshPort, @sshUser, @sshHostKeyFingerprint, @sshReadOnly, @sshCommandAllowlist, @sshRiskyPatterns, @allowPlainHttp, @apiKeyHeader)`,
-    ).run({ ...row, oauthNeedsReauth: row.oauthNeedsReauth ? 1 : 0, sshReadOnly: row.sshReadOnly ? 1 : 0, allowPlainHttp: row.allowPlainHttp ? 1 : 0 });
+      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at, provider, client_id, auth_url, token_url, scopes, token_expires_at, oauth_needs_reauth, project_id, ssh_port, ssh_user, ssh_host_key_fingerprint, ssh_read_only, ssh_shell_syntax, ssh_command_allowlist, ssh_risky_patterns, allow_plain_http, api_key_header)
+       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt, @provider, @clientId, @authUrl, @tokenUrl, @scopes, @tokenExpiresAt, @oauthNeedsReauth, @projectId, @sshPort, @sshUser, @sshHostKeyFingerprint, @sshReadOnly, @sshShellSyntax, @sshCommandAllowlist, @sshRiskyPatterns, @allowPlainHttp, @apiKeyHeader)`,
+    ).run({ ...row, oauthNeedsReauth: row.oauthNeedsReauth ? 1 : 0, sshReadOnly: row.sshReadOnly ? 1 : 0, sshShellSyntax: row.sshShellSyntax ? 1 : 0, allowPlainHttp: row.allowPlainHttp ? 1 : 0 });
     return row;
   }
   /** Delete a connection by id (idempotent — a missing id matches nothing). */
@@ -6512,7 +6519,7 @@ export class Db {
   updateConnection(id: string, patch: {
     name?: string; host?: string; authScheme?: ConnectionAuthScheme; secretBlob?: string;
     sshPort?: number; sshUser?: string; sshHostKeyFingerprint?: string;
-    sshReadOnly?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
+    sshReadOnly?: boolean; sshShellSyntax?: boolean; sshCommandAllowlist?: string; sshRiskyPatterns?: string;
     allowPlainHttp?: boolean;
     /** `null` clears back to the default header; `undefined` leaves it unchanged. */
     apiKeyHeader?: string | null;
@@ -6521,7 +6528,7 @@ export class Db {
       ["name", "name"], ["host", "host"], ["authScheme", "auth_scheme"], ["secretBlob", "secret_blob"],
       ["allowPlainHttp", "allow_plain_http"], ["apiKeyHeader", "api_key_header"],
       ["sshPort", "ssh_port"], ["sshUser", "ssh_user"], ["sshHostKeyFingerprint", "ssh_host_key_fingerprint"],
-      ["sshReadOnly", "ssh_read_only"], ["sshCommandAllowlist", "ssh_command_allowlist"], ["sshRiskyPatterns", "ssh_risky_patterns"],
+      ["sshReadOnly", "ssh_read_only"], ["sshShellSyntax", "ssh_shell_syntax"], ["sshCommandAllowlist", "ssh_command_allowlist"], ["sshRiskyPatterns", "ssh_risky_patterns"],
     ];
     const sets: string[] = [];
     const params: Record<string, unknown> = { id };
@@ -13334,6 +13341,7 @@ function toConnectionRow(r0: unknown): ConnectionRow {
     // Fail CLOSED on an unexpected NULL (read-only), never fail open — `=== 1` would decode a NULL as
     // false (read-write); `!== 0` decodes NULL/1 as true and only an explicit 0 as false.
     sshReadOnly: (r.ssh_read_only as number | null) !== 0,
+    sshShellSyntax: (r.ssh_shell_syntax as number | null) === 1,
     sshCommandAllowlist: (r.ssh_command_allowlist as string | null) ?? "[]",
     sshRiskyPatterns: (r.ssh_risky_patterns as string | null) ?? "[]",
     // Fail CLOSED the other way: NULL/0/anything-but-1 means https only.

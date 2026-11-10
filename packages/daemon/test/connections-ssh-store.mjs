@@ -149,6 +149,10 @@ try {
     check("validate: omitted riskyCommandPatterns defaults to the shipped list", JSON.stringify(validateSshConnectionInput(baseValid).riskyCommandPatterns) === JSON.stringify(DEFAULT_SSH_RISKY_COMMAND_PATTERNS));
     check("validate: omitted commandAllowlist defaults to empty", validateSshConnectionInput(baseValid).commandAllowlist.length === 0);
     check("validate: readOnly defaults to true", validateSshConnectionInput(baseValid).readOnly === true);
+    check("validate: shellSyntax defaults to false", validateSshConnectionInput(baseValid).shellSyntax === false);
+    check("validate: shellSyntax:true with the default readOnly is rejected (read-write only)", validateSshConnectionInput({ ...baseValid, shellSyntax: true }).ok === false);
+    check("validate: shellSyntax:true with readOnly:false accepted", validateSshConnectionInput({ ...baseValid, readOnly: false, shellSyntax: true }).shellSyntax === true);
+    check("validate: a non-boolean shellSyntax rejected", validateSshConnectionInput({ ...baseValid, readOnly: false, shellSyntax: "yes" }).ok === false);
     check("validate: a bad command-rule kind rejected", validateSshConnectionInput({ ...baseValid, commandAllowlist: [{ kind: "nope", pattern: "x" }] }).ok === false);
     check("validate: an empty-pattern command rule rejected", validateSshConnectionInput({ ...baseValid, commandAllowlist: [{ kind: "exact", pattern: "" }] }).ok === false);
     check("validate: an invalid regex command rule rejected", validateSshConnectionInput({ ...baseValid, commandAllowlist: [{ kind: "regex", pattern: "(unclosed" }] }).ok === false);
@@ -310,6 +314,15 @@ try {
     const updated = updateSshConnectionConfig(db, created.id, { readOnly: false, commandAllowlist: [{ kind: "exact", pattern: "uptime" }] });
     check("update: readOnly flipped", updated.readOnly === false);
     check("update: commandAllowlist replaced", JSON.stringify(updated.commandAllowlist) === JSON.stringify([{ kind: "exact", pattern: "uptime" }]));
+    check("update: shellSyntax stays false when omitted", updated.shellSyntax === false);
+    const shellOn = updateSshConnectionConfig(db, created.id, { shellSyntax: true });
+    check("update: shellSyntax:true accepted on a now read-write connection and round-trips", shellOn.shellSyntax === true && getConnectionMetadata(db, created.id).shellSyntax === true);
+    let roWithShell = false;
+    try { updateSshConnectionConfig(db, created.id, { readOnly: true }); } catch { roWithShell = true; }
+    check("update: flipping readOnly back on while shellSyntax is stored true is refused (no partial write)", roWithShell && getConnectionMetadata(db, created.id).readOnly === false);
+    const shellOff = updateSshConnectionConfig(db, created.id, { readOnly: true, shellSyntax: false });
+    check("update: readOnly:true together with shellSyntax:false accepted", shellOff.readOnly === true && shellOff.shellSyntax === false);
+    updateSshConnectionConfig(db, created.id, { readOnly: false });
     check("update: riskyCommandPatterns untouched when omitted", JSON.stringify(updated.riskyCommandPatterns) === JSON.stringify(DEFAULT_SSH_RISKY_COMMAND_PATTERNS));
     check("update: host/port/user/fingerprint untouched (not in the editable set)", updated.host === "10.0.0.5" && updated.port === 2222 && updated.user === "loom" && updated.hostKeyFingerprint === FINGERPRINT);
     check("update: the stored key is still the same after a config update", getSshPrivateKeyForUse(db, created.id) === decrypted);
@@ -392,6 +405,13 @@ try {
     const put = await inject({ method: "PUT", url: `/api/connections/${createdBody.id}/ssh`, payload: { readOnly: false, riskyCommandPatterns: [{ kind: "exact", pattern: "rm -rf /" }] } });
     const putBody = JSON.parse(put.payload);
     check("REST PUT: update -> 200, readOnly flipped", put.statusCode === 200 && putBody.readOnly === false);
+    const putShell = await inject({ method: "PUT", url: `/api/connections/${createdBody.id}/ssh`, payload: { shellSyntax: true } });
+    check("REST PUT: shellSyntax:true on the read-write connection -> 200 and returned", putShell.statusCode === 200 && JSON.parse(putShell.payload).shellSyntax === true);
+    const putShellRo = await inject({ method: "PUT", url: `/api/connections/${createdBody.id}/ssh`, payload: { readOnly: true } });
+    check("REST PUT: readOnly:true while shellSyntax is on -> 400", putShellRo.statusCode === 400);
+    const postShellRo = await inject({ method: "POST", url: "/api/connections/ssh", payload: { name: "n-shell", host: "h", user: "u", privateKey: unenc.private, hostKeyFingerprint: FINGERPRINT, shellSyntax: true } });
+    check("REST POST: shellSyntax:true with default readOnly -> 400", postShellRo.statusCode === 400);
+    await inject({ method: "PUT", url: `/api/connections/${createdBody.id}/ssh`, payload: { shellSyntax: false } });
     check("REST PUT: riskyCommandPatterns replaced", JSON.stringify(putBody.riskyCommandPatterns) === JSON.stringify([{ kind: "exact", pattern: "rm -rf /" }]));
     check("REST PUT: unknown id -> 400 (not a connection crash)", (await inject({ method: "PUT", url: "/api/connections/does-not-exist/ssh", payload: { readOnly: true } })).statusCode === 400);
     const putBadRule = await inject({ method: "PUT", url: `/api/connections/${createdBody.id}/ssh`, payload: { commandAllowlist: [{ kind: "bogus", pattern: "x" }] } });

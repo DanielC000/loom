@@ -1555,7 +1555,7 @@ export const api = {
   // sent once on create, never returned by any read (the response is ConnectionMetadata only).
   createSshConnection: (b: {
     name: string; host: string; port: number; user: string; privateKey: string; passphrase?: string;
-    hostKeyFingerprint: string; readOnly: boolean; commandAllowlist: SshCommandRule[]; riskyCommandPatterns: SshCommandRule[];
+    hostKeyFingerprint: string; readOnly: boolean; shellSyntax?: boolean; commandAllowlist: SshCommandRule[]; riskyCommandPatterns: SshCommandRule[];
     projectId: string | null;
   }) => postErr<ConnectionMetadata>("/api/connections/ssh", b),
   // Human-clicked probe: DISPLAYS the host's current key fingerprint for the owner to confirm; pins nothing.
@@ -1565,7 +1565,7 @@ export const api = {
   // (write-only, never returned); a host or port change REQUIRES a new hostKeyFingerprint in the same body.
   updateSshConnection: (id: string, b: {
     name?: string; host?: string; port?: number; user?: string; privateKey?: string; passphrase?: string;
-    hostKeyFingerprint?: string; readOnly?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[];
+    hostKeyFingerprint?: string; readOnly?: boolean; shellSyntax?: boolean; commandAllowlist?: SshCommandRule[]; riskyCommandPatterns?: SshCommandRule[];
   }) => putErr<ConnectionMetadata>(`/api/connections/${encodeURIComponent(id)}/ssh`, b),
   // Owner edit of an api-key/bearer/oauth2 connection (card 923dfc9d). A blank `secret` = unchanged
   // (write-only, never returned); oauth2 takes name/host only; scope (projectId) is immutable.

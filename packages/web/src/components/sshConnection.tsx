@@ -34,13 +34,18 @@ export interface SshDraft {
    *  stays: nothing ties it to the previous target). Kept in the draft so a preset switch can't drop it. */
   pinnedFor: string | null;
   readOnly: boolean;
+  /** Opt-in quoted and piped commands (read-write connections only). */
+  shellSyntax: boolean;
   commandAllowlist: SshCommandRule[];
   riskyCommandPatterns: SshCommandRule[];
 }
 
+const SHELL_SYNTAX_LABEL = "Allow quoted arguments and pipes (the remote login shell is POSIX sh-compatible)";
+const SHELL_SYNTAX_HINT = "Off by default; needs Read-only unticked. You are attesting the remote user's login shell is sh/bash-compatible (not fish, PowerShell or rbash). Every pipeline stage is still checked, and a shell, interpreter, xargs or find -exec waits for your approval.";
+
 export function emptySshDraft(): SshDraft {
   return {
-    port: "22", user: "", privateKey: "", passphrase: "", fingerprint: "", pinnedFor: null, readOnly: true,
+    port: "22", user: "", privateKey: "", passphrase: "", fingerprint: "", pinnedFor: null, readOnly: true, shellSyntax: false,
     commandAllowlist: [], riskyCommandPatterns: DEFAULT_SSH_RISKY_COMMAND_PATTERNS.map((r) => ({ ...r })),
   };
 }
@@ -216,7 +221,7 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
       </div>
 
       <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
-        <input type="checkbox" checked={draft.readOnly} onChange={(e) => patch({ readOnly: e.target.checked })}
+        <input type="checkbox" checked={draft.readOnly} onChange={(e) => patch(e.target.checked ? { readOnly: true, shellSyntax: false } : { readOnly: false })}
           style={{ accentColor: color.accent, width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
         <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           <span style={{ fontSize: fs.body, color: color.text }}>Read-only</span>
@@ -224,12 +229,22 @@ export function SshConnectionFields({ host, setHost, draft, setDraft }: {
         </span>
       </label>
 
+      <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: draft.readOnly ? "not-allowed" : "pointer", opacity: draft.readOnly ? 0.6 : 1 }}>
+        <input type="checkbox" data-testid="ssh-shell-syntax" checked={draft.shellSyntax} disabled={draft.readOnly}
+          onChange={(e) => patch({ shellSyntax: e.target.checked })}
+          style={{ accentColor: color.accent, width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
+        <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <span style={{ fontSize: fs.body, color: color.text }}>{SHELL_SYNTAX_LABEL}</span>
+          <Hint>{SHELL_SYNTAX_HINT}</Hint>
+        </span>
+      </label>
+
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={fieldLabel}>Command allowlist</span>
-        {/* @decision a3d5c7f4 — ssh_exec (card 699fdbd9) refuses a command with shell syntax ALWAYS, allowlist or not, and read-only applies on top of the allowlist; keep this copy in step with that tool. */}
-        <Hint>When set, an agent may run only commands matching one of these rules. Read-only mode still applies on top, and a command with shell syntax (; | &amp;&amp; $( ) redirects) is always refused.</Hint>
+        {/* @decision a3d5c7f4 — ssh_exec (card 699fdbd9) refuses shell syntax unless the owner opted in (b2229239), allowlist or not, and read-only applies on top of the allowlist; keep this copy in step with that tool. */}
+        <Hint>When set, an agent may run only commands matching one of these rules. Read-only mode still applies on top, and a command with shell syntax (; &amp;&amp; $( ) redirects) is always refused; quotes and pipes only when enabled above.</Hint>
         <SshRuleList rules={draft.commandAllowlist} onChange={(v) => patch({ commandAllowlist: v })} testId="ssh-allowlist"
-          emptyText="No allowlist: any command read-only mode permits. A command with shell syntax is always refused." />
+          emptyText="No allowlist: any command read-only mode permits. A command with shell syntax is refused." />
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -274,7 +289,7 @@ export function buildSshCreateBody(name: string, host: string, d: SshDraft, proj
     body: {
       name: name.trim(), host: host.trim(), port, user: d.user.trim(), privateKey: d.privateKey,
       passphrase: d.passphrase === "" ? undefined : d.passphrase,
-      hostKeyFingerprint: d.fingerprint.trim(), readOnly: d.readOnly,
+      hostKeyFingerprint: d.fingerprint.trim(), readOnly: d.readOnly, shellSyntax: d.shellSyntax && !d.readOnly,
       commandAllowlist: allow.value, riskyCommandPatterns: risky.value, projectId,
     },
   };
@@ -286,6 +301,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [readOnly, setReadOnly] = useState(c.readOnly ?? true);
+  const [shellSyntax, setShellSyntax] = useState(c.shellSyntax ?? false);
   const [allow, setAllow] = useState<SshCommandRule[]>(c.commandAllowlist ?? []);
   const [risky, setRisky] = useState<SshCommandRule[]>(c.riskyCommandPatterns ?? []);
   // Card 923dfc9d: the identity fields are editable too. The key and passphrase are WRITE-ONLY drafts (blank =
@@ -309,7 +325,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
     onSuccess: () => { setEditing(false); setPrivateKey(""); setPassphrase(""); void qc.invalidateQueries({ queryKey: ["connections"] }); },
   });
   const open = () => {
-    setReadOnly(c.readOnly ?? true); setAllow(c.commandAllowlist ?? []); setRisky(c.riskyCommandPatterns ?? []);
+    setReadOnly(c.readOnly ?? true); setShellSyntax(c.shellSyntax ?? false); setAllow(c.commandAllowlist ?? []); setRisky(c.riskyCommandPatterns ?? []);
     setName(c.name); setHost(c.host); setPort(String(c.port ?? 22)); setUser(c.user ?? ""); setPrivateKey(""); setPassphrase("");
     setFingerprint(c.hostKeyFingerprint ?? ""); setFetched(null); probe.reset();
     setLocalErr(null); save.reset(); setEditing(true);
@@ -348,7 +364,7 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
       name: name.trim(), host: host.trim(), port: portNum, user: user.trim(),
       ...(fp !== "" ? { hostKeyFingerprint: fp } : {}),
       ...(privateKey.trim() !== "" ? { privateKey, ...(passphrase !== "" ? { passphrase } : {}) } : {}),
-      readOnly, commandAllowlist: a.value, riskyCommandPatterns: r.value,
+      readOnly, shellSyntax: shellSyntax && !readOnly, commandAllowlist: a.value, riskyCommandPatterns: r.value,
     });
   };
   const allowN = c.commandAllowlist?.length ?? 0;
@@ -426,8 +442,16 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
             )}
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
-            <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} style={{ accentColor: color.accent, width: 15, height: 15 }} />
+            <input type="checkbox" checked={readOnly} onChange={(e) => { setReadOnly(e.target.checked); if (e.target.checked) setShellSyntax(false); }} style={{ accentColor: color.accent, width: 15, height: 15 }} />
             <span style={{ fontSize: fs.body, color: color.text }}>Read-only</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: readOnly ? "not-allowed" : "pointer", opacity: readOnly ? 0.6 : 1 }}>
+            <input type="checkbox" data-testid={`ssh-edit-shell-syntax-${c.id}`} checked={shellSyntax} disabled={readOnly}
+              onChange={(e) => setShellSyntax(e.target.checked)} style={{ accentColor: color.accent, width: 15, height: 15, marginTop: 2, flexShrink: 0 }} />
+            <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{ fontSize: fs.body, color: color.text }}>{SHELL_SYNTAX_LABEL}</span>
+              <span style={hintStyle}>{SHELL_SYNTAX_HINT}</span>
+            </span>
           </label>
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Command allowlist</span>

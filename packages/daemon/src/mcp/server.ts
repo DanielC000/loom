@@ -894,10 +894,12 @@ export class TaskMcpRouter {
               "Run ONE command on a remote host over a pre-configured SSH connection granted to this session. " +
               "Loom connects as the connection's fixed user to its fixed, host-key-pinned address and you never see " +
               "the key; you pass only `connectionId` and `command`. The command is checked before anything is sent: " +
-              "shell syntax is always refused (no `;` `&` `|` backticks `$()` redirection, quotes, globbing, " +
-              "newlines or non-ASCII), read-only connections accept only a short list of read verbs (this limits " +
-              "which verbs run, not what the server-side user can read), an owner " +
-              "allowlist may further restrict commands. A risky command (reboot, rm, service control, …) is NOT run: " +
+              "shell syntax is refused (no `;` `&` backticks `$()` redirection, globbing, newlines or " +
+              "non-ASCII); quoted arguments and `|` pipelines are accepted only on a read-write connection the " +
+              "owner enabled them on, and each pipeline stage is checked on its own (find's `{}` must be quoted; a quoted argument that still carries shell syntax, such as `'{}'` or `'^#'`, is held for owner approval). Read-only connections accept " +
+              "only a short list of read verbs (this limits which verbs run, not what the server-side user can " +
+              "read), an owner allowlist may further restrict commands. A risky command, a shell or interpreter, " +
+              "xargs or find -exec is held the same way (a pipe into a shell included). A risky command (reboot, rm, service control, …) is NOT run: " +
               "it is held, the owner is asked to approve that exact text, and you get {ok:false, status:" +
               "\"awaiting-owner-approval\", approvalRequestId}. Once the owner authorizes it, call again with the " +
               "IDENTICAL command; any changed text needs its own approval, and a denied or expired approval refuses. " +

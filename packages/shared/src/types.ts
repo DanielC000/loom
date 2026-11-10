@@ -3916,6 +3916,10 @@ export interface ConnectionMetadata {
   hostKeyFingerprint?: string;
   /** `ssh` rows only — true = read-only (default ON at create time; the owner unticks it per connection). */
   readOnly?: boolean;
+  /** `ssh` rows only — true = the owner opted this (read-write) connection into quoted and piped
+   *  `ssh_exec` commands, attesting the remote login shell is POSIX sh-compatible. Default false; never
+   *  effective on a read-only connection. Human-only (REST), no MCP write path. */
+  shellSyntax?: boolean;
   /** `ssh` rows only — the owner-set command allowlist. Empty means no allowlist restriction beyond `readOnly`. */
   commandAllowlist?: SshCommandRule[];
   /** `ssh` rows only — the risky-command pattern list (the shipped default at create time unless the owner
