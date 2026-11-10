@@ -211,11 +211,74 @@ try {
   check("(9) lastPrompt carries no FYI text (equals what was actually written)", !live9.lastPrompt.includes("EO_FYI") && !live9.lastPrompt.includes(FYI_TAG));
   check("(9) nothing bundled was tracked", !live9.bundledFyi);
 
+  // ============ (10) ownership-mismatch no-body give-up never takes held FYIs either ============
+  const SID10 = "fyi-mismatch";
+  const f10 = spawnReady(SID10);
+  const live10 = host.live.get(SID10);
+  host.enqueueStdin(SID10, "MM_FIRST", "human", undefined, undefined, "agent");
+  host.requeueGiveUpOrigin(SID10, live10.submitGeneration);
+  const queued10 = live10.pending[0];
+  queued10.giveUpHeldUntil = 0;
+  live10.composerDirtyLen = 10; live10.composerLen = 0; live10.composerOwnerLineage = new Set(["some-other-lineage"]);
+  sendFyi(SID10, "MM_FYI", "fyi:mm");
+  const before10 = written(f10).length;
+  const log10 = [];
+  const origErr10 = console.error;
+  console.error = (...a) => { log10.push(a.join(" ")); };
+  live10.busy = false;
+  try { host.drainPending(SID10); } finally { console.error = origErr10; }
+  check("(10) precondition: the drain took the ownership-mismatch no-write branch", log10.some((l) => l.includes("composer ownership mismatch, no write attempted")));
+  check("(10) ownership-mismatch give-up: the held FYI was NOT taken", host.getHeldFyiEntries(SID10).length === 1);
+  check("(10) nothing written", !written(f10).slice(before10).includes("MM_FYI"));
+  check("(10) nothing bundled was tracked", !live10.bundledFyi);
+
+  // ============ (11) supersede: a bundled record whose turn never confirmed is RE-HELD, never stamped ============
+  const SID11 = "fyi-supersede";
+  const f11 = spawnReady(SID11);
+  const live11 = host.live.get(SID11);
+  const stamped11 = [];
+  sendFyi(SID11, "SUP_FYI", "fyi:sup", () => stamped11.push("sup"));
+  host.enqueueStdin(SID11, "SUP_TURN_A", "human", undefined, undefined, "agent");
+  check("(11) precondition: FYI bundled into turn A and tracked", written(f11).includes("SUP_FYI") && live11.bundledFyi && live11.bundledFyi.held.length === 1);
+  host.submit(SID11, "SUP_TURN_B", undefined, undefined, undefined, undefined, "immediate"); // a newer generation starts with neither a confirm nor a give-up
+  host.trackBundledFyi(live11, []);
+  check("(11) the superseded FYI was re-held", host.getHeldFyiEntries(SID11).map((e) => e.text).join() === "SUP_FYI");
+  check("(11) the superseded FYI was NOT stamped delivered", stamped11.length === 0);
+  check("(11) the superseded record is cleared", !live11.bundledFyi);
+
+  // ============ (12) confirm: Stop alone (UserPromptSubmit lost) stamps; the generation guard refuses a stale confirm ============
+  const SID12 = "fyi-confirm";
+  spawnReady(SID12);
+  const live12 = host.live.get(SID12);
+  const stamped12 = [];
+  sendFyi(SID12, "CF_FYI", "fyi:cf", () => stamped12.push("cf"));
+  host.enqueueStdin(SID12, "CF_TURN", "human", undefined, undefined, "agent");
+  host.deliverHook(SID12, { hook_event_name: "Stop" }); // no UserPromptSubmit ever arrived
+  check("(12) a Stop alone confirms the bundled turn: onDeliver fired exactly once", stamped12.length === 1);
+  host.deliverHook(SID12, { hook_event_name: "Stop" });
+  check("(12) a second Stop does not re-fire it", stamped12.length === 1);
+  sendFyi(SID12, "CF_FYI2", "fyi:cf2", () => stamped12.push("cf2"));
+  host.enqueueStdin(SID12, "CF_TURN2", "human", undefined, undefined, "agent");
+  live12.submitGeneration += 1; // the record now belongs to an OLDER generation
+  host.confirmBundledFyi(live12);
+  check("(12) confirm generation guard: a stale-generation confirm stamps nothing", stamped12.length === 1 && !!live12.bundledFyi);
+  host.reholdBundledFyi(live12, live12.bundledFyi.gen + 1);
+  check("(12) rehold generation guard: a give-up of a different generation leaves the record alone", !!live12.bundledFyi && host.getHeldFyiEntries(SID12).length === 0);
+  host.reholdBundledFyi(live12, live12.bundledFyi.gen);
+  check("(12) rehold with the matching generation re-holds", !live12.bundledFyi && host.getHeldFyiEntries(SID12).map((e) => e.text).join() === "CF_FYI2");
+
+  // ============ (13) a control byte before the slash cannot hide a slash command ============
+  const SID13 = "fyi-ctrl-slash";
+  const f13 = spawnReady(SID13);
+  sendFyi(SID13, "CTRL_HELD_FYI", "fyi:ctrl");
+  host.enqueueStdin(SID13, "\x1b/compact", "human", undefined, undefined, "agent");
+  check("(13) a control-byte-prefixed slash turn does not carry the FYI block", !written(f13).includes(FYI_TAG) && host.getHeldFyiEntries(SID13).length === 1);
+
   // ============ dead session: an FYI to nobody is dropped, not held ============
   const rd = sendFyi("no-such-session", "x", "fyi:z");
   check("(dead) FYI to a non-live session reports dropped", rd.delivered === false && rd.deliveryState === "dropped");
 } finally {
-  for (const sid of ["fyi-parked", "fyi-caps", "fyi-purge", "fyi-slash", "fyi-giveup", "fyi-enteronly"]) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
+  for (const sid of ["fyi-parked", "fyi-caps", "fyi-purge", "fyi-slash", "fyi-giveup", "fyi-enteronly", "fyi-mismatch", "fyi-supersede", "fyi-confirm", "fyi-ctrl-slash"]) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 

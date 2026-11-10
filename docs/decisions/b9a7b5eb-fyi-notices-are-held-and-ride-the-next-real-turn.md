@@ -26,6 +26,13 @@ Left as wakes: every notice that asks the manager to act (`stranded`, `parked-ga
 - **Never taken for a no-body submit.** When the submit will be an Enter-only redelivery or the ownership-mismatch give-up (`willRedeliverWithoutBody`, mirroring those two branches in `submit()`), no FYI is taken, so nothing is marked delivered that was never written, and `lastPrompt` equals what was actually written.
 - **Delivered means confirmed.** A bundled FYI is tracked on `Live.bundledFyi` (per submit generation). Its `onDeliver` fires on that turn's confirm signal (`UserPromptSubmit` for the outstanding submit, or `Stop`), exactly once. A give-up (`requeueGiveUpOrigin`) puts the FYIs back on the FRONT of `heldFyi` (no duplicate id/`questionId`, still cap-bound) and fires nothing.
 
+## Round 3 (card `01d0e804`) — a superseded bundle is re-held, and the no-body predicate is shared
+
+- **Supersede re-holds.** If a newer submit generation starts while an older `bundledFyi` record is still unresolved (no confirm, no give-up — `healIfStuck`'s composer-dirty branch, the redirect Esc bump, a late hook cancelling the verify), `trackBundledFyi` puts the old FYIs back on the front of `heldFyi` instead of firing their `onDeliver`. A duplicate is harmless; a memory digest stamped for memory the agent never saw is not. `confirmBundledFyi` no longer has a `force` path.
+- **One no-body predicate.** `submitWritesNoBody` is what `submit()` branches on (Enter-only redelivery / ownership-mismatch give-up) AND what the FYI bundler asks before taking anything. There is no mirror to go stale.
+- `reholdBundledFyi(live, gen)` ignores a give-up for a generation other than the tracked record's. The slash-command check runs on control-byte-stripped text, so a leading control byte cannot hide a slash command.
+- **Accepted edge:** a platform Lead used only from a raw terminal (never the composer/web) may not receive a re-sent memory digest through this path; it re-fires on each resume.
+
 ## Project-memory digest
 
 The pool digest is stamped only from the FYI's `onDeliver`, i.e. once the turn that carried it is confirmed. A held-then-dropped (cap, TTL, recycle, restart) or given-up memory FYI stays unstamped and re-fires on the next resume. With nothing to send, the digest is stamped immediately as before.

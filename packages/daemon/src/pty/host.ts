@@ -11448,15 +11448,22 @@ export class PtyHost {
   private takeHeldFyiFor(live: Live, realText: string, origin: readonly QueuedMessage[]): HeldFyi[] {
     const held = live.heldFyi;
     if (!held || held.length === 0) return [];
-    if (realText.trimStart().startsWith("/")) return [];
-    if (this.willRedeliverWithoutBody(live, origin)) return [];
+    // eslint-disable-next-line no-control-regex
+    if (realText.replace(/[\x00-\x1f\x7f]/g, "").trimStart().startsWith("/")) return []; // control bytes (e.g. a leading ESC/bracket-paste marker) can't hide a slash command
+    if (this.submitWritesNoBody(live, origin)) return [];
     live.heldFyi = [];
     return held;
   }
 
-  /** Mirrors the two no-body branches in `submit()` (Enter-only redelivery / ownership-mismatch give-up). */
-  private willRedeliverWithoutBody(live: Live, origin: readonly QueuedMessage[]): boolean {
-    if (origin.length === 0) return false;
+  /**
+   * THE predicate for `submit()`'s two no-body branches (Enter-only redelivery / ownership-mismatch
+   * give-up): `submit()` itself branches on it, and the FYI bundler asks it BEFORE calling `submit()`,
+   * so the two can never drift apart.
+   * @decision b9a7b5eb — one shared predicate, never a mirror in the bundler.
+   * @decision fa27d262 — `every`, not `some`: ALL of `origin` must be already-given-up lineages.
+   */
+  private submitWritesNoBody(live: Live, origin: readonly QueuedMessage[] | undefined): boolean {
+    if (origin === undefined || origin.length === 0) return false;
     if (!(live.composerDirtyLen > 0 && live.composerLen === 0)) return false;
     if (!origin.every((m) => live.giveUpLineages.has(m.logicalId))) return false;
     return !origin.every((m) => m.bypassOwnershipGateOnce === true);
@@ -11466,28 +11473,30 @@ export class PtyHost {
    * Record the FYIs just bundled into the in-flight turn (called right AFTER `submit()` bumped the
    * generation). Their `onDeliver` fires only on that turn's CONFIRM (`confirmBundledFyi`); a give-up
    * puts them back on `heldFyi` (`requeueGiveUpOrigin`). A previous, still-unresolved record (a newer
-   * generation started without a give-up in between) is treated as settled.
+   * generation started with neither a confirm nor a give-up in between) is RE-HELD, never stamped: its
+   * turn was never proven to land.
    * @decision b9a7b5eb — a bundled FYI is stamped delivered only once its carrying turn is confirmed.
    */
   private trackBundledFyi(live: Live, taken: readonly HeldFyi[]): void {
-    if (live.bundledFyi && live.bundledFyi.gen !== live.submitGeneration) this.confirmBundledFyi(live, true);
+    if (live.bundledFyi && live.bundledFyi.gen !== live.submitGeneration) this.reholdBundledFyi(live);
     if (taken.length === 0) return;
     live.bundledFyi = { gen: live.submitGeneration, held: [...taken] };
   }
 
-  /** Confirm signal (UserPromptSubmit / Stop for the current generation, or `force` for a superseded record): fire each FYI's `onDeliver` exactly once. */
-  private confirmBundledFyi(live: Live, force = false): void {
+  /** Confirm signal (UserPromptSubmit / Stop for the current generation): fire each FYI's `onDeliver` exactly once. */
+  private confirmBundledFyi(live: Live): void {
     const b = live.bundledFyi;
     if (!b) return;
-    if (!force && b.gen !== live.submitGeneration) return;
+    if (b.gen !== live.submitGeneration) return;
     live.bundledFyi = null;
     for (const h of b.held) { if (h.entry.onDeliver) { try { h.entry.onDeliver(); } catch { /* never break the turn */ } } }
   }
 
   /** Give-up: the turn carrying these FYIs was never confirmed — put them back (front, FIFO, no duplicate ids / questionIds). */
-  private reholdBundledFyi(live: Live): void {
+  private reholdBundledFyi(live: Live, gen?: number): void {
     const b = live.bundledFyi;
     if (!b) return;
+    if (gen !== undefined && b.gen !== gen) return; // a stale give-up of an older generation must not touch a newer turn's record
     live.bundledFyi = null;
     const held = (live.heldFyi ??= []);
     const have = new Set(held.map((h) => h.entry.id));
@@ -12904,16 +12913,15 @@ export class PtyHost {
     // @decision fa27d262 — `every`, not `some`: ALL of `origin` must already be marked before trusting
     // Enter-only, or a batch mixing a fresh, never-given-up neighbour silently loses that neighbour's
     // body while onDeliver() still fires for it as delivered. See fa27d262's record.
-    const lineageEverGaveUp = origin !== undefined && origin.length > 0 && origin.every((m) => live.giveUpLineages.has(m.logicalId));
     // @decision 844ca34e (round 3/4) — a ONE-SHOT escape for an auto-joined resend of an ALREADY-PARKED
-    // root. `.every`, not `.some` (round 4, mirroring `lineageEverGaveUp`'s fa27d262 discipline above):
-    // a coalesced batch mixing a flagged member with an unflagged one must not ride the bypass.
-    const bypassOwnershipGateOnce = origin !== undefined && origin.length > 0 && origin.every((m) => m.bypassOwnershipGateOnce === true);
-    if (live.composerDirtyLen > 0 && live.composerLen === 0 && lineageEverGaveUp && !bypassOwnershipGateOnce) {
+    // root. `.every`, not `.some` (round 4): a coalesced batch mixing a flagged member with an unflagged
+    // one must not ride the bypass. Both conjuncts live in `submitWritesNoBody`, shared with the FYI
+    // bundler (one predicate, never a mirror).
+    if (this.submitWritesNoBody(live, origin)) {
       // @decision 844ca34e (round 2) — OWNERSHIP, not just lineage history: a different/unknown owner
       // means a DIFFERENT lineage's unconfirmed paste is what's physically sitting there, and Enter
       // would submit THAT content under THIS lineage's identity.
-      const originIds = new Set(origin.map((m) => m.logicalId));
+      const originIds = new Set(origin!.map((m) => m.logicalId)); // non-empty: guaranteed by submitWritesNoBody
       const ownsComposer = live.composerOwnerLineage !== null
         && live.composerOwnerLineage.size === originIds.size
         && [...originIds].every((id) => live.composerOwnerLineage!.has(id));
@@ -13597,7 +13605,7 @@ export class PtyHost {
     if (!live?.alive) return;
     const origin = live.giveUpOrigin;
     live.giveUpOrigin = null;
-    this.reholdBundledFyi(live); // @decision b9a7b5eb — FYIs bundled into the unconfirmed turn go back on heldFyi
+    this.reholdBundledFyi(live, gen); // @decision b9a7b5eb — FYIs bundled into the unconfirmed turn go back on heldFyi
     if (!origin || origin.length === 0) return;
     const exhausted: { id: string; cb: () => void }[] = [];
     // Code Review Major finding (card 4a0af485, Major 4): seed the signature from the text ACTUALLY
