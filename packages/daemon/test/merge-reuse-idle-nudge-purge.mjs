@@ -207,9 +207,12 @@ try {
   // ── Fire the real classification/notify AT that exact moment — reproduces the periodic idle-watcher
   //    tick landing inside the race window, on the REAL, unmodified classifyIdleWorker/notify path. ────
   sessions.notifyManagerOfIdleWorker(wkrId);
-  const queuedMidFlight = host.getPendingEntries(mgrId);
+  // Card b9a7b5eb: the parked-merge notice ("no action needed") is now an FYI — held on the manager, not in
+  // its pending queue — so this reads queued-or-held. The purge below must still reach it either way.
+  const queuedMidFlight = [...host.getPendingEntries(mgrId), ...host.getHeldFyiEntries(mgrId)];
+  check("(1) the parked-merge notice is HELD (an FYI), not queued on live.pending", host.getHeldFyiEntries(mgrId).some((e) => e.text.startsWith(`[loom:worker-idle] worker ${wkrId} `)) && !host.getPendingEntries(mgrId).some((e) => e.text.startsWith(`[loom:worker-idle] worker ${wkrId} `)));
   const staleNudge = queuedMidFlight.find((e) => e.text.startsWith(`[loom:worker-idle] worker ${wkrId} `));
-  check("(1) a nudge naming this worker IS queued (manager busy, so it queues rather than delivers live)", !!staleNudge);
+  check("(1) a nudge naming this worker IS queued or held (manager busy; the parked-merge notice is a held FYI)", !!staleNudge);
   check("(1) it names the confirm's REAL opId as its merge gate", !!staleNudge && staleNudge.text.includes(observedOpId));
   check("(1) it claims the gate 'runs' and promises a future settle nudge", !!staleNudge && /runs on its own branch/.test(staleNudge.text) && /\[loom:merge-done\]/.test(staleNudge.text));
 
@@ -223,7 +226,7 @@ try {
   check("confirm: the gate command was never called a second time", calls === 1);
 
   // ── (2) THE FIX: the stale nudge naming the now-settled confirm's opId must be gone ─────────────────
-  const queuedAfter = host.getPendingEntries(mgrId);
+  const queuedAfter = [...host.getPendingEntries(mgrId), ...host.getHeldFyiEntries(mgrId)];
   check("(2) the STALE '[loom:worker-idle] worker <this> ... merge gate <opId> ... running' nudge is purged once the reused-verdict merge settles",
     !queuedAfter.some((e) => e.text.startsWith(`[loom:worker-idle] worker ${wkrId} `) && e.text.includes(observedOpId)));
 

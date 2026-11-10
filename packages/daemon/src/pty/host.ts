@@ -2979,7 +2979,32 @@ export type EnqueueStdinTail = {
   /** @decision dacc6d9e — places this HELD entry at the FRONT of `live.pending` so it drains before any
    *  manager direction already queued behind it, without flushing/superseding that direction. */
   headInsert?: boolean;
+  /**
+   * An FYI (no-action) notice: held on `Live.heldFyi`, never on `live.pending`, rides the NEXT real turn.
+   * Options-object only; claude-only (codex ignores it). A `questionId` tag supersedes an older held copy.
+   * @decision b9a7b5eb — never push an FYI to `live.pending`, or it can start a turn on its own.
+   */
+  fyi?: boolean;
 };
+/**
+ * @decision b9a7b5eb — caps for `Live.heldFyi` (code constants, deliberately no config key): a session
+ * that never takes a real turn must not accumulate held notices forever. Oldest dropped first.
+ */
+export const FYI_HELD_MAX_COUNT = 8;
+export const FYI_HELD_TTL_MS = 6 * 60 * 60 * 1000;
+/** A held FYI notice plus the wall-clock moment it was held (for the TTL sweep in `reconcile`). */
+export type HeldFyi = { entry: QueuedMessage; heldAt: number };
+/** Frame a held-FYI block ahead of a real turn's own text (the real instruction stays LAST). */
+export function bundleFyiIntoTurn(fyis: readonly QueuedMessage[], realText: string): string {
+  if (fyis.length === 0) return realText;
+  const lines: string[] = [];
+  for (const f of fyis) {
+    const t = f.text.trim();
+    // One line per entry; a multi-line entry (e.g. a memory digest) is kept verbatim on its own lines.
+    lines.push(t.includes("\n") ? `-\n${t}` : `- ${t}`);
+  }
+  return `[loom:fyi, no action needed] ${fyis.length} background notice(s) held until this turn — informational only, nothing below this block asks you to reply to them:\n${lines.join("\n")}\n[/loom:fyi]\n\n${realText}`;
+}
 /**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
  * idle/context/busy-stuck watchdogs, restart/boot continuation notes, memory-recall injection —
@@ -3213,7 +3238,10 @@ interface Live {
   // origin — a mismatch means Enter would submit a DIFFERENT lineage's text under the wrong identity.
   composerOwnerLineage: Set<string> | null;
   pending: QueuedMessage[]; // FIFO of messages held while busy / while the human types — drained on Stop + reconcile. Each carries a stable id so the UI can delete/edit/reorder a specific entry safely (an id op is a no-op once that entry has drained).
-  stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
+  heldFyi?: HeldFyi[]; // @decision b9a7b5eb — held no-action notices; NOT in `pending`, bundled into the next real turn
+  /** @decision b9a7b5eb — FYIs bundled into the in-flight turn (submit generation `gen`), awaiting its CONFIRM; fired on confirm, re-held on give-up. */
+  bundledFyi?: { gen: number; held: HeldFyi[] } | null;
+  stopping: boolean;   // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
   // Card d88163b7 (CR fix): a CALLER-held drain suppression — SUPPRESS drain/submit (mirrors `stopping`,
   // but is a DISTINCT flag: see `holdDrain`/`releaseDrain`) for a window BEFORE the caller has decided to
   // actually stop the session, so nothing can start a NEW turn (via drainPending's Stop-hook auto-drain
@@ -3765,6 +3793,7 @@ interface Live {
  * Claude-only field "just in case" — its absence must stay a compile error, not a runtime check.
  */
 export interface CodexLive {
+  heldFyi?: HeldFyi[]; // @decision b9a7b5eb — never populated for codex (claude-only); declared so shared reads typecheck
   kind: "codex";
   pty: IPty;
   pid: number;
@@ -9720,6 +9749,7 @@ export class PtyHost {
         // in during a submit()'s own outstanding-Enter window (discard, don't attribute — see b4b9b707).
         const submitWasOutstanding = !live.enterConfirmed;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
+        if (submitWasOutstanding) this.confirmBundledFyi(live); // @decision b9a7b5eb — FYIs ride this confirmed turn: stamp them delivered now
         this.resolveFlushMarker(sessionId, live); // card ac7884e3 — see that method's own doc
         // @decision 4a0af485 — captured BEFORE the purge call below (which can itself delete an entry): with
         // no pre-existing ambiguity this hook can only be about the CURRENT generation, making the CONFIRMED
@@ -10764,6 +10794,7 @@ export class PtyHost {
         // registered (even if UserPromptSubmit's own hook was lost); neutralize any pending verify-retry
         // before the M2 window below.
         live.enterConfirmed = true;
+        this.confirmBundledFyi(live); // @decision b9a7b5eb — Stop is itself proof the bundled turn registered
         this.resolveFlushMarker(sessionId, live); // card ac7884e3 — see that method's own doc; synchronous, safe before the M2 window below
         // Card 2521bf51: same "Stop is itself proof" reasoning clears any bounded human-submit hold too
         // (see `humanSubmitHeldUntil`'s own doc) — belt-and-suspenders for the rare path where the
@@ -11120,6 +11151,8 @@ export class PtyHost {
     // `headInsert` has NO positional legacy form (options-object only, card dacc6d9e) — see
     // EnqueueStdinTail's own doc.
     const headInsert = isTailObject ? tailOrGiveUpHeldUntil.headInsert === true : false;
+    // `fyi` has NO positional legacy form (options-object only, card b9a7b5eb).
+    const fyi = isTailObject ? tailOrGiveUpHeldUntil.fyi === true : false;
     // Multi-harness epic (df1f94b0) Phase 1, card 353f6dc4 — LEAD RULING #3(c)/#5: dispatch to codex's OWN,
     // simpler push+drain path BEFORE any of the claude-specific machinery below runs (`this.live.get`
     // would return undefined for a codex sessionId anyway — WITHOUT this branch that would silently
@@ -11182,6 +11215,9 @@ export class PtyHost {
       // eslint-disable-next-line no-console
       console.warn(`[pty] ${sessionId} a "warning"-kind system nudge is missing its [loom:*] tag (delivering anyway — this sender should be tagged): ${redactedExcerpt(text.slice(0, 200))}`);
     }
+    // @decision b9a7b5eb — an FYI is held, never submitted or queued: it must not reach the idle-submit
+    // branch or `live.pending` below, or it would wake a parked session. Claude-only (codex returned above).
+    if (fyi) return this.holdFyi(live, { text, source, onDeliver, route, kind, questionId, senderId, logicalId });
     this.healIfStuck(live, sessionId);
     // Card 9e27f4d2 (code review follow-up): a restored give-up hold still in the future must NEVER take
     // the immediate-submit branch below — that branch delivers unconditionally, with no hold check at
@@ -11246,7 +11282,11 @@ export class PtyHost {
         // this is a no-op for the immediate path (nothing has run yet to make it stale), but it stays
         // correct rather than assumed.
         const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, reportEventId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(resolveTailAtDelivery ? { resolveTailAtDelivery } : {}), ...(ownerTextSeq !== undefined ? { ownerTextSeq } : {}), ...(bypassOwnershipGateOnce ? { bypassOwnershipGateOnce: true } : {}) };
-        this.submit(sessionId, joinSubmittedText([entry], live.submitGeneration), route, ownerText, proactive, senderId, "immediate", [entry]);
+        // @decision b9a7b5eb — held FYI notices ride at the FRONT of this real turn (its own text stays last).
+        const realText = joinSubmittedText([entry], live.submitGeneration);
+        const taken = this.takeHeldFyiFor(live, realText, [entry]);
+        this.submit(sessionId, bundleFyiIntoTurn(taken.map((h) => h.entry), realText), route, ownerText, proactive, senderId, "immediate", [entry]);
+        this.trackBundledFyi(live, taken);
       }
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
       // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
@@ -11372,6 +11412,100 @@ export class PtyHost {
     // this message actually sits.
     const busyForMs = live.busySince != null ? Date.now() - live.busySince : undefined;
     return { delivered: false, position: live.pending.indexOf(entry) + 1, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs, deliveryState: "queued" };
+  }
+
+  /**
+   * Hold one FYI notice on `live.heldFyi` (see `EnqueueStdinTail.fyi`). Returns `queued:true` like any held
+   * entry, but never touches `live.pending` and never drains or submits.
+   * @decision b9a7b5eb — a same-`questionId` held copy is superseded; over the cap the OLDEST is dropped.
+   */
+  private holdFyi(
+    live: Live,
+    f: { text: string; source: QueueSource; onDeliver?: () => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; senderId?: string | null; logicalId?: string },
+  ): EnqueueResult {
+    const held = (live.heldFyi ??= []);
+    if (f.questionId != null) {
+      for (let i = held.length - 1; i >= 0; i--) if (held[i]!.entry.questionId === f.questionId) held.splice(i, 1);
+    }
+    const id = randomUUID();
+    held.push({
+      heldAt: Date.now(),
+      entry: { id, text: f.text, source: f.source, onDeliver: f.onDeliver, route: f.route, kind: f.kind, questionId: f.questionId, senderId: f.senderId, logicalId: f.logicalId ?? id },
+    });
+    while (held.length > FYI_HELD_MAX_COUNT) held.shift();
+    return { delivered: false, reason: "held", queued: true, landsAt: "next-turn-boundary", deliveryState: "queued" };
+  }
+
+  /**
+   * Remove and return every held FYI, FIFO — called only by the two real-turn submit paths, and only
+   * when this turn can actually carry them. Returns `[]` (leaving them held) when:
+   * - the real turn is a slash command (`realText` trimStart starts with `/`): a block before it would
+   *   stop the harness running it as a command (`/compact`, companion `/clear`);
+   * - the submit will be a no-body redelivery (Enter-only, or the ownership-mismatch give-up), so the
+   *   FYI text would never be written.
+   * @decision b9a7b5eb — never bundle into a slash-command turn or a no-body redelivery.
+   */
+  private takeHeldFyiFor(live: Live, realText: string, origin: readonly QueuedMessage[]): HeldFyi[] {
+    const held = live.heldFyi;
+    if (!held || held.length === 0) return [];
+    if (realText.trimStart().startsWith("/")) return [];
+    if (this.willRedeliverWithoutBody(live, origin)) return [];
+    live.heldFyi = [];
+    return held;
+  }
+
+  /** Mirrors the two no-body branches in `submit()` (Enter-only redelivery / ownership-mismatch give-up). */
+  private willRedeliverWithoutBody(live: Live, origin: readonly QueuedMessage[]): boolean {
+    if (origin.length === 0) return false;
+    if (!(live.composerDirtyLen > 0 && live.composerLen === 0)) return false;
+    if (!origin.every((m) => live.giveUpLineages.has(m.logicalId))) return false;
+    return !origin.every((m) => m.bypassOwnershipGateOnce === true);
+  }
+
+  /**
+   * Record the FYIs just bundled into the in-flight turn (called right AFTER `submit()` bumped the
+   * generation). Their `onDeliver` fires only on that turn's CONFIRM (`confirmBundledFyi`); a give-up
+   * puts them back on `heldFyi` (`requeueGiveUpOrigin`). A previous, still-unresolved record (a newer
+   * generation started without a give-up in between) is treated as settled.
+   * @decision b9a7b5eb — a bundled FYI is stamped delivered only once its carrying turn is confirmed.
+   */
+  private trackBundledFyi(live: Live, taken: readonly HeldFyi[]): void {
+    if (live.bundledFyi && live.bundledFyi.gen !== live.submitGeneration) this.confirmBundledFyi(live, true);
+    if (taken.length === 0) return;
+    live.bundledFyi = { gen: live.submitGeneration, held: [...taken] };
+  }
+
+  /** Confirm signal (UserPromptSubmit / Stop for the current generation, or `force` for a superseded record): fire each FYI's `onDeliver` exactly once. */
+  private confirmBundledFyi(live: Live, force = false): void {
+    const b = live.bundledFyi;
+    if (!b) return;
+    if (!force && b.gen !== live.submitGeneration) return;
+    live.bundledFyi = null;
+    for (const h of b.held) { if (h.entry.onDeliver) { try { h.entry.onDeliver(); } catch { /* never break the turn */ } } }
+  }
+
+  /** Give-up: the turn carrying these FYIs was never confirmed — put them back (front, FIFO, no duplicate ids / questionIds). */
+  private reholdBundledFyi(live: Live): void {
+    const b = live.bundledFyi;
+    if (!b) return;
+    live.bundledFyi = null;
+    const held = (live.heldFyi ??= []);
+    const have = new Set(held.map((h) => h.entry.id));
+    const fresh = b.held.filter((h) => !have.has(h.entry.id) && !(h.entry.questionId != null && held.some((x) => x.entry.questionId === h.entry.questionId)));
+    held.unshift(...fresh);
+    while (held.length > FYI_HELD_MAX_COUNT) held.shift();
+  }
+
+  /** TTL sweep (called from `reconcile`): drop held FYI older than `FYI_HELD_TTL_MS`. A dropped entry never fires `onDeliver`. */
+  private expireHeldFyi(live: Live, now: number = Date.now()): void {
+    if (!live.heldFyi || live.heldFyi.length === 0) return;
+    live.heldFyi = live.heldFyi.filter((h) => now - h.heldAt < FYI_HELD_TTL_MS);
+  }
+
+  /** Test/diagnostic read: the held FYI entries for a live claude session (never `pending`). */
+  getHeldFyiEntries(sessionId: string): Array<Pick<QueuedMessage, "id" | "text" | "questionId">> {
+    const live = this.findAnyLive(sessionId);
+    return (live?.heldFyi ?? []).map((h) => ({ id: h.entry.id, text: h.entry.text, questionId: h.entry.questionId }));
   }
 
   /**
@@ -11858,7 +11992,14 @@ export class PtyHost {
         live.pending.splice(i, 1);
       }
     }
-    return removed.reverse(); // restore original FIFO order (the scan walked back-to-front)
+    removed.reverse(); // restore original FIFO order (the scan walked back-to-front)
+    // @decision b9a7b5eb — a held FYI carrying the same tag is purged too.
+    if (live.heldFyi) {
+      const kept: HeldFyi[] = [];
+      for (const h of live.heldFyi) { if (h.entry.questionId != null && ids.has(h.entry.questionId)) removed.push(h.entry); else kept.push(h); }
+      live.heldFyi = kept;
+    }
+    return removed;
   }
 
   /**
@@ -11959,7 +12100,14 @@ export class PtyHost {
         live.pending.splice(i, 1);
       }
     }
-    return removed.reverse(); // restore original FIFO order (the scan walked back-to-front)
+    removed.reverse(); // restore original FIFO order (the scan walked back-to-front)
+    // @decision b9a7b5eb — a HELD FYI idle notice for this worker is stale on the same re-engage edge too.
+    if (live.heldFyi) {
+      const kept: HeldFyi[] = [];
+      for (const h of live.heldFyi) { if (prefixes.some((p) => stripPossibleDuplicateFrame(h.entry.text).startsWith(p))) removed.push(h.entry); else kept.push(h); }
+      live.heldFyi = kept;
+    }
+    return removed;
   }
 
   /**
@@ -12421,12 +12569,16 @@ export class PtyHost {
     // turn ever running would be silently folded into a "turns" count. `annotatePasteRecoveryAge`'s own
     // wording says "submit generations", not "turns", precisely so this snapshot stays true to what it
     // actually counts.
-    this.submit(sessionId, joinSubmittedText(drained, live.submitGeneration), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route/proactive/senderId — the head's, mirroring the route; but `origin` (== `drained`) carries EVERY member, so submit()'s own ownerText-attribution loop (card 438973ce) attributes ALL of them, not just the head; `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
+    // @decision b9a7b5eb — held FYI notices ride at the FRONT of this real turn (its own text stays last).
+    const drainRealText = joinSubmittedText(drained, live.submitGeneration);
+    const takenFyi = this.takeHeldFyiFor(live, drainRealText, drained);
+    this.submit(sessionId, bundleFyiIntoTurn(takenFyi.map((h) => h.entry), drainRealText), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route/proactive/senderId — the head's, mirroring the route; but `origin` (== `drained`) carries EVERY member, so submit()'s own ownerText-attribution loop (card 438973ce) attributes ALL of them, not just the head; `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
     // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
     // non-messaging entry → a no-op.
     for (const msg of drained) { if (msg.onDeliver) { try { msg.onDeliver(); } catch { /* a delivery-marking fault never breaks the drain */ } } }
+    this.trackBundledFyi(live, takenFyi);
   }
 
   /**
@@ -12440,6 +12592,7 @@ export class PtyHost {
       if (!live.alive || live.kind !== "claude") continue; // shells/canned entries have no busy/queue to heal or drain
       this.healIfStuck(live, sessionId);
       this.drainPending(sessionId);
+      this.expireHeldFyi(live); // @decision b9a7b5eb — bound a held FYI on a session that never takes a real turn
       // Card f18a2201 (item 2): re-persist on mismatch — a prior persistBusy failure (set this flag true
       // in its catch) may have left the DB busy column stale. Re-asserts the CURRENT live.busy (idempotent,
       // cheap, and never races a concurrent edge — everything here runs synchronously, no await in between).
@@ -13444,6 +13597,7 @@ export class PtyHost {
     if (!live?.alive) return;
     const origin = live.giveUpOrigin;
     live.giveUpOrigin = null;
+    this.reholdBundledFyi(live); // @decision b9a7b5eb — FYIs bundled into the unconfirmed turn go back on heldFyi
     if (!origin || origin.length === 0) return;
     const exhausted: { id: string; cb: () => void }[] = [];
     // Code Review Major finding (card 4a0af485, Major 4): seed the signature from the text ACTUALLY

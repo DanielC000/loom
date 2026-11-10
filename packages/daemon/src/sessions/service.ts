@@ -5293,8 +5293,20 @@ export class SessionService {
         const boundTask = session.taskId ? this.db.getTask(session.taskId) : undefined;
         const kickoffText = boundTask ? `${boundTask.title}\n${boundTask.body}` : (agent?.startupPrompt ?? "");
         const projectRecall = retrieveProjectMemoryForKickoff(this.db, session.projectId, kickoffText);
-        if (projectRecall) this.pty.enqueueStdin(session.id, projectRecall, "system");
-        this.db.setLastProjectMemoryDigest(session.id, poolIdentity);
+        // @decision b9a7b5eb — held as FYI, never its own turn; the pool digest is stamped ONLY when it is
+        // actually bundled into a submitted turn (a dropped/expired FYI stays unstamped and re-fires on the
+        // next resume). Nothing to send → stamp now, as before.
+        // Only a role that parks via idle_report (manager/platform) takes the held-FYI path; every other
+        // role (plain/owner sessions, companion `assistant`, workers) keeps its own-turn behaviour, so a
+        // raw-terminal session is never left waiting for a turn that may never come.
+        if (projectRecall && (session.role === "manager" || session.role === "platform")) {
+          this.pty.enqueueStdin(session.id, projectRecall, "system", () => this.db.setLastProjectMemoryDigest(session.id, poolIdentity), undefined, "warning", "fyi:project-memory", undefined, undefined, undefined, { fyi: true });
+        } else if (projectRecall) {
+          this.pty.enqueueStdin(session.id, projectRecall, "system");
+          this.db.setLastProjectMemoryDigest(session.id, poolIdentity);
+        } else {
+          this.db.setLastProjectMemoryDigest(session.id, poolIdentity);
+        }
       }
     }
     // Live-flip re-drive (card 225559e5): this recipient just transitioned to live, so re-drive any durable
@@ -14515,6 +14527,9 @@ export class SessionService {
       // id; the successor's workerReport purges its OWN id, so a carried copy could never be purged. Drop it
       // (the manager-facing idle notice is the fallback). Covers the recycle and revive carries alike.
       if (m.questionId?.startsWith("worker-report-nudge:")) continue;
+      // Held FYI notices (`Live.heldFyi`, card b9a7b5eb) never appear in `flushed` — they live outside
+      // `live.pending` — so a recycle/revive drops them by construction (the successor's kickoff carries
+      // fresh memory, and an unbundled memory FYI is left unstamped).
       // Non-durable (nudge / raw human turn): carry the text, source, AND kind so a 'human'/'agent' entry
       // stays classified exactly as it was (a warning nudge doesn't become one-per-turn, an agent message
       // doesn't start coalescing). DELIVER, never hold — deliberately omit `m.giveUpHeldUntil` even when
@@ -16962,7 +16977,13 @@ export class SessionService {
       : cls.kind === "parked-merge"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle while its merge gate ${cls.opId}${cls.gatePhase ? ` (${cls.gatePhase})` : ""} runs on its own branch — no action needed; it will settle on its own and you'll get a [loom:merge-done]/[loom:merge-failed] nudge when it does. Only step in if you want to check on it: gate_status(${cls.opId}) / gate_queue, or worker_transcript ${workerSessionId}.`
       : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). Observed (single point-in-time read): turnSeq=${w.turnSeq ?? 0}, ~${Math.round((Date.now() - Date.parse(w.lastActivity)) / 60_000)} min since last activity — check these against how long this worker's turns normally take before treating either as decisive. It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review the diff before confirming (${zeroCommitMergeHazardNote()}), or worker_message it.`;
-    try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
+    // @decision b9a7b5eb — the three "no action needed" kinds are FYI: held until the manager's next real
+    // turn, never a turn of their own. Tagged per worker so a fresh one supersedes a still-held older copy.
+    const isFyi = cls.kind === "parked-wake" || cls.kind === "parked-background" || cls.kind === "parked-merge";
+    try {
+      if (isFyi) this.pty.enqueueStdin(w.parentSessionId, msg, "system", undefined, undefined, "warning", `fyi:worker-idle:${workerSessionId}`, undefined, undefined, undefined, { fyi: true });
+      else this.pty.enqueueStdin(w.parentSessionId, msg);
+    } catch { /* manager not live */ }
     return "sent-other";
   }
 

@@ -77,8 +77,18 @@ class SeamHost extends createSeamHost(PtyHost) {
   isAlive() { return false; }
   // Bypass the real queue/ready-gate machinery entirely (it depends on a real spawned+ready pty) — we
   // only care THAT the resume half calls enqueueStdin with the right text/kind, not delivery mechanics.
-  enqueueStdin(sessionId, text, source, _onDeliver, _route, kind = "warning") {
-    this.enqueued.push({ sessionId, text, source, kind });
+  // Card b9a7b5eb: resume's project-memory recall is now an FYI whose pool digest is stamped from its
+  // `onDeliver` (i.e. only once bundled into a submitted turn). This stub has no real turn, so it fires
+  // `onDeliver` itself to stand in for that bundling — otherwise the digest would (correctly) stay
+  // unstamped and every resume would re-enqueue, which is the opposite of what the dedup cases assert.
+  enqueueStdin(sessionId, text, source, onDeliver, _route, kind = "warning", ...rest) {
+    // The FYI tail object is the LAST argument (options-object form); record it plus the persisted digest
+    // as it stood BEFORE onDeliver ran — the service-level "unstamped until bundled" contract.
+    const tail = rest[rest.length - 1];
+    const fyi = !!tail && typeof tail === "object" && tail.fyi === true;
+    const digestBeforeDeliver = db.getLastProjectMemoryDigest(sessionId);
+    this.enqueued.push({ sessionId, text, source, kind, fyi, digestBeforeDeliver, hadOnDeliver: typeof onDeliver === "function" });
+    if (typeof onDeliver === "function") onDeliver();
     return { delivered: false };
   }
 }
@@ -231,6 +241,32 @@ try {
   check("(resume) the recall carries the pinned note", resumeMsg?.text.includes("daemon default port is 4317"));
   check("(resume) injected as kind:\"warning\" (operational/coalescible), NEVER \"agent\" direction",
     resumeMsg?.kind === "warning");
+  // Card b9a7b5eb round 2: a WORKER keeps today's own-turn behaviour — not an FYI, stamped at enqueue.
+  check("(resume scope) a worker's recall is NOT an FYI (own-turn behaviour unchanged) and has no onDeliver",
+    resumeMsg?.fyi === false && resumeMsg?.hadOnDeliver === false);
+  check("(resume scope) a worker's digest is stamped at enqueue", !!db.getLastProjectMemoryDigest(rawWorkerId));
+
+  // A MANAGER (parks via idle_report) takes the held-FYI path: fyi tail set, and the pool digest is NOT
+  // stamped until onDeliver fires (the stub fires it right after recording the pre-deliver digest).
+  {
+    const rawMgrId = "rawMgrA";
+    const rawMgrEng = "44444444-5555-6666-7777-888888888888";
+    db.insertSession({
+      id: rawMgrId, projectId: projA, agentId: "mgrAgentA", engineSessionId: rawMgrEng, title: null,
+      cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+      lastError: null, role: "manager", taskId: null,
+    });
+    const mp = engineTranscriptPath(repo, rawMgrEng);
+    fs.mkdirSync(path.dirname(mp), { recursive: true });
+    fs.writeFileSync(mp, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+    host.enqueued.length = 0;
+    svc.resume(rawMgrId);
+    const mgrMsg = host.enqueued.find((e) => e.sessionId === rawMgrId && e.text.includes(PROJECT_MEMORY_TAG));
+    check("(resume scope) a manager's recall IS enqueued", !!mgrMsg);
+    check("(resume scope) a manager's recall carries the FYI tail (fyi===true) and an onDeliver", mgrMsg?.fyi === true && mgrMsg?.hadOnDeliver === true);
+    check("(resume scope) NO digest stamp existed before onDeliver fired (unstamped until bundled)", !mgrMsg?.digestBeforeDeliver);
+    check("(resume scope) the digest IS stamped once onDeliver fired", !!db.getLastProjectMemoryDigest(rawMgrId));
+  }
 
   // ===================== resume on the ZERO-notes project enqueues NOTHING project-memory-related =====================
   const engIdB = "88888888-9999-aaaa-bbbb-cccccccccccc";
