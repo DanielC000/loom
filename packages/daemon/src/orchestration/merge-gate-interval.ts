@@ -86,20 +86,30 @@ export function decideMergeGate(
  * oldest first). Returns the red's `{opId, head}` only when the NEWEST verdict-bearing event on that tip is a fail — so a later
  * green on the same tip clears it. Counts only real run_gate verdicts: a row needs the `settleHead` a run_gate settle stamps, and
  * a cancelled run, a thrown-error row (`error`), a landing-check/dist-importer row, or a row on another head carries no verdict
- * for this tip and is skipped. `tip` is the BRANCH's own tip read BEFORE any union-merge forward of main, so main moving can
- * never launder a red; a NEW commit by the worker is a new head and out of scope (a known limit).
+ * for this tip and is skipped. The head set is the branch's tip plus the commits reached through merges of main
+ * (`mergeOfMainHeadSet`, git/mainline-watch.ts), so a union-merge forward of main that a cancelled/refused confirm left on the
+ * branch cannot launder a red stamped below it; each head keeps the newest-verdict-wins rule and the newest red across the set
+ * is returned. A NEW commit by the worker is a new head and out of scope (a known limit).
  */
-export function redSelfCheckOnTip(events: readonly { detail?: Record<string, unknown> | undefined }[], tip: string | null | undefined): { opId: string; head: string } | undefined {
-  if (!tip) return undefined;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const d = events[i]!.detail;
-    if (!d) continue;
-    if (d.settleHead !== tip) continue;
-    if (d.cancelled === true || typeof d.error === "string" || d.landingCheckOnly === true || d.distImporterCheckOnly === true) continue;
-    if (typeof d.passed !== "boolean") continue;
-    return d.passed === false && typeof d.opId === "string" ? { opId: d.opId, head: tip } : undefined;
+export function redSelfCheckOnTip(events: readonly { detail?: Record<string, unknown> | undefined }[], tipOrHeads: string | readonly string[] | null | undefined): { opId: string; head: string } | undefined {
+  const heads = typeof tipOrHeads === "string" ? [tipOrHeads] : (tipOrHeads ?? []).filter(Boolean);
+  let best: { opId: string; head: string; at: number } | undefined;
+  for (const head of heads) {
+    // Newest verdict-bearing event on THIS head decides it (a later green on the same head clears its red).
+    for (let i = events.length - 1; i >= 0; i--) {
+      const d = events[i]!.detail;
+      if (!d) continue;
+      // A run whose tree moved mid-run (`headCurrent:false`) also stamps the settle worktree head: a RED counts on either head,
+      // a GREEN only on the head the run started on (fails closed).
+      const onHead = d.settleHead === head || (d.passed === false && d.settleWorktreeHead === head);
+      if (!onHead) continue;
+      if (d.cancelled === true || typeof d.error === "string" || d.landingCheckOnly === true || d.distImporterCheckOnly === true) continue;
+      if (typeof d.passed !== "boolean") continue;
+      if (d.passed === false && typeof d.opId === "string" && (!best || i > best.at)) best = { opId: d.opId, head, at: i };
+      break;
+    }
   }
-  return undefined;
+  return best ? { opId: best.opId, head: best.head } : undefined;
 }
 
 export function agentViewOf(state: MergeGateState, orch: { mergeGate: "on" | "off"; mergeGateInterval?: number | undefined }, repoKey = "primary", pending = 0): MergeGateAgentView {

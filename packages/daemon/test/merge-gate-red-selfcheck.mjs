@@ -19,7 +19,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (BR) BATCH: a red candidate makes an interval-skippable batch run the real gate; (BO) with a per-candidate override both
 //        land ungated and ONLY the red one carries the override.
 //
-// NOT COVERED: the MCP zod bounds on overrideReason (a surface test); the web UI.
+//   (J)  round 2: a red is carried THROUGH merges of main (the worker's own, and Loom's union-merge left by a confirm refused at
+//        admission with no gate failure recorded) — a two-confirm laundering path; (J3) control: no red ⇒ none invented.
+//   (K)  a forced-by-red gate is named on a SOLO REJECTION; (BR) also on the merge_batch result + its build_gate event.
+//   (L)  an inert docs-only diff under a red does not claim the real gate ran; (H2) cadence never + overrideReason ⇒ warning
+//        only, the override is not recorded as used; (M) merge_batch refuses an overrideReasons key that is not a candidate.
+// NOT COVERED: the MCP zod bounds on overrideReason (a surface test); the web UI; the 50-hop cap of the merge walk.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-red-selfcheck.mjs  (LOOM_DEV unset and =1)
 import fs from "node:fs";
 import os from "node:os";
@@ -40,6 +45,9 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const M = await import("../dist/orchestration/merge-gate-interval.js");
+const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -78,6 +86,14 @@ const head = (repo) => execSync("git rev-parse HEAD", { cwd: repo }).toString().
   check("(U) landing-check / dist-importer rows are no self-check verdict", M.redSelfCheckOnTip([ev({ opId: "x", passed: false, settleHead: "H1", landingCheckOnly: true }), ev({ opId: "y", passed: false, settleHead: "H1", distImporterCheckOnly: true })], "H1") === undefined);
   check("(U) a row with no settleHead (pre-change / unreadable head) is no verdict", M.redSelfCheckOnTip([ev({ opId: "x", passed: false })], "H1") === undefined);
   check("(U) no tip / empty / detail-less rows ⇒ undefined", M.redSelfCheckOnTip([R("r1")], null) === undefined && M.redSelfCheckOnTip([], "H1") === undefined && M.redSelfCheckOnTip([{}], "H1") === undefined);
+  // round 2 — a head SET (the tip plus the commits reached through merges of main)
+  check("(U) head set: a red on a LOWER head (under a merge-of-main) is found, naming that head", (() => { const r = M.redSelfCheckOnTip([R("r1", "H0")], ["H1", "H0"]); return r?.opId === "r1" && r.head === "H0"; })());
+  check("(U) head set: the NEWEST red across the set wins (by event order)", M.redSelfCheckOnTip([R("r1", "H0"), R("r2", "H1")], ["H1", "H0"])?.opId === "r2" && M.redSelfCheckOnTip([R("r2", "H1"), R("r1", "H0")], ["H1", "H0"])?.opId === "r1");
+  check("(U) head set: a green on another head of the set does NOT clear a red; a green on the SAME head does", M.redSelfCheckOnTip([R("r0", "H0"), G("g", "H1")], ["H1", "H0"])?.opId === "r0" && M.redSelfCheckOnTip([R("r0", "H0"), G("g", "H0")], ["H1", "H0"]) === undefined);
+  check("(U) head set: a head OUTSIDE the set never counts", M.redSelfCheckOnTip([R("r1", "HX")], ["H1", "H0"]) === undefined);
+  const moved = ev({ opId: "m1", passed: false, settleHead: "A", settleWorktreeHead: "B" });
+  check("(U) a red from a run whose tree moved counts on BOTH the gated head and the settle head", M.redSelfCheckOnTip([moved], "A")?.opId === "m1" && M.redSelfCheckOnTip([moved], "B")?.opId === "m1");
+  check("(U) …but a green from such a run clears only the gated head, never the settle-time one (fails closed)", M.redSelfCheckOnTip([moved, ev({ opId: "m2", passed: true, settleHead: "A", settleWorktreeHead: "B" })], "A") === undefined && M.redSelfCheckOnTip([moved, ev({ opId: "m2", passed: true, settleHead: "A", settleWorktreeHead: "B" })], "B")?.opId === "m1");
 }
 
 // ============ fixtures ============
@@ -114,7 +130,7 @@ async function addWorker(db, P, n, files) {
 }
 /** A service whose injected gate counts calls; `gate.failNext` makes the NEXT call red. `enqueued` captures every nudge. */
 function mkService(db, extra = {}) {
-  const gate = { calls: 0, failNext: false };
+  const gate = { calls: 0, failNext: false, during: null };
   const enqueued = [];
   const pty = { stop() {}, isAlive() { return false; }, enqueueStdin(sessionId, text, source, onDeliver, route, kind) { enqueued.push({ sessionId, text, kind }); } };
   const sessions = new SessionService(db, pty, new OrchestrationControl(), {
@@ -122,6 +138,7 @@ function mkService(db, extra = {}) {
     deployStaleness: STAMPED_STALENESS,
     runGate: async () => {
       gate.calls++;
+      if (gate.during) { const f = gate.during; gate.during = null; await f(); } // one-shot hook: runs INSIDE the gate window
       if (gate.failNext) { gate.failNext = false; return { passed: false, failedStep: "test", failedStatus: 1, steps: [] }; }
       return { passed: true, steps: [] };
     },
@@ -314,7 +331,7 @@ try {
     seedProject(db, P, { mergeGate: "off", mergeGateInterval: 5, maxConcurrentWorkers: 4 });
     const w1 = await addWorker(db, P, "br1", { "src/br1.ts": "export const br1 = 1;\n" });
     const w2 = await addWorker(db, P, "br2", { "src/br2.ts": "export const br2 = 2;\n" });
-    await selfCheck(ctx, w1.workerId, { red: true });
+    const sc1 = await selfCheck(ctx, w1.workerId, { red: true });
     const calls0 = ctx.gate.calls;
     const r = await ctx.sessions.mergeBatchTracked(P.mgrId, [w1.workerId, w2.workerId]);
     const v = r.settled && r.ok ? r.value : undefined;
@@ -322,6 +339,8 @@ try {
     try { landed = await waitUntil(() => [w1, w2].every((w) => db.getTask(w.taskId).columnKey === "done"), { timeoutMs: 120000, intervalMs: 50, label: "merge-gate-red-selfcheck (BR): both landed" }); } catch { landed = false; }
     const ungated = db.listEvents(P.mgrId).filter((e) => e.kind === "build_gate" && e.detail?.skipReason === "gate-interval").length;
     check("(BR) a red candidate makes the batch run the REAL gate: both landed, ZERO interval skips, the gate command ran", landed && ungated === 0 && ctx.gate.calls > calls0 && v !== undefined);
+    check("(BR) the forced gate is NAMED on the merge_batch result (redSelfCheckOpIds + note naming the worker)", v?.redSelfCheckOpIds?.length === 1 && v.redSelfCheckOpIds[0] === sc1.opId && /REFUSED/.test(v.redSelfCheckNote ?? "") && (v.redSelfCheckNote ?? "").includes(w1.workerId.slice(0, 8)));
+    check("(BR) …and on the batch's build_gate event", (() => { const b = db.listEvents(P.mgrId).filter((e) => e.kind === "build_gate" && e.detail?.batched === true).at(-1); return b?.detail?.redSelfCheckOpIds?.[0] === sc1.opId && /REFUSED/.test(b.detail.redSelfCheckNote ?? ""); })());
   }
   // ── (BO) batch with a per-candidate override: both land ungated, ONLY the red one carries it ───
   {
@@ -339,6 +358,121 @@ try {
     const gates = db.listEvents(P.mgrId).filter((e) => e.kind === "build_gate" && e.detail?.skipReason === "gate-interval");
     check("(BO) both landed ungated (gate-interval), the gate command never ran", landed && gates.length === 2 && ctx.gate.calls === calls0);
     check("(BO) ONLY the red candidate's landing carries the override reason", gates.filter((g) => g.detail?.overrideReason === "flaky, rechecked by hand").length === 1 && gates.filter((g) => g.detail?.overrideReason !== undefined).length === 1);
+  }
+  // ── (J) round 2: a red must not be laundered by a merge of main left on the branch ─────────────
+  const tipOf = (repo, branch) => execSync(`git rev-parse refs/heads/${branch}`, { cwd: repo }).toString().trim();
+  const parentCount = (repo, sha) => execSync(`git rev-list --parents -n 1 ${sha}`, { cwd: repo }).toString().trim().split(/\s+/).length - 1;
+  {
+    // (J1) the worker's OWN merge of main on top of the red tip
+    const P = mk("j1"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    seedProject(db, P, { mergeGate: "off", mergeGateInterval: 3 });
+    const w = await addWorker(db, P, "j1", { "src/j1.ts": "export const j1 = 1;\n" });
+    const sc = await selfCheck(ctx, w.workerId, { red: true });
+    const T = tipOf(P.repo, w.branch);
+    fs.writeFileSync(path.join(P.repo, "main-advance-j1.txt"), "main moved\n");
+    commitAll(P.repo, "main advance j1", GIT_ID);
+    const mainBranch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: P.repo }).toString().trim();
+    execSync(`git ${GIT_ID} merge --no-edit ${mainBranch}`, { cwd: w.worktreePath, stdio: "pipe" });
+    const M1 = tipOf(P.repo, w.branch);
+    check("(J1) precondition: the branch tip is now a MERGE commit over the red tip", M1 !== T && parentCount(P.repo, M1) === 2 && execSync(`git rev-parse "${M1}^1"`, { cwd: P.repo }).toString().trim() === T);
+    const before = ctx.gate.calls;
+    const v = await confirm(ctx, P.mgrId, w.workerId);
+    check("(J1) the red on T is carried through the merge of main: GATED, never skip-interval", v.merged === true && v.gateRan === true && ctx.gate.calls === before + 1 && v.skipReason === undefined && v.redSelfCheckOpId === sc.opId && /REFUSED/.test(v.redSelfCheckNote ?? ""));
+  }
+  {
+    // (J2) the two-confirm laundering path: confirm #1 runs AFTER Loom's pre-gate union-merge of main committed M on the branch, then ends WITHOUT a
+    // recorded gate failure (main moves inside the gate window ⇒ gate_base_invalidated, gateOwed stays false); confirm #2 reads tip M while the red sits on T.
+    const P = mk("j2"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    seedProject(db, P, { mergeGate: "off", mergeGateInterval: 3 });
+    const w = await addWorker(db, P, "j2", { "src/j2.ts": "export const j2 = 1;\n" });
+    const sc = await selfCheck(ctx, w.workerId, { red: true });
+    const T = tipOf(P.repo, w.branch);
+    fs.writeFileSync(path.join(P.repo, "main-advance-j2.txt"), "main moved\n");
+    commitAll(P.repo, "main advance j2", GIT_ID);
+    ctx.gate.during = async () => { fs.writeFileSync(path.join(P.repo, "main-advance-j2b.txt"), "main moved inside the gate window\n"); commitAll(P.repo, "main advance j2b", GIT_ID); };
+    const v1 = await confirm(ctx, P.mgrId, w.workerId);
+    const M1 = tipOf(P.repo, w.branch);
+    check("(J2) precondition: confirm #1 was REFUSED (no merge) yet left a union-merge commit M over the red tip on the branch, with no gate failure owed", v1.merged === false && M1 !== T && parentCount(P.repo, M1) === 2 && db.getMergeGateState(P.projId).gateOwed === false);
+    const before = ctx.gate.calls;
+    const v2 = await confirm(ctx, P.mgrId, w.workerId);
+    check("(J2) confirm #2 still GATES (the red is found through M's first parent), never skip-interval, and names the red op", v2.merged === true && v2.gateRan === true && ctx.gate.calls === before + 1 && v2.skipReason === undefined && v2.redSelfCheckOpId === sc.opId);
+  }
+  {
+    // (J3) control: the SAME merge-of-main shape with NO red must not invent one
+    const P = mk("j3"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    seedProject(db, P, { mergeGate: "off", mergeGateInterval: 3 });
+    const w = await addWorker(db, P, "j3", { "src/j3.ts": "export const j3 = 1;\n" });
+    fs.writeFileSync(path.join(P.repo, "main-advance-j3.txt"), "main moved\n");
+    commitAll(P.repo, "main advance j3", GIT_ID);
+    const mainBranch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: P.repo }).toString().trim();
+    execSync(`git ${GIT_ID} merge --no-edit ${mainBranch}`, { cwd: w.worktreePath, stdio: "pipe" });
+    const v = await confirm(ctx, P.mgrId, w.workerId);
+    check("(J3) no red + a merge of main on the branch ⇒ the interval skip proceeds, no note", v.merged === true && v.skipReason === "gate-interval" && ctx.gate.calls === 0 && v.redSelfCheckNote === undefined);
+  }
+
+  // ── (K) a forced-by-red gate is named on a SOLO REJECTION too ─────────────────────────────────
+  {
+    const P = mk("k"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    seedProject(db, P, { mergeGate: "off", mergeGateInterval: 3 });
+    const w = await addWorker(db, P, "k1", { "src/k1.ts": "export const k1 = 1;\n" });
+    const sc = await selfCheck(ctx, w.workerId, { red: true });
+    ctx.gate.failNext = true;
+    const v = await confirm(ctx, P.mgrId, w.workerId);
+    check("(K) the forced gate was red ⇒ a REJECTION, which still names the red op and says the skip was refused", v.merged === false && v.redSelfCheckOpId === sc.opId && /REFUSED/.test(v.redSelfCheckNote ?? ""));
+  }
+
+  // ── (L) an inert docs-only diff under a red: the note must not claim the real gate ran ─────────
+  {
+    const P = mk("l"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    seedProject(db, P, { mergeGate: "off", mergeGateInterval: 3 });
+    const w = await addWorker(db, P, "l1", { "docs/l1.md": "# l1\n" });
+    await selfCheck(ctx, w.workerId, { red: true });
+    const before = ctx.gate.calls;
+    const v = await confirm(ctx, P.mgrId, w.workerId);
+    check("(L) fixture: the docs-only diff was inert-skipped (no gate ran)", v.merged === true && v.gateRan === false && ctx.gate.calls === before);
+    check("(L) the note says NO gate ran and does not claim the real merge gate ran", /NO gate ran/.test(v.redSelfCheckNote ?? "") && !/real merge gate ran/.test(v.redSelfCheckNote ?? ""));
+  }
+
+  // ── (H2) cadence never + overrideReason: warning only, the override is NOT recorded as used ───
+  {
+    const P = mk("h2"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    seedProject(db, P, { mergeGate: "off" });
+    const w = await addWorker(db, P, "h2", { "src/h2.ts": "export const h2 = 1;\n" });
+    await selfCheck(ctx, w.workerId, { red: true });
+    const v = await confirm(ctx, P.mgrId, w.workerId, { overrideReason: "not needed under never" });
+    check("(H2) the note says warning only / override not needed, and no override is recorded on the result", /warning only; override not needed/.test(v.redSelfCheckNote ?? "") && v.overrideReason === undefined && !/RECORDED/.test(v.redSelfCheckNote ?? ""));
+    check("(H2) nor on merge_done / build_gate", !db.listEvents(P.mgrId).some((e) => (e.kind === "merge_done" || e.kind === "build_gate") && e.detail?.overrideReason !== undefined));
+  }
+
+  // ── (M) merge_batch refuses an overrideReasons key that is not a candidate ────────────────────
+  {
+    const P = mk("m"); makeRepo(P.repo);
+    const db = new Db(); dbs.push(db);
+    const ctx = mkService(db);
+    seedProject(db, P, { mergeGate: "off", mergeGateInterval: 5, maxConcurrentWorkers: 4 });
+    const w1 = await addWorker(db, P, "m1", { "src/m1.ts": "export const m1 = 1;\n" });
+    const w2 = await addWorker(db, P, "m2", { "src/m2.ts": "export const m2 = 1;\n" });
+    const server = new OrchestrationMcpRouter(db, ctx.sessions).buildServer(P.mgrId, "manager");
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: "mgred-m", version: "0" });
+    await client.connect(clientT);
+    const call = async (args) => JSON.parse((await client.callTool({ name: "merge_batch", arguments: args })).content[0].text);
+    const out = await call({ workerSessionIds: [w1.workerId, w2.workerId], overrideReasons: { [w1.workerId]: "ok", "not-a-candidate-id": "typo" } });
+    check("(M) a stray overrideReasons key is REFUSED by name, and nothing was merged", out.ok === false && /not-a-candidate-id/.test(out.reason ?? "") && db.getTask(w1.taskId).columnKey !== "done" && db.getTask(w2.taskId).columnKey !== "done");
+    await client.close();
   }
 } finally {
   for (const d of dbs) { try { d.close(); } catch { /* ignore */ } }

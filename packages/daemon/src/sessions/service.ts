@@ -38,7 +38,7 @@ import { resolveEscalationDestMerged } from "../orchestration/linked-fixes.js";
 import { detectUnanchoredAddedCommentBlocks, formatUnanchoredCommentBlocksAdvisory } from "../git/unanchored-comment-blocks.js";
 import type { SimpleGit } from "simple-git";
 import { boundedSimpleGit, canonicalGit, isNotAGitRepositoryError, withTimeout, detectShallowCanonicalRepo, defaultTrustedMainRoot, CanonicalGitRefusal } from "../git/bounded.js";
-import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert, type MainlineEvidence, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, MainlineDeadlineError } from "../git/mainline-watch.js";
+import { classifyMainlineMove, mainlineWatermarkKey, mainlineBootAlertKey, mainlineDivertEpisodeKey, mainlineDeferStreakKey, MAINLINE_FIRST_SIGHT_DEFER_ALERT_THRESHOLD, parseMainlineWatermark, readMainlineWatermarkStrict, parseMainlineBootAlert, mainlineMovedNudgeText, MAINLINE_BOOT_ALERT_PREFIX, MAINLINE_WATERMARK_MISSING_REASON, MAINLINE_LOOM_TIP_CAP_REASON, type MainlineBootAlert, type MainlineEvidence, isAncestorCommit, readFirstParent, readMainlineFacts, readMainlineHead, mergeOfMainHeadSet, MainlineDeadlineError } from "../git/mainline-watch.js";
 import { GitReader } from "../git/reader.js";
 import { GitWriter, unsafeBranchNameReason } from "../git/writer.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
@@ -764,6 +764,10 @@ export type MergeBatchResult = {
    *  array under-reports on a hard-deleted session row, or a `finishRefused` candidate below: either way
    *  the content genuinely landed, just without Loom-side cleanup. */
   landedCount?: number;
+  /** Card 4a95e9fc: present when a red run_gate self-check (on a candidate's tip, or a commit it merged main over) FORCED this batch's real gate in place of an
+   *  interval skip: the red self-check op ids and a note naming the workers. Absent otherwise. */
+  redSelfCheckOpIds?: string[];
+  redSelfCheckNote?: string;
   /** @decision e8e98d43 — a candidate the fast-forward DID land on main, but whose `finishAlreadyMerged`
    *  call REFUSED to finalize (always `heldAtFinish` today). Excluded from `landed` (the task/worktree/
    *  branch are all untouched), but counted in `landedCount` above (a true git fact either way). */
@@ -901,6 +905,8 @@ type ConfirmMergeResult = {
   /** Card 4a95e9fc: present when a red run_gate self-check on this branch's own tip bore on the merge-gate decision — it FORCED the real gate
    *  (an interval skip refused), was OVERRIDDEN, or is only WARNED about (gate off). Manager-facing text; never a pass claim. */
   redSelfCheckNote?: string;
+  /** Card 4a95e9fc: the op id of the red self-check that FORCED this landing's real gate (set on a rejection too, not only on merged:true). */
+  redSelfCheckOpId?: string;
   /** Card 4a95e9fc: the manager's RECORDED (never authenticated) reason, present only when it actually let a red-tip landing through ungated. */
   overrideReason?: string;
   /** @decision a1a8c5c4 — `outputTail` covers only the two dominant paths (a plain gate-fail rejection, a
@@ -1267,13 +1273,26 @@ function gateSkipWarning(reason: "gate-disabled" | "gate-interval" | undefined):
 }
 
 /** Card 4a95e9fc: the ONE wording for a red-self-check-on-the-tip decision — shared by the merge result, the `[loom:merge-done]` nudge and the warning. */
-function redSelfCheckNoteFor(d: MergeGateDecision): string | undefined {
+function redSelfCheckNoteFor(d: MergeGateDecision, ran?: { gateRan: boolean; inertSkip: boolean }): string | undefined {
   const r = d.redSelfCheck;
   if (!r) return undefined;
-  const at = `a red run_gate self-check (op ${r.opId.slice(0, 8)}) is the latest settled verdict on this branch's tip ${r.head.slice(0, 8)}`;
-  if (d.reason === "red-self-check") return `${at} — the interval skip was REFUSED and the real merge gate ran instead (pass overrideReason to land such a tip ungated)`;
+  const at = `a red run_gate self-check (op ${r.opId.slice(0, 8)}) is the latest settled verdict on this branch's tip ${r.head.slice(0, 8)} (or a commit it merged main over)`;
+  if (d.reason === "red-self-check") {
+    const outcome = ran === undefined || ran.gateRan ? "the real merge gate ran instead"
+      : ran.inertSkip ? "but the diff is inert docs-only so NO gate ran (not a pass)"
+        : "a reused green self-check stood in for the gate";
+    return `${at} — the interval skip was REFUSED; ${outcome} (pass overrideReason to land such a tip ungated)`;
+  }
+  if (d.cadence === "never") return `${at} — warning only; override not needed (the merge gate is OFF, so nothing was refused or forced); this landing carried no gate verdict on that tip`;
   if (r.overrideReason !== undefined) return `${at} — landed ungated under a manager overrideReason ("${r.overrideReason}"); the reason is RECORDED, not authenticated, and this is NOT a pass`;
-  return `${at} — the merge gate is OFF so nothing was refused; this landing carried no gate verdict on that tip`;
+  return `${at} — landed without a gate verdict on that tip`;
+}
+
+/** Card 4a95e9fc: stamp a red-self-check-FORCED gate onto a solo confirm's result (a rejection too, not only merged:true), never overwriting a note already set. */
+function withForcedRedNote(r: ConfirmMergeResult, d: MergeGateDecision | undefined): ConfirmMergeResult {
+  if (!d || d.reason !== "red-self-check" || !d.redSelfCheck) return r;
+  const note = redSelfCheckNoteFor(d);
+  return { ...r, redSelfCheckOpId: d.redSelfCheck.opId, ...(r.redSelfCheckNote === undefined && note ? { redSelfCheckNote: note } : {}) };
 }
 
 /** Card e8df2659: the `|mergeGate:<value>` suffix folded into a merge op's cache identity (see
@@ -20824,8 +20843,9 @@ export class SessionService {
     const gateDisabled = !mergeGateDecision.gate;
     const mergeSkipReason = mergeGateDecision.skipReason ?? "gate-disabled";
     // Card 4a95e9fc: the red self-check note (forced gate / override / gate-off warning) and the override reason that actually let a skip through.
-    const redSelfCheckNote = redSelfCheckNoteFor(mergeGateDecision);
-    const appliedOverrideReason = gateDisabled ? mergeGateDecision.redSelfCheck?.overrideReason : undefined;
+    let redSelfCheckNote = redSelfCheckNoteFor(mergeGateDecision);
+    // Under cadence "never" the red is a warning only: an overrideReason changes nothing there, so it is never recorded as USED.
+    const appliedOverrideReason = gateDisabled && mergeGateDecision.cadence === "interval" ? mergeGateDecision.redSelfCheck?.overrideReason : undefined;
 
     // @decision 864e79fe — worktree-gone alone false-negatives "build gate failed" for an already-successful
     //  merge (best-effort removal can lag finalizeMerge); OR in the task's own terminal-lane state, but
@@ -23770,6 +23790,7 @@ export class SessionService {
     // confirmWorkerMergeTracked's pendingOps.attach() wraps), so it's baked into this result once, at the
     // moment the merge actually runs, correct across every one of worker_merge_confirm's response shapes.
     const composerWarning = composerIntegrityWarning(this.pty, workerSessionId);
+    redSelfCheckNote = redSelfCheckNoteFor(mergeGateDecision, { gateRan, inertSkip });
     const warning = [nestedWarning, worktreeWarning, gateWarning, inertSkipWarning, redSelfCheckNote, emitCompareWarning, composerWarning, soloTipGuard.warning()].filter((w): w is string => !!w).join(" ") || undefined;
     // Drop this worker's recorded self-check (card e50600d2): its gated tip has landed, so the entry must not outlive it. Also true when finalize RETAINS the branch
     // (card cc9bce38, a late commit): that late tip was never checked, and a re-confirm gates it afresh rather than reading this record.
@@ -24571,6 +24592,10 @@ export class SessionService {
     }
     const batchDecision = this.decideMergeGateFor(finalProjectId, liveChosen.length, orchestration, batchRepoKey, [...redByWorker.values()].find((r) => r.overrideReason === undefined));
     const mergeGateOff = !batchDecision.gate;
+    // A gate FORCED by a red (interval skip refused): named on the batch result and its build_gate event, never silent.
+    const batchRedForced = batchDecision.reason === "red-self-check"
+      ? { redSelfCheckOpIds: [...redByWorker.values()].filter((r) => r.overrideReason === undefined).map((r) => r.opId), redSelfCheckNote: `the interval skip was REFUSED: ${[...redByWorker.entries()].filter(([, r]) => r.overrideReason === undefined).map(([w, r]) => `worker ${w.slice(0, 8)} has a red run_gate self-check (op ${r.opId.slice(0, 8)}) on tip/merge-of-main ${r.head.slice(0, 8)}`).join("; ")} — the real batch gate ran instead (pass overrideReasons for those workers to land them ungated)` }
+      : undefined;
     // A skip decision is shared by the fallback confirms; each carries ITS OWN red/override note, never the first candidate's.
     const decisionFor = (workerSessionId: string): MergeGateDecision => {
       const { redSelfCheck: _first, ...rest } = batchDecision;
@@ -25086,6 +25111,7 @@ export class SessionService {
               // on this run's gate child) — never `chosen.length`, the requested K, which can over-report after
               // a conflict drop-out (DoD-4).
               passed: r.passed, batched: true, branchCount: landedCount,
+              ...(batchRedForced ?? {}),
               // @decision 3d2afb53 — this batch never routes through confirmWorkerMergeTracked/
               //  PendingOpRegistry, so these four fields (and the be260976 tombstone's own scope) must be
               //  stamped here directly, off this event's own `detail`.
@@ -25666,7 +25692,7 @@ export class SessionService {
     };
     return this.pendingOps.attach<MergeBatchResult>(
       batchKey, "merge", managerSessionId, this.syncAttachBudgetMs,
-      (opId) => runBatchBody(opId).finally(async () => {
+      (opId) => runBatchBody(opId).then((r) => (batchRedForced ? { ...r, ...batchRedForced } : r)).finally(async () => {
         // Card bba7a8ec: awaited BEFORE this run settles, so the settle callback below enqueues in the same span.
         // Runs FIRST (before the task claim is released below) so a spawn/recycle cannot cut the worktree
         // during the read window; `readStampSuffix` never throws, so the claim release below cannot leak.
@@ -26010,7 +26036,15 @@ export class SessionService {
       if (resolveMergeGateCadence(orch).cadence === "every") return undefined;
       const repo = resolveRepoByKey(project, worker.repoKey);
       const tip = await resolveBranchTip(repo.path, worker.branch, { timeoutMs: this.gitOpMs });
-      const red = redSelfCheckOnTip(this.db.listEventsForBranch(worker.branch, "worker_gate"), tip);
+      if (!tip) {
+        console.warn(`[merge-gate] could not resolve the branch tip for worker ${workerSessionId} (${worker.branch}); the red self-check is not consulted (fails open)`);
+        return undefined;
+      }
+      // Resolve the red through merges of main: a union-merge forward M left on the branch by an earlier confirm that ended
+      // without a recorded gate failure must not launder a red stamped on the commit under it.
+      const mainHead = await readMainlineHead(repo.path, this.mainlineGitMs()).catch(() => null);
+      const heads = await mergeOfMainHeadSet(repo.path, tip, mainHead?.tip ?? null, this.mainlineGitMs());
+      const red = redSelfCheckOnTip(this.db.listEventsForBranch(worker.branch, "worker_gate"), heads);
       return red ? { ...red, ...(overrideReason !== undefined ? { overrideReason } : {}) } : undefined;
     } catch (err) {
       console.warn(`[merge-gate] could not read the red self-check for worker ${workerSessionId} (non-fatal, treated as none): ${err instanceof Error ? err.message : String(err)}`);
@@ -27965,7 +27999,7 @@ export class SessionService {
       // (as "unknown", not "failed" — see that doc).
       async (opId) => this.runWithMergeGateRelease(() => { mgStarted = true; }, mgRes, async () => {
         try {
-          return await this.confirmGatedIdentity(await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId, mergeGateDecision, () => mgRes?.release()), workerSessionId);
+          return await this.confirmGatedIdentity(withForcedRedNote(await this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt, opts?.fallbackOfBatchOpId, mergeGateDecision, () => mgRes?.release()), mergeGateDecision), workerSessionId);
         } catch (err) {
           const worker = this.db.getSession(workerSessionId);
           const project = worker ? this.db.getProject(worker.projectId) : undefined;
@@ -28775,7 +28809,12 @@ export class SessionService {
           }
           // @decision 4a95e9fc — the settle head + branch are stamped on every pass/fail verdict row so a merge can find a red on the
           // branch's own tip durably (the in-memory slot above dies on restart); cancelled/error rows never carry them.
-          const settleHeadFields = worker.branch && settleStamp.head ? { settleHead: settleStamp.head, branch: worker.branch } : {};
+          // `settleHead` is the head the gate was ADMITTED (spawned) against — what it actually ran on — falling back to the settle-time head only when
+          // the admit head is unknown; a tree that moved mid-run also stamps `settleWorktreeHead` (a red counts on either head, a green only on `settleHead`).
+          const gatedHead = admitStamp!.head ?? settleStamp.head;
+          const settleHeadFields = worker.branch && gatedHead
+            ? { settleHead: gatedHead, ...(settleStamp.head && settleStamp.head !== gatedHead ? { settleWorktreeHead: settleStamp.head } : {}), branch: worker.branch }
+            : {};
           if (gateResult.passed) {
             const durationMs = Date.now() - gateStartedAt;
             // `extended` (card 78214063): stamped alongside `opId` (the `evt` closure adds that

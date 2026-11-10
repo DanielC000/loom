@@ -293,6 +293,42 @@ export async function readFirstParent(repoPath: string, sha: string, timeoutMs: 
   } catch { return null; }
 }
 
+/** The second parent of `sha`, or `null` (not a merge / unreadable). */
+async function readSecondParent(repoPath: string, sha: string, timeoutMs: number): Promise<string | null> {
+  try {
+    const out = (await withTimeout(canonicalGit(repoPath, timeoutMs).raw(["rev-parse", "--verify", "--quiet", "--end-of-options", `${sha}^2`]), timeoutMs, "git rev-parse")).trim();
+    return /^[0-9a-f]{40,64}$/.test(out) ? out : null;
+  } catch { return null; }
+}
+
+/** Max first-parent hops {@link mergeOfMainHeadSet} walks. */
+export const MERGE_OF_MAIN_WALK_MAX = 50;
+
+/**
+ * Card 4a95e9fc — the set of heads a red self-check on `tip` may be stamped on: `tip` itself, then, walking FIRST parents, every
+ * commit while the current one is a MERGE whose second parent is an ancestor of `mainTip` (a merge of main — Loom's pre-gate union
+ * forward or a worker's own). Each such merge's first parent joins the set, so a union-merge M on top of a red T still resolves to T.
+ * Bounded by {@link MERGE_OF_MAIN_WALK_MAX}; a git failure ends the walk early (the set so far — fails closed only on what it proved).
+ * Never throws; always contains `tip`.
+ */
+export async function mergeOfMainHeadSet(repoPath: string, tip: string, mainTip: string | null, timeoutMs: number): Promise<string[]> {
+  const heads = [tip];
+  if (!mainTip) return heads;
+  let cur = tip;
+  for (let hop = 0; hop < MERGE_OF_MAIN_WALK_MAX; hop++) {
+    const second = await readSecondParent(repoPath, cur, timeoutMs);
+    if (!second) break;
+    let isMain: boolean;
+    try { isMain = await isAncestorCommit(repoPath, second, mainTip, timeoutMs); } catch { break; }
+    if (!isMain) break;
+    const first = await readFirstParent(repoPath, cur, timeoutMs);
+    if (!first || heads.includes(first)) break;
+    heads.push(first);
+    cur = first;
+  }
+  return heads;
+}
+
 /**
  * Is `ancestor` an ancestor of (or equal to) `descendant`? Compares `merge-base` OUTPUT, never `merge-base --is-ancestor`'s exit status (simple-git's `raw()` resolves a
  * non-zero exit with empty stderr as success — decision bc2240d7). THROWS on a git failure — the caller fails open (no advance). `run` (default: a bounded canonical read) lets
