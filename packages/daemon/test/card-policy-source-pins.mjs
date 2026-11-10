@@ -79,13 +79,16 @@ const throwsLoudly = (fn) => { try { fn(); return false; } catch (e) { return /a
 {
   const svc = stripped.get("sessions/service.ts");
   // The REAL P2 machinery over a service.ts text; every slice is locate-then-slice (a missing anchor throws).
+  const RUNNING_GUARD = 'this.pendingOps.peek(key)?.state !== "running"';
   const p2 = (text) => {
     const calls = [...text.matchAll(/mergePolicyRefusal\(/g)].length;
     const tracked = methodSlice(text, "  async confirmWorkerMergeTracked(");
     const key = locate(tracked, "const key = lineageOp");
     const call = locate(tracked, "mergePolicyRefusal(");
     const attach = locate(tracked, "this.pendingOps.attach<ConfirmMergeResult>(");
-    const runningGuard = tracked.slice(key, call).includes('this.pendingOps.peek(key)?.state !== "running"');
+    // Anchored on the guard IMMEDIATELY preceding the call: other `peek(key)` lines (e.g. the restartExiting refusal) may precede it, so mere presence in key..call proves nothing.
+    const gi = tracked.slice(key, call).lastIndexOf(RUNNING_GUARD);
+    const runningGuard = gi >= 0 && tracked.slice(key + gi + RUNNING_GUARD.length, call).length < 80;
     const conf = methodSlice(text, "  async confirmWorkerMerge(");
     const backstop = locate(conf, "mergePolicyRefusal(") < locate(conf, "resolveConfig(");
     const squash = locate(conf, "const squashTip =");
@@ -97,6 +100,14 @@ const throwsLoudly = (fn) => { try { fn(); return false; } catch (e) { return /a
     const noCardLevelExemption = !/mergedSha|columnKey/.test(def) && /workerBranchProvenLanded\(/.test(def);
     return { calls, trackedOrder: key < call && call < attach, runningGuard, backstop, preSquashPinned, noCardLevelExemption, batchPinned };
   };
+  // Control mutant: replace the guard occurrence nearest BEFORE the tracked wrapper's policy call (the one that really protects it), not the first textual occurrence.
+  const dropGuardBeforePolicyCall = (text) => {
+    const start = locate(text, "  async confirmWorkerMergeTracked(");
+    const callAt = locate(text, "mergePolicyRefusal(", start);
+    const at = text.lastIndexOf(RUNNING_GUARD, callAt);
+    if (at < start) throw new Error("anchor not found: running guard before the policy call");
+    return text.slice(0, at) + "true" + text.slice(at + RUNNING_GUARD.length);
+  };
   const r2 = p2(svc);
   check(`(P2) mergePolicyRefusal( occurs 5 times in service.ts: the definition + the 3 merge sites + the pre-squash pinned-tip re-check (got ${r2.calls})`, r2.calls === 5);
   check("(P2) the pre-squash re-check passes the PINNED squash tip and sits between `const squashTip` and checkMainlineMove", r2.preSquashPinned);
@@ -106,7 +117,7 @@ const throwsLoudly = (fn) => { try { fn(); return false; } catch (e) { return /a
   check("(P2) ...and only when no op is already RUNNING under that key (a running op is attached to, never refused)", r2.runningGuard);
   check("(P2) confirmWorkerMerge runs it before resolveConfig / any gate work (the backstop)", r2.backstop);
   check("(c2) CONTROL (loud): a service.ts missing the key anchor makes the P2 machinery THROW, not pass", throwsLoudly(() => p2(svc.replace("const key = lineageOp", "const kkey = lineageOp"))));
-  check("(c2) CONTROL (positive): dropping the running-op guard flips the guard predicate to false", p2(mutate(stripped, "sessions/service.ts", 'this.pendingOps.peek(key)?.state !== "running"', "true").get("sessions/service.ts")).runningGuard === false);
+  check("(c2) CONTROL (positive): dropping the running-op guard flips the guard predicate to false", p2(dropGuardBeforePolicyCall(svc)).runningGuard === false);
   check("(c2) CONTROL (positive): moving the policy call after attach flips the order predicate to false", p2(svc.replace(/(const key = lineageOp[^\n]*\n)/, "$1    const __zz = this.pendingOps.attach<ConfirmMergeResult>(\n")).trackedOrder === false);
   const evalCalls = hits(/evaluateCardPolicies\(/, (f) => f !== "orchestration/card-policy.ts").map((h) => h.f).sort();
   check(`(P2) evaluateCardPolicies( is called only from service.ts + mcp/tasks.ts (got ${evalCalls.join(",")})`, evalCalls.join(",") === "mcp/tasks.ts,sessions/service.ts");
