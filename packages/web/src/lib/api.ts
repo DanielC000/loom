@@ -1561,6 +1561,10 @@ export const api = {
   // Human-clicked probe: DISPLAYS the host's current key fingerprint for the owner to confirm; pins nothing.
   fetchSshHostFingerprint: (b: { host: string; port: number }) =>
     postErr<{ fingerprint: string }>("/api/connections/ssh/fingerprint", b),
+  // Human-only re-pin after a host-key mismatch (card 7b812c18): pins EXACTLY `fingerprint`, and only while
+  // `previousFingerprint` is still the current pin; the daemon also re-checks the host presents `fingerprint`.
+  repinSshHostKey: (id: string, b: { fingerprint: string; previousFingerprint: string }) =>
+    postErr<ConnectionMetadata>(`/api/connections/${encodeURIComponent(id)}/ssh/repin-host-key`, b),
   // Owner edit (card 923dfc9d). Omitted field = unchanged; a blank/omitted privateKey keeps the stored key
   // (write-only, never returned); a host or port change REQUIRES a new hostKeyFingerprint in the same body.
   updateSshConnection: (id: string, b: {

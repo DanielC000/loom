@@ -41,7 +41,7 @@ export interface SshExecDeps {
 
 export type SshExecToolResult =
   | { ok: true; exitCode: number | null; stdout: string; stderr: string; truncated: boolean }
-  | { ok: false; error: string; reason?: string; kind?: string; status?: "awaiting-owner-approval"; approvalRequestId?: string };
+  | { ok: false; error: string; reason?: string; kind?: string; status?: "awaiting-owner-approval"; approvalRequestId?: string; presentedFingerprint?: string };
 
 // --- per-connection rate limiter (in-memory; counts only GENUINE dispatches) ----------------------------
 const sshRateState = new Map<string, number[]>();
@@ -163,7 +163,10 @@ export async function performSshExec(
       maxOutputBytes: Math.min(deps.guard.maxResponseBytes > 0 ? Math.floor(deps.guard.maxResponseBytes) : SSH_EXEC_MAX_OUTPUT_BYTES, SSH_EXEC_MAX_OUTPUT_BYTES),
     });
     if (!result.ok) {
-      return finish({ ok: false, error: result.error, kind: result.kind }, { outcome: "error", errorKind: result.kind });
+      // A host-key mismatch also carries the fingerprint the host presented (public data), so the owner can
+      // re-pin to it from the Connections UI. Reporting it pins nothing; only the human-only re-pin route does.
+      const presented = result.presentedFingerprint ? { presentedFingerprint: result.presentedFingerprint } : {};
+      return finish({ ok: false, error: result.error, kind: result.kind, ...presented }, { outcome: "error", errorKind: result.kind, ...presented });
     }
     const scrub = (s: string): string => (privateKey && s.includes(privateKey) ? s.split(privateKey).join("[REDACTED]") : s);
     return finish(

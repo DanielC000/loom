@@ -29,7 +29,7 @@ kind-groupings (`GATE_HISTORY_KINDS`, `EVENT_TRIGGER_EVENT_KINDS`, `ORCH_ACTIVIT
 - **Security / trust-boundary:** `credential_revoked`, `credential_undeliverable` (card f44cc187 — a
   reserved-name deny-list widening silently de-provisioning an already-live credential, same evidentiary
   shape and same `managerSessionId:""` filing posture as `credential_revoked`), `manager_manage`,
-  `deploy`, `worker_gate`, `discovery_block_injection`, `engine_session_rotated`, `codex_auto_commit`, `ssh_command_run` (card 699fdbd9 — the per-call audit trail of agent-issued remote commands; evidence that must survive the calling agent's deletion).
+  `deploy`, `worker_gate`, `discovery_block_injection`, `engine_session_rotated`, `codex_auto_commit`, `ssh_command_run` (card 699fdbd9 — the per-call audit trail of agent-issued remote commands; evidence that must survive the calling agent's deletion), `ssh_host_key_repinned` (card 7b812c18 — a human moving an ssh connection's host-key pin, by live re-pin or manual edit; the record of every change to what the daemon trusts), `grants_repinned`, `agent_profile_rebind` (both already in `DURABLE_AUDIT_EVENT_KINDS` but previously missing from this list).
 - **Cross-board / cross-project escalation trail** (the event is the audit LINK to another durable
   record; losing it breaks traceability even though the target task survives): `platform_escalate`,
   `escalation_triaged`, `audit_finding`, `workspace_audit_suggestion`, `cross_project_message`,

@@ -198,6 +198,21 @@ try {
     const before = serverFlags.execs.length;
     await callTool(sGranted.id, { connectionId: rwConn.id, command: "ls /tmp" });
     check("2f (flip control) a permitted call DOES move the server's exec counter", serverFlags.execs.length === before + 1);
+
+    // Card 7b812c18: a host-key MISMATCH over the real loopback server reports the fingerprint the host
+    // presented (HOST_FP, derived independently above) in both the tool result and the outcome audit row —
+    // and never reached the exec stage.
+    const WRONG_FP = HOST_FP.slice(0, -1) + (HOST_FP.endsWith("A") ? "B" : "A");
+    const mmConn = mk("MISMATCH", { readOnly: false, hostKeyFingerprint: WRONG_FP });
+    db.setSessionCapabilitySurface(sGranted.id, { connections: [...ALL, mmConn.id] });
+    const execsBefore = serverFlags.execs.length;
+    const mm = await callTool(sGranted.id, { connectionId: mmConn.id, command: "ls /mismatch" });
+    check("2g host-key mismatch: kind host-key-mismatch and presentedFingerprint is the host's real fingerprint", mm.ok === false && mm.kind === "host-key-mismatch" && mm.presentedFingerprint === HOST_FP);
+    check("2g' the pinned (wrong) value is not what is reported as presented", mm.presentedFingerprint !== WRONG_FP);
+    check("2h the outcome audit row carries presentedFingerprint (public data) and the call never reached exec", lastOutcome("ls /mismatch")?.presentedFingerprint === HOST_FP && serverFlags.execs.length === execsBefore);
+    const okCall = await callTool(sGranted.id, { connectionId: roConn.id, command: "ls /exit7" });
+    check("2i (negative control) a matching pin carries no presentedFingerprint", okCall.ok === true && !("presentedFingerprint" in okCall));
+    db.setSessionCapabilitySurface(sGranted.id, { connections: ALL });
   }
 
   // ============ 3. refusals: refused AND audited AND the wire is never touched ============

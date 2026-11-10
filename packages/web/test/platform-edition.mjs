@@ -772,7 +772,10 @@ check("the exact read/write split is unchanged by card 66b9e590's fail-closed fi
   // human-only loopback REST, no MCP path): 240→241 total, 138→139 writes, reads unchanged.
   // Card d4d3481e added ONE READ member, `mcpCalls` (GET /api/sessions/:id/mcp-calls, the per-call MCP record,
   // human-only loopback REST, no MCP path): 241→242 total, 102→103 reads, writes unchanged.
-  assert.equal(API_MEMBERS.total, 242, `api.ts now has ${API_MEMBERS.total} members, not 242`);
+  // Card 7b812c18 added ONE WRITE member, `repinSshHostKey` (postErr, POST /api/connections/:id/ssh/repin-host-key,
+  // human-only loopback REST, no MCP path): 242→243 total, 139→140 writes, reads unchanged.
+  assert.equal(API_MEMBERS.total, 243, `api.ts now has ${API_MEMBERS.total} members, not 243`);
+  assert.ok(API_MEMBERS.writes.has("repinSshHostKey"), "api.repinSshHostKey must classify as a WRITE (card 7b812c18)");
   assert.ok(API_MEMBERS.reads.has("mcpCalls"), "api.mcpCalls must classify as a READ (card d4d3481e)");
   assert.ok(API_MEMBERS.writes.has("setCompanionAutoRecycle"), "api.setCompanionAutoRecycle must classify as a WRITE (card 1837a542)");
   assert.ok(API_MEMBERS.writes.has("recycleCompanionSession"), "api.recycleCompanionSession must classify as a WRITE (card 79e030d9)");
@@ -781,7 +784,7 @@ check("the exact read/write split is unchanged by card 66b9e590's fail-closed fi
   assert.ok(API_MEMBERS.writes.has("dismissNotices"), "api.dismissNotices must classify as a WRITE (card f549a0ae)");
   assert.ok(API_MEMBERS.writes.has("updateConnection"), "api.updateConnection must classify as a WRITE (card 923dfc9d)");
   assert.equal(API_MEMBERS.reads.size, 103, `api.ts now has ${API_MEMBERS.reads.size} reads, not 103`);
-  assert.equal(API_MEMBERS.writes.size, 139, `api.ts now has ${API_MEMBERS.writes.size} writes, not 139`);
+  assert.equal(API_MEMBERS.writes.size, 140, `api.ts now has ${API_MEMBERS.writes.size} writes, not 140`);
   assert.ok(API_MEMBERS.writes.has("addAgentConnection"), "api.addAgentConnection must classify as a WRITE (card b1df40f2)");
   // Card 61d32daf, pinned by name: the two reads are Tier-1 routes (gateway/trust-tier.ts) and the waiver pair is
   // the human-only escape from a card policy. A flipped verdict means re-reviewing that route's trust posture.

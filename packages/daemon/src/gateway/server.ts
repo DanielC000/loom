@@ -54,7 +54,7 @@ import { reconcileCompanionBindingRoutes, companionRouteBlockReason } from "../c
 import { buildCompanionReplyStatus, checkCompanionReplyHealth } from "../companion/reply-watch.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
-import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection, createSshConnection, updateSshConnection, updateConnection, ConnectionInputError, validateSshHost, SshConnectionInputError } from "../connections/store.js";
+import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection, createSshConnection, updateSshConnection, repinSshHostKey, SSH_HOST_KEY_FINGERPRINT_RE, updateConnection, ConnectionInputError, validateSshHost, SshConnectionInputError } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { validateSonarQubeCredential } from "../connections/sonarqube.js";
 import { fetchHostKeyFingerprint } from "../connections/ssh.js";
@@ -3023,6 +3023,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const b = (req.body ?? {}) as Record<string, unknown>;
     try {
       const result = deps.db.runInTransaction(() => {
+        const before = deps.db.getConnection(id);
         const r = updateSshConnection(deps.db, id, {
           name: b.name as string | undefined, host: b.host as string | undefined, port: b.port as number | undefined,
           user: b.user as string | undefined, privateKey: b.privateKey as string | undefined,
@@ -3033,6 +3034,61 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           riskyCommandPatterns: b.riskyCommandPatterns as never,
         });
         auditConnectionUpdated(id, r);
+        // A manual pin edit at an UNCHANGED address is the owner's own re-pin path: it has NO live re-check
+        // (the owner may be pasting a fingerprint obtained out of band), so it is audited as a re-pin too.
+        // A host/port change is a new pin for a new address, not a re-pin, and files no such event.
+        if (r.changedFields.includes("hostKeyFingerprint") && !r.changedFields.includes("host") && !r.changedFields.includes("port")) {
+          deps.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "ssh_host_key_repinned",
+            detail: { connectionId: id, previousFingerprint: before?.sshHostKeyFingerprint ?? null, fingerprint: r.metadata.hostKeyFingerprint ?? null, via: "manual-edit" },
+          });
+        }
+        return r;
+      });
+      return reply.code(200).send(result.metadata);
+    } catch (err) {
+      return sendConnectionEditError(reply, err);
+    }
+  });
+
+  // Card 7b812c18: HUMAN-ONLY re-pin of an ssh connection's host key after a host-key mismatch. No MCP tool
+  // anywhere; default-deny Tier 0 (loopback), like every route in this section. Body {fingerprint,
+  // previousFingerprint}: it re-pins ONLY to the exact fingerprint the mismatch reported, and only if the
+  // pin it replaces is still current (409 otherwise) AND the host presents that same key right now (409
+  // otherwise) — never an "accept whatever it presents next" switch. Audited as `ssh_host_key_repinned`.
+  app.post("/api/connections/:id/ssh/repin-host-key", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const b = (req.body ?? {}) as Record<string, unknown>;
+    const row = deps.db.getConnection(id);
+    if (!row || row.authScheme !== "ssh") return reply.code(404).send({ error: "no ssh connection with that id" });
+    if (typeof b.fingerprint !== "string" || typeof b.previousFingerprint !== "string") {
+      return reply.code(400).send({ error: "fingerprint and previousFingerprint must be strings" });
+    }
+    // Validate + stale-check BEFORE dialing the host (a dry CAS read; the write below re-checks atomically).
+    if (b.previousFingerprint.trim() !== row.sshHostKeyFingerprint) {
+      return reply.code(409).send({ error: "the pinned host key changed since this mismatch was read — re-check the connection and try again" });
+    }
+    if (!SSH_HOST_KEY_FINGERPRINT_RE.test(b.fingerprint.trim())) {
+      return reply.code(400).send({ error: 'fingerprint must match "SHA256:<43-char base64 digest>"' });
+    }
+    // Captured BEFORE the probe: the live key is verified at exactly this address, and the store re-checks
+    // inside the write transaction that the row still points there (an edit landing mid-probe -> 409).
+    const probedHost = row.host;
+    const probedPort = row.sshPort ?? 22;
+    const live = await fetchHostKeyFingerprint(probedHost, probedPort);
+    if (!live.ok) return reply.code(502).send({ error: "could not read the host's key to confirm the re-pin" });
+    if (live.fingerprint !== b.fingerprint.trim()) {
+      return reply.code(409).send({ error: "the host no longer presents that fingerprint — nothing was re-pinned; re-check the mismatch" });
+    }
+    try {
+      const result = deps.db.runInTransaction(() => {
+        const r = repinSshHostKey(deps.db, id, { fingerprint: b.fingerprint, previousFingerprint: b.previousFingerprint, host: probedHost, port: probedPort });
+        if (r.changed) {
+          deps.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "ssh_host_key_repinned",
+            detail: { connectionId: id, previousFingerprint: r.previousFingerprint, fingerprint: r.fingerprint, via: "live-repin" },
+          });
+        }
         return r;
       });
       return reply.code(200).send(result.metadata);

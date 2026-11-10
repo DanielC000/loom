@@ -360,3 +360,40 @@ test("the quoted-and-piped opt-in is off and disabled while read-only, and a rea
     if (connId) await fetch(`${base}/api/connections/${connId}`, { method: "DELETE" });
   }
 });
+
+test("a host-key mismatch offers a human re-pin to exactly the presented fingerprint, and the stored pin follows", async ({ page, loomDaemon }) => {
+  const base = loomDaemon.baseURL;
+  const project = await loomDaemon.createProject(uniq("ssh-repin-ui"));
+  const server = await startHostKeyServer();
+  let connId: string | undefined;
+  try {
+    // Pinned to a DIFFERENT fingerprint than the live server presents, i.e. the post-reinstall mismatch.
+    const stale = `SHA256:${createHash("sha256").update(Buffer.from(uniq("old"))).digest("base64").replace(/=+$/, "")}`;
+    expect(stale, "control: the stand-in pin really differs from the live host key").not.toBe(server.fingerprint);
+    const key = generateParseableEd25519(ssh2.utils);
+    const created = await apiJson<ConnRow>(`${base}/api/connections/ssh`, {
+      method: "POST",
+      body: JSON.stringify({ name: uniq("Repin NAS"), host: "127.0.0.1", port: server.port, user: "loom", privateKey: key.private, hostKeyFingerprint: stale, readOnly: true, projectId: project.id }),
+    });
+    connId = created.id;
+    await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
+    await page.goto(`${base}/settings`);
+    await page.getByTestId(`ssh-edit-open-${created.id}`).click();
+    await page.getByRole("button", { name: "Fetch from host" }).click();
+    await expect(page.getByTestId("ssh-hostkey-mismatch")).toContainText(stale);
+    // Nothing is pinned by merely looking at the mismatch.
+    expect((await apiJson<ConnRow[]>(`${base}/api/connections`)).find((c) => c.id === created.id)?.hostKeyFingerprint).toBe(stale);
+    await page.getByTestId("ssh-repin-hostkey").click();
+    await expect.poll(async () => (await apiJson<ConnRow[]>(`${base}/api/connections`)).find((c) => c.id === created.id)?.hostKeyFingerprint, { timeout: 15_000 }).toBe(server.fingerprint);
+    await expect(page.getByTestId("ssh-hostkey-mismatch")).toHaveCount(0);
+    // A re-pin built from the now-stale pin is refused by the daemon (compare-and-swap), pin untouched.
+    const replay = await fetch(`${base}/api/connections/${created.id}/ssh/repin-host-key`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fingerprint: server.fingerprint, previousFingerprint: stale }),
+    });
+    expect(replay.status).toBe(409);
+  } finally {
+    if (connId) await fetch(`${base}/api/connections/${connId}`, { method: "DELETE" });
+    await server.close();
+  }
+});

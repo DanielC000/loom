@@ -28,7 +28,9 @@ test("a url-in-host connection is refused at create, and an existing one is badg
   // Create-time refusal: a clear 400 naming the scheme, and nothing persisted.
   const refused = await postConnection(loomDaemon.baseURL, { name: uniq("refused"), host: "http://192.168.178.136:32400", authScheme: "api-key", secret: "s" });
   expect(refused.status).toBe(400);
-  expect(await refused.text()).toMatch(/remove the scheme/);
+  const refusedText = await refused.text();
+  expect(refusedText).toMatch(/remove the scheme/);
+  expect(refusedText).toMatch(/host\[:port\].*HTTPS by default.*Allow plain HTTP/);
 
   const bad = (await (await postConnection(loomDaemon.baseURL, { name: badName, host: "plex.lan:32400", authScheme: "api-key", secret: "s" })).json()) as { id: string };
   const good = (await (await postConnection(loomDaemon.baseURL, { name: goodName, host: "good.lan:32400", authScheme: "api-key", secret: "s" })).json()) as { id: string };

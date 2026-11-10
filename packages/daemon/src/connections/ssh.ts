@@ -58,6 +58,10 @@ export type SshExecResult =
       ok: false;
       error: string;
       kind: SshExecFailureKind;
+      /** Set ONLY on `host-key-mismatch`: the SHA256 fingerprint the host actually presented (public data —
+       *  derived from the host's public key, never key material). It is what a HUMAN may explicitly re-pin
+       *  to via the owner-only re-pin route; nothing in this file ever pins it. */
+      presentedFingerprint?: string;
     };
 
 /** `auth-refused` (the host answered but rejected our key) and `unreachable` (no TCP/DNS path to it) are
@@ -199,6 +203,7 @@ export async function runSshExecCommand(input: SshExecInput): Promise<SshExecRes
     // handshake teardown fires its 'error' event in the same call stack, so the no-TOFU host-key-pinning
     // refusal below can tell a real mismatch apart from any other connection error.
     let fingerprintMismatch = false;
+    let presentedFingerprint: string | undefined;
 
     const timer = setTimeout(() => {
       finish({ ok: false, error: "ssh command timed out", kind: "timeout" });
@@ -216,7 +221,7 @@ export async function runSshExecCommand(input: SshExecInput): Promise<SshExecRes
       // Never pass ssh2's own error text through (it could embed input). The specific, user-meaningful
       // cases are classified from our own state / ssh2's `level` tag, not from the library's message.
       if (fingerprintMismatch) {
-        finish({ ok: false, error: "host key verification failed (fingerprint mismatch)", kind: "host-key-mismatch" });
+        finish({ ok: false, error: "host key verification failed (fingerprint mismatch)", kind: "host-key-mismatch", presentedFingerprint });
         return;
       }
       const kind = classifySsh2ErrorLevel(err);
@@ -269,6 +274,7 @@ export async function runSshExecCommand(input: SshExecInput): Promise<SshExecRes
           const fingerprint = computeHostKeyFingerprint(key);
           if (fingerprint !== input.expectedFingerprint) {
             fingerprintMismatch = true;
+            presentedFingerprint = fingerprint;
             return false;
           }
           return true;

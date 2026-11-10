@@ -2626,6 +2626,7 @@ function ConnectionEditForm({ c, onDone, onCancel }: { c: ConnectionMetadata; on
       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={fieldLabel}>Host</span>
         <Input aria-label="Connection host" value={host} onChange={(e) => setHost(e.target.value)} spellCheck={false} />
+        {!isOauth && <span data-testid="connection-host-hint"><Hint>Use host[:port], never a URL. HTTPS by default; tick "Allow plain HTTP" for http.</Hint></span>}
       </label>
       {!isOauth && (
         <>
@@ -3000,7 +3001,7 @@ function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onS
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Host</span>
             <Input value={host} onChange={(e) => setHost(e.target.value)} placeholder="e.g. api.github.com" spellCheck={false} />
-            <Hint>the target host this connection's secret is scoped to (requests are only ever sent to this host)</Hint>
+            <Hint>the target host this connection's secret is scoped to (requests are only ever sent to this host). Use host[:port], never a URL; HTTPS by default, tick "Allow plain HTTP" for http.</Hint>
           </label>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <span style={fieldLabel}>Auth scheme</span>

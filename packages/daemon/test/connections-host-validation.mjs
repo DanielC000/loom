@@ -42,7 +42,7 @@ try {
   check("https: surrounding whitespace is trimmed, not refused", okH("  api.example.com  "));
   check("https: 'http://x' refused as a URL, message says to remove the scheme", badH("http://x", "https", /remove the scheme/));
   check("https: 'https://x' refused", badH("https://api.example.com", "https", /remove the scheme/));
-  check("https: the Plex row's exact value 'http://192.168.178.136:32400' refused", badH("http://192.168.178.136:32400", "https", /bare hostname/));
+  check("https: the Plex row's exact value 'http://192.168.178.136:32400' refused", badH("http://192.168.178.136:32400", "https", /host\[:port\]/));
   check("https: 'x/path' refused", badH("api.example.com/v1", "https", /path/));
   check("https: query / fragment / userinfo / backslash refused",
     badH("x?y=1", "https", /path/) && badH("x#f", "https", /path/) && badH("u@x", "https", /path/) && badH("x\\y", "https", /path/));
@@ -103,6 +103,13 @@ try {
   check("ssh: a host carrying a port refused, message points at the port field", badH("pve.lan:22", "ssh", /port field/));
   check("ssh: a bracketed host carrying a port refused", badH("[fd00::1]:22", "ssh", /port field/));
   check("ssh: a scheme refused", badH("ssh://pve.lan", "ssh", /remove the scheme/));
+  {
+    const sshUrl = validateConnectionHost("ssh://pve.lan:22", "ssh").error;
+    check("ssh: the scheme refusal says bare host + port field, and never mentions HTTPS / plain HTTP",
+      /bare hostname/.test(sshUrl) && /port field/.test(sshUrl) && !/https/i.test(sshUrl) && !/plain http/i.test(sshUrl));
+    const httpsUrl = validateConnectionHost("https://x", "https").error;
+    check("https: control — the scheme refusal still names HTTPS-by-default and 'Allow plain HTTP'", /HTTPS by default/.test(httpsUrl) && /Allow plain HTTP/.test(httpsUrl));
+  }
   check("ssh: a path / whitespace refused", badH("pve.lan/x", "ssh", /path/) && badH("pve lan", "ssh", /whitespace/));
   check("validateSshHost IS the ssh form of the shared validator (no private copy)",
     validateSshHost("pve.lan:22").ok === false && validateSshHost("pve.lan").ok === true);
@@ -126,7 +133,7 @@ try {
   // ---- an EXISTING bad row (written before the validator) is flagged, not rewritten ----
   const stored = db.createConnection({ name: "Plex", host: "http://192.168.178.136:32400", authScheme: "api-key", secretBlob: "x", projectId: null });
   const meta = getConnectionMetadata(db, stored.id);
-  check("a stored url-in-host row reads back invalidHost:true with a fixed reason", meta.invalidHost === true && /bare hostname/.test(meta.invalidHostReason));
+  check("a stored url-in-host row reads back invalidHost:true with a fixed reason", meta.invalidHost === true && /host\[:port\]/.test(meta.invalidHostReason) && /HTTPS by default/.test(meta.invalidHostReason) && /Allow plain HTTP/.test(meta.invalidHostReason));
   check("the stored host is left exactly as it was", meta.host === "http://192.168.178.136:32400");
   check("the reason never echoes the host", !String(meta.invalidHostReason).includes("192.168"));
   check("listConnections flags the bad row and not the good one",

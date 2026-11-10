@@ -2365,6 +2365,10 @@ export type OrchestrationEventKind =
   // {connectionId, fields: string[] (NAMES of changed fields only), secretRotated: boolean} — never a value,
   // never the secret. Audit-only, same bucket as `card_policy_waived`.
   | "connection_updated"
+  // A HUMAN re-pinned an ssh connection's host key after a host-key mismatch (human-only REST, never an MCP
+  // tool). `detail` = {connectionId, previousFingerprint, fingerprint} (public SHA256 host-key fingerprints,
+  // never key material). Audit-only, same bucket as `connection_updated`.
+  | "ssh_host_key_repinned"
   // A `daemon_restart` that proceeded DESPITE live gate/merge ops (the explicit override), filed once per affected
   // project right before the exit. `detail` = {overridingSessionId, reason, opIds, projectId}. Audit-only, same
   // bucket as `codex_auto_commit`: the restart intent is consumed at boot, so this row is the surviving trace.
@@ -2436,6 +2440,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   merge_quarantine_broad_union_cleared: true,
   card_policy_waived: true,
   connection_updated: true,
+  ssh_host_key_repinned: true,
   restart_orphaned_ops: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];

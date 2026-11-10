@@ -265,7 +265,14 @@ export function validateConnectionHost(host: unknown, kind: "https" | "ssh" | "h
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f\x7f]/.test(h)) return { ok: false, error: "host must not contain control characters" };
   if (/\s/.test(h)) return { ok: false, error: "host must not contain whitespace" };
-  if (h.includes("://")) return { ok: false, error: "host must be a bare hostname, not a URL — remove the scheme (e.g. 'https://' or 'http://')" };
+  if (h.includes("://")) {
+    return {
+      ok: false,
+      error: kind === "ssh"
+        ? "host must be a bare hostname or IP, not a URL — remove the scheme (e.g. 'ssh://') and any port; set the port in the port field"
+        : "host must be host[:port], not a URL — remove the scheme (e.g. 'https://'). Requests use HTTPS by default; tick 'Allow plain HTTP' on the connection to use http",
+    };
+  }
   if (/[/?#@\\]/.test(h)) return { ok: false, error: "host must not contain a path, query, fragment, user info or backslash (none of / ? # @ \\)" };
   const bracketed = /^\[([0-9a-fA-F:.]+)\](?::(.*))?$/.exec(h);
   let portText: string | undefined;
@@ -754,6 +761,42 @@ export function updateSshConnection(
     }
     throw err;
   }
+}
+
+/**
+ * HUMAN-ONLY explicit re-pin of an `ssh` connection's host-key pin after a `host-key-mismatch` (card 7b812c18).
+ * Compare-and-swap, never a "trust the next key" switch: it writes exactly `fingerprint` (the value the
+ * mismatch reported), and only when `previousFingerprint` still equals the CURRENT pin — so a re-pin built
+ * from a stale view (someone already edited the pin) is refused 409 instead of overwriting it. The caller
+ * (the REST route) additionally confirms the host really presents `fingerprint` right now. Never reachable
+ * from an agent tool. Returns the old and new pin for the audit event.
+ * @decision 7b812c18 — never accept a re-pin without the exact fingerprint AND the pin it replaces; no "accept next key" flag.
+ */
+export function repinSshHostKey(
+  db: ConnectionsDbStore,
+  id: string,
+  input: { fingerprint: unknown; previousFingerprint: unknown; host: unknown; port: unknown },
+): { metadata: ConnectionMetadata; previousFingerprint: string; fingerprint: string; changed: boolean } {
+  const row = db.getConnection(id);
+  if (!row || row.authScheme !== "ssh") throw new ConnectionInputError("no ssh connection with that id", 404);
+  // The caller verified the live key at (host, port); the pin may only move while the row still points there.
+  if (input.host !== row.host || input.port !== (row.sshPort ?? SSH_DEFAULT_PORT)) {
+    throw new ConnectionInputError("the connection's address changed since the host key was verified — re-check the connection and try again", 409);
+  }
+  const valid = (v: unknown): v is string => typeof v === "string" && SSH_HOST_KEY_FINGERPRINT_RE.test(v.trim());
+  if (!valid(input.fingerprint) || !valid(input.previousFingerprint)) {
+    throw new ConnectionInputError('fingerprint and previousFingerprint must each match "SHA256:<43-char base64 digest>"', 400);
+  }
+  const fingerprint = input.fingerprint.trim();
+  const previousFingerprint = input.previousFingerprint.trim();
+  if (previousFingerprint !== row.sshHostKeyFingerprint) {
+    throw new ConnectionInputError("the pinned host key changed since this mismatch was read — re-check the connection and try again", 409);
+  }
+  if (fingerprint === row.sshHostKeyFingerprint) {
+    return { metadata: getConnectionMetadata(db, id)!, previousFingerprint, fingerprint, changed: false };
+  }
+  db.updateConnection(id, { sshHostKeyFingerprint: fingerprint });
+  return { metadata: getConnectionMetadata(db, id)!, previousFingerprint, fingerprint, changed: true };
 }
 
 /**

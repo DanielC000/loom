@@ -333,6 +333,10 @@ try {
     capturedResults.push(result);
     check("2a fingerprint mismatch: refused (not ok)", result.ok === false);
     check("2a fingerprint mismatch: kind is host-key-mismatch", result.ok === false && result.kind === "host-key-mismatch");
+    // Card 7b812c18: the refusal carries the fingerprint the host ACTUALLY presented (computed independently
+    // of the code under test), and not the pinned one — while a non-mismatch failure carries none.
+    check("2a' mismatch returns presentedFingerprint equal to the host's real key fingerprint", result.ok === false && result.presentedFingerprint === independentHostFingerprint);
+    check("2a' presentedFingerprint is not the (wrong) pinned value", result.ok === false && result.presentedFingerprint !== wrongFingerprint);
     // The server never even reached the session/exec stage — no command was ever requested. (MAJOR #2:
     // was asserted against the vacuous ptyRequested flag; sessionOpened/execRequested are proven able to
     // flip positively by 1c above, so this is a real, non-vacuous proof of refusal-before-session.)

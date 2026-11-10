@@ -324,7 +324,15 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
     mutationFn: (b: Parameters<typeof api.updateSshConnection>[1]) => api.updateSshConnection(c.id, b),
     onSuccess: () => { setEditing(false); setPrivateKey(""); setPassphrase(""); void qc.invalidateQueries({ queryKey: ["connections"] }); },
   });
+  // Card 7b812c18: the human-only host-key re-pin. Offered only when the fetched key differs from the stored
+  // pin at the UNCHANGED address; it sends exactly what was shown plus the pin it replaces.
+  const repin = useMutation({
+    meta: { inlineError: true },
+    mutationFn: (b: { fingerprint: string; previousFingerprint: string }) => api.repinSshHostKey(c.id, b),
+    onSuccess: (m) => { setFingerprint(m.hostKeyFingerprint ?? ""); setFetched(null); void qc.invalidateQueries({ queryKey: ["connections"] }); },
+  });
   const open = () => {
+    repin.reset();
     setReadOnly(c.readOnly ?? true); setShellSyntax(c.shellSyntax ?? false); setAllow(c.commandAllowlist ?? []); setRisky(c.riskyCommandPatterns ?? []);
     setName(c.name); setHost(c.host); setPort(String(c.port ?? 22)); setUser(c.user ?? ""); setPrivateKey(""); setPassphrase("");
     setFingerprint(c.hostKeyFingerprint ?? ""); setFetched(null); probe.reset();
@@ -434,10 +442,23 @@ export function SshConnectionRowDetail({ c, grantedTo }: { c: ConnectionMetadata
                 <span style={{ fontSize: fs.sm, color: color.text }}><span style={{ fontFamily: font.mono }}>{fetched.target}</span> presented this host key:</span>
                 <code style={{ fontFamily: font.mono, fontSize: fs.body, color: color.attnText, overflowWrap: "anywhere" }}>{fetched.fingerprint}</code>
                 <span style={hintStyle}>Only pin it if it matches what the host itself reports.</span>
+                {!targetChanged && c.hostKeyFingerprint && fetched.fingerprint !== c.hostKeyFingerprint && (
+                  <span data-testid="ssh-hostkey-mismatch" role="status" style={{ ...hintStyle, color: color.attnText }}>
+                    This differs from the pinned key ({c.hostKeyFingerprint}). Agents are refused on this host until it is re-pinned. Re-pin only if you expected the host key to change (a reinstall, a new host).
+                  </span>
+                )}
                 <div style={{ display: "flex", gap: 6 }}>
-                  <Button variant="primary" onClick={() => { setFingerprint(fetched.fingerprint); setFetched(null); }}>Pin this fingerprint</Button>
+                  {!targetChanged && c.hostKeyFingerprint && fetched.fingerprint !== c.hostKeyFingerprint ? (
+                    <Button variant="primary" data-testid="ssh-repin-hostkey" disabled={repin.isPending}
+                      onClick={() => repin.mutate({ fingerprint: fetched.fingerprint, previousFingerprint: c.hostKeyFingerprint! })}>
+                      {repin.isPending ? "Re-pinning…" : "Re-pin to this fingerprint"}
+                    </Button>
+                  ) : (
+                    <Button variant="primary" onClick={() => { setFingerprint(fetched.fingerprint); setFetched(null); }}>Pin this fingerprint</Button>
+                  )}
                   <Button variant="ghost" onClick={() => setFetched(null)}>Discard</Button>
                 </div>
+                {repin.error && <span role="alert" style={{ ...hintStyle, color: color.danger }}>{errorText(repin.error)}</span>}
               </div>
             )}
           </div>
