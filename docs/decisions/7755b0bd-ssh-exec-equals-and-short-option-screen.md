@@ -21,13 +21,14 @@ Accepted false holds: any `=` value or short-option remainder that equals a risk
 - A program on no list; only the risky list and the server-side user constrain it.
 - The OFF path has no executor hold (`bash`/`xargs`/`ssh` are held only in shell mode). Widening that is a separate product decision.
 - A risky word inside a `/`-terminated word: card `7eea8cd4`.
-- Whether `tee`/`truncate`/`shred`/`sed -i` join the DEFAULT risky list is an owner product call, not changed here.
+- `tee`/`truncate`/`shred`/`sed -i` joined the DEFAULT risky list by owner decision `e7401fff` (card `f5ba3db7`): `cp`/`mv` deliberately did NOT. Three bare prefix rules (`tee`, `truncate`, `shred`; they over-match `teeth`-style words, by design) plus one regex rule for `sed` followed by `-<letters>i…` (`-i`, `-i.bak`, `-ni`) or `--in…` (`--in-place[=SUFFIX]`, GNU abbreviation), hand case-folded because a RegExp rule has no flags. A prefix rule cannot see a bundle or the long form, hence the regex. `sed -n 1p f` and `sed s/a/b/ f` stay clean on the OFF path. Only NEW connections are seeded with it (`validateSshConnectionInput`); an existing row keeps the list it was saved with and the owner can use "Restore default" in the UI. Test: `test/ssh-risky-default-overwrite-verbs.mjs`.
 
 ## Do not
 
 - Do not replace the `=` split and short-option remainder with a list of dangerous option names (b2229239's round-5 lesson: a denylist is found wanting one review at a time).
 - Do not stop the OFF path from using `wordsForRiskyMatch`, and do not keep a second splitter.
-- Do not touch the human-only grant paths or the default risky list in this change.
+- Do not touch the human-only grant paths in this change.
+- Do not add `cp` or `mv` to the default risky list, and do not migrate existing connections onto the new default (owner decision `e7401fff`).
 
 ## Proof
 

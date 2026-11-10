@@ -3801,6 +3801,14 @@ export const DEFAULT_SSH_RISKY_COMMAND_PATTERNS: readonly SshCommandRule[] = [
   { kind: "prefix", pattern: "dd " },
   { kind: "prefix", pattern: "kill " },
   { kind: "prefix", pattern: "pkill" },
+  // File-overwriting commands (owner decision e7401fff). cp/mv are deliberately NOT here.
+  { kind: "prefix", pattern: "tee" },
+  { kind: "prefix", pattern: "truncate" },
+  { kind: "prefix", pattern: "shred" },
+  // `sed` in-place: a `sed` word, then (anywhere later) `--in…` (`--in-place[=SUFFIX]`, GNU abbreviation) or a
+  // short-option bundle containing `i` (`-i`, `-i.bak`, `-ni`). A regex rule because a prefix rule cannot see
+  // a bundle or the long form; `sed -n 1p f` / `sed s/a/b/ f` stay clean. Case-folded by hand: a RegExp rule has no flags.
+  { kind: "regex", pattern: "(^|[ /])[sS][eE][dD] (.* )?(-[a-zA-Z]*[iI]|--[iI][nN])" },
 ];
 
 /** OAuth2 provider template slug (agent-tooling P5a). "custom" = human supplies auth/token URLs + scopes directly. */
