@@ -1,4 +1,4 @@
-# 2bbc0412 — `daemon_restart` waits (bounded) for live gate/merge ops, then REFUSES; it never silently orphans them
+# 2bbc0412 — `daemon_restart` waits (bounded) for live gate/merge ops, then REFUSES unless overridden; orphaning is guarded against only up to the final recheck (see `e4f0c1df` for the window after it)
 
 Specimen: a worker `run_gate` was admitted after `gate_queue` said `restartSafe:true` and before the exit; the restart fired and the gate came back `orphaned-by-restart`. The boot sweep only marks orphans, it never re-fires them.
 

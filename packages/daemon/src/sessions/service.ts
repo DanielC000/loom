@@ -5962,7 +5962,7 @@ export class SessionService {
     this.restartProceedOverride = proceedOverride;
     // @decision 2bbc0412 — real gate/merge ops are waited for (bounded) then REFUSED, never orphaned, unless the
     // caller overrode with a reason. Every non-exit return below must call releaseLatch().
-    const releaseLatch = (): void => { this.restartAdmissionLatch = false; this.restartProceedOverride = null; };
+    const releaseLatch = (): void => { this.restartAdmissionLatch = false; this.restartExiting = false; this.restartProceedOverride = null; };
     let liveOpsWait: RequestDaemonRestartResult["liveOpsWait"];
     let orphanedOps: LiveRestartOp[] | null = null;
     const liveOpsRefusal = (ops: LiveRestartOp[], when: string): RequestDaemonRestartResult => {
@@ -6078,8 +6078,8 @@ export class SessionService {
       }
     }
     // Re-read at the final recheck too: a late attached override carries its OWN session id.
-    const overrideReason = this.restartProceedOverride?.reason ?? null;
-    const overrideSessionId =this.restartProceedOverride?.sessionId ?? null;
+    let overrideReason = this.restartProceedOverride?.reason ?? null;
+    let overrideSessionId = this.restartProceedOverride?.sessionId ?? null;
     const preempt = await this.preemptAdvisoryDistImporterChecks(deps.advisoryPreemptVerifyMs ?? SessionService.ADVISORY_PREEMPT_VERIFY_MS);
     advisoryBase = preempt.refire;
     advisoryRefire = preempt.refire;
@@ -6218,6 +6218,12 @@ export class SessionService {
     // (nothing awaits between here and the setTimeout). Without an override, any op that appeared since the wait
     // (a merge confirm — the run_gate latch already closed worker gates) refuses the restart.
     const liveAtExit = this.liveRealWorkOps();
+    // @decision e4f0c1df — a proceedDespiteLiveOps from an overlapping caller that attached AFTER the override was
+    // captured above is honoured here (it carries its OWN session id), so it is never told to pass what it passed.
+    if (!overrideReason && this.restartProceedOverride) {
+      overrideReason = this.restartProceedOverride.reason;
+      overrideSessionId = this.restartProceedOverride.sessionId;
+    }
     if (!overrideReason && liveAtExit.length > 0 && recheck.alive) {
       clearRestartIntent();
       refireAfterRefusal();
@@ -6225,6 +6231,9 @@ export class SessionService {
       return liveOpsRefusal(liveAtExit, "immediately before exiting");
     }
     if (recheck.alive) {
+      // @decision e4f0c1df — the exit is committed to from this synchronous point: refuse NEW merge/merge_batch/deploy
+      // admissions until the process exits (cleared by releaseLatch on every non-exit path and after the exit callback).
+      this.restartExiting = true;
       // Final fold + seal: an arrival from here on is nudged to its manager instead of being carried. Rewrites the
       // already-written intent only if the set grew since the first write (synchronous with the seal — no gap).
       const before = JSON.stringify(advisoryRefire ?? []);
@@ -6373,6 +6382,7 @@ export class SessionService {
     managerSessionId: string, reason: string,
   ): Promise<{ deployed: boolean; reason?: string; exitCode?: number | null; outputTail?: string; opId?: string }> {
     this.requireManager(managerSessionId, "deploy");
+    if (this.restartExiting) throw this.restartExitingRefusal("deploy"); // @decision e4f0c1df
     const session = this.db.getSession(managerSessionId);
     const project = session ? this.db.getProject(session.projectId) : undefined;
     if (!project) throw new Error("project not found for this session");
@@ -7324,6 +7334,13 @@ export class SessionService {
    *  admissions (see runWorkerGate) so a steady trickle of gates can't defer the restart. Cleared on every
    *  non-exit path and after the exit callback. */
   private restartAdmissionLatch = false;
+  /** Set synchronously at `requestDaemonRestart`'s final live-ops recheck, once the exit is committed to: from then
+   *  on NEW merge / merge_batch / deploy admissions are refused (see `refuseIfRestartExiting`). Cleared with the latch. */
+  private restartExiting = false;
+  /** @decision e4f0c1df — plain thrown/returned refusal, never a verdict: nothing is minted, cached or counted. */
+  private restartExitingRefusal(what: string): Error {
+    return new Error(`${what} refused: the daemon is exiting for a restart (its final live-ops check has already passed), so no NEW merge, merge_batch or deploy is started right now (this is NOT a gate verdict and nothing was run). Retry after the daemon is back up.`);
+  }
   /** Set by an overlapping `daemon_restart` call carrying `proceedDespiteLiveOps` while another attempt is
    *  already waiting: the wait loop reads it each poll and switches to the override path. */
   /** Max length of the override's `proceedReason` (the MCP schemas carry the same bound). */
@@ -24227,6 +24244,7 @@ export class SessionService {
    *  stamps the real post-assembly landed count, and `gate_history.branch` reads null for a batch row.
    */
   async mergeBatchTracked(managerSessionId: string, workerSessionIds: string[]): Promise<AttachResult<MergeBatchResult>> {
+    if (this.restartExiting) return { settled: true, ok: false, error: this.restartExitingRefusal("merge_batch") }; // @decision e4f0c1df
     if (workerSessionIds.length === 0) return { settled: true, ok: true, value: { ok: false, landed: [], fallback: [], reason: "no worker session ids given" } };
     interface Candidate { workerSessionId: string; taskId: string | null; branch: string; taskTitle: string | null; repoKey: string | null; cutBaseSha: string | null; }
     let repoPath: string | undefined;
@@ -27683,6 +27701,11 @@ export class SessionService {
     // has already settled.
     const lineageOp = lineageResolvedPendingOp(this.db, "merge", (k) => this.pendingOps.peek(k), workerSessionId);
     const key = lineageOp && lineageOp.view.state === "running" ? lineageOp.key : `merge:${workerSessionId}`;
+    // @decision e4f0c1df — once a restart's final recheck has passed, a call that would MINT a new op is refused
+    // (plain error, never an op/verdict/cache entry); attaching to an already-running op is still allowed.
+    if (this.restartExiting && this.pendingOps.peek(key)?.state !== "running") {
+      return { settled: true, ok: false, error: this.restartExitingRefusal("worker_merge_confirm") };
+    }
     // CARD-POLICY PRECHECK (card 9623e943): the shared `mergePolicyRefusal`, evaluated only when this call would MINT a
     // new op. A call that would ATTACH to an already-RUNNING op under `key` is never refused here (that op was admitted
     // under the policy then in force; refusing would return merged:false for work already in flight). The refusal

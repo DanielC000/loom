@@ -308,6 +308,67 @@ try {
     }
     reset();
   }
+
+  // ── (K) card e4f0c1df: after the final recheck, NEW merge / merge_batch / deploy admissions are refused ──
+  {
+    reset();
+    const exit = mkExit();
+    const probes = {}; let flagInWindow = null;
+    const r = await sessions.requestDaemonRestart(ids.m1, "deploy K", restartDeps(exit, {
+      // Runs inside the exit window (the 300ms timer), i.e. strictly AFTER the final recheck and before exit().
+      armHardShutdownWatchdog: () => {
+        flagInWindow = sessions.restartExiting;
+        probes.deploy = sessions.deployOwnProject(ids.m1, "late deploy").then((v) => ({ v }), (e) => ({ e }));
+        probes.batch = sessions.mergeBatchTracked(ids.m2, [ids.w2]);
+        probes.confirm = sessions.confirmWorkerMergeTracked(ids.m2, ids.w3);
+        return { step() {}, disarm() {} };
+      },
+    }));
+    await waitUntil(() => exit.calls.length === 1, { label: "(K) exit captured" });
+    check("(K) the restart itself proceeded and the exiting flag was set in the exit window", r.restarting === true && flagInWindow === true);
+    const dep = await probes.deploy; const bat = await probes.batch; const con = await probes.confirm;
+    const isRefusal = (e, what) => e instanceof Error && e.message.startsWith(`${what} refused`) && /NOT a gate verdict/.test(e.message) && /exiting for a restart/.test(e.message);
+    check("(K) a deploy admitted after the recheck is refused (thrown), naming deploy", isRefusal(dep.e, "deploy"));
+    check("(K) a merge_batch admitted after the recheck is refused, not run: settled error, no op minted", bat.settled === true && bat.ok === false && isRefusal(bat.error, "merge_batch") && sessions.pendingOps.peek(`merge-batch:${ids.m2}`) === undefined);
+    check("(K) a worker_merge_confirm admitted after the recheck is refused, not orphaned: settled error, no op/tombstone", con.settled === true && con.ok === false && isRefusal(con.error, "worker_merge_confirm")
+      && sessions.pendingOps.peek(`merge:${ids.w3}`) === undefined);
+    check("(K) the exiting flag and latch are cleared after the exit callback", sessions.restartExiting === false && sessions.restartAdmissionLatch === false);
+    // Controls: the same calls with the flag clear are NOT exiting-refused (they fail/return for their own unrelated reasons).
+    const dep2 = await sessions.deployOwnProject(ids.m1, "control deploy");
+    check("(K) control: deploy after the exit window is not exiting-refused (no deployCommand reason)", dep2.deployed === false && /no deployCommand/.test(dep2.reason ?? ""));
+    const bat2 = await sessions.mergeBatchTracked(ids.m2, [ids.w2]);
+    check("(K) control: merge_batch after the exit window reaches its own validation", bat2.settled === true && bat2.ok === true && /no branch/.test(bat2.value?.reason ?? ""));
+    reset();
+  }
+
+  // ── (L) card e4f0c1df: an override from a caller that attaches AFTER the override was captured is honoured at the final recheck ──
+  {
+    reset();
+    const d = deferred();
+    let calls = 0; let lateOp = null; let lateOpId = null; let attached = null;
+    const exit = mkExit();
+    const deps = restartDeps(exit, {
+      isSupervisorAlive: async () => {
+        if (++calls === 2) {
+          // The final recheck's own liveness read: an op appears AND a second caller attaches with an override, in the same tick.
+          lateOp = liveOp(`merge:late-${sfx}`, "merge", ids.m2, d); lateOpId = opIdOf(`merge:late-${sfx}`);
+          attached = sessions.requestDaemonRestart(ids.m2, "late override call", restartDeps(exit, { proceedDespiteLiveOps: "attached late, owner-approved" }));
+        }
+        return { alive: true };
+      },
+    });
+    const r = await sessions.requestDaemonRestart(ids.m1, "deploy L", deps);
+    const r2 = await attached;
+    check("(L) the late override is honoured: restart proceeds (not told to pass an override already passed)", r.restarting === true && r === r2);
+    check("(L) the late op is recorded as orphaned in the result", (r.orphanedOps ?? []).some((o) => o.opId === lateOpId));
+    const lRows = orphanRows();
+    check("(L) the audit row names the LATE-attaching caller and its reason", lRows.length === 1 && lRows[0].detail.overridingSessionId === ids.m2 && lRows[0].detail.reason === "attached late, owner-approved" && JSON.stringify(lRows[0].detail.opIds) === JSON.stringify([lateOpId]));
+    const lIntent = restart.readRestartIntent();
+    check("(L) the written intent carries the orphaned op and the late reason", lIntent?.orphanedOps?.reason === "attached late, owner-approved" && lIntent.orphanedOps.ops.some((o) => o.opId === lateOpId));
+    await waitUntil(() => exit.calls.length === 1, { label: "(L) exit captured" });
+    d.resolve(); await lateOp;
+    reset();
+  }
 } finally {
   db.close();
 }
