@@ -44,7 +44,7 @@ On top of that the executor/interpreter hold and the risky word screen apply. Wh
 
 **Residuals (named, not fixed here):**
 
-- **`=`-glued payloads** (`git -c 'core.pager=…'`, `GIT_SSH_COMMAND='…'`, `tar -I`, `rsync -e` with a value glued by `=`): the risky screen does not split words on `=`, so the payload after it is not seen as a command. Tracked as card `7755b0bd`.
+- **`=`-glued payloads** (`git -c 'core.pager=…'`, `GIT_SSH_COMMAND='…'`, `tar -I`, `rsync -e`): closed by card `7755b0bd` (`docs/decisions/7755b0bd-ssh-exec-equals-and-short-option-screen.md`), which splits on `=` and on a short option's remainder. That change also altered the OFF path (fail-closed only).
 - A first-stage program that evaluates its own ARGUMENTS and is on no list (`make -f x`, `m4 x`, `sqlite3 db .shell`): only the risky list and the server-side user constrain it.
 - Filter stages with a quirk not yet known to write or evaluate: `sort` (R15: positive option allowlist), `uniq` (R11: output operand) and `sed` (R12, not a filter) are the ones found and handled; the list is a judgement, revisit it when another filter is found to write a file or execute.
 - **A risky word inside a `/`-terminated word** (`s/a/reboot/` folds to an empty basename, so the risky screen never sees `reboot`). This predates this card and affects the OFF path as well; it is its own card (`7eea8cd4`) and is not fixed here.
@@ -57,7 +57,7 @@ With a non-empty allowlist, a multi-stage pipeline passes only if the owner's `e
 ## What does not change
 
 - The read-only verb list and `isReadOnlyCommand` are untouched. A read-only connection keeps the flat grammar: `shellSyntax` is inert on it (policy) and refused with it (store validation: `shellSyntax` requires `readOnly:false`).
-- Default OFF is byte-identical to before: a pre-existing row backfills `ssh_shell_syntax` to 0 and still refuses every quote and pipe.
+- Default OFF was byte-identical to before for this card (card `7755b0bd` later added fail-closed holds on the OFF path for `=`-glued programs): a pre-existing row backfills `ssh_shell_syntax` to 0 and still refuses every quote and pipe.
 - No new MCP tool, no new grant path. The flag is human-only REST like `readOnly`, `commandAllowlist` and `riskyCommandPatterns`; the agent-facing surface only gets a longer `ssh_exec` description.
 
 ## Known limits (the owner's attestation, not detected)

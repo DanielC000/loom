@@ -153,7 +153,7 @@ export async function evaluateSshCommandPolicy(
   if (trimmed.length === 0) return refuse("invalid-command");
   const words = trimmed.split(/ +/);
   // Each pipeline segment is screened on its own word list (a quoted payload is also split into pieces).
-  const segmentWords: string[][] = parsed ? parsed.map((s) => wordsForRiskyMatch(s.words)) : [words];
+  const segmentWords: string[][] = parsed ? parsed.map((s) => wordsForRiskyMatch(s.words)) : [wordsForRiskyMatch(words)];
 
   const allowlist = conn.commandAllowlist ?? [];
   const risky = conn.riskyCommandPatterns ?? [];

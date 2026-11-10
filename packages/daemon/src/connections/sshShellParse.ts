@@ -127,7 +127,8 @@ export function shellExecutorHold(segments: ParsedSegment[]): boolean {
     // `time . x` and `sudo -s` are seen as what they run.
     if (commandPositionHold(seg.words)) return true;
     if (sedHold(seg.words)) return true;
-    if (filterSinkHold(ws)) return true;
+    // sort/uniq option parsing needs the option words intact, so it gets the list WITHOUT the glued pieces.
+    if (filterSinkHold(wordsForRiskyMatch(seg.words, false))) return true;
   }
   return pipelineStageHold(segments);
 }
@@ -368,13 +369,28 @@ export function dequotedWordCarriesShellSyntax(segments: ParsedSegment[]): boole
  * The word list the risky matcher sees for one segment: its de-quoted words, plus — right after any word
  * that holds characters outside the plain-word charset (a quoted payload such as `'rm -rf /x'`) — that word
  * split into its pieces, so a risky command hidden inside a quoted string is still seen. Over-matches by design.
+ *
+ * @decision 7755b0bd — split on `=` and on a short option's remainder; never a denylist of option names.
  */
-export function wordsForRiskyMatch(words: string[]): string[] {
+export function wordsForRiskyMatch(words: string[], glued = true): string[] {
   const out: string[] = [];
+  const addGlued = (s: string): void => {
+    if (!glued) return;
+    const eq = (t: string): void => {
+      if (t.includes("=")) for (const p of t.split("=")) if (p.length > 0) out.push(p);
+    };
+    eq(s);
+    if (/^-[^-]/.test(s) && s.length > 2) {
+      const rem = s.slice(2);
+      out.push(rem);
+      eq(rem);
+    }
+  };
   for (const w of words) {
     out.push(w);
+    addGlued(w);
     if (NON_PLAIN_CHAR.test(w)) {
-      for (const piece of w.split(NON_PLAIN_RUN)) if (piece.length > 0) out.push(piece);
+      for (const piece of w.split(NON_PLAIN_RUN)) if (piece.length > 0) { out.push(piece); addGlued(piece); }
     }
   }
   return out;
