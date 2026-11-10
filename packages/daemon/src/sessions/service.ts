@@ -2406,6 +2406,16 @@ let warnedMissingHasAmbiguousMatch = false;
 const BACKGROUND_PARK_STALE_MINUTES = 20;
 
 /**
+ * How long after a worker's turn ends on an in-progress card with no `worker_report` before the WORKER
+ * itself is nudged to file one. An internal timing value (like the kickoff-confirm timer), not a config key.
+ * The manager-facing `[loom:worker-idle]` notice fires FIRST (T+0, on the same busy edge); this worker
+ * reminder follows at T+delay.
+ */
+export const WORKER_REPORT_NUDGE_DELAY_MS = 2 * 60_000;
+/** `questionId` tag on the queued nudge so `workerReport` can purge it if the worker reports before it drains. */
+const workerReportNudgeTag = (workerSessionId: string): string => `worker-report-nudge:${workerSessionId}`;
+
+/**
  * @decision 2ff893f3 — do not lower this casually: it is how long a worker can read "fresh" after
  * actually dying, not the re-check cadence itself (that's the IdleWatcher's own tick interval).
  */
@@ -3470,6 +3480,15 @@ export class SessionService {
    *  `notifyManagerOfIdleWorker` exactly when a kickoff's plausible-confirm window ends, for both
    *  tasked and taskless workers. See `armKickoffConfirmRecheck`/`clearKickoffConfirmRecheckTimer`. */
   private readonly kickoffConfirmRecheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** One-shot "finish with worker_report" nudge timers, armed at a worker's turn end. In-memory only: a
+   *  daemon restart drops them, and the manager-facing idle notice remains the fallback. See `armWorkerReportNudge`. */
+  private readonly workerReportNudgeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Epoch ms each worker's current turn began (its busy false→true edge). In-memory. */
+  private readonly workerTurnStartedAtMs = new Map<string, number>();
+  /** Epoch ms a worker was last sent the report nudge; the episode ends at its next report or manager direction. */
+  private readonly workerReportNudgedAtMs = new Map<string, number>();
+  /** Delay before the worker report nudge fires. A field (default `WORKER_REPORT_NUDGE_DELAY_MS`) so a test can shrink it. */
+  workerReportNudgeDelayMs = WORKER_REPORT_NUDGE_DELAY_MS;
   /**
    * HOST-LOAD guard (card 301d8c01): caps how many daemon-executed heavy gate runs (the merge-confirm
    * gate + the scoped-deploy gate — both spawn a human-set build/test command via `runGateSequential`)
@@ -12151,6 +12170,7 @@ export class SessionService {
     // @decision 8882e2ca — the SINGLE chokepoint every deliberate retirement (worker_stop, auto-retire,
     // merge_confirm) already routes through; never fire the one-shot escalation into a retired worker.
     this.clearKickoffConfirmRecheckTimer(workerSessionId);
+    this.clearWorkerReportNudgeTimer(workerSessionId);
   }
   /** @decision 4ee527d1 — a human/Lead deliberately stopping a WORKER (REST `/stop`, `stopSession`) IS a
    *  retirement too; a no-op for any non-worker target. Public: REST `/stop` (gateway/server.ts) calls
@@ -13313,6 +13333,60 @@ export class SessionService {
     if (timer) { clearTimeout(timer); this.kickoffConfirmRecheckTimers.delete(sessionId); }
   }
 
+  private clearWorkerReportNudgeTimer(sessionId: string): void {
+    const timer = this.workerReportNudgeTimers.get(sessionId);
+    if (timer) { clearTimeout(timer); this.workerReportNudgeTimers.delete(sessionId); }
+  }
+
+  /**
+   * Arm the one-shot "finish with worker_report" nudge for a worker whose turn just ended. The timer is
+   * cancelled by the worker's next turn, a report (workerReport), retire/recycle/exit. The fired callback
+   * re-checks live: no worker_report since this turn began AND `classifyIdleWorker` says exactly `stranded`
+   * (so every parked/gated/reported/rate-limited exemption stays single-sourced there), the composer is not
+   * dirty, and this episode has not already been nudged.
+   */
+  private armWorkerReportNudge(workerSessionId: string): void {
+    const w = this.db.getSession(workerSessionId);
+    if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
+    this.clearWorkerReportNudgeTimer(workerSessionId);
+    const timer = setTimeout(() => {
+      this.workerReportNudgeTimers.delete(workerSessionId);
+      try { this.fireWorkerReportNudge(workerSessionId); } catch { /* best-effort; the manager notice is the fallback */ }
+    }, this.workerReportNudgeDelayMs);
+    timer.unref?.();
+    this.workerReportNudgeTimers.set(workerSessionId, timer);
+  }
+
+  private fireWorkerReportNudge(workerSessionId: string): void {
+    const w = this.db.getSession(workerSessionId);
+    if (!w || w.archivedAt || w.processState !== "live" || w.busy || w.role !== "worker" || !w.parentSessionId || !w.taskId) return;
+    // An exhausted worker holds every queued message (exhaustion hold) until recycled; don't queue one it
+    // can never act on. Deliberately here, not in classifyIdleWorker, whose other callers rely on it as-is.
+    if (w.contextExhaustedAt != null) return;
+    const events = this.db.listEventsForWorker(workerSessionId);
+    const turnStartedAt = this.workerTurnStartedAtMs.get(workerSessionId);
+    // Belt-and-braces: classifyIdleWorker below already treats a reported worker as not-stranded, so this
+    // is redundant with it by the reviewer's reading; kept as a cheap independent check (no test pins it).
+    // A report filed during this turn (ts >= turn start) means the worker already did its job.
+    if (turnStartedAt !== undefined && events.some((e) => e.kind === "worker_report" && Date.parse(e.ts) >= turnStartedAt)) return;
+    // Once nudged, stay quiet until the worker reports or the manager sends fresh direction.
+    const nudgedAt = this.workerReportNudgedAtMs.get(workerSessionId);
+    if (nudgedAt !== undefined) {
+      const episodeEnded = events.some((e) => (e.kind === "worker_report" || e.kind === "message_worker" || e.kind === "redirect_worker") && Date.parse(e.ts) >= nudgedAt);
+      if (!episodeEnded) return;
+    }
+    // Never write into a dirty composer; the manager fallback still covers this worker.
+    if ((this.pty.getComposerDirtyLen?.(workerSessionId) ?? 0) > 0) return;
+    if (this.classifyIdleWorker(workerSessionId).kind !== "stranded") return;
+    const text = "[loom:worker-report-reminder] Your turn ended while your task is still in progress and you have not called worker_report. If you are finished, call worker_report with status done. If you are stuck, call it with status blocked and say what you need. If you are waiting on a background command, call it with status progress and awaiting background. A chat reply reaches nobody.";
+    let accepted = false;
+    try {
+      const r = this.pty.enqueueStdin(workerSessionId, text, "system", undefined, undefined, "warning", workerReportNudgeTag(workerSessionId));
+      accepted = !!(r && (r.delivered || r.queued));
+    } catch { /* worker not live */ }
+    if (accepted) this.workerReportNudgedAtMs.set(workerSessionId, Date.now());
+  }
+
   /**
    * @decision b03e636c — re-arms `armKickoffConfirmRecheck`'s escalation at boot-reconcile for a worker
    * (taskless OR tasked — card 7970db77 widened this from taskless-only; see that card's own section in
@@ -14420,6 +14494,10 @@ export class SessionService {
       // Durable entry — resolved below, driven entirely by `durableRecords`; see this method's own
       // @decision f1969787 doc for why its `onDeliver` closure is deliberately never invoked here.
       if (m.onDeliver) continue;
+      // A held worker-report reminder is addressed to the OLD worker's turn-end episode and tagged with its
+      // id; the successor's workerReport purges its OWN id, so a carried copy could never be purged. Drop it
+      // (the manager-facing idle notice is the fallback). Covers the recycle and revive carries alike.
+      if (m.questionId?.startsWith("worker-report-nudge:")) continue;
       // Non-durable (nudge / raw human turn): carry the text, source, AND kind so a 'human'/'agent' entry
       // stays classified exactly as it was (a warning nudge doesn't become one-per-turn, an agent message
       // doesn't start coalescing). DELIVER, never hold — deliberately omit `m.giveUpHeldUntil` even when
@@ -15874,6 +15952,11 @@ export class SessionService {
     const managerSessionId = worker.parentSessionId ?? null;
     const taskId = worker.taskId ?? null;
 
+    // The worker is reporting: cancel any pending "finish with worker_report" nudge and drop a queued one
+    // so it cannot drain late into a worker that already did what it asks.
+    this.clearWorkerReportNudgeTimer(workerSessionId);
+    try { this.pty.purgeQueuedByQuestionIds?.(workerSessionId, [workerReportNudgeTag(workerSessionId)]); } catch { /* worker not live */ }
+
     // AUTO-RECOVERY RE-CONFIRMATION DEDUPE (card 289586c7, bounded p2 0b795bf4): the crash-recovery resume
     // nudge invites a recovered worker to "call worker_report (done/blocked) if you had already finished" —
     // so a worker that crash-loops N times can call worker_report N times with BYTE-IDENTICAL content
@@ -16880,6 +16963,7 @@ export class SessionService {
     // that covers every way a turn can start (not just the content-matched confirm path) — see
     // armKickoffConfirmRecheck's own doc for why that single path isn't enough on its own.
     this.clearKickoffConfirmRecheckTimer(workerSessionId);
+    this.clearWorkerReportNudgeTimer(workerSessionId);
     try { this.pty.purgeQueuedWorkerIdleNudges(w.parentSessionId, workerSessionId); } catch { /* manager not live */ }
   }
 
@@ -16897,8 +16981,13 @@ export class SessionService {
     } catch (err) {
       console.error(`[busy] ${sessionId} db.setBusy(${busy}) failed — the busy DB column may now be stale (PtyHost.reconcile() heals it on its next tick):`, (err as Error)?.message ?? err);
     }
-    if (!busy) this.notifyManagerOfIdleWorker(sessionId);
-    else this.purgeStaleIdleNudgeForReengagedWorker(sessionId);
+    if (!busy) {
+      this.notifyManagerOfIdleWorker(sessionId);
+      try { this.armWorkerReportNudge(sessionId); } catch { /* best-effort */ }
+    } else {
+      this.workerTurnStartedAtMs.set(sessionId, Date.now());
+      this.purgeStaleIdleNudgeForReengagedWorker(sessionId);
+    }
   }
 
   /**
@@ -17057,6 +17146,7 @@ export class SessionService {
       // @decision 8882e2ca — the predecessor is never worker_retired-marked (card 4ee527d1's own "Do
       // not"), so this is its ONLY clear site; never fire the one-shot escalation into it post-recycle.
       this.clearKickoffConfirmRecheckTimer(workerSessionId);
+      this.clearWorkerReportNudgeTimer(workerSessionId);
       this.pty.stop(workerSessionId, "hard");
       for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
         await new Promise((r) => setTimeout(r, 100));
@@ -19874,6 +19964,9 @@ export class SessionService {
     // one-shot escalation into a session whose process is gone. A manager/platform session can hold an
     // entry here too (card ab3c965d round 3's within-window deferral) — this clear is not worker-only.
     this.clearKickoffConfirmRecheckTimer(session.id);
+    this.clearWorkerReportNudgeTimer(session.id);
+    this.workerTurnStartedAtMs.delete(session.id);
+    this.workerReportNudgedAtMs.delete(session.id);
     if (session.role === "manager" || session.role === "platform") {
       const liveWorkers = this.db.listWorkers(session.id).filter((w) => w.processState === "live");
       if (liveWorkers.length > 0) {
