@@ -2715,13 +2715,26 @@ export class PlatformMcpRouter {
             "ITSELF fails (e.g. git unavailable) the result instead carries {supervisorCheckFailed:true, " +
             "supervisorWarning}, a mutually-exclusive pair: treat it as UNKNOWN whether the supervisor script " +
             "changed, never as a confirmed-clean deploy. The same distinction appears on the post-restart resume " +
-            "nudge, your reliable read of it (this immediate response returns into a session about to be killed).",
-          inputSchema: strictShape({ reason: z.string() }),
+            "nudge, your reliable read of it (this immediate response returns into a session about to be killed). " +
+            "LIVE GATES ARE NOT ORPHANED BY DEFAULT: after the build, if any real gate/merge op (a worker's run_gate " +
+            "self-check, a merge gate, in ANY project; advisory dist-importer checks don't count) is still in flight, " +
+            "the restart WAITS up to ~2 minutes for them to settle (new worker run_gate calls are refused with " +
+            "'retry in ~1 min' meanwhile, and the owning managers of other projects are told), then REFUSES with " +
+            "{restarting:false, liveOpsRefused:[{opId,kind,projectId}], error} and the daemon stays up: park and " +
+            "retry once they settle. Override ONLY when an urgent restart can't wait for a gate that may run for " +
+            "hours: pass proceedDespiteLiveOps:true AND a non-empty proceedReason. The wait is skipped, those ops ARE " +
+            "orphaned (verdict lost, never re-fired; opIds returned in `orphanedOps` and recorded in the restart " +
+            "intent) and every owning manager, in every project, gets a [loom:restart-orphaning] nudge naming its " +
+            "opIds before the exit. Take the human's go (above) for an override too.",
+          inputSchema: strictShape({ reason: z.string(), proceedDespiteLiveOps: z.boolean().optional(), proceedReason: z.string().max(500).optional() }),
         },
-        async ({ reason }) => {
+        async ({ reason, proceedDespiteLiveOps, proceedReason }) => {
           if (!callerSessionId) return ok({ error: "no caller session" });
+          if (proceedDespiteLiveOps && !(proceedReason ?? "").trim()) {
+            return ok({ restarting: false, error: "proceedDespiteLiveOps:true requires a non-empty proceedReason (why orphaning the live gate/merge ops is acceptable) — nothing was restarted." });
+          }
           try {
-            return ok(await sessions.requestDaemonRestart(callerSessionId, reason));
+            return ok(await sessions.requestDaemonRestart(callerSessionId, reason, proceedDespiteLiveOps ? { proceedDespiteLiveOps: proceedReason!.trim() } : {}));
           } catch (e) {
             return ok({ error: (e as Error).message });
           }

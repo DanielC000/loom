@@ -2364,7 +2364,11 @@ export type OrchestrationEventKind =
   // An owner edit of a stored connection (human-only REST, never an MCP tool). `detail` =
   // {connectionId, fields: string[] (NAMES of changed fields only), secretRotated: boolean} — never a value,
   // never the secret. Audit-only, same bucket as `card_policy_waived`.
-  | "connection_updated";
+  | "connection_updated"
+  // A `daemon_restart` that proceeded DESPITE live gate/merge ops (the explicit override), filed once per affected
+  // project right before the exit. `detail` = {overridingSessionId, reason, opIds, projectId}. Audit-only, same
+  // bucket as `codex_auto_commit`: the restart intent is consumed at boot, so this row is the surviving trace.
+  | "restart_orphaned_ops";
 
 /**
  * Every `OrchestrationEventKind` value, as a runtime array — closes the gap where `events_search`
@@ -2432,6 +2436,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   merge_quarantine_broad_union_cleared: true,
   card_policy_waived: true,
   connection_updated: true,
+  restart_orphaned_ops: true,
 };
 export const ALL_ORCHESTRATION_EVENT_KINDS = Object.keys(ORCHESTRATION_EVENT_KIND_MEMBERSHIP) as OrchestrationEventKind[];
 

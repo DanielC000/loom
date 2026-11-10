@@ -5578,15 +5578,29 @@ export class OrchestrationMcpRouter {
           "post-restart resume nudge you receive may likewise WITHHOLD its usual 'your merged daemon code is " +
           "now LIVE' assurance if the freshly-restarted process's own build signature can't be confirmed " +
           "(`deploySignatureMismatch` — a turbo cache-replay signature; see `served_status`) — that is a notice " +
-          "about what's KNOWN, not a failed restart; verify behavior directly rather than assuming the merge landed.",
-        inputSchema: strictShape({ reason: z.string() }),
+          "about what's KNOWN, not a failed restart; verify behavior directly rather than assuming the merge landed. " +
+          "LIVE GATES ARE NOT ORPHANED BY DEFAULT: after the build, if any real gate/merge op (a worker's run_gate " +
+          "self-check, a merge gate — in ANY project; advisory dist-importer checks don't count) is still in flight, " +
+          "the restart WAITS up to ~2 minutes for them to settle (new worker run_gate calls are refused with " +
+          "'retry in ~1 min' meanwhile, and the owning managers of other projects are told), then REFUSES with " +
+          "{restarting:false, liveOpsRefused:[{opId,kind,projectId}], error} and the daemon stays up — park and " +
+          "retry once they settle (`gate_queue`'s restartSafe:true is the same check). Override ONLY when an " +
+          "urgent restart can't wait for another project's gate (a full-suite gate can run for hours): pass " +
+          "proceedDespiteLiveOps:true AND a non-empty proceedReason — the wait is skipped, those ops ARE orphaned " +
+          "(their verdict is lost and never re-fired; the opIds come back in `orphanedOps` and are recorded in the " +
+          "restart intent) and every owning manager, in every project, gets a [loom:restart-orphaning] nudge " +
+          "naming its opIds before the exit.",
+        inputSchema: strictShape({ reason: z.string(), proceedDespiteLiveOps: z.boolean().optional(), proceedReason: z.string().max(500).optional() }),
       },
-      async ({ reason }) => {
+      async ({ reason, proceedDespiteLiveOps, proceedReason }) => {
         // @decision 92c20eb9 — a retiring predecessor must not trigger a fleet-wide restart mid-settle.
         const superseded = callerSupersededError();
         if (superseded) return ok(superseded);
+        if (proceedDespiteLiveOps && !(proceedReason ?? "").trim()) {
+          return ok({ restarting: false, error: "proceedDespiteLiveOps:true requires a non-empty proceedReason (why orphaning the live gate/merge ops is acceptable) — nothing was restarted." });
+        }
         try {
-          return ok(await sessions.requestDaemonRestart(managerSessionId, reason));
+          return ok(await sessions.requestDaemonRestart(managerSessionId, reason, proceedDespiteLiveOps ? { proceedDespiteLiveOps: proceedReason!.trim() } : {}));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

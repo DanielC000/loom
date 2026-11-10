@@ -53,6 +53,22 @@ export interface RequestDaemonRestartResult {
   /** Card c9a21e8f — set when a pre-empted RUNNING advisory's kill was still unverified after the bounded
    *  wait; the restart proceeded anyway (its own worktree's strays were reaped by path). */
   advisoryCancelUnverified?: string[];
+  /** Set only on a `restarting:false` refusal because real gate/merge work was still in flight after the bounded wait
+   *  (or appeared at the final pre-exit recheck) — the ops the caller should wait for, then retry. */
+  liveOpsRefused?: LiveRestartOp[];
+  /** What the bounded wait for real gate/merge ops did; absent when nothing was live at the first look. */
+  liveOpsWait?: { waitedMs: number; initial: number; settledBeforeExit: boolean };
+  /** Set only when `proceedDespiteLiveOps` skipped the wait: the ops this restart will orphan. */
+  orphanedOps?: LiveRestartOp[];
+}
+
+/** One live (non-advisory) gate/merge op, as named in a restart refusal / orphaning record / owner nudge. */
+export interface LiveRestartOp {
+  opId: string;
+  kind: string;
+  projectId: string | null;
+  /** The session that owns the op (a worker for a self-check gate, a manager for a merge). */
+  ownerSessionId: string | null;
 }
 
 /** Exit code that asks the supervisor to rebuild + relaunch. MUST match scripts/daemon-supervisor.mjs. */
@@ -207,6 +223,9 @@ export interface RestartIntent {
    * pre-empted. Size is capped per entry — see {@link DistImporterRefireEntry.droppedPathCount}.
    */
   distImporterRefire?: DistImporterRefireEntry[];
+  /** `proceedDespiteLiveOps` override: the gate/merge ops this restart deliberately orphaned, with the caller's
+   *  stated reason. Additive + informational (an older intent simply has none). */
+  orphanedOps?: { reason: string; ops: LiveRestartOp[] };
   requestedAt: string;
 }
 

@@ -266,7 +266,9 @@ const restartDeps = (extra = {}) => ({
   // restart's pre-empt frees the slot — which is exactly the point (it is real work the restart must not abort).
   const merge = e.hold("merge");
   await waitUntil(() => e.sessions.gateSemaphore.snapshot().entries.some((x) => x.gateType === "merge"), { label: "(6) the merge op is registered (queued behind the advisory)" });
-  const res = await e.sessions.requestDaemonRestart(e.P.mgrId, "deploy c9a21e8f fixture", restartDeps());
+  // The concurrent merge op is REAL work: since card 2bbc0412 a restart waits for it and then refuses, so this case
+  // restarts with the explicit override — it still proves the pre-empt never aborts that op (the point of (6)).
+  const res = await e.sessions.requestDaemonRestart(e.P.mgrId, "deploy c9a21e8f fixture", restartDeps({ proceedDespiteLiveOps: "(6) fixture: prove the pre-empt leaves a real merge op un-aborted" }));
   check("(6) restart proceeded", res.restarting === true);
   check("(6) result reports the pre-empt", res.advisoryPreempt?.cancelled === 1 && res.advisoryPreempt?.refireQueued === 1 && res.advisoryCancelUnverified === undefined);
   const intent = restart.readRestartIntent();

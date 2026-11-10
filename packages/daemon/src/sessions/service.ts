@@ -74,7 +74,7 @@ import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { resolveCodescapeLastIngested } from "../codescape/manifest.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, runBuildStep, DIST_IMPORTER_REFIRE_MAX_PATHS, type DistImporterRefireEntry, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult, type RequestDaemonRestartResult } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, isSupervisorProcessAlive, writeRestartIntent, clearRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, announcesDeploy, supervisorScriptChangedSince, supervisorCheckResponseFields, runBuildStep, DIST_IMPORTER_REFIRE_MAX_PATHS, type DistImporterRefireEntry, type LiveRestartOp, type RestartIntent, type RestartResumeEntry, type BuildDeps, type SupervisorLivenessResult, type RequestDaemonRestartResult } from "../orchestration/restart.js";
 import { armHardShutdownWatchdog, GRACEFUL_TEARDOWN_HARD_EXIT_MS } from "../graceful-teardown.js";
 import { currentDeployStalenessAsync } from "../served-status.js";
 import { advisoryBuildStamp, notApplicableDeployStaleness, type DeployStalenessResult } from "../deploy-staleness.js";
@@ -1241,6 +1241,11 @@ type WorkerGateResult = {
   cancelled?: boolean;
   cancelKind?: GateCancelKind;
 };
+
+/** The ONE "is a retained worker self-check result worth re-serving" predicate — shared by the run_gate attach()
+ *  and the restart admission latch so the latch lets exactly the replayable verdicts through. States what IS usable. */
+const isUsableRetainedWorkerGate = (value: WorkerGateResult): boolean =>
+  value.ran === true && typeof value.passed === "boolean" && value.headCurrent === true;
 
 /** @decision 4c5bf820 — the durable tombstone write derives from the SAME four shapes (error/cancelled/
  * pass/fail) the completion-nudge builder branches on, or the two can tell different stories. */
@@ -5894,6 +5899,11 @@ export class SessionService {
       advisoryPreemptVerifyMs?: number;
       /** TEST SEAM (card c9a21e8f): the bound on how long the seal waits for an in-flight post-landing kick's changed-paths git op. */
       distImporterKickSettleMs?: number;
+      /** Override: restart WITHOUT waiting for live gate/merge ops (they are orphaned, recorded and their owners
+       *  nudged). The value is the caller's REQUIRED non-empty reason. Absent = wait, then refuse. */
+      proceedDespiteLiveOps?: string;
+      /** TEST SEAMS: the bound / poll interval of the live gate/merge-op wait. */
+      liveWorkWaitMs?: number; liveWorkPollMs?: number;
     } = {},
   ): Promise<RequestDaemonRestartResult> {
     const caller = this.db.getSession(callerSessionId);
@@ -5903,6 +5913,16 @@ export class SessionService {
     if (!isSupervised()) {
       return { restarting: false, error: "daemon is not running under the restart supervisor (pnpm daemon:stable) — cannot self-restart. Flag that the human must restart for your merged code to go live." };
     }
+    if (deps.proceedDespiteLiveOps !== undefined && deps.proceedDespiteLiveOps.trim() === "") {
+      return { restarting: false, error: "proceedDespiteLiveOps requires a non-empty reason (why orphaning the live gate/merge ops is acceptable) — nothing was restarted." };
+    }
+    if (deps.proceedDespiteLiveOps !== undefined && deps.proceedDespiteLiveOps.trim().length > SessionService.PROCEED_REASON_MAX) {
+      return { restarting: false, error: `proceedReason is too long (max ${SessionService.PROCEED_REASON_MAX} characters) — nothing was restarted.` };
+    }
+    const proceedReason = deps.proceedDespiteLiveOps?.trim() || null;
+    // The OVERRIDING caller's own session id rides with the reason (an attached second caller is not the first).
+    const proceedOverride = proceedReason ? { reason: proceedReason, sessionId: callerSessionId } : null;
+    if (proceedOverride && this.inFlightRestart) this.restartProceedOverride = proceedOverride;
     // Card 8e84e4a6: a second overlapping call ATTACHES to an already-in-flight build/restart attempt
     // (awaits the SAME promise) rather than racing it with a second real buildDaemon() — see
     // `inFlightRestart`'s own field doc for the corruption this prevents. Its own `reason` is folded into
@@ -5920,6 +5940,20 @@ export class SessionService {
       return this.inFlightRestart.promise;
     }
     const restartNotes: { sessionId: string; reason: string }[] = [{ sessionId: callerSessionId, reason }];
+    this.restartProceedOverride = proceedOverride;
+    // @decision 2bbc0412 — real gate/merge ops are waited for (bounded) then REFUSED, never orphaned, unless the
+    // caller overrode with a reason. Every non-exit return below must call releaseLatch().
+    const releaseLatch = (): void => { this.restartAdmissionLatch = false; this.restartProceedOverride = null; };
+    let liveOpsWait: RequestDaemonRestartResult["liveOpsWait"];
+    let orphanedOps: LiveRestartOp[] | null = null;
+    const liveOpsRefusal = (ops: LiveRestartOp[], when: string): RequestDaemonRestartResult => {
+      const list = ops.map((o) => `${o.opId} (${o.kind}${o.projectId ? `, project ${o.projectId.slice(0, 8)}` : ""})`).join(", ");
+      return {
+        restarting: false, liveOpsRefused: ops, ...(liveOpsWait ? { liveOpsWait } : {}),
+        error: `NOT restarting ${when}: ${ops.length} real gate/merge op(s) still in flight — a restart now would orphan them (their verdict lost, never re-fired): ${list}. ` +
+          `Retry daemon_restart once they settle, or — only if orphaning them is acceptable — pass proceedDespiteLiveOps:true with a reason. The daemon stays up; the build is already green.`,
+      };
+    };
     // Card c9a21e8f: non-null once the advisory pre-empt has run — every non-restarting exit after it must re-fire in-process.
     let advisoryRefire: DistImporterRefireEntry[] | null = null;
     // The pre-empt's own refire set, NEVER overwritten: every merge of the paused arrivals starts from this, because
@@ -6000,6 +6034,33 @@ export class SessionService {
     // BEFORE the intent is written: cancel every advisory dist-importer check — they must not hold a gate
     // slot/host CPU through the deploy, nor leave child trees alive across the exit — and carry ONE refire
     // per (project, repo) in the intent. A merge/deploy/worker-self-check op is deliberately NOT touched.
+    // Card 2bbc0412: close the worker run_gate door, then give live real ops a bounded chance to settle. Runs BEFORE
+    // the advisory pre-empt/backup/fleet capture so none of that is done (or undone) for a restart that refuses.
+    this.restartAdmissionLatch = true;
+    {
+      const first = this.liveRealWorkOps();
+      if (first.length > 0 && !this.restartProceedOverride) {
+        this.notifyLiveOpOwners(first, "[loom:restart-pending]", (ids) =>
+          `A daemon restart (requested from another project) is waiting up to ${Math.round((deps.liveWorkWaitMs ?? SessionService.LIVE_WORK_WAIT_MS) / 1000)}s for your in-flight gate/merge op(s) ${ids.join(", ")} to settle, and will REFUSE (not orphan them) if they don't. New run_gate calls are refused with "retry in ~1 min" until it resolves — do not cancel your op on account of this.`,
+          caller.projectId);
+        const waitMs = deps.liveWorkWaitMs ?? SessionService.LIVE_WORK_WAIT_MS;
+        const pollMs = deps.liveWorkPollMs ?? SessionService.LIVE_WORK_POLL_MS;
+        const t0 = Date.now();
+        let left = first;
+        while (left.length > 0 && !this.restartProceedOverride && Date.now() - t0 < waitMs) {
+          await new Promise<void>((r) => { setTimeout(r, Math.min(pollMs, Math.max(1, waitMs - (Date.now() - t0)))); });
+          left = this.liveRealWorkOps();
+        }
+        liveOpsWait = { waitedMs: Date.now() - t0, initial: first.length, settledBeforeExit: left.length === 0 };
+        if (left.length > 0 && !this.restartProceedOverride) {
+          releaseLatch();
+          return liveOpsRefusal(left, `after waiting ${Math.round(liveOpsWait.waitedMs / 1000)}s`);
+        }
+      }
+    }
+    // Re-read at the final recheck too: a late attached override carries its OWN session id.
+    const overrideReason = this.restartProceedOverride?.reason ?? null;
+    const overrideSessionId =this.restartProceedOverride?.sessionId ?? null;
     const preempt = await this.preemptAdvisoryDistImporterChecks(deps.advisoryPreemptVerifyMs ?? SessionService.ADVISORY_PREEMPT_VERIFY_MS);
     advisoryBase = preempt.refire;
     advisoryRefire = preempt.refire;
@@ -6093,6 +6154,10 @@ export class SessionService {
     };
     const firstRefire = withArrivals(false);
     if (firstRefire.length > 0) intent.distImporterRefire = firstRefire;
+    if (overrideReason) {
+      orphanedOps = this.liveRealWorkOps();
+      if (orphanedOps.length > 0) intent.orphanedOps = { reason: overrideReason, ops: orphanedOps };
+    }
     intentWritten = true; // set before the write: a partial write must also be cleared by the catch-all
     writeRestartIntent(intent);
     // Card f05e5a06 — await the merge-danger-window guard BEFORE scheduling the exit-flush timer below,
@@ -6130,18 +6195,57 @@ export class SessionService {
     // carries), and nudge the manager by name for any that is still unresolved.
     await this.settleInFlightDistImporterKicks(deps.distImporterKickSettleMs ?? SessionService.DIST_IMPORTER_KICK_SETTLE_MS);
     const recheck = await checkSupervisorAlive();
+    // Card 2bbc0412 — the FINAL, synchronous recheck of live real ops: the last look before the exit is scheduled
+    // (nothing awaits between here and the setTimeout). Without an override, any op that appeared since the wait
+    // (a merge confirm — the run_gate latch already closed worker gates) refuses the restart.
+    const liveAtExit = this.liveRealWorkOps();
+    if (!overrideReason && liveAtExit.length > 0 && recheck.alive) {
+      clearRestartIntent();
+      refireAfterRefusal();
+      releaseLatch();
+      return liveOpsRefusal(liveAtExit, "immediately before exiting");
+    }
     if (recheck.alive) {
       // Final fold + seal: an arrival from here on is nudged to its manager instead of being carried. Rewrites the
       // already-written intent only if the set grew since the first write (synchronous with the seal — no gap).
       const before = JSON.stringify(advisoryRefire ?? []);
       const finalRefire = withArrivals(true);
-      if (JSON.stringify(finalRefire) !== before) {
-        if (finalRefire.length > 0) intent.distImporterRefire = finalRefire;
-        writeRestartIntent(intent);
+      let rewrite = JSON.stringify(finalRefire) !== before;
+      if (finalRefire.length > 0) intent.distImporterRefire = finalRefire;
+      if (overrideReason) {
+        // Override: record exactly what this exit orphans (re-read now — it may have grown since the intent write).
+        if (JSON.stringify(liveAtExit.map((o) => o.opId).sort()) !== JSON.stringify((orphanedOps ?? []).map((o) => o.opId).sort())) rewrite = true;
+        orphanedOps = liveAtExit;
+        if (liveAtExit.length > 0) intent.orphanedOps = { reason: overrideReason, ops: liveAtExit };
+        else delete intent.orphanedOps;
+      }
+      if (rewrite) writeRestartIntent(intent);
+      if (overrideReason && liveAtExit.length > 0) {
+        // Durable audit trail (synchronous, before the exit): boot consumes the intent, so these rows are the only
+        // surviving record. One row per affected project, attributed to the OVERRIDING caller (not the first one).
+        const byProject = new Map<string, string[]>();
+        for (const o of liveAtExit) {
+          const pid = o.projectId ?? caller.projectId;
+          byProject.set(pid, [...(byProject.get(pid) ?? []), o.opId]);
+        }
+        for (const [projectId, opIds] of byProject) {
+          try {
+            this.db.appendEvent({
+              id: randomUUID(), ts: new Date().toISOString(), managerSessionId: overrideSessionId ?? callerSessionId,
+              kind: "restart_orphaned_ops",
+              detail: { overridingSessionId: overrideSessionId ?? callerSessionId, reason: overrideReason, opIds, projectId },
+            });
+          } catch (e) { console.error("[restart] failed to write restart_orphaned_ops audit row", e); }
+        }
+        console.warn(`[restart] daemon_restart proceeding DESPITE ${liveAtExit.length} live gate/merge op(s) — they will be orphaned: ${liveAtExit.map((o) => `${o.opId}(${o.kind})`).join(", ")}. Reason: ${overrideReason}`);
+        this.notifyLiveOpOwners(liveAtExit, "[loom:restart-orphaning]", (ids) =>
+          `The daemon is restarting NOW (requested with an explicit override: ${overrideReason}) and your in-flight gate/merge op(s) ${ids.join(", ")} will be ORPHANED — their result is lost and will NOT be re-fired. After the resume, check gate_status on each opId and re-run it if you still need the verdict.`,
+          null);
       }
     }
     if (!recheck.alive) {
       clearRestartIntent();
+      releaseLatch();
       // Card c9a21e8f: nothing will exit, so the advisories this restart cancelled are re-fired right here.
       refireAfterRefusal();
       return supervisorRefusal(
@@ -6179,6 +6283,9 @@ export class SessionService {
           // skip the restart exit).
           watchdog.disarm();
           exit(RESTART_EXIT_CODE);
+          // Card 2bbc0412: in production exit() never returns (fresh process, fresh latch); under a captured exit
+          // this keeps the closed run_gate door from leaking into whatever the same process does next.
+          releaseLatch();
           // Card 8e84e4a6 Code Review MINOR 1: the single-flight lock stays LATCHED (see the clearing
           // logic below `attempt`'s own closing `})()`) until the point the exit has actually been
           // INVOKED, not merely until this promise resolved — closing the "late caller starts a competing
@@ -6196,6 +6303,8 @@ export class SessionService {
       restarting: true,
       ...supervisorResponseFields,
       mergeDangerWait,
+      ...(liveOpsWait ? { liveOpsWait } : {}),
+      ...(orphanedOps && orphanedOps.length > 0 ? { orphanedOps } : {}),
       // Card 0ec6fb57 — a non-fatal win-job-launcher.exe rebuild failure during the deploy build above;
       // surfaced here so the requesting manager sees it on this SAME call, not just in daemon stdout.
       ...(build.nativeLauncherWarning ? { nativeLauncherWarning: build.nativeLauncherWarning } : {}),
@@ -6208,6 +6317,7 @@ export class SessionService {
       // Card c9a21e8f: an intent written moments ago must not outlive a restart that is NOT happening — a later
       // crash-boot would re-fire from it while the in-process re-fire below already did.
       if (intentWritten) { try { clearRestartIntent(); } catch { /* best-effort */ } }
+      releaseLatch();
       refireAfterRefusal();
       // Code Review (card 8e84e4a6), CRITICAL: the catch-all for the try{} opened above — see its own
       // comment for why this body must never let an exception escape as a rejection of `attempt`.
@@ -7154,13 +7264,82 @@ export class SessionService {
     // A merge confirm does real work (inert-diff / emit-compare / reunion prep) BEFORE it reaches the semaphore, so
     // it is also read off the live pending ops: any RUNNING merge or gate op is non-advisory work (an advisory
     // check registers a `pending_gate_ops` row, never a `pendingOps` entry).
-    const livePendingRealWork = this.pendingOps.listAllOfKind("merge").length > 0 || this.pendingOps.listAllOfKind("gate").length > 0;
-    // Belt-and-braces: the `waitingOnSelfCheck.length === 0` conjunct below is subsumed by `livePendingRealWork`
+    // Belt-and-braces: the `waitingOnSelfCheck.length === 0` conjunct below is subsumed by the live-op read
     // (a merge waiting on its worker's self-check holds a pending "merge" op) — kept so restartSafe stays correct
-    // even if that pending-op bookkeeping ever changes.
-    const restartSafe = snap.entries.every((e) => e.distImporterCheckOnly)
-      && repoGuardOnly.length === 0 && squashing.length === 0 && waitingOnSelfCheck.length === 0 && !livePendingRealWork;
+    // even if that pending-op bookkeeping ever changes. The rest is the SAME read `requestDaemonRestart` waits on.
+    const restartSafe = this.liveRealWorkOps().length === 0 && waitingOnSelfCheck.length === 0;
     return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued, repoGuardOnly, squashing, declarations, waitingOnSelfCheck, restartSafe };
+  }
+
+  /**
+   * Every live NON-advisory gate/merge op, fleet-wide: any running pendingOps merge/gate entry, any non-advisory
+   * semaphore entry, any squash-only or repo-guard-only hold. The ONE source for both `gate_queue`'s `restartSafe`
+   * and `requestDaemonRestart`'s wait/refuse (they must never disagree). An advisory dist-importer check is
+   * identified by `distImporterCheckOnly` and is deliberately excluded (it is pre-empted, not waited for).
+   */
+  liveRealWorkOps(): LiveRestartOp[] {
+    const out = new Map<string, LiveRestartOp>();
+    const projectOf = (sessionId: string | null | undefined): string | null => (sessionId ? this.db.getSession(sessionId)?.projectId ?? null : null);
+    for (const kind of ["merge", "gate"] as const) {
+      for (const v of this.pendingOps.listAllOfKind(kind)) {
+        out.set(v.opId, { opId: v.opId, kind, projectId: projectOf(v.managerSessionId), ownerSessionId: v.managerSessionId });
+      }
+    }
+    // A semaphore entry may not carry an opId yet (null): key it by a synthetic id so it still counts.
+    const add = (e: { opId?: string | null; projectId?: string | null; sessionId?: string | null }, kind: string): void => {
+      const opId = e.opId ?? `${kind}:${e.sessionId ?? "unknown"}`;
+      if (!out.has(opId)) out.set(opId, { opId, kind, projectId: e.projectId ?? null, ownerSessionId: e.sessionId ?? null });
+    };
+    for (const e of this.gateSemaphore.snapshot().entries) if (!e.distImporterCheckOnly) add(e, e.gateType);
+    for (const e of this.gateSemaphore.repoGuardOnlySnapshot()) add(e, "repo-guard");
+    for (const e of this.gateSemaphore.squashOnlySnapshot()) add(e, "squash");
+    return [...out.values()];
+  }
+
+  /** Window a `daemon_restart` waits for live gate/merge ops before refusing. A worker gate can run for hours,
+   *  so this is deliberately short: the caller parks and retries (or overrides) rather than hanging an MCP call. */
+  static readonly LIVE_WORK_WAIT_MS = 120_000;
+  static readonly LIVE_WORK_POLL_MS = 1_000;
+
+  /** Closed while a `daemon_restart` is waiting for / about to exit past live ops: refuses NEW worker `run_gate`
+   *  admissions (see runWorkerGate) so a steady trickle of gates can't defer the restart. Cleared on every
+   *  non-exit path and after the exit callback. */
+  private restartAdmissionLatch = false;
+  /** Set by an overlapping `daemon_restart` call carrying `proceedDespiteLiveOps` while another attempt is
+   *  already waiting: the wait loop reads it each poll and switches to the override path. */
+  /** Max length of the override's `proceedReason` (the MCP schemas carry the same bound). */
+  static readonly PROCEED_REASON_MAX = 500;
+  private restartProceedOverride: { reason: string; sessionId: string } | null = null;
+
+  /** Resolve who to tell about a live op: its worker's manager, else the owner itself, falling back to the
+   *  project's live manager/platform session. Null when nobody live can be found. */
+  private liveOpNoticeTarget(op: LiveRestartOp): Session | null {
+    const owner = op.ownerSessionId ? this.db.getSession(op.ownerSessionId) : undefined;
+    const primaryId = owner?.role === "worker" ? owner.parentSessionId : owner?.id;
+    const primary = primaryId ? liveLineageSuccessor(this.db, primaryId) : null;
+    if (primary) return primary;
+    const live = this.db.listLiveSessions();
+    return live.find((s) => s.projectId === op.projectId && s.role === "manager")
+      ?? live.find((s) => s.projectId === op.projectId && s.role === "platform")
+      ?? null;
+  }
+
+  /** One durable nudge per target session, listing its ops. `skipProjectId` excludes the requester's own project. */
+  private notifyLiveOpOwners(ops: LiveRestartOp[], tag: string, text: (opIds: string[]) => string, skipProjectId: string | null): void {
+    const byTarget = new Map<string, { target: Session; opIds: string[] }>();
+    for (const op of ops) {
+      if (skipProjectId && op.projectId === skipProjectId) continue;
+      const target = this.liveOpNoticeTarget(op);
+      if (!target) continue;
+      const g = byTarget.get(target.id) ?? { target, opIds: [] };
+      g.opIds.push(op.opId);
+      byTarget.set(target.id, g);
+    }
+    for (const { target, opIds } of byTarget.values()) {
+      try { this.enqueueDurableNudge(target.id, target.role ?? null,`${tag} ${text(opIds)}`); } catch (e) {
+        console.warn(`[restart] ${tag} nudge to ${target.id.slice(0, 8)} failed (non-fatal): ${(e as Error)?.message ?? e}`);
+      }
+    }
   }
 
   /**
@@ -28132,6 +28311,13 @@ export class SessionService {
     const gateCap = orchestration.maxConcurrentGates;
     const runGateSeq = this.runGate ?? runGateSequential;
     const key = `gate:${workerSessionId}`;
+    // @decision 2bbc0412 — refused BEFORE any op/tombstone/verdict is minted (never a red, never lastWorkerGateCheck);
+    // an already-running op of this worker may still be re-attached.
+    // A running op, or a retained settled verdict the attach() below would hand back without a fresh run (same
+    // usability predicate), passes through — the worker whose gate settled during the wait still gets its result.
+    if (this.restartAdmissionLatch && !this.pendingOps.peekAttachable<WorkerGateResult>(key, { isRetainedResultUsable: isUsableRetainedWorkerGate })) {
+      throw new Error("run_gate refused: a daemon restart is pending and waiting for in-flight gates to drain, so no NEW gate is started right now (this is NOT a gate verdict). If your gate just finished, its result was sent to you. Retry in ~1 min.");
+    }
     // CIRCUIT BREAKER (card 3564fd1e): the SAME per-branch breaker confirmWorkerMerge checks — a worker
     // repeatedly re-calling run_gate against a genuinely hanging test hits the identical wall, so a spiral
     // can't form via either path independently. Short-circuits BEFORE ever touching PendingOpRegistry/the
@@ -28659,7 +28845,7 @@ export class SessionService {
         // never re-run) — see DoD-3 in card ec994992's worker_report for the positive-control proof. No new
         // git round-trip on the fast path — `headCurrent` is already computed and stored on the cached
         // value by `describeGateHeadCurrency` at settle, so this is a plain field read, same as before.
-        isRetainedResultUsable: (value) => value.ran === true && typeof value.passed === "boolean" && value.headCurrent === true,
+        isRetainedResultUsable: isUsableRetainedWorkerGate,
         classifyOutcome: (outcome) => (!outcome.ok ? "errored" : outcome.value.passed ? "passed" : "failed"),
         // DURABLE TOMBSTONE (card edc1ec12, generalized by e3e40167): mints the row the MOMENT this op is
         // created — fast or slow — so a settled fast-path opId is still POSITIVELY distinguishable from one
