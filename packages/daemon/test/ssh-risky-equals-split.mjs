@@ -53,5 +53,15 @@ for (const cmd of ["git -c user.name=x log", "ls -l", "ls -la /etc", "df -h"]) {
   check(`SHELL clean: ${cmd}`, await clean(on, cmd));
 }
 
+// Slash pieces (card 7eea8cd4): a word ending in `/` has an empty basename; its pieces must still be screened.
+for (const cmd of ["sed s/a/reboot/ f", "echo x/reboot/", "ls /usr/sbin/reboot/"]) {
+  check(`OFF   HELD: ${cmd}`, await held(off, cmd));
+  check(`SHELL HELD: ${cmd}`, await held(on, cmd));
+}
+for (const cmd of ["ls /etc/", "cat /var/log/syslog", "df -h /"]) {
+  check(`OFF   clean: ${cmd}`, await clean(off, cmd));
+  check(`SHELL clean: ${cmd}`, await clean(on, cmd));
+}
+
 console.log(failures === 0 ? "\nALL PASSED" : `\n${failures} FAILED`);
 process.exitCode = failures === 0 ? 0 : 1;

@@ -371,6 +371,7 @@ export function dequotedWordCarriesShellSyntax(segments: ParsedSegment[]): boole
  * split into its pieces, so a risky command hidden inside a quoted string is still seen. Over-matches by design.
  *
  * @decision 7755b0bd — split on `=` and on a short option's remainder; never a denylist of option names.
+ * @decision 7eea8cd4 — also every `/`-separated piece; an empty basename must never mean "nothing to match".
  */
 export function wordsForRiskyMatch(words: string[], glued = true): string[] {
   const out: string[] = [];
@@ -391,6 +392,20 @@ export function wordsForRiskyMatch(words: string[], glued = true): string[] {
     addGlued(w);
     if (NON_PLAIN_CHAR.test(w)) {
       for (const piece of w.split(NON_PLAIN_RUN)) if (piece.length > 0) { out.push(piece); addGlued(piece); }
+    }
+  }
+  // Every non-empty `/`-separated piece of every entry (card 7eea8cd4): the risky matcher folds a word to its
+  // basename, which is EMPTY for a word ending in `/` (`s/a/reboot/`), so a piece in the middle was invisible.
+  if (glued) {
+    const n = out.length;
+    for (let i = 0; i < n; i++) {
+      const w = out[i]!;
+      if (!w.includes("/")) continue;
+      const parts = w.split("/");
+      // The LAST piece of a word not ending in `/` is its basename, which the matcher already folds to; re-emitting
+      // it would sit away from its following word and drop the `systemctl <read-only-sub>` exemption.
+      if (!w.endsWith("/")) parts.pop();
+      for (const p of parts) if (p.length > 0) out.push(p);
     }
   }
   return out;
