@@ -11320,15 +11320,35 @@ export class SessionService {
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string; reviewOfWorkerSessionId?: string; reviewOfTaskId?: string },
   ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }>> {
     const taskRef = (opts.taskId ?? "").trim();
-    const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
+    // A TASKLESS REVIEW spawn (exactly one reviewOf* param) has a stable identity: (manager lineage root,
+    // agentId, which reviewOf param + its raw value, hash of the trimmed kickoff). The kickoff is part of
+    // it so a NEW review of the same branch (different brief, e.g. after new commits) never attaches to a
+    // still-live reviewer pinned to the OLD tip; a genuine retry re-sends a byte-identical kickoff. A taskless spawn WITHOUT reviewOf keeps a fresh
+    // per-call key (no identity, may start a second worker). Both reviewOf params given is invalid and is
+    // rejected by spawnWorker itself, so it keeps the per-call key too.
+    const reviewWs = (opts.reviewOfWorkerSessionId ?? "").trim();
+    const reviewTask = (opts.reviewOfTaskId ?? "").trim();
+    const reviewIdentity = !taskRef && !!reviewWs !== !!reviewTask
+      ? `${reviewWs ? `ws:${reviewWs}` : `task:${reviewTask}`}:k${createHash("sha256").update(opts.kickoffPrompt.trim()).digest("hex").slice(0, 16)}`
+      : null;
+    const managerRow = this.db.getSession(managerSessionId);
+    const key = taskRef
+      ? `spawn:${taskRef}`
+      : reviewIdentity
+        ? `spawn:review:${managerRow ? lineageRootId(this.db, managerRow) : managerSessionId}:${(opts.agentId ?? "").trim()}:${reviewIdentity}`
+        : `spawn:taskless:${randomUUID()}`;
     // LIVENESS + BINDING RE-CHECK (manager review, card b1fcb6a7): a 10-minute window is long enough that
     // the cached worker may have exited (merged, stopped, recycled away) by the time a re-call lands.
     // Re-derive the CURRENT live-worker-for-this-task from the db (the SAME query spawnWorker's own guard
     // uses) rather than trusting the cached value's own frozen fields. Hoisted into a shared const (card
     // 656e326f, Round 2) so BOTH the ownership guard below and attach() itself apply the identical rule.
-    const isRetainedResultUsable = (value: Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }) => this.spawnResultStillUsable(value);
-    // OWNERSHIP CHECK (card 656e326f, unified into attach() itself by 94725dcb): a taskless key is unique
-    // per call, so this never finds anything for it (always passes through). A real taskRef's key is
+    // A review spawn has no task to re-derive from, so it re-checks that the cached session itself is
+    // still live instead.
+    const isRetainedResultUsable = (value: Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }) =>
+      reviewIdentity ? this.db.getSession(value.id)?.processState === "live" : this.spawnResultStillUsable(value);
+    // OWNERSHIP CHECK (card 656e326f, unified into attach() itself by 94725dcb): a plain taskless key is
+    // unique per call, so this never finds anything for it (always passes through). A review key embeds
+    // the manager lineage root, so another lineage can never match it either. A real taskRef's key is
     // shared daemon-wide — attach() refuses an attach to another manager's lineage's in-flight/
     // still-usable-retained op by feeding this predicate exactly what it's about to serve.
     return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; discardedOnRecut?: DiscardedOnRecutInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo; harnessDefaultSkipped?: CodexIncompatibility[]; capacity: WorkerCapacity | null }>(
@@ -11447,7 +11467,7 @@ export class SessionService {
   listPendingSpawns(managerSessionId: string): Array<PendingOpView & { taskId: string | null }> {
     return this.pendingOps.listByManager(managerSessionId, "spawn").map((op) => {
       const raw = op.key.slice("spawn:".length);
-      return { ...op, taskId: raw.startsWith("taskless:") ? null : raw };
+      return { ...op, taskId: raw.startsWith("taskless:") || raw.startsWith("review:") ? null : raw };
     });
   }
 

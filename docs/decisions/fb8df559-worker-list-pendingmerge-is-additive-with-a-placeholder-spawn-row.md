@@ -43,6 +43,14 @@ instead of attaching — a strictly lesser failure than the alternative (unrelat
 colliding), and one the manager can resolve with an ordinary `worker_stop`. A tasked spawn's key is
 BYTE-IDENTICAL to before.
 
+Amended by card `9ccf4bc5`: the lesser failure above now applies ONLY to a taskless spawn WITHOUT a
+`reviewOf*` param. A taskless REVIEW spawn (exactly one of `reviewOfWorkerSessionId`/`reviewOfTaskId`)
+does have a stable identity and keys on `spawn:review:<manager lineage root>:<agentId>:<ws|task>:<id>:k<sha256(trimmed kickoff)[0:16]>` (the kickoff
+is part of the identity so a re-review with a new brief never reuses a reviewer pinned to an older tip), so
+its retry attaches in flight and is answered from the settled worker (its retained-result liveness check is
+the cached session's own `processState`, since there is no task to re-derive from). Both reviewOf params
+together are invalid and keep the per-call key.
+
 ### Do not (2)
 
 - Do not key `spawnWorkerTracked`'s dedup on the RESOLVED/prefix-matched task id — key on the raw caller

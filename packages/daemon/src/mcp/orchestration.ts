@@ -3873,8 +3873,10 @@ export class OrchestrationMcpRouter {
           "CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath}; a slow one " +
           "returns {opId,status:\"pending\",taskId}. Poll worker_list (a placeholder row) or RE-CALL " +
           "worker_spawn with the SAME taskId (or omission)/agentId/kickoffPrompt. A TASKED retry is idempotent: " +
-          "while in flight it attaches to the same spawn and never throws 'already in flight'. A TASKLESS retry " +
-          "has no stable identity and may start a second worker (retire the extra with worker_stop). A TASKED " +
+          "while in flight it attaches to the same spawn and never throws 'already in flight'. A TASKLESS REVIEW " +
+          "retry (same agentId, same `reviewOfWorkerSessionId` or `reviewOfTaskId`, and the same kickoffPrompt) " +
+          "is idempotent the same way; a different kickoffPrompt is a NEW review and spawns a new worker. A TASKLESS spawn WITHOUT a `reviewOf*` param has no stable identity and may start a " +
+          "second worker (retire the extra with worker_stop). A TASKED or REVIEW " +
           "re-call after it settles, within ~" + sessions.spawnOpRetainMinutes + " min, is answered from the " +
           "ORIGINAL worker with `reused:true` plus `reusedNote`: the kickoff was NOT re-delivered, so use " +
           "worker_message for new direction. Past that window a same-args retry falls through to the " +
