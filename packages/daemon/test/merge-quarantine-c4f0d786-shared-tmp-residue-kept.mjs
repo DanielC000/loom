@@ -2,6 +2,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Board card c4f0d786 — a PENDING-path clear of one claimant must not unlink a shared corrupt tmp / safety-tmp
 // residue that its pending siblings still name as their sourceFile (the `<hash>.json` shape already kept its
 // file; the tmp shapes did not, so the siblings were blocked in memory only and a restart armed nobody).
+// Test H has two variants (card 05a3b6ad): H covered (the file holds ONLY the cleared claimant's record: it is now REMOVED, nothing is
+// disclosed as kept for the active owner, and a fresh boot does NOT re-arm the claimant) and H2 not covered (the file also holds a token the
+// clear did not drop: the original contract, kept, owner disclosed as content-kept, a boot re-arms the claimant).
 //   A. per shape (tmp, safety-tmp, json+tmp, json+safety-tmp) x claimants (2, 3) x by-path route (clearMergeQuarantine,
 //      clearMergeQuarantineByRecordedPath, clearMergeQuarantineReporting): every shared file survives the clear,
 //      and a fresh boot (#1) re-arms every claimant; then the siblings are released ONE AT A TIME through the route
@@ -353,10 +356,13 @@ try {
   // HONEST SCOPE: H pins parity between the two routes and guards against the round-5 id predicate. It does NOT discriminate
   // the round-6 delegated-keep branch, because E is re-kept by the body's own pending pass after the removals. The test that
   // pins a delegated keep SURVIVING that branch is "[E3 unreduced survives]".
-  {
+  // 05a3b6ad: that keep holds only when the file ALSO carries a token this clear did not drop ("H2 not covered", the original assertions). When the
+  // file holds ONLY Y's cleared record ("H covered"), E's claim on it is aspirational: the file is removed, nothing is disclosed as kept for E,
+  // and a fresh boot does NOT re-arm Y.
+  for (const covered of [true, false]) {
     const outcomes = {};
     for (const route of ["clearMergeQuarantineByRecordedPath", "clearMergeQuarantine"]) {
-      const label = `[H fresh-write-target owner ${route}]`;
+      const label = `[${covered ? "H covered" : "H2 not covered"} fresh-write-target owner ${route}]`;
       const E = makeRepo(`h-e-${route}`).y;
       const Y = makeRepo(`h-y-${route}`).y;
       wipeQuarantineDir();
@@ -365,11 +371,17 @@ try {
       const f = `${createHash("sha256").update(K2).digest("hex").slice(0, 24)}.json`;
       const rec = (rp, b, t) => ({ repoPath: rp, branch: b, reason: b, enteredAt: Date.now(), tokens: t });
       mq.setActiveQuarantineTestOnly("fakeK1-c4f0d786", { ...rec(E, "e", ["te"]), armedKeys: ["fakeK1-c4f0d786"] });
-      fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, f), JSON.stringify(rec(Y, "y", ["ty"]), null, 2) + "\n");
+      fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, f), JSON.stringify(rec(Y, "y", covered ? ["ty"] : ["ty", "uncleared"]), null, 2) + "\n");
       mq.pushPendingQuarantineTestOnly(rec(Y, "y", ["ty"]), f);
       const res = mq[route](Y);
       const cos = res.stillBlockedCoOccupants ?? [];
       const nm = (p) => (p === E ? "E" : p === Y ? "Y" : path.basename(p));
+      if (covered) {
+        outcomes[route] = { latchKept: res.latchKept === true, refs: (res.referencingRepoPaths ?? []).map(nm).sort().join(","), kept: (res.contentKeptRepoPaths ?? []).map(nm).sort().join(","), named: cos.map((c) => nm(c.repoPath)).sort().join(",") };
+        check(`${label} *** 05a3b6ad *** the file holding only Y's cleared record is removed, Y was lifted, and nothing is disclosed as kept for E`, !listDir().includes(f) && (res.liftedRepoPaths ?? []).includes(Y) && res.latchKept !== true && !(res.contentKeptRepoPaths ?? []).includes(E) && !(res.referencingRepoPaths ?? []).includes(E) && !cos.some((c) => c.repoPath === E));
+        check(`${label} a fresh boot does NOT re-arm Y`, (await bootArmed([Y])).length === 0);
+        continue;
+      }
       outcomes[route] = { latchKept: res.latchKept === true, refs: (res.referencingRepoPaths ?? []).map(nm).sort().join(","), kept: (res.contentKeptRepoPaths ?? []).map(nm).sort().join(","), named: cos.map((c) => nm(c.repoPath)).sort().join(",") };
       console.log(`INFO  ${label} ${JSON.stringify(outcomes[route])}`);
       // 613e4592: a "still blocked" list names ONLY what the in-memory oracle (stillBlockedEntryFor / assertRepoNotQuarantined) says is blocked. E's active entry sits at a
@@ -380,7 +392,7 @@ try {
       if (route === "clearMergeQuarantineByRecordedPath") check(`${label} the reason says the file was kept rather than destroyed and will re-divert`, /kept rather than destroyed/.test(res.reason ?? "") && /re-divert/.test(res.reason ?? ""));
       check(`${label} a fresh boot re-arms Y from the file`, (await bootArmed([Y])).length === 1);
     }
-    check("[H] PARITY: both routes report the same kept state for the same shape (latchKept, referencers, named co-occupants)", JSON.stringify(outcomes.clearMergeQuarantineByRecordedPath) === JSON.stringify(outcomes.clearMergeQuarantine));
+    check(`[${covered ? "H covered" : "H2 not covered"}] PARITY: both routes report the same kept state for the same shape (latchKept, referencers, named co-occupants)`, JSON.stringify(outcomes.clearMergeQuarantineByRecordedPath) === JSON.stringify(outcomes.clearMergeQuarantine));
   }
 
   // ---- I (round 6): sibling-file shape — y's REDUCED entry survives on tmp-B while the kept residue was tmp-A -------------

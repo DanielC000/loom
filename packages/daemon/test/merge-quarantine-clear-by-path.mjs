@@ -2186,7 +2186,12 @@ function hashKey(key) {
     repoPath: rAI, branch: "r-ai-branch", reason: "R — AI, survives, claims pSourceFileAI as its OWN fresh write target",
     enteredAt: Date.now(), tokens: ["r-ai-token"], resolvedKey: k2AI, armedKeys: [k2AI],
   }, null, 2) + "\n");
-  reenterMergeQuarantinesAtBoot([pAI, rAI]);
+  // 05a3b6ad: a file holding ONLY P's cleared record would now be removed (R's claim on it is aspirational), so R would no longer be named.
+  // Make the file NOT covered: it holds R's OWN record (R's real latch at its fresh write target), which P's clear does not cover, so it must be kept and R named.
+  const pFilePathAI = path.join(MERGE_QUARANTINE_DIR, pSourceFileAI);
+  reenterMergeQuarantinesAtBoot([pAI, rAI]); // boot reads P's own record from the file (as before); swap R's record in AFTER, so only the clear sees it
+  fs.writeFileSync(pFilePathAI, fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, "mqcbp-ai-r-twin.json"), "utf8"));
+  check("(AI precondition) the file at P's sourceFile holds R's OWN record (so P's clear does NOT cover it)", JSON.parse(fs.readFileSync(pFilePathAI, "utf8")).repoPath === rAI);
   check("(AI precondition) P reads as blocked after boot", !!activeMergeQuarantineFor(pAI));
   check("(AI precondition) R reads as blocked after boot (it SURVIVES — P's clear below never touches R)", !!activeMergeQuarantineFor(rAI));
 

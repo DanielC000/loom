@@ -12,6 +12,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      print the latch id descriptively but only OFFER {"id":...} when the guard passes.
 //   C. clause units, each with a control that flips it: (i)(ii)(iii)(iv-blocker)(iv-contributor), blockedBy.id.
 //   D. the round-6 sibling-file shape (c4f0d786 test I) followed through every produced route.
+//   E. blocked-only rule: a kept file's fresh-write-target owner (E) is content-kept, never a blocked co-occupant. Since 05a3b6ad this is
+//      pinned on E2 (file also carries an uncleared token); when the file holds ONLY the cleared claimant's record ([E]) it is removed and
+//      nothing is disclosed as kept for E.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-613e4592-route-id-releases-exactly-claimant.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -320,20 +323,27 @@ try {
   // ---- E. a "still blocked" list names ONLY what the in-memory oracle says is blocked (resolved ruling) ---------------------------------
   // E is armed at a fake key; Y's pending entry names the file `<hash(K2)>.json` that E would write. E physically owns that file but
   // stillBlockedEntryFor / assertRepoNotQuarantined say E is NOT blocked, so E is disclosed as content-kept, never as a blocked co-occupant.
-  {
+  // 05a3b6ad: when the file holds ONLY Y's cleared record ([E]) it is removed, not kept (E's claim on it is aspirational), so no keep is disclosed;
+  // the blocked-only rule is pinned on the NOT-covered variant ([E2]: the file also carries an uncleared token, so it is kept for E).
+  for (const covered of [true, false]) {
+    const tag = covered ? "[E]" : "[E2 not covered]";
     const E = makeRepo("e-owner");
     const Y = makeRepo("e-victim");
     wipeQuarantineDir();
     const mq = await freshModule();
     const f = `${sha24(canonicalRepoLockKey(E))}.json`;
     mq.setActiveQuarantineTestOnly("fakeK1-613e4592", { ...rec(E, "e", ["te"]), armedKeys: ["fakeK1-613e4592"] });
-    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, f), JSON.stringify(rec(Y, "y", ["ty"]), null, 2) + "\n");
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, f), JSON.stringify(rec(Y, "y", covered ? ["ty"] : ["ty", "uncleared"]), null, 2) + "\n");
     mq.pushPendingQuarantineTestOnly(rec(Y, "y", ["ty"]), f);
     const res = mq.clearMergeQuarantine(Y);
     const eCo = (res.stillBlockedCoOccupants ?? []).find((c) => c.repoPath === E);
-    check("[E] (precondition) the kept file is disclosed: latchKept, E is content-kept", res.latchKept === true && (res.contentKeptRepoPaths ?? []).includes(E));
-    check("[E] *** 613e4592 *** E is NOT in stillBlockedCoOccupants (the in-memory oracle says it is not blocked), so it is offered no route and no id", eCo === undefined && !(res.referencingRepoPaths ?? []).includes(E));
-    check("[E] (evidence) E is NOT blocked as far as enforcement and the in-memory oracle go: its active entry sits at a stale key", mq.assertRepoNotQuarantined(E).ok === true && !mq.stillBlockedEntryFor(E));
+    if (covered) {
+      check("[E] *** 05a3b6ad *** the file holding only Y's cleared record is removed and nothing is disclosed as kept for E", !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, f)) && res.latchKept !== true && !(res.contentKeptRepoPaths ?? []).includes(E) && eCo === undefined && !(res.referencingRepoPaths ?? []).includes(E));
+      continue;
+    }
+    check(`${tag} (precondition) the kept file is disclosed: latchKept, E is content-kept`, res.latchKept === true && (res.contentKeptRepoPaths ?? []).includes(E));
+    check(`${tag} *** 613e4592 *** E is NOT in stillBlockedCoOccupants (the in-memory oracle says it is not blocked), so it is offered no route and no id`, eCo === undefined && !(res.referencingRepoPaths ?? []).includes(E));
+    check(`${tag} (evidence) E is NOT blocked as far as enforcement and the in-memory oracle go: its active entry sits at a stale key`, mq.assertRepoNotQuarantined(E).ok === true && !mq.stillBlockedEntryFor(E));
   }
 
   // ---- F (round 2). (iv) is judged AFTER the matched entries are gone: an UNRESOLVABLE claimant's own entry must not hide a foreign blocker ----

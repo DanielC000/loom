@@ -6012,7 +6012,9 @@ function clearTokenFromPendingIndices(indices: number[], token: string, writeFai
       // @decision d2592cd5 — a `kept` with NO referencer (failed unlink) still holds `token`: a write
       // failure, like the sibling loop's `anyKeptUnattributed`; a kept WITH referencers is another
       // owner's record, covered by the decide-time scan.
-      const ownSourceSweep = sweepOwnLatchFileUnlessOwnedElsewhere(live.sourceFile);
+      // @decision 05a3b6ad — pass the entry's own tokens (this "remove" branch lifts the whole set): without them a covered
+      // fresh-write-target file is kept and its cleared claimant re-arms at the next boot.
+      const ownSourceSweep = sweepOwnLatchFileUnlessOwnedElsewhere(live.sourceFile, live.entry.tokens);
       if (ownSourceSweep.kept && ownSourceSweep.referencingRepoPaths.length === 0) removeWriteFailed = true;
       // @decision 8db913e2 (Follow-up f2cc5f18) — `live.entry.tokens` captured via the `live` binding
       // resolved above, BEFORE the splice above — this branch only fires when it's the full set being lifted.
@@ -6545,11 +6547,11 @@ function survivingSharedClaimRepoPaths(filename: string): string[] {
 
 /** Unlink a quarantine latch file — `true` for a genuine success or ENOENT (nothing
  *  left to remove either way), `false` for any other error (an EPERM/EBUSY-shaped failure). */
-function unlinkLatchFileConfirmed(filename: string): boolean {
+function unlinkLatchFileConfirmed(filename: string, why = "no remaining quarantine entry references it"): boolean {
   try {
     fs.unlinkSync(path.join(MERGE_QUARANTINE_DIR, filename));
     // eslint-disable-next-line no-console
-    console.log(`[merge-quarantine] deleted orphan latch ${filename} — no remaining quarantine entry references it.`);
+    console.log(`[merge-quarantine] deleted orphan latch ${filename} — ${why}.`);
     return true;
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === "ENOENT";
@@ -7522,9 +7524,36 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens
     return { kept: !unlinkConfirmed, referencingRepoPaths: [], ...(unlinkConfirmed ? {} : { unlinkFailed: true as const, unlinkFailedFile: filename }) };
   }
   const owners = physicalOwnerRepoPaths(filename);
-  if (owners.length > 0) return { kept: true, referencingRepoPaths: owners };
-  const unlinkConfirmed = unlinkLatchFileConfirmed(filename);
+  // @decision 05a3b6ad — an ACTIVE entry's claim on this file, whether its fresh write target or its armed-key hash, proves no content
+  // (an arm is not a record): when no pending entry's sourceFile needs the file AND a fresh read proves the whole content is
+  // covered by this clear (and is not any owner's own record), keeping it only preserves a cleared claimant's bytes for a reboot to re-arm.
+  const settledByCoverage = owners.length > 0 && activeOwnerClaimIsSettledByCoverage(filename, owners, candidateTokens);
+  if (owners.length > 0 && !settledByCoverage) return { kept: true, referencingRepoPaths: owners };
+  const unlinkConfirmed = settledByCoverage
+    ? unlinkLatchFileConfirmed(filename, "an active entry's claim on it is settled: its whole content is covered by this clear")
+    : unlinkLatchFileConfirmed(filename);
   return { kept: !unlinkConfirmed, referencingRepoPaths: [], ...(unlinkConfirmed ? {} : { unlinkFailed: true as const, unlinkFailedFile: filename }) };
+}
+
+/** `true` iff every owner of `filename` is an active-entry claim (fresh write target OR armed-key hash) AND a fresh read proves its
+ *  content is wholly covered by `candidateTokens` and belongs to none of the owners. Any unprovable shape is `false` (keep).
+ *  @decision 05a3b6ad — never settle a pending sourceFile claim, a shared claimant, or an owner's own record. */
+function activeOwnerClaimIsSettledByCoverage(filename: string, owners: string[], candidateTokens: string[] | undefined): boolean {
+  if (!candidateTokens || candidateTokens.length === 0) return false;
+  if (pendingUnresolvedQuarantines.some((p) => p.sourceFile === filename)) return false;
+  if (survivingSharedClaimRepoPaths(filename).length > 0) return false; // defensive only: subsumed by the pending-sourceFile check above
+  const full = path.join(MERGE_QUARANTINE_DIR, filename);
+  let parsed: unknown;
+  try { parsed = JSON.parse(fs.readFileSync(full, "utf8")); } catch (e) {
+    // already gone (an earlier sweep in the same clear removed it): nothing left to keep, so no owner claim can hold it.
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true;
+    return false; // unreadable/corrupt: unprovable
+  }
+  if (!isReadableLatchRecord(parsed) || typeof parsed.repoPath !== "string") return false;
+  const contentIdentity = directPathIdentity(parsed.repoPath);
+  if (owners.some((o) => directPathIdentity(o) === contentIdentity)) return false; // an owner's OWN record
+  if (!Array.isArray(parsed.tokens) || parsed.tokens.length === 0) return false;
+  return markedFinalFullyCoveredByClear(full, candidateTokens);
 }
 
 /** `true` iff `key`'s CURRENT occupant in `activeQuarantines` is genuinely `entry` itself — either the

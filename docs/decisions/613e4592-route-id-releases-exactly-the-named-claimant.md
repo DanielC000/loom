@@ -76,7 +76,9 @@ E has an ACTIVE entry armed at a stale key and owns the kept file by its fresh w
 `assertRepoNotQuarantined(E).ok === true` and `stillBlockedEntryFor(E) === undefined` before and after the clear. E is
 therefore disclosed as the kept file's owner (`latchKept` + `contentKeptRepoPaths`, the existing reclassification target for
 a non-blocked referencer), never as a blocked co-occupant and never with a route. `referencingRepoPaths` stays TRUE
-in-memory referencers only, so E is not there either. Both clear routes agree: the pending-branch sweep in
+in-memory referencers only, so E is not there either. (Card `05a3b6ad` narrowed the specimen: when the file holds ONLY the cleared
+claimant's own record the keep itself was a false claim, so that file is now removed and nothing is disclosed for E; the rule is
+pinned on the NOT-covered variant, where the file also carries content the clear does not cover and is kept for E.) Both clear routes agree: the pending-branch sweep in
 `clearMergeQuarantineByRecordedPath` now classifies its referencers with `classifyKeptRepoPath` instead of the bare
 `blockedCoOccupant` (25d0d45b's round-4 rule). Do not reintroduce a "physical owner is live" branch in `classifyKeptRepoPath`.
 
