@@ -877,13 +877,18 @@ function tombstoneDurablyIfConfirmed(durablyConfirmed: boolean, tokens: string[]
  * co-occupant backstop deliberately overrides (`anyReferencing`/`latchKept`/`contentKeptRepoPaths`,
  * G1/G2) — this helper re-derives ONLY the identity-scoped physical check every push site already ran.
  */
-function decideDeferredTombstones(jobs: readonly DeferredTombstoneJob[], writeFailedIdentitiesThisCall: ReadonlySet<string>): void {
+function decideDeferredTombstones(jobs: readonly DeferredTombstoneJob[], writeFailedIdentitiesThisCall: ReadonlySet<string>): boolean {
+  // @decision 1be24e71 — returns whether ANY job's tombstone was withheld: a reboot may then re-arm a token this call
+  // lifted in memory, so `clearMergeQuarantineByToken` must report `durable:false`; never drop this signal.
+  let anyWithheld = false;
   for (const job of jobs) {
     const stillOk = job.nonFailureOk
       && !writeFailedIdentitiesThisCall.has(job.identity)
       && !identityHasAnyPhysicalRecordHoldingToken(job.identity, job.tokens, trackedBasenamesForIdentity(job.identity));
+    if (!stillOk && job.tokens.length > 0) anyWithheld = true;
     tombstoneDurablyIfConfirmed(stillOk, job.tokens, job.repoPath);
   }
+  return anyWithheld;
 }
 
 /**
@@ -6512,8 +6517,8 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): Cl
   // @decision d2592cd5 (3rd fix round, card 3d4467cf) — decide and write every deferred job exactly ONCE,
   // now that every phase of this public call (including every delegate) has fully settled — a crash
   // before this point only OVER-blocks (fail-closed; never worse than the pre-fix behavior).
-  decideDeferredTombstones(deferredTombstoneJobs, writeFailedIdentitiesThisCall);
-  return disclosureAfterTokenClear(repoPath, token, matched, writeFailedIdentitiesThisCall.size === 0);
+  const anyTombstoneWithheld = decideDeferredTombstones(deferredTombstoneJobs, writeFailedIdentitiesThisCall);
+  return disclosureAfterTokenClear(repoPath, token, matched, writeFailedIdentitiesThisCall.size === 0 && !anyTombstoneWithheld);
 }
 
 function tokenIsHeld(token: string): boolean {
@@ -6522,8 +6527,8 @@ function tokenIsHeld(token: string): boolean {
 
 /** What {@link clearMergeQuarantineByToken} reports. `matched` = some entry held `token` when the call started (false = a
  *  no-op: nothing to clear). `lifted` = `matched` AND no live entry (active or pending) holds `token` now; it is the IN-MEMORY
- *  outcome only. `durable:false` = a durable write failed during the call, so a reboot may re-arm the token despite
- *  `lifted:true`. `stillBlockedBy` = `repoPath` is nonetheless still blocked, by the named entry (an independent claimant's
+ *  outcome only. `durable:false` = a durable write failed during the call, OR a durable tombstone was withheld (a kept
+ *  file still physically holds the token), so a reboot may re-arm the token despite `lifted:true`. `stillBlockedBy` = `repoPath` is nonetheless still blocked, by the named entry (an independent claimant's
  *  stale arm, a surviving same-identity record); lifting a token never lifts a block another entry holds. */
 export interface ClearByTokenResult {
   lifted: boolean;
