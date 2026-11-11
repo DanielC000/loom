@@ -8,6 +8,7 @@ import { useVoiceLang, voiceLangOptions } from "../lib/useVoiceLang";
 import { getDraft, setDraft, clearDraft } from "../lib/composerDrafts";
 import { useDismissable } from "../lib/useDismissable";
 import { useBottomDock } from "../lib/bottomDock";
+import { fileDropGuardProps } from "../lib/fileDrag";
 import { PresetPromptsPopover, PRESET_OVERLAY_SURFACE } from "./PresetPrompts";
 
 // Reliable "send a turn" box: posts through the daemon's busy-gated enqueue (auto-Enter, queues
@@ -121,7 +122,7 @@ export function Composer({ sessionId }: { sessionId: string }) {
   ) : null;
 
   return (
-    <div ref={dockRef} data-testid="composer" style={{ marginTop: 3 }}>
+    <div ref={dockRef} data-testid="composer" {...fileDropGuardProps} style={{ marginTop: 3 }}>
       {/* The box and the controls share ONE row until it can no longer hold both, then the controls drop
           to their own line beneath it. Three properties, each load-bearing and each separately witnessed
           by e2e/composer-narrow-width.spec.ts: `flexWrap` lets the line break at all; the columns' flex

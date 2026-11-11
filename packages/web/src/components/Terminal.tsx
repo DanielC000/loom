@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { fileDropGuardProps } from "../lib/fileDrag";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { TerminalControl } from "@loom/shared";
@@ -620,7 +621,7 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   // HUG mode seeds the height to the budget so the pane isn't collapsed before the first geometry frame
   // (its parent is content-sized); applyFontSize then trims it to the actual grid height.
   return (
-    <div ref={ref} style={{ position: "relative", height: heightBudget != null ? heightBudget : "100%", width: "100%", overflow: "hidden" }}>
+    <div ref={ref} {...fileDropGuardProps} style={{ position: "relative", height: heightBudget != null ? heightBudget : "100%", width: "100%", overflow: "hidden" }}>
       {/* Card 5c14fa6b — the remote viewer's "your keys go nowhere" notice. A hairline strip pinned to the
           TOP of the pane, not a centred overlay: it reads as terminal chrome, and the BOTTOM rows (where
           Claude's TUI keeps its composer and hints — the part a watcher most wants) stay uncovered.
