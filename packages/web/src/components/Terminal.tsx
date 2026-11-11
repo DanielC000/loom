@@ -12,6 +12,7 @@ import { useIsCompanionSession } from "../lib/companionGuard";
 import { getResolvedTheme, subscribeResolvedTheme } from "../lib/themePref";
 import { xtermTheme } from "../lib/xtermTheme";
 import { publishPinnedCols } from "../lib/pinnedGeometry";
+import { browserPlatform, imagePasteKey } from "../lib/imagePaste";
 import { Dot } from "./ui";
 import { color, font, space, fs } from "../theme";
 import "@xterm/xterm/css/xterm.css";
@@ -52,6 +53,8 @@ import "./Terminal.css";
  * mount and outlives every attempt: only the socket is rebuilt, so a reconnect costs no remount, no
  * scrollback teardown, and no font re-derivation.
  */
+const IMAGE_PASTE_HINT_KEY = "loom.imagePasteHintShown";
+
 export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyProp = false, heightBudget, onGridWidth }: {
   sessionId: string; resizable?: boolean; readOnly?: boolean; heightBudget?: number;
   /** HUG only (card 80c4e758): called with the widest the pinned grid can ever render at this height
@@ -80,6 +83,8 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
   // signal: what actually suppresses stdin is `socket.readyState` on the hot path below, which is true
   // whether or not React has re-rendered yet.
   const [reconnecting, setReconnecting] = useState(false);
+  // One-time (per browser session) hint shown after the first image-only paste is forwarded.
+  const [imagePasteHint, setImagePasteHint] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   // Kept in a ref so a budget change is picked up on the next resize WITHOUT re-running the effect
   // (which would tear down + re-attach the websocket). It's constant per page in practice.
@@ -189,6 +194,36 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       }
       return true;
     });
+
+    // Image-only paste: xterm's paste handler reads only text/plain, so an image-only clipboard would
+    // reach the pty as an EMPTY bracketed paste. Capture phase on the pane, so it runs before xterm's own
+    // listener on its textarea; it handles ONLY image-and-no-text (any text, incl. mixed clipboards, falls
+    // through untouched). `term.input` goes out through onData → the same guarded stdin path as a keystroke.
+    // @decision 3da47390 — the key comes from the browser's platform; do not add a daemon platform field.
+    const onImagePaste = (ev: ClipboardEvent) => {
+      const cd = ev.clipboardData;
+      if (!cd) return;
+      const key = imagePasteKey(
+        Array.from(cd.items ?? []).map((i) => ({ kind: i.kind, type: i.type })),
+        cd.getData("text/plain"),
+        browserPlatform(navigator as Parameters<typeof browserPlatform>[0]),
+      );
+      if (key === null) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (readOnly || serverReadOnly) return;
+      term.input(key);
+      try {
+        if (sessionStorage.getItem(IMAGE_PASTE_HINT_KEY) !== "1") {
+          sessionStorage.setItem(IMAGE_PASTE_HINT_KEY, "1");
+          setImagePasteHint(true);
+          clearTimeout(imageHintTimer);
+          imageHintTimer = setTimeout(() => setImagePasteHint(false), 6000);
+        }
+      } catch { /* storage blocked: skip the one-time hint */ }
+    };
+    let imageHintTimer: ReturnType<typeof setTimeout> | undefined;
+    el.addEventListener("paste", onImagePaste, true);
 
     // The pinned grid, learned from the daemon's `geometry` frame (Claude mode only). Held in closure
     // so both the frame handler and the ResizeObserver can recompute the fontSize against it.
@@ -576,6 +611,8 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
       ro.disconnect();
       textarea?.removeEventListener("focus", onFocus);
       textarea?.removeEventListener("blur", onBlur);
+      el.removeEventListener("paste", onImagePaste, true);
+      clearTimeout(imageHintTimer);
       clearTimeout(repaintTimer);
       // Don't act on a socket the pane abandoned mid-handshake. Closing one that's still CONNECTING
       // logs "WebSocket is closed before the connection is established" — it fires on Terminals/Workspace
@@ -651,6 +688,21 @@ export function TerminalPane({ sessionId, resizable = false, readOnly: readOnlyP
           chrome, same `pointer-events:none` so selection underneath still works; amber, because nothing
           is broken and the pane is already fixing itself. The `data-` hook is what an e2e asserts on —
           this is the pane's only externally observable disconnected state. */}
+      {imagePasteHint && (
+        <div
+          role="status"
+          data-terminal-hint="image-paste"
+          style={{
+            position: "absolute", top: 0, left: 0, right: 0, pointerEvents: "none",
+            padding: `${space(1)} ${space(2)}`,
+            background: color.inset, borderBottom: `1px solid ${color.line}`,
+            fontSize: fs.sm, lineHeight: 1.5, color: color.text2,
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }}
+        >
+          Images are read from this computer's clipboard.
+        </div>
+      )}
       {reconnecting && (
         <div
           role="status"
