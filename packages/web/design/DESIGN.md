@@ -28,7 +28,7 @@ All values are OKLCH. TS keys in brackets.
 | `--loom-text` (`text`) | 0.965 0.003 260 | 0.205 0.008 260 | primary text |
 | `--loom-text-2` (`text2`) | 0.8 0.008 260 | 0.4 0.01 260 | secondary text |
 | `--loom-text-3` (`text3`) | 0.69 0.01 260 | 0.5 0.01 260 | muted text and metadata (still AA) |
-| `--loom-accent` (`accent`) | 0.55 0.17 258 | 0.51 0.18 258 | cobalt: primary buttons, selection, focus (`--loom-ring`), links (`--loom-accent-fg`) |
+| `--loom-accent` (`accent`) | 0.56 0.215 264 | 0.5 0.225 264 | cobalt: primary buttons, selection, focus (`--loom-ring`), links (`--loom-accent-fg`) |
 | `--loom-live` (`live`, text `liveText`) | 0.76 0.15 155 | 0.62 0.15 155 | green: **live, and nothing else** |
 | `--loom-busy` (`busy`) | 0.83 0.13 78 | 0.52 0.12 62 | busy, in progress, attention |
 | `--loom-info` (`info`) | 0.78 0.11 255 | 0.49 0.17 258 | info and metadata |
@@ -71,13 +71,13 @@ Radius has one 8px base (`--loom-radius`, TS `radius.base`): 6px for tags and sm
 - **Input / Select**: a `fieldBg` fill, a `lineStrong` border, radius 8, and the sans for free text; a field that holds an id or code uses mono. Focus is a 2px `ring` with a `ringSoft` halo, as is every `:focus-visible` in the app.
 - **StatusPill**: a capsule (radius 999, `-soft` fill, a 6px dot, the label in the tone's text colour, 12px / 500, sentence case). Status is always dot plus word, never colour alone.
 - **Badge**: a 6px-radius tinted tag with no border. **Chip**: a pill on `surface2` with no border. **Dot**: 8px, no glow.
-- **SectionLabel**: sans 600 at 14 in `text`, sentence case. **NavTab**: sans 14/500, active 600 with a 2px `accent` underline. **Segmented**: a `surface2` track with a raised thumb (`--loom-seg-on`).
+- **SectionLabel**: sans 600 at 14 in `text`, sentence case. **NavTab**: sans 14/500, active 600 in `accentFg` with a 2px `accent` underline. A band heading (`.loom-bandhead`) carries a 3px `accent` bar in the panel padding, its jump link (`.loom-bandlink`) reads in `accentFg`, and empty-band copy (`.loom-bandempty`) opens with an `accentFg` glyph. **Segmented**: a `surface2` track with a raised thumb (`--loom-seg-on`).
 - **Meter**: a `track` track and a `meterOk` fill.
 - **Tones** (`Tone` in `theme.ts`): `live | busy | info | danger | muted | accent`. `tone` is the signal colour for `color:` and borders, `toneText` the text on its own soft fill, `toneFill` the colour of a dot or a meter bar, and `toneSoft` the capsule background.
 
 ## Per-surface intent
 
-- **Atlas** (the shell): a `--loom-rail-bg` tree rail with no border line; the selected node gets a `selected` fill and an accent icon; the node head and crumbs follow the type scale.
+- **Atlas** (the shell): a `--loom-rail-bg` tree rail with no border line; the selected node gets a `selected` fill, an accent icon and a 2px `accent` left edge; the node head and crumbs follow the type scale.
 - **Board**: lanes are tinted wells (`--loom-lane-bg`, radius 12); a lane head is a dot plus a sentence-case name; cards are `cardBg` with a light-only hairline and shadow. The board embedded in the Overview is the owner's primary board: restyle it, never drop or summarise it.
 - **Sessions and terminals**: a tonal header, a status capsule, NavTab tabs, and the terminal as a dark well in both themes.
 - **Vault**: the calm one; a readable document pane with generous spacing. Markdown colours come from the `--loom-md-*` tokens.

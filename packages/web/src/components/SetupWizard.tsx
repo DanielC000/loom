@@ -175,7 +175,7 @@ function WizardBody({ onClose }: { onClose: () => void }) {
     >
       {/* Top bar: brand at the left, the horizontal stepper centered, a close affordance at the right. */}
       <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 24px 30px" }}>
-        <span style={{ position: "absolute", left: 24, top: 20, display: "inline-flex", alignItems: "center", gap: 9, color: color.accentFg }}>
+        <span style={{ position: "absolute", left: 24, top: 20, display: "inline-flex", alignItems: "center", gap: 9, color: color.live }}>
           <LogoMark size={20} />
           <span style={{ fontFamily: font.ui, fontWeight: 600, fontSize: fs.lg, letterSpacing: "0.12em", color: color.text }}>loom</span>
         </span>

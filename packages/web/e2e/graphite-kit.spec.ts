@@ -88,7 +88,7 @@ for (const theme of THEMES) {
     const primaryPress = await cssColor(page, "color-mix(in oklab, var(--loom-accent-hover) 70%, var(--loom-text-3))");
     const dangerPress = await cssColor(page, "color-mix(in oklab, var(--loom-danger-soft) 80%, var(--loom-danger))");
 
-    // primary: the connections "New connection" button. A solid ink fill under an on-accent label.
+    // primary: the connections "New connection" button. A solid cobalt fill under an on-accent label (card 7d7ccee6).
     const primary = page.getByRole("button", { name: "New connection" });
     await expect(primary).toBeVisible();
     await expect(primary).toHaveCSS("color", await cssColor(page, "--loom-on-accent"));

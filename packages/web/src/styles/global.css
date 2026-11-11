@@ -6,11 +6,13 @@
    leaks nothing to a third party. Fallbacks below keep the layout intact if a face fails to load. */
 @import "./fonts.css";
 
-/* Colour tokens: Direction C, "Ink & Signal" (card d2a44f7b, owner decision e6339f6b). One semantic
-   set per theme. Values are the spec's own (vault Mockups/2026-11-06 Graphite palette/palette.html,
-   .d-c.t-dark / .d-c.t-light); the few tokens the spec does not name are derived by its rules.
-   There is no brand hue: the primary is ink, links are underlined ink, and the focus ring is the one
-   non-state blue. Every other coloured pixel is a state:
+/* Colour tokens: Direction C's semantic map ("Ink & Signal", card d2a44f7b, owner decision e6339f6b)
+   with Direction A's cobalt brand and slate-tinted neutrals restored (card 7d7ccee6, owner decision
+   719d954c). One semantic set per theme. Surface, text, accent and work values are A's own (vault
+   Mockups/2026-11-06 Graphite palette/palette.html, .d-a.t-dark / .d-a.t-light); live, attn and danger
+   keep C's values. Tokens the spec does not name are derived on the same slate hue.
+   Cobalt is the brand: the primary action, focus, selection, links and the healthy meter. It is never
+   a status. Every other coloured pixel is a state:
      live    a process is alive and healthy, or something succeeded;
      work    an agent is doing something (normal, no action needed);
      attn    a human is needed (a request, the Review lane, unsaved work, a threshold, P1);
@@ -22,36 +24,36 @@
 :root,
 :root[data-theme="dark"] {
   /* Surfaces, darkest to lightest. */
-  --loom-bg: oklch(0.145 0.004 260);
-  --loom-inset: oklch(0.125 0.004 260);
-  --loom-field-bg: oklch(0.125 0.004 260);
-  --loom-rail-bg: oklch(0.13 0.004 260);
-  --loom-lane-bg: oklch(0.175 0.005 260);
-  --loom-surface: oklch(0.188 0.005 260);
-  --loom-surface-2: oklch(0.228 0.006 260);
-  --loom-btn-bg: oklch(0.228 0.006 260);
-  --loom-raised: oklch(0.232 0.006 260);
-  --loom-card-bg: oklch(0.232 0.006 260);
-  /* State steps. Selection is neutral: no hue. */
-  --loom-hover: oklch(0.25 0.006 260);
-  --loom-pressed: oklch(0.275 0.006 260);
-  --loom-selected: oklch(0.285 0.006 260);
+  --loom-bg: oklch(0.17 0.014 258);
+  --loom-inset: oklch(0.15 0.013 258);
+  --loom-field-bg: oklch(0.15 0.013 258);
+  --loom-rail-bg: oklch(0.155 0.015 258);
+  --loom-lane-bg: oklch(0.195 0.016 258);
+  --loom-surface: oklch(0.212 0.017 258);
+  --loom-surface-2: oklch(0.252 0.019 258);
+  --loom-btn-bg: oklch(0.252 0.019 258);
+  --loom-raised: oklch(0.258 0.019 258);
+  --loom-card-bg: oklch(0.258 0.019 258);
+  /* State steps. Selection carries a cobalt tint. */
+  --loom-hover: oklch(0.27 0.021 258);
+  --loom-pressed: oklch(0.29 0.022 258);
+  --loom-selected: oklch(0.3 0.07 262);
   /* Lines. */
-  --loom-line: oklch(0.275 0.006 260);
-  --loom-line-strong: oklch(0.53 0.008 260);
-  --loom-line-hover: oklch(0.62 0.008 260);
+  --loom-line: oklch(0.295 0.018 258);
+  --loom-line-strong: oklch(0.54 0.025 258);
+  --loom-line-hover: oklch(0.63 0.025 258);
   /* Text. */
-  --loom-text: oklch(0.975 0.002 260);
-  --loom-text-2: oklch(0.83 0.005 260);
-  --loom-text-3: oklch(0.71 0.007 260);
-  /* Accent is ink. The focus ring is the one blue that is not a state. */
-  --loom-accent: oklch(0.95 0.003 260);
-  --loom-accent-hover: oklch(0.88 0.004 260);
-  --loom-on-accent: oklch(0.16 0.004 260);
-  --loom-accent-fg: oklch(0.975 0.002 260);
-  --loom-accent-edge: oklch(0.83 0.005 260);
-  --loom-ring: oklch(0.72 0.17 250);
-  --loom-ring-soft: oklch(0.33 0.09 250);
+  --loom-text: oklch(0.97 0.006 258);
+  --loom-text-2: oklch(0.83 0.018 258);
+  --loom-text-3: oklch(0.715 0.024 258);
+  /* Accent is the cobalt brand: primary action, focus ring, selection, links. Never a status. */
+  --loom-accent: oklch(0.56 0.215 264);
+  --loom-accent-hover: oklch(0.62 0.21 264);
+  --loom-on-accent: oklch(1 0 0);
+  --loom-accent-fg: oklch(0.79 0.13 262);
+  --loom-accent-edge: oklch(0.7 0.14 262);
+  --loom-ring: oklch(0.74 0.16 262);
+  --loom-ring-soft: oklch(0.33 0.09 262);
   /* Signals. Each has a fill (dots, edges, meters), a -text shade and a soft fill for capsules. */
   --loom-live: oklch(0.8 0.21 148);
   --loom-live-text: oklch(0.84 0.19 148);
@@ -59,9 +61,9 @@
   /* Live green as bare small text or a glyph on a page surface (diff +N/A, "ON", ticks). Dark keeps the
      fill value byte-for-byte; light drops to a shade that clears 4.5:1 (card 92d197ed). */
   --loom-live-fg: oklch(0.8 0.21 148);
-  --loom-work: oklch(0.7 0.17 252);
-  --loom-work-text: oklch(0.79 0.13 252);
-  --loom-work-soft: oklch(0.3 0.09 256);
+  --loom-work: oklch(0.79 0.13 200);
+  --loom-work-text: oklch(0.83 0.12 200);
+  --loom-work-soft: oklch(0.31 0.065 205);
   --loom-attn: oklch(0.82 0.17 70);
   --loom-attn-text: oklch(0.86 0.155 76);
   --loom-attn-soft: oklch(0.34 0.095 66);
@@ -76,64 +78,64 @@
   --loom-danger-line: oklch(0.5 0.16 25);
   --loom-on-danger: oklch(1 0 0);
   /* Meters, overlays and elevation. Dark elevation is tonal, so panels and cards cast nothing. The
-     healthy meter fill is ink-grey, not a hue. */
-  --loom-track: oklch(0.29 0.006 260);
-  --loom-meter-ok: oklch(0.83 0.005 260);
+     healthy meter fill is the brand cobalt. */
+  --loom-track: oklch(0.31 0.02 258);
+  --loom-meter-ok: oklch(0.7 0.16 262);
   --loom-scrim: oklch(0 0 0 / 0.55);
   --loom-panel-shadow: none;
   --loom-card-border: transparent;
   --loom-card-shadow: none;
   --loom-pop-shadow: 0 16px 40px oklch(0 0 0 / 0.5);
   /* Segmented control: the raised thumb under the chosen option. */
-  --loom-seg-on: oklch(0.3 0.006 260);
+  --loom-seg-on: oklch(0.31 0.022 258);
   --loom-seg-shadow: none;
   /* The terminal well. It stays dark in BOTH themes (see lib/xtermTheme.ts). */
   --loom-term-bg: oklch(0.115 0.004 260);
   --loom-term-fg: oklch(0.93 0.003 260);
   --loom-diff-add: oklch(0.78 0.17 148);
   --loom-diff-del: oklch(0.73 0.17 25);
-  /* Markdown reader. Wikilinks are links, so ink (underlined in the reader); the callout hues mirror
+  /* Markdown reader. Wikilinks are links, so the accent (underlined in the reader); the callout hues mirror
      Obsidian's own callouts, which are content rather than chrome. */
-  --loom-md-wikilink: oklch(0.975 0.002 260);
+  --loom-md-wikilink: oklch(0.79 0.13 262);
   --loom-md-callout-note: oklch(0.68 0.13 260);
   --loom-md-callout-question: oklch(0.7 0.13 300);
   color-scheme: dark;
 }
 
 :root[data-theme="light"] {
-  --loom-bg: oklch(0.99 0 0);
-  --loom-inset: oklch(0.965 0.002 260);
+  --loom-bg: oklch(0.982 0.005 258);
+  --loom-inset: oklch(0.962 0.008 258);
   --loom-field-bg: oklch(1 0 0);
-  --loom-rail-bg: oklch(0.968 0.002 260);
-  --loom-lane-bg: oklch(0.955 0.003 260);
+  --loom-rail-bg: oklch(0.962 0.009 258);
+  --loom-lane-bg: oklch(0.952 0.011 258);
   --loom-surface: oklch(1 0 0);
-  --loom-surface-2: oklch(0.955 0.003 260);
+  --loom-surface-2: oklch(0.955 0.01 258);
   --loom-btn-bg: oklch(1 0 0);
   --loom-raised: oklch(1 0 0);
   --loom-card-bg: oklch(1 0 0);
-  --loom-hover: oklch(0.945 0.003 260);
-  --loom-pressed: oklch(0.925 0.004 260);
-  --loom-selected: oklch(0.915 0.004 260);
-  --loom-line: oklch(0.9 0.004 260);
-  --loom-line-strong: oklch(0.6 0.008 260);
-  --loom-line-hover: oklch(0.5 0.008 260);
-  --loom-text: oklch(0.17 0.005 260);
-  --loom-text-2: oklch(0.38 0.007 260);
-  --loom-text-3: oklch(0.49 0.008 260);
-  --loom-accent: oklch(0.2 0.005 260);
-  --loom-accent-hover: oklch(0.3 0.006 260);
+  --loom-hover: oklch(0.942 0.013 258);
+  --loom-pressed: oklch(0.925 0.015 258);
+  --loom-selected: oklch(0.925 0.05 264);
+  --loom-line: oklch(0.905 0.011 258);
+  --loom-line-strong: oklch(0.6 0.025 258);
+  --loom-line-hover: oklch(0.5 0.025 258);
+  --loom-text: oklch(0.2 0.022 262);
+  --loom-text-2: oklch(0.4 0.028 262);
+  --loom-text-3: oklch(0.5 0.028 262);
+  --loom-accent: oklch(0.5 0.225 264);
+  --loom-accent-hover: oklch(0.44 0.21 264);
   --loom-on-accent: oklch(1 0 0);
-  --loom-accent-fg: oklch(0.17 0.005 260);
-  --loom-accent-edge: oklch(0.38 0.007 260);
-  --loom-ring: oklch(0.55 0.2 255);
-  --loom-ring-soft: oklch(0.9 0.06 255);
+  --loom-accent-fg: oklch(0.48 0.215 264);
+  --loom-accent-edge: oklch(0.5 0.225 264);
+  --loom-ring: oklch(0.5 0.225 264);
+  --loom-ring-soft: oklch(0.9 0.06 264);
   --loom-live: oklch(0.62 0.2 148);
   --loom-live-text: oklch(0.46 0.15 148);
   --loom-live-soft: oklch(0.93 0.09 148);
   --loom-live-fg: oklch(0.46 0.15 148);
-  --loom-work: oklch(0.55 0.2 255);
-  --loom-work-text: oklch(0.48 0.19 258);
-  --loom-work-soft: oklch(0.94 0.04 255);
+  --loom-work: oklch(0.6 0.12 205);
+  --loom-work-text: oklch(0.45 0.095 210);
+  --loom-work-soft: oklch(0.935 0.045 205);
   --loom-attn: oklch(0.66 0.17 58);
   --loom-attn-text: oklch(0.5 0.14 55);
   --loom-attn-soft: oklch(0.94 0.08 80);
@@ -145,21 +147,21 @@
   --loom-danger-fill: oklch(0.55 0.22 25);
   --loom-danger-line: oklch(0.76 0.12 25);
   --loom-on-danger: oklch(1 0 0);
-  --loom-track: oklch(0.9 0.004 260);
-  --loom-meter-ok: oklch(0.38 0.007 260);
+  --loom-track: oklch(0.91 0.012 258);
+  --loom-meter-ok: oklch(0.5 0.225 264);
   --loom-scrim: oklch(0.2 0.02 260 / 0.35);
   /* Light elevation is a hairline ring plus a short shadow. */
-  --loom-panel-shadow: 0 0 0 1px oklch(0.9 0.004 260), 0 1px 2px oklch(0.88 0.004 260);
-  --loom-card-border: oklch(0.9 0.004 260);
-  --loom-card-shadow: 0 1px 2px oklch(0.88 0.004 260);
+  --loom-panel-shadow: 0 0 0 1px oklch(0.91 0.011 258), 0 1px 2px oklch(0.88 0.015 258);
+  --loom-card-border: oklch(0.91 0.011 258);
+  --loom-card-shadow: 0 1px 2px oklch(0.88 0.015 258);
   --loom-pop-shadow: 0 16px 40px oklch(0.2 0.02 260 / 0.14);
   --loom-seg-on: oklch(1 0 0);
-  --loom-seg-shadow: 0 1px 2px oklch(0.85 0.006 260), 0 0 0 1px oklch(0.9 0.004 260);
+  --loom-seg-shadow: 0 1px 2px oklch(0.85 0.015 258), 0 0 0 1px oklch(0.91 0.011 258);
   --loom-term-bg: oklch(0.17 0.005 260);
   --loom-term-fg: oklch(0.94 0.002 260);
   --loom-diff-add: oklch(0.78 0.17 148);
   --loom-diff-del: oklch(0.74 0.17 25);
-  --loom-md-wikilink: oklch(0.17 0.005 260);
+  --loom-md-wikilink: oklch(0.48 0.215 264);
   --loom-md-callout-note: oklch(0.55 0.15 260);
   --loom-md-callout-question: oklch(0.52 0.16 300);
   color-scheme: light;
@@ -643,7 +645,7 @@ body {
   background: var(--loom-selected);
   color: var(--loom-accent-fg);
 }
-/* A filled on-state is a SELECTION, so it is ink: the neutral selected fill, an ink edge and label. */
+/* A filled on-state is a SELECTION, so it is the accent: the selected fill, an accent edge and label. */
 .loom-btn-on {
   background: var(--loom-selected);
   border-color: var(--loom-accent-edge);
@@ -1094,6 +1096,10 @@ select.loom-field:disabled {
   font-weight: 600;
   border-bottom-color: var(--loom-accent);
 }
+/* Accent addition 5 (card 7d7ccee6): the active tab's label takes the accent, matching its underline. */
+.loom-navtab.is-active {
+  color: var(--loom-accent-fg);
+}
 @media (prefers-reduced-motion: reduce) {
   .loom-navtab {
     transition: none;
@@ -1198,7 +1204,7 @@ button.loom-cardtab:focus-visible {
   text-align: left;
 }
 .loom-rail-mark {
-  color: var(--loom-accent-fg);
+  color: var(--loom-live);
   flex: none;
   display: flex;
 }
@@ -1920,12 +1926,16 @@ button.loom-atlas-node:hover {
   color: var(--loom-text);
   background: var(--loom-hover);
 }
-/* Graphite selection: a neutral fill (`--loom-selected`) with the icon in the ink accent. No edge
-   bar: the fill alone says "you are here", and green stays reserved for "live". */
+/* Graphite selection: the cobalt-tinted fill (`--loom-selected`) with the icon in the accent. The edge
+   is in the accent, never green: green stays reserved for "live". */
 a.loom-atlas-node.is-active {
   color: var(--loom-text);
   font-weight: 500;
   background: var(--loom-selected);
+}
+/* Accent addition 3 (card 7d7ccee6): a 2px accent edge on the selected tree node. */
+a.loom-atlas-node.is-active {
+  box-shadow: inset 2px 0 0 var(--loom-accent);
 }
 a.loom-atlas-node.is-active .loom-atlas-ico {
   color: var(--loom-accent-fg);
@@ -3796,6 +3806,22 @@ button.loom-kpi.is-open {
   padding-bottom: 8px;
   border-bottom: 1px solid var(--loom-line);
 }
+/* Accent addition 1 (card 7d7ccee6): a short accent bar marking each band heading. It sits in the
+   panel's 12px left padding, absolutely positioned, so the heading row's measured widths (the band
+   tracks are budgeted to the pixel, see atlasHome.tsx) do not move. */
+.loom-bandhead {
+  position: relative;
+}
+.loom-bandhead::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 3px;
+  width: 3px;
+  height: 12px;
+  border-radius: 2px;
+  background: var(--loom-accent);
+}
 .loom-bandcount {
   font-family: var(--loom-font-mono);
   font-size: var(--loom-fs-xs);
@@ -3815,6 +3841,12 @@ button.loom-kpi.is-open {
   text-decoration: none;
   flex: none;
 }
+/* Accent addition 2 (card 7d7ccee6): a band's jump link reads as navigation, in accent text on a soft
+   accent edge. Scoped to the default button, so a primary button carrying the class keeps its label. */
+.loom-btn-default.loom-bandlink {
+  color: var(--loom-accent-fg);
+  border-color: color-mix(in oklab, var(--loom-accent-edge) 55%, transparent);
+}
 .loom-bandbody {
   flex: 1 1 auto;
   min-height: 0;
@@ -3827,6 +3859,14 @@ button.loom-kpi.is-open {
   font-size: var(--loom-fs-sm);
   line-height: 1.65;
   color: var(--loom-text-3);
+}
+/* Accent addition 4 (card 7d7ccee6): a small accent glyph before empty-band copy. Decorative: the
+   second `content` gives it empty alt text, and a browser without that syntax keeps the first. */
+.loom-bandempty::before {
+  content: "\25C7";
+  content: "\25C7" / "";
+  margin-right: 7px;
+  color: var(--loom-accent-fg);
 }
 .loom-slotcard {
   margin-top: 8px;

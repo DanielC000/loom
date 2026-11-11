@@ -1036,7 +1036,7 @@ function columnAccent(col: KanbanColumn): string | null {
 // the light one (phosphor #2ee66e is 1.66:1 on white), so the guard compares against the panel of the
 // theme IN FORCE. Each hex is --loom-surface (global.css) converted to sRGB; persisted accentColor values
 // are owner data and are never rewritten.
-const PANEL_HEX: Record<ResolvedTheme, string> = { dark: "#121316", light: "#ffffff" };
+const PANEL_HEX: Record<ResolvedTheme, string> = { dark: "#141921", light: "#ffffff" };
 function relLuminance(hex: string): number {
   const lin = (i: number): number => {
     const v = parseInt(hex.slice(1 + i, 3 + i), 16) / 255;

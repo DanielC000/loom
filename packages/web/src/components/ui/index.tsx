@@ -248,7 +248,7 @@ export function SectionLabel({ children, style, ...rest }: SectionLabelProps) {
 }
 
 // ── Meter ────────────────────────────────────────────────────────────────────
-// Thin fill bar, e.g. context-token usage. The healthy fill is ink-grey (`accent`); a threshold state
+// Thin fill bar, e.g. context-token usage. The healthy fill is the brand cobalt (`accent`); a threshold state
 // passes `attn` or `danger`.
 export function Meter({ value, max, tone: t = "accent", width = 80 }: { value: number; max: number; tone?: Tone; width?: number }) {
   const pct = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;

@@ -105,7 +105,7 @@ export const space = (n: number): string => `${n * 4}px`;
 //   attn    a human is needed: a pending request, the Review lane, unsaved work, a threshold, P1;
 //   danger  failed, refused, destructive, P0;
 //   muted   identity and metadata: roles, branches, ids, lane names, P2/P3;
-//   accent  ink: the primary action, selection, the healthy meter. Never a status.
+//   accent  the cobalt brand: the primary action, selection, links, the healthy meter. Never a status.
 export type Tone = "live" | "work" | "attn" | "danger" | "muted" | "accent";
 
 // The tone's signal colour: what a caller writes into `color:` or a border. Each signal reads its

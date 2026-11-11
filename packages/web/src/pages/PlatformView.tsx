@@ -424,7 +424,7 @@ function GuidedSetupLauncher({ onStart }: { onStart: () => void }) {
       display: "flex", alignItems: "center", gap: 16, padding: "16px 18px", flexWrap: "wrap",
       background: `radial-gradient(560px 180px at 12% -40%, ${color.surface2}, transparent 70%), ${color.surface}`,
     }}>
-      <span style={{ color: color.accentFg, display: "inline-flex", flexShrink: 0 }}><LogoMark size={26} /></span>
+      <span style={{ color: color.live, display: "inline-flex", flexShrink: 0 }}><LogoMark size={26} /></span>
       <div style={{ flex: 1, minWidth: 220 }}>
         <div style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>New project from a template</div>
         <div style={{ fontSize: fs.sm, color: color.text3, marginTop: 3, lineHeight: 1.5 }}>

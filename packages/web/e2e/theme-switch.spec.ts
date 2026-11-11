@@ -191,7 +191,8 @@ test("another tab's change is applied at once", async ({ page, loomDaemon, conte
 });
 
 test("the main contrast pairs clear AA in both themes, read from live token values", async ({ page, loomDaemon }) => {
-  // Direction C's ("Ink & Signal", card d2a44f7b) contrast table, every pair of the vault README's
+  // Direction C's ("Ink & Signal", card d2a44f7b) contrast table, now with A's cobalt brand (card 7d7ccee6),
+  // every pair of the vault README's
   // §WCAG contrast, plus the secondary-on-panel pair: [label, foreground, background, floor]. Text
   // needs 4.5:1; UI (dots, edges, borders, the focus ring, a meter fill) needs 3:1. A background may be
   // an expression: the "needs you" band is an 11% attn wash over the panel, measured as rendered.
