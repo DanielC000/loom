@@ -244,7 +244,7 @@ DIFFERENT file than R's own) — corrected in place to assert `latchKept:true` w
 
 (c) `clearMergeQuarantineReporting`'s own compose-once branch (the m3 fix) and the surrounding
 `clearMergeQuarantineByRecordedPath` kept/relocated split-and-recombine machinery (b) are now covered by
-a NEW scenario (`cr3-m3` in `test/merge-quarantine-protect-write-failure.mjs`, reusing the CR's own probe
+a NEW scenario (`cr3-m3` — since replaced, see Round 5 — in `test/merge-quarantine-protect-write-failure.mjs`, reusing the CR's own probe
 construction verbatim: P unresolvable at boot, armed at a synthetic `resolvedKey` K — never `mkdir`'d, so
 it dispatches via `clearMergeQuarantine` → `clearMergeQuarantineByRecordedPath`, never `clearMergeQuarantineByKey`
 directly; X's foreign record at `hash(K).json`, written AFTER boot; the pending-divert write injected to
@@ -254,9 +254,9 @@ fail). A clean (non-injected) positive control sits alongside it.
 "Round 5" section below for the real construction and why `cr3-m3`'s own compose-once assertion (line
 ~557 in `test/merge-quarantine-protect-write-failure.mjs`) is VACUOUS for it (`relocated.length=0,
 kept.size=1` in that exact construction — true, and still the honest finding FOR `cr3-m3` ITSELF, but the
-"therefore the combine call can never fire" conclusion drawn from it was wrong).** What IS verified by
-`cr3-m3` stands unchanged: `clearMergeQuarantineByRecordedPath`'s own `splitCoOccupants` call, its
-kept/relocated Map-building, and its final-return assembly.
+"therefore the combine call can never fire" conclusion drawn from it was wrong).** What `cr3-m3` verified
+(`clearMergeQuarantineByRecordedPath`'s own `splitCoOccupants` call, its kept/relocated Map-building, and its
+final-return assembly) is now exercised by the replacement scenario below.
 
 ### m4's own "still-quarantined AND relocated" construction: UNPROVEN, reachability argument only
 
@@ -338,9 +338,13 @@ raw-fallback branches of `clearMergeQuarantineLatchFile`, both the final-sweep a
 call sites). It checks `physicalOwnerRepoPaths(sourceFile).includes(repoPath)` first (physical ownership
 → `sourceFile`'s own id is correct, unchanged); otherwise it resolves `repoPath`'s OWN active/pending
 entry and uses `quarantineLatchFileIdsFor(ownEntry)[0]` instead — a genuinely different, working id.
-`BlockedCoOccupant.route.id` is now optional (`id?: string`) for the structurally-unreachable case where
-no owning entry can be found at all (every real caller's `repoPath` is itself read off a live entry's
-`.repoPath` field, so this never fires today) — `mergeKeptAndRelocatedCoOccupant` falls back to the
+`BlockedCoOccupant.route.id` is now optional (`id?: string`) — an id-less `{repoPath}` route DOES fire, and
+not only in a structurally-unreachable case: since card `613e4592`, `routeWithFollowableId` withholds any id
+that would not release exactly the named claimant (a claimant with two entries, an id shared across
+identities, a foreign blocker behind its entry), leaving the `{repoPath}` route, which clears the claimant's
+own entries. (A kept orphan latch's content-parsed repoPath is not such a case: since card `25d0d45b` it is
+ARMED in memory first, so it is a live entry with a followable id, pinned in scenario (F) of
+`merge-quarantine-orphan-sweep-content-aware.mjs`.) `mergeKeptAndRelocatedCoOccupant` falls back to the
 relocated route alone rather than building a broken `alsoClear` with no id in that case.
 
 **Audited every other `blockedCoOccupant` call site for the same shape** (the MAJOR's own instruction):
@@ -409,14 +413,14 @@ the second (`clearMergeQuarantineByKey(K2, P)`, X double-faults, stays kept) —
 (`relocated.map((co) => { const keptCo = keptReferencingRepoPaths.get(co.repoPath); return keptCo
 !== undefined && !co.alsoClear ? mergeKeptAndRelocatedCoOccupant(co, keptCo) : co; })`) fires.
 
-**NOT independently re-verified or committed this round** — this correction records the CR's own repro
-(attributed to the reviewer, not to this worker's own independent construction) and is NOT a claim that
-this worker built and ran it. Re-pointing `cr3-m3`'s own vacuous compose-once assertion at this
-construction, and committing it as a real test, is left for a follow-up round — constructing "two distinct
-same-identity active entry objects" correctly (vs. a boot-time union collapsing them into one) is exactly
-the kind of subtle setup this card's own history shows is easy to get wrong without independent
-verification, and this round's remaining budget did not allow verifying it firsthand before committing it
-as fact.
+**Since card `ac8cdf40` this construction is built, run and committed** as scenario
+"two-key-relocate-and-keep" in `test/merge-quarantine-protect-write-failure.mjs` (two P twin files with
+different `resolvedKey`s → two distinct entries; X at `hash(K1).json` and `hash(K2).json`; the pending-divert
+write passes once and fails from the 2nd write on). Its reach of `mergeKeptAndRelocatedCoOccupant` was
+proved with a temporary, uncommitted instrument. It follows `route.id` first (X still blocked, the kept file
+survives) and then `alsoClear.id` (X unblocked, no file naming X left). It REPLACES the old `cr3-m3`
+injected scenario (deleted: its own compose-once assertion was vacuous for the combine call); the clean
+non-injected control that sat beside it is unchanged.
 
 ### MINOR — final-path relocated split masked by the safety net — documented as load-bearing, no new test
 

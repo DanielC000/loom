@@ -103,12 +103,15 @@ function makeToplevelRepo(tag) {
 // Intercepts fs.openSync for any path shaped like a fresh pending-divert tmp write
 // (`pending-<24hex>.json.tmp-<pid>-<hex>`, written by writePendingDivertFile) and throws EACCES. Returns
 // a restore function and an interceptCount the caller can assert against.
-function injectPendingDivertWriteFailure() {
+// `failFrom` (default 1 = every write fails): the 1-based index of the first matching write that throws; earlier
+// matching writes pass through to the real fs.openSync. `count()` counts every matching write seen, failed or not.
+function injectPendingDivertWriteFailure(failFrom = 1) {
   const real = fs.openSync;
   let interceptCount = 0;
   fs.openSync = (p, ...rest) => {
     if (typeof p === "string" && p.includes("pending-") && p.includes(".tmp-")) {
       interceptCount++;
+      if (interceptCount < failFrom) return real(p, ...rest);
       throw Object.assign(new Error("EACCES: simulated pending-divert write failure"), { code: "EACCES" });
     }
     return real(p, ...rest);
@@ -496,71 +499,72 @@ try {
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
-  // SCENARIO cr3-m3 — card 182c01cc round 4, CR3 untested-site findings (b)/(c): the CR's own probe
-  // construction (P unresolvable at boot, armed at a SYNTHETIC resolvedKey K — an 883e29bc-shaped raw
-  // twin, deliberately NEVER mkdir'd — stays unresolvable the whole scenario, unlike (AH) in
-  // merge-quarantine-clear-by-path.mjs); X's foreign record written to hash(K).json AFTER boot (a fresh
-  // mint, never a re-point). `clearMergeQuarantineReporting(p)` then dispatches via `clearMergeQuarantine`
-  // to `clearMergeQuarantineByRecordedPath` (p stays unresolvable the whole time) — NEVER
-  // `clearMergeQuarantineByKey` directly — reaching this card's (c) site: `clearMergeQuarantineReporting`'s
-  // own `latchKept` branch, composing onto a reason `clearMergeQuarantineByRecordedPath` ALREADY composed
-  // (the compose-ONCE fix, m3). With the pending-divert write injected to fail, X's own protect call
-  // double-faults — reaching this card's (b) site: `clearMergeQuarantineByRecordedPath`'s own
-  // kept/relocated split-and-recombine of its delegated `clearMergeQuarantineByKey` result (never reached
-  // when p is resolvable, since that dispatches straight to ByKey and never enters this function at all).
-  //
-  // MEASURED (not assumed): in THIS exact construction, X's double-fault is bucketed as PURELY kept (no
-  // relocation at all — nothing else here ever mints a NEW latch), so `mergeKeptAndRelocatedCoOccupant`
-  // itself (the literal combine call inside site (b), for ONE repoPath independently found in BOTH
-  // buckets) is NOT invoked — confirmed via a temporary debug instrument during development, not
-  // asserted blind. What IS genuinely exercised, and controlled below: `clearMergeQuarantineByRecordedPath`'s
-  // own `splitCoOccupants` call, its `keptReferencingRepoPaths`/`relocatedCoOccupants` Map-building, and
-  // the `combinedRelocated`/final-return assembly (site (b)'s surrounding machinery) — and
-  // `clearMergeQuarantineReporting`'s own compose-once branch (site (c)) with a REAL already-composed
-  // base reason to not double onto. See this card's own decision record, "Round 4" section, for why a
-  // construction that ALSO drives `mergeKeptAndRelocatedCoOccupant` itself was not found.
+  // SCENARIO two-key-relocate-and-keep (card ac8cdf40; replaces the old cr3-m3 scenario, which measured
+  // itself as never reaching `mergeKeptAndRelocatedCoOccupant` — a test that claims coverage it does not
+  // have). P is unresolvable (never created) with TWO twin files armed at two SYNTHETIC resolvedKeys K1/K2
+  // (two distinct entry objects after boot). X's foreign record is written to hash(K1).json AND hash(K2).json
+  // AFTER boot. `clearMergeQuarantineReporting(p)` dispatches to `clearMergeQuarantineByRecordedPath`, which
+  // lifts both keys; the pending-divert write is injected to fail from its 2nd write on, so X is RELOCATED
+  // off the first key's file (to a new pending latch) and KEPT at the second (double-fault) — one repoPath
+  // found in BOTH buckets, the only shape that drives `mergeKeptAndRelocatedCoOccupant` (route = the
+  // relocated latch's id, alsoClear = the kept file's old id). Reach was proved with a temporary,
+  // uncommitted instrument in the compiled output when this scenario was written.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
-  const p = path.join(os.tmpdir(), `loom-mqpwf-cr3m3-p-${freshSfx()}`); // never created — stays unresolvable
-  const k = "loom-mqpwf-cr3m3-synthetic-key";
-  const khash = createHash("sha256").update(k).digest("hex").slice(0, 24);
+  const p = path.join(os.tmpdir(), `loom-mqpwf-2key-p-${freshSfx()}`); // never created — stays unresolvable
+  const k1 = `loom-mqpwf-2key-synthetic-key-1-${freshSfx()}`;
+  const k2 = `loom-mqpwf-2key-synthetic-key-2-${freshSfx()}`;
+  const hashOf = (k) => createHash("sha256").update(k).digest("hex").slice(0, 24);
   fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
-  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, "mqpwf-cr3m3-p-twin.json"), JSON.stringify({
-    repoPath: p, branch: "p-branch", reason: "P — cr3-m3, armed at a synthetic resolvedKey K", enteredAt: Date.now(),
-    tokens: ["p-cr3m3-token"], resolvedKey: k, armedKeys: [k],
-  }, null, 2) + "\n");
+  for (const [i, k] of [[1, k1], [2, k2]]) {
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `mqpwf-2key-p-twin-${i}.json`), JSON.stringify({
+      repoPath: p, branch: `p-branch-${i}`, reason: `P — two-key, armed at synthetic resolvedKey K${i}`, enteredAt: Date.now(),
+      tokens: [`p-2key-token-${i}`], resolvedKey: k, armedKeys: [k],
+    }, null, 2) + "\n");
+  }
   reenterMergeQuarantinesAtBoot([p]);
-  check("(cr3-m3 precondition) P reads as blocked right after this boot", !!activeMergeQuarantineFor(p));
+  check("(two-key precondition) P reads as blocked right after this boot", !!activeMergeQuarantineFor(p));
+  check("(two-key precondition) P holds two distinct entries, one per key", listActiveMergeQuarantines().filter((e) => e.repoPath === p).length === 2);
 
-  const x = path.join(os.tmpdir(), `loom-mqpwf-cr3m3-x-never-${freshSfx()}`);
-  fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${khash}.json`), JSON.stringify({
-    repoPath: x, branch: "x-branch", reason: "X — cr3-m3, foreign, written AFTER boot", enteredAt: Date.now(), tokens: ["x-cr3m3-token"],
-  }, null, 2) + "\n");
-  check("(cr3-m3 precondition) X is NOT yet known to memory before the clear (never scanned)", !activeMergeQuarantineFor(x));
-  check("(cr3-m3 precondition) p is genuinely unresolvable (never created)", !fs.existsSync(p));
+  const x = path.join(os.tmpdir(), `loom-mqpwf-2key-x-never-${freshSfx()}`);
+  for (const k of [k1, k2]) {
+    fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${hashOf(k)}.json`), JSON.stringify({
+      repoPath: x, branch: "x-branch", reason: "X — two-key, foreign, written AFTER boot", enteredAt: Date.now(), tokens: [`x-2key-token-${hashOf(k)}`],
+    }, null, 2) + "\n");
+  }
+  check("(two-key precondition) X is NOT yet known to memory before the clear (never scanned)", !activeMergeQuarantineFor(x));
+  check("(two-key precondition) p is genuinely unresolvable (never created)", !fs.existsSync(p));
 
-  const inject = injectPendingDivertWriteFailure();
+  const inject = injectPendingDivertWriteFailure(2);
   let rr;
   try { rr = clearMergeQuarantineReporting(p); } finally { inject.restore(); }
-  check("(cr3-m3 positive control) the protective write was actually attempted (and injected to fail)", inject.count() >= 1);
+  check("(two-key positive control) a pending-divert write was attempted at least twice (the 1st passes, the 2nd+ are injected to fail)", inject.count() >= 2);
 
-  check("*** THE FIX (cr3-m3, sites b+c) *** stillBlockedCoOccupants names X via the ByRecordedPath dispatch", Array.isArray(rr?.stillBlockedCoOccupants) && rr.stillBlockedCoOccupants.some((c) => c.repoPath === x));
-  const coCr3m3 = rr?.stillBlockedCoOccupants?.find((c) => c.repoPath === x);
-  check("*** THE FIX (round 4, cr3-m3) *** no alsoClear (double-fault stays kept, never relocated)", coCr3m3?.alsoClear === undefined);
-  check("(cr3-m3) latchKept is true, X named in referencingRepoPaths", rr?.latchKept === true && (rr?.referencingRepoPaths ?? []).includes(x));
-  // *** THE FIX (c): compose-ONCE *** — `clearMergeQuarantineByRecordedPath`'s own reason ALREADY
-  // composes everything; `clearMergeQuarantineReporting`'s latchKept branch must pass it through
-  // UNCHANGED, never compose a SECOND time on top. A pre-round-3-m3-fix regression would double any
-  // relocated clause present — here there is none to double, so the discriminating assertion is that
-  // the base `keptReason` clause itself (identifiable by its own "stays on disk" wording) appears
-  // EXACTLY ONCE, never duplicated wholesale.
-  check("*** THE FIX (round 4, cr3-m3, m3 compose-once) *** the base reason clause appears exactly once, never doubled", ((rr?.reason ?? "").split("stays on disk").length - 1) === 1);
-  check("*** THE FIX (round 4, cr3-m3) *** reason never claims a relocation that never happened", !(rr?.reason ?? "").includes("RELOCATED") && !(rr?.reason ?? "").includes("just removed"));
+  const coX = rr?.stillBlockedCoOccupants?.find((c) => c.repoPath === x);
+  check("*** two-key *** X is named exactly once in stillBlockedCoOccupants", (rr?.stillBlockedCoOccupants ?? []).filter((c) => c.repoPath === x).length === 1);
+  check("*** two-key *** its route is the relocated latch's id, with a DIFFERENT alsoClear id (the kept file's old id)",
+    typeof coX?.route?.id === "string" && typeof coX?.alsoClear?.id === "string" && coX.route.id !== coX.alsoClear.id);
+  check("(two-key) the alsoClear id is one of the two key-hash ids X's kept file can carry", [k1, k2].map(hashOf).includes(coX?.alsoClear?.id));
+  check("(two-key) latchKept is true, X named in referencingRepoPaths", rr?.latchKept === true && (rr?.referencingRepoPaths ?? []).includes(x));
+  check("(two-key) the reason names the relocation AND the kept file (the kept clause once, never doubled)",
+    (rr?.reason ?? "").includes("RELOCATED") && ((rr?.reason ?? "").split("stays on disk").length - 1) === 1);
 
-  // ONE clear of the fold's own named route.id genuinely lifts X.
-  const oneClearCr3m3 = clearMergeQuarantineLatchFile(coCr3m3.route.id);
-  check("*** THE FIX (round 4, cr3-m3) *** ONE clear of the named id lifts X", oneClearCr3m3?.ok === true && oneClearCr3m3?.wasQuarantined === true && (oneClearCr3m3?.liftedRepoPaths ?? []).includes(x));
-  check("(cr3-m3) X now reads as genuinely unblocked after that one clear", assertRepoNotQuarantined(x).ok === true);
+  // Follow the route FIRST: X is still blocked by the kept file, and that file survives.
+  // Other scenarios share this directory, so look for files that NAME X rather than asserting an empty directory.
+  const filesNaming = (rp) => fs.readdirSync(MERGE_QUARANTINE_DIR).filter((f) => {
+    try { return JSON.parse(fs.readFileSync(path.join(MERGE_QUARANTINE_DIR, f), "utf8")).repoPath === rp; } catch { return false; }
+  });
+  check("(two-key positive control) the file-naming probe can see X's file before the clears", filesNaming(x).length >= 1);
+  const afterRoute = clearMergeQuarantineLatchFile(coX.route.id);
+  check("*** two-key *** following route.id FIRST leaves X still blocked (the kept file still holds it)", assertRepoNotQuarantined(x).ok === false);
+  check("(two-key) the kept file survives the first step", fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${coX.alsoClear.id}.json`)));
+  check("(two-key) the first step's result does not claim X lifted", !(afterRoute?.liftedRepoPaths ?? []).includes(x));
+  // Then alsoClear: X is genuinely unblocked and no latch file of X's is left.
+  const afterAlso = clearMergeQuarantineLatchFile(coX.alsoClear.id);
+  check("*** two-key *** then following alsoClear.id lifts X", afterAlso?.ok === true && assertRepoNotQuarantined(x).ok === true);
+  const filesNamingX = filesNaming(x);
+  check("*** two-key *** zero files of X's remain (relocated latch and kept file both gone)", filesNamingX.length === 0);
+  check("(two-key) the two key-hash files X was written to are both gone", [k1, k2].every((k) => !fs.existsSync(path.join(MERGE_QUARANTINE_DIR, `${hashOf(k)}.json`))));
   }
 
   // Positive control (no injection): the SAME p/k/x shape, but the protective write succeeds — a clean

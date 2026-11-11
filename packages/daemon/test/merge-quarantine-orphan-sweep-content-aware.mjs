@@ -322,6 +322,14 @@ try {
     check("(F, 25d0d45b) result-says-blocked === assertRepoNotQuarantined-refuses",
       !!clearResultF.stillBlockedCoOccupants?.some((c) => c.repoPath === foreignRepoF) === (mod.assertRepoNotQuarantined(foreignRepoF).ok === false));
     check("(F) the orphan genuinely survives on disk", fs.existsSync(orphanPathF));
+    // Route-shape pin (card ac8cdf40): the armed record is a live entry, so its co-occupant carries a FOLLOWABLE id
+    // (never the id-less {repoPath} shape an on-disk-only record would get), and following it actually lifts it.
+    const coF = clearResultF.stillBlockedCoOccupants?.find((c) => c.repoPath === foreignRepoF);
+    check("*** route shape (F, ac8cdf40) *** the co-occupant's route names its repoPath AND carries a route id", coF?.route?.repoPath === foreignRepoF && typeof coF?.route?.id === "string");
+    check("(F, ac8cdf40) no alsoClear on a single-file keep", coF?.alsoClear === undefined);
+    const followF = coF?.route?.id !== undefined ? mod.clearMergeQuarantineLatchFile(coF.route.id) : undefined;
+    check("*** route shape (F, ac8cdf40) *** following route.id lifts it (wasQuarantined, listed in liftedRepoPaths)", followF?.ok === true && followF?.wasQuarantined === true && (followF?.liftedRepoPaths ?? []).includes(foreignRepoF));
+    check("(F, ac8cdf40) ...and it now reads as unblocked", mod.assertRepoNotQuarantined(foreignRepoF).ok === true);
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
