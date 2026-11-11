@@ -83,6 +83,8 @@ const EXPECTED_KEYS = [
   "ctxMidTurn",
   "neverCompletedTurn", "lastEngineOutputAt", "composerDirtyLen", "composerDirtyLenBelieved",
   "unconfirmedDeliveryMs",
+  // Card 20ff76de: midSessionModalSince — epoch-ms a live worker has been HELD on an unrecognized on-screen modal (null = not held).
+  "midSessionModalSince",
   // Card 8882e2ca: kickoffConfirmPending — non-null only while this worker's turn-1 kickoff is
   // unconfirmed AND still inside its size-aware plausible-confirm window.
   "kickoffConfirmPending",

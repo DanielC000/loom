@@ -214,6 +214,7 @@ export interface AttentionItem {
   // MANAGER ASLEEP / QUEUE DRAINED / CONTEXT OVERFLOW (the manager session). Its "Open"
   // affordance deep-links to that session's view (/session/:sessionId), NOT the merge panel.
   sessionId?: string | null;
+  modalHoldSessionId?: string | null; // when set, the row offers "Resume deliveries" (POST .../modal-hold/release, human-only)
   rateLimitSessionId?: string | null; // when set, the row offers a "clear / retry now" action (POST .../rate-limit/clear)
   // Set on a pending/orphaned request item (a manager→human Request of ANY type — decision, input,
   // permission, credential) AND on an unread notice (card 68f27faf) — both are Request rows. Its
@@ -592,12 +593,19 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     }
   }
   for (const { event: e, sessionId: sid } of activeBootStuck) {
-    const detail = (e.detail ?? {}) as { signatureName?: string | null; role?: string | null; timeoutMs?: number };
+    const detail = (e.detail ?? {}) as { signatureName?: string | null; role?: string | null; timeoutMs?: number; phase?: string };
+    // Card 20ff76de: a MID-SESSION held-on-modal episode shares this event kind but is a different
+    // situation (the session booted fine) — never word it as a boot failure.
+    const midSession = detail.phase === "mid-session";
     items.push({
-      key: `bs-${e.id}`, tone: "danger", notify: "boot-stuck", kind: "BOOT STUCK", sessionId: sid,
+      key: `bs-${e.id}`, tone: "danger", notify: "boot-stuck", kind: midSession ? "PROMPT HELD" : "BOOT STUCK", sessionId: sid, modalHoldSessionId: midSession ? sid : null,
       dismissKey: `bs:${e.id}`, // one claude_boot_dialog_stuck event per stuck boot episode (card 611e76ba)
-      dismissHint: "Hide this alert — it returns if a session gets stuck booting again. The session itself is untouched.",
-      text: `${detail.role ?? "session"} ${sid.slice(0, 8)} never reached SessionStart — possible blocking CLI dialog (${detail.signatureName ?? "none recognized"})`,
+      dismissHint: midSession
+        ? "Hide this alert — it returns if a session is held on an unrecognized prompt again. The session itself is untouched."
+        : "Hide this alert — it returns if a session gets stuck booting again. The session itself is untouched.",
+      text: midSession
+        ? `${detail.role ?? "session"} ${sid.slice(0, 8)} is held on an unrecognized on-screen prompt (${detail.signatureName ?? "none recognized"}) — its writes are paused until you resolve it in its terminal and press Resume deliveries`
+        : `${detail.role ?? "session"} ${sid.slice(0, 8)} never reached SessionStart — possible blocking CLI dialog (${detail.signatureName ?? "none recognized"})`,
     });
   }
   for (const e of latestIdle.values()) {

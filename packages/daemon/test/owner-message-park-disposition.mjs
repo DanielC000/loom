@@ -251,6 +251,34 @@ try {
       await post("mgrR", long);
       const pLong = db.getPendingOwnerMessage("mgrR");
       check("(R6) an over-300-char message is bounded at the write site", pLong?.excerpt.length <= 301 && pLong?.excerpt.endsWith("…"));
+
+      // (R7) card 20ff76de: a composer entry REFUSED because the session is held on an on-screen modal never
+      // reaches the session, so it must NOT open an "owner message without a disposition" episode (409, no record).
+      // Paired with the (R1) control above: the identical POST on an UNHELD manager DOES record.
+      freshSession("mgrHeld", "pR", "aR", "manager");
+      ptyStub.modalHoldRefusal = (sid) => (sid === "mgrHeld" ? "session is held on an unrecognized on-screen prompt; resolve the prompt in the terminal, then press Resume deliveries" : null);
+      const heldResp = await post("mgrHeld", "message into a held pane");
+      check("(R7) a held session's composer POST is refused with 409 + the readable reason", heldResp.statusCode === 409 && /resolve the prompt in the terminal, then press Resume deliveries/.test(heldResp.json().error));
+      check("(R7) ...and records NO pending owner message (nothing was delivered)", db.getPendingOwnerMessage("mgrHeld") === null);
+      freshSession("mgrUnheld", "pR", "aR", "manager");
+      await post("mgrUnheld", "message into a normal pane");
+      check("(R7) control: the same POST on an unheld manager DOES record the episode", db.getPendingOwnerMessage("mgrUnheld")?.excerpt === "message into a normal pane");
+
+      // (R8) card 20ff76de: the human-only release route. 404 unknown session; 409 when nothing is held; 200 when released.
+      // It rides the loopback-secret bearer guard like every non-GET /api route (an agent has no MCP path to it).
+      const calls = []; const forces = []; freshSession("mgrStill", "pR", "aR", "manager");
+      ptyStub.releaseModalHoldByHuman = (sid, opts) => { calls.push(sid); forces.push(!!opts?.force); if (sid === "mgrStill") return opts?.force ? { released: true, held: true, candidate: true } : { released: false, held: true, candidate: true, stillOnScreen: true }; return sid === "mgrHeld" ? { released: true, held: true, candidate: true } : { released: false, held: false, candidate: false }; };
+      const rel = (sid) => app.inject({ method: "POST", url: `/api/sessions/${sid}/modal-hold/release` });
+      const r404 = await rel("no-such-session");
+      const r409 = await rel("mgrUnheld");
+      const r200 = await rel("mgrHeld");
+      check("(R8) release route: 404 for an unknown session (the pty is never asked)", r404.statusCode === 404 && !calls.includes("no-such-session"));
+      check("(R8) release route: 409 with a readable reason when the session is not held", r409.statusCode === 409 && /not held/.test(r409.json().error));
+      check("(R8) release route: 200 + {released:true} when it releases a held session", r200.statusCode === 200 && r200.json().released === true && calls.includes("mgrHeld"));
+      const rSoft = await rel("mgrStill");
+      const rForce = await app.inject({ method: "POST", url: "/api/sessions/mgrStill/modal-hold/release", payload: { force: true } });
+      check("(R8) soft refusal: 409 {stillOnScreen:true} when the screen still shows the prompt, force not passed to the pty", rSoft.statusCode === 409 && rSoft.json().stillOnScreen === true && forces[forces.length - 2] === false);
+      check("(R8) force:true in the body overrides it (200, force:true reaches the pty)", rForce.statusCode === 200 && rForce.json().released === true && forces[forces.length - 1] === true);
     } finally {
       await app.close();
     }

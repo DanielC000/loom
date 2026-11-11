@@ -7140,6 +7140,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // bypasses it entirely — a known, separately-tracked gap, card b4b9b707 — and Companion inbound is
     // irrelevant here, refused just above). Bounded at the write site so the stored/returned excerpt is
     // never the raw unbounded text; NEVER logged anywhere (see Db.recordPendingOwnerMessage's own doc).
+    // Card 20ff76de: a composer entry refused because the session is held on an on-screen modal never reaches
+    // the session, so it must not open an "owner message left without a disposition" episode either.
+    const heldRefusal = deps.pty.modalHoldRefusal?.(id) ?? null;
+    if (heldRefusal) return reply.code(409).send({ error: heldRefusal });
     if (role === "manager" || role === "platform") {
       const trimmed = text.trim();
       const excerpt = trimmed.length > PENDING_OWNER_MSG_EXCERPT_MAX_CHARS
@@ -7166,8 +7170,24 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // this route already refused role:"assistant" above before ever reaching enqueueStdin.
     const enq = deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent", undefined, text, undefined, HUMAN_COMPOSER_SENDER_ID);
     // @decision 710a34fa — PtyHost.enqueueStdin refuses a host shell id; a clear 409, not a silent 200.
+    // Card 20ff76de: a session held on an unrecognized on-screen modal refuses composer entries (readable reason).
+    if (enq.reason === "modal-held") return reply.code(409).send({ error: enq.message ?? "session is held on an unrecognized on-screen prompt" });
     if (enq.reason === "shell-terminal") return reply.code(409).send({ error: "host shell terminals are not sessions; type into them from the Terminals page" });
     return reply.send(enq);
+  });
+  // Card 20ff76de: the HUMAN release of a session held on an unrecognized on-screen prompt. HUMAN/REST only
+  // (loopback; deliberately NOT in the remote Tier-1 list, NEVER an agent MCP tool): the human has resolved the
+  // prompt themselves. Drops the detector's frozen candidate, ends the hold, requeues the parked turn and drains;
+  // writes no Enter. A UserPromptSubmit is the only other way out. 404 unknown/not live; 409 nothing to release.
+  app.post("/api/sessions/:id/modal-hold/release", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    const force = (req.body as { force?: boolean } | undefined)?.force === true;
+    const r = deps.pty.releaseModalHoldByHuman(id, { force });
+    // SOFT refusal: the screen still shows a modal footer. Overridable (`force:true`) because the dismissal evidence is synthetic.
+    if (r.stillOnScreen) return reply.code(409).send({ error: "the prompt still seems to be on screen; resume anyway only if you have resolved it", stillOnScreen: true });
+    if (!r.released) return reply.code(409).send({ error: "this session is not held on an on-screen prompt" });
+    return reply.send(r);
   });
   // One-click graceful wrap-up (card f55bd338). Injects ONE wrap-up turn that tells the session to run
   // the /loom-session-end skill (log progress to the board, leave it resumable) and then call the `end_me`

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { errorText } from "../lib/loopbackCredential";
 import { Button, Select, StatusPill, Panel, SectionLabel, Chip } from "./ui";
 import { color, font, radius, fs } from "../theme";
 import { useSpeechRecognition, type SpeechRecognitionApi } from "../lib/useSpeechRecognition";
@@ -66,7 +67,8 @@ export function Composer({ sessionId }: { sessionId: string }) {
       else setStatus("session not live");
       qc.invalidateQueries({ queryKey: ["queue", sessionId] });
     },
-    onError: () => setStatus("failed"),
+    // A 409 carries the daemon's readable reason (e.g. a session held on an on-screen prompt); show it, keep the draft.
+    onError: (e) => setStatus(errorText(e) || "failed"),
   });
   const submit = () => { if (text.trim()) send.mutate(text); };
   const onComposeKey = (e: React.KeyboardEvent) => {

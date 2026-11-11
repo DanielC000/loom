@@ -59,6 +59,7 @@ import { CODEX_BINARY_NAME, hashConfigBefore, diffConfigAfterSpawn, pollConfigDi
 import { isTrustDialogPrompt, trustDialogAnswer, scanCodexBusy, isCodexReadyMarkerPresent, isCodexModelLoaded, mcpServersToCodexArgs, unsupportedCodexMcpServers, buildCodexResumeArgs, buildCodexModelArgs, buildCodexProviderArgs, codexTrustDialogLock, codexAsciiFold, CODEX_UPDATE_CHECK_OVERRIDE_ARGS, CODEX_PLUGIN_SYNC_OVERRIDE_ARGS, describeCodexScreenTail, MCP_TOKEN_ENV_VAR } from "./codex-host.js";
 import { describeRolloutCandidatesForDiagnostic, findConversationIdForSpawn, snapshotExistingConversationIdsForSpawn, resolveTranscriptFile as resolveCodexRolloutFile } from "./codex-transcript.js";
 import { restoreArchivedCodexRollout } from "./codex-rollout-archive.js";
+import { MODAL_RESOLVE_STEPS } from "./modal-hold-text.js";
 
 /** @decision 702f2197 — the ONLY server ids passed as `mcpServersToCodexArgs`'s `autoApproveServerIds` at
  *  `createCodexPty`'s call site: Loom's own first-party, daemon-local, role-gated surfaces. Never widen
@@ -1483,6 +1484,62 @@ export function detectNewestBlockingDialogSignature(flatCollapsed: string): stri
   return null;
 }
 
+/** @decision 20ff76de — raw-output tail the mid-session modal check reads; never the cumulative boot scans. */
+export const MODAL_TAIL_MAX_CHARS = 3000;
+
+/**
+ * Mid-session unknown-modal check (PURE): raw tail in, signature NAME (never screen text) or null out.
+ * @decision 20ff76de — evaluate only on an unconfirmed delivery or during a hold; never answer a modal.
+ */
+export function detectMidSessionModal(rawTail: string, opts?: { echoText?: string | null }): string | null {
+  let raw = rawTail.slice(-MODAL_TAIL_MAX_CHARS);
+  // CURRENT frame only: drop everything before the last full-screen erase (cursor-home alone is not an erase).
+  let cut = -1;
+  for (const m of raw.matchAll(MODAL_FRAME_RESET_RE)) cut = (m.index ?? 0) + m[0].length;
+  if (cut >= 0) raw = raw.slice(cut);
+  let flat = collapseBoot(raw);
+  // Never match text Loom itself typed: the session's own echoed last prompt is removed first.
+  const echo = opts?.echoText ? collapseBoot(opts.echoText) : "";
+  if (echo.length >= MODAL_ECHO_MIN_CHARS) flat = flat.split(echo).join("");
+  const known = detectNewestBlockingDialogSignature(flat);
+  const escIdx = flat.search(/esctocancel(?![\s\S]*esctocancel)/i);
+  const enter = [...flat.matchAll(/enterto(?:confirm|select|continue|accept|choose)/gi)].at(-1);
+  const hasFooter = escIdx >= 0 && !!enter;
+  const footerEnd = hasFooter ? Math.max(escIdx + "esctocancel".length, (enter!.index ?? 0) + enter![0].length) : -1;
+  // STALE / QUOTED: a footer followed by the redrawn composer box (a long border run then the ❯ prompt) is
+  // no longer the live frame — it was dismissed, or it is text inside an agent reply. Status-line repaints
+  // after a LIVE modal (timers, spinner) are cursor-addressed text and never draw that box.
+  // Measured against a real captured modal: any "trailing text" length cap decays as those repaints accrue.
+  if (hasFooter && MODAL_COMPOSER_BOX_RE.test(flat.slice(footerEnd))) return null;
+  if (known !== null && known !== "enter-esc-footer") return known;
+  return hasFooter ? "unknown-modal" : null;
+}
+/** @decision 20ff76de — how long a mid-session hold lasts before the ONE owner escalation (never a timeout into the Enter ladder). */
+export const MODAL_HOLD_ESCALATE_MS = Number(process.env.LOOM_MODAL_HOLD_ESCALATE_MS) || 180_000;
+/** @decision 20ff76de — dismissal evidence must stand this long with no modal footer re-appearing before a candidate
+ *  is dropped; one chunk is never enough (an erase-led redraw splits across chunks). ~5x the ~300ms redraw gap;
+ *  env-overridable for tests. */
+export const MODAL_DISMISS_SETTLE_MS = Number(process.env.LOOM_MODAL_DISMISS_SETTLE_MS) || 1500;
+const MODAL_HOLD_EXEMPT_TAGS: ReadonlySet<string> = new Set(["stop-ctrl-c", "stop-escalate-ctrl-c", "repaint-ctrl-l"]);
+export const MODAL_HOLD_REFUSAL = `session is held on an unrecognized on-screen prompt; ${MODAL_RESOLVE_STEPS}`;
+/** A redrawn composer box: a long border run directly followed by the ❯ prompt (collapsed text). */
+const MODAL_COMPOSER_BOX_RE = /[─━]{20,}❯/;
+/** Full-screen ERASE only (cursor-home alone is not an erase). An erase is NOT dismissal evidence by itself:
+ *  the TUI erases and redraws a still-up modal (viewer Ctrl-L repaint). */
+const MODAL_FRAME_RESET_RE = /\x1b\[[23]J/g;
+/** Positive dismissal evidence in the output since a snapshot: a composer box redrawn AFTER the last modal
+ *  footer (or with no footer at all). A box redrawn BEFORE a footer (erase, box, modal) means still up. */
+function modalDismissedBy(afterCollapsed: string): boolean {
+  const box = [...afterCollapsed.matchAll(/[─━]{20,}❯/g)].at(-1);
+  if (!box) return false;
+  return afterCollapsed.search(/esctocancel(?![\s\S]*esctocancel)/i) < (box.index ?? 0);
+}
+const MODAL_ECHO_MIN_CHARS = 16;
+/** Raw chars of rolling window kept to sight a footer split across chunks while a candidate is live (longest footer + ANSI slack). */
+const MODAL_FOOTER_WINDOW_CHARS = 1200;
+/** Chars carried into the fresh tail when a candidate is dropped, so the split tolerance across a drop/UPS is THIS (400), not the window. */
+const MODAL_CARRY_CHARS = 400;
+
 /**
  * Which option the resume-summary gate's ❯ cursor currently sits on — "1"/"2"/"3", or `null` if
  * unreadable (the frame hasn't painted the cursor yet, or the gate isn't on screen). PURE + exported
@@ -2902,7 +2959,7 @@ export type QueuedMessage = { id: string; text: string; source: QueueSource; onD
  * member here; every `kind:"warning"` entry is either sanitized or logged, never dropped on shape alone.
  * A caller that only checked `delivered:false` could conflate "dropped" with "queued".
  */
-export type EnqueueDeliveryReason = "session-dead" | "held" | "shell-terminal";
+export type EnqueueDeliveryReason = "session-dead" | "held" | "shell-terminal" | "modal-held";
 /**
  * `enqueueStdin`'s full return shape. `delivered` NEVER changes meaning — callers and tests read it
  * as-is (delivered now vs not-yet).
@@ -2957,6 +3014,8 @@ export type EnqueueResult = {
   delivered: boolean;
   position?: number;
   reason?: EnqueueDeliveryReason;
+  /** Human-readable text for `reason:"modal-held"` (card 20ff76de); absent otherwise. */
+  message?: string;
   queued?: boolean;
   landsAt?: "next-turn-boundary";
   busyForMs?: number;
@@ -3669,6 +3728,24 @@ interface Live {
   // One-shot; armed in spawn() (claude path only — never for a shell/canned entry) for an unattended-role
   // session, cleared the instant SessionStart is observed or the pty exits. null once cleared/fired.
   dialogStuckTimer: NodeJS.Timeout | null;
+  // Card 20ff76de — MID-SESSION unknown-modal detector (optional so no Live literal needs touching).
+  // `modalTail`: bounded raw tail of recent output (MODAL_TAIL_MAX_CHARS), fed only for
+  // BOOT_DIALOG_DETECTOR_ROLES; read ONLY by `detectMidSessionModal`, and only when a delivery failed to
+  // confirm (engage) or while a hold is active (release). Never the cumulative boot scans.
+  // `midSessionModal`: non-null while the hold is engaged (see `isBlockedOnUnresolvedBootDialog`);
+  // `parkedGen`: the unconfirmed submit generation whose retry chain was parked by the engage, so the
+  // release can resume it with a single Enter-only attempt.
+  modalTail?: string;
+  // `modalCandidate`: a FROZEN snapshot of the tail taken the moment a chunk completed a modal footer, plus
+  // the output since. A sitting modal's status repaints would push it out of a sliding tail within seconds,
+  // so engage/release read this instead; only positive dismissal evidence (composer box redrawn / full-screen
+  // erase) clears it.
+  modalCandidate?: { tail: string; signature: string; after: string; frameReset: boolean; shown: boolean; recent: string; dismissSince: number | null; settleTimer: NodeJS.Timeout | null } | null;
+  // Generation whose BODY paste the chokepoint refused (nothing of it ever reached the pty): its release requeues it as a no-write generation.
+  modalBodyRefusedGen?: number | null;
+  // Generation whose Enter chain a modal hold parked: that chain stays dead after ANY release (the release requeues the delivery instead).
+  modalParkedChainGen?: number | null;
+  midSessionModal?: { signature: string; since: number; parkedGen: number | null; parkedAttempt: number; escalateTimer: NodeJS.Timeout | null } | null;
   // Card 01160ae3 (Code Review round 2): set unconditionally at the top of deliverHook for ANY hook
   // event, never scoped to SessionStart alone — proves the engine reached live hook delivery even on the
   // rare path where SessionStart itself was missed (the READY_FALLBACK case). Checked alongside
@@ -4294,7 +4371,7 @@ export interface PtyHostEvents {
    *  ceiling (never retried; a late SessionStart still resolves normally). Fires on the timeout whether or
    *  not a signature matched — `signatureName` null means nothing recognized was in the scan buffer, not
    *  that the session is fine. Never carries screen content — signature NAME only. */
-  onClaudeBootDialogStuck?(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null }): void;
+  onClaudeBootDialogStuck?(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null; phase?: "boot" | "mid-session"; escalation?: boolean }): void;
   /** Card b1da256d — the RESOLVE half of the pair above: fired from `deliverHook` the first time
    *  `Live.anyHookObserved` flips false→true for THIS Live incarnation (see that flip site's own doc) —
    *  never scoped to the `SessionStart` hook alone, so a non-SessionStart first hook under the
@@ -6805,6 +6882,7 @@ export class PtyHost {
     // dialog-stuck timer also re-looks-up its Live by sessionId at fire time, so a stale outgoing handle
     // left running would check the NEW (resumed) Live instead of a dead one.
     if (outgoing?.dialogStuckTimer) clearTimeout(outgoing.dialogStuckTimer);
+    if (outgoing) this.clearMidSessionModal(outgoing); // card 20ff76de
     // Card 019d2e7a — the entry whose viewers `adoptSubscribers` (below, after the map write) moves into
     // the successor. Captured HERE, before the overwrite, and across BOTH live maps.
     const previousLive = this.findAnyLive(opts.sessionId);
@@ -6976,6 +7054,12 @@ export class PtyHost {
       // MCP-prompt branch below never clears this buffer at detection time (see its own decision-anchored
       // comment just below), so the two blocks here never interact within one callback invocation.
       if (live.dialogStuckTimer) live.dialogStuckScan = (live.dialogStuckScan + d).slice(-8192);
+      // Card 20ff76de: bounded recent-output tail for the mid-session modal check (a slice only; the
+      // check itself runs solely on an unconfirmed delivery or while a hold is active).
+      if (live.role && (BOOT_DIALOG_DETECTOR_ROLES as readonly string[]).includes(live.role)) {
+        live.modalTail = ((live.modalTail ?? "") + d).slice(-MODAL_TAIL_MAX_CHARS);
+        this.trackModalCandidate(opts.sessionId, live, d);
+      }
       // A per-project "N new MCP servers found — enable?" prompt (e.g. docker/sentry, inherited from
       // ~/.mcp.json up-tree) can block the unattended boot BEFORE SessionStart. The PRIMARY fix now
       // pre-decides those servers in ~/.claude.json (ensureTrusted → disabledMcpjsonServers) so the
@@ -7029,6 +7113,7 @@ export class PtyHost {
       // can never be "stuck" (nothing left to notice), and this closes the died-before-SessionStart path
       // that the SessionStart handler's own clear never reaches.
       if (live.dialogStuckTimer) { clearTimeout(live.dialogStuckTimer); live.dialogStuckTimer = null; }
+      this.clearMidSessionModal(live); // card 20ff76de — a dead session has no hold and no pending escalation
       // Card f9b1ea00 — Code Review MAJOR (confirmed, board card f9b1ea00): the SAME belt-and-suspenders
       // clear as `readyFallbackTimer` just above, for `checkPromptMismatchUnresolved`'s own pending timers
       // (see `Live.pendingMismatchUnresolvedTimers`' own doc). `spawn()`'s own clear (mirroring
@@ -9583,6 +9668,14 @@ export class PtyHost {
     }
     // eslint-disable-next-line no-console
     console.log(`[hook] ${sessionId} ${hook.hook_event_name ?? "?"} session_id=${hook.session_id ?? "-"}`);
+    // @decision 20ff76de — ONLY a UserPromptSubmit proves no modal has focus (the engine accepted a new prompt).
+    // Stop/PreToolUse/PostToolUse/Notification neither release the hold nor drop the candidate: the offer fires at
+    // the END of a turn, so a mid-turn hook proves nothing.
+    // The hook can land AFTER the next modal frame was painted (hook latency): never wipe a frame already received.
+    if (hook.hook_event_name === "UserPromptSubmit" && !this.modalFrameStillShown(live)) {
+      this.dropModalCandidate(live, "frame");
+      if (live.midSessionModal) this.releaseMidSessionModal(sessionId, live, "hook", "UserPromptSubmit");
+    }
     switch (hook.hook_event_name) {
       case "PreToolUse": {
         // Card cd0c7fee: record-only — never blocks or denies anything, mirrors the vault-lint
@@ -11209,6 +11302,15 @@ export class PtyHost {
     // @decision 710a34fa — a host shell takes ONLY raw writeStdin over the loopback /ws/term; the programmatic
     // turn path (bracketed paste + Enter) refuses it structurally, whatever route or tier reached here.
     if (live.kind === "shell") return { delivered: false, reason: "shell-terminal", queued: false, deliveryState: "dropped" };
+    // Card 20ff76de: a HUMAN composer entry (the REST composer route / wrap-up) means the human took over —
+    // release the mid-session modal hold BEFORE the normal path runs; no Enter is written by the release.
+    // Card 20ff76de: a composer entry is NOT proof the modal was resolved (the composer is not the terminal):
+    // while held it is REFUSED with the readable reason (shown by the composer UI), never queued silently and
+    // never a release. Only raw terminal input (writeStdin) releases.
+    // Every enqueue on a blocked session engages the episode (hold + escalation + midSessionModalSince): a candidate
+    // is an episode as soon as anything arrives. Only a human composer entry is refused outright (the 409 keeps the draft).
+    const modalBlocked = this.modalBlockedEngaging(sessionId, live);
+    if (source === "human" && modalBlocked) return { delivered: false, reason: "modal-held", message: MODAL_HOLD_REFUSAL, queued: false, deliveryState: "dropped" };
     // @decision 2400d0bc — resolved HERE (not above) so a fresh mint reads `live`'s own counter; an
     // explicit override (resumeAfterRateLimit's replay) is threaded through unchanged instead.
     // @decision 270b963c — `!== undefined`, never `??`: an explicit `null` override (requeueQueuedMessage's
@@ -12310,6 +12412,9 @@ export class PtyHost {
    * just silently discard it.
    */
   private healIfStuck(live: Live, sessionId: string): void {
+    // @decision 20ff76de — a held modal owns the stranded turn (release requeues it); healing here would bump the
+    // generation and clear busy under the parked chain.
+    if (live.midSessionModal) return;
     const now = Date.now();
     const staleMs = live.firstTurnStarted ? this.busyStaleMs : FIRST_TURN_STALE_MS;
     if (live.busy && live.busySince != null
@@ -12387,9 +12492,223 @@ export class PtyHost {
    * carve-out: there is no reliable live-attention signal, and the hold only ever costs bounded latency.
    */
   private isBlockedOnUnresolvedBootDialog(live: Live): boolean {
+    // Card 20ff76de: a mid-session modal hold (engaged by an unconfirmed delivery) holds the same three
+    // write paths; released by `releaseMidSessionModalIfGone` / a post-hold hook.
+    if (this.modalWriteBlocked(live)) return true;
     return !this.isPastBoot(live)
       && !!live.role && (BOOT_DIALOG_DETECTOR_ROLES as readonly string[]).includes(live.role)
       && detectBlockingDialogSignature(collapseBoot(live.dialogStuckScan)) !== null;
+  }
+
+  /**
+   * @decision 20ff76de — engage the mid-session modal hold when a delivery went unconfirmed and the
+   * CURRENT output tail shows a modal. Returns true when engaged (caller parks its retry chain). Never
+   * writes to the pty: no Enter, no Esc. Durable event + owner alert ride the existing boot-dialog pair.
+   */
+  private engageMidSessionModalHold(sessionId: string, live: Live, parkedGen: number | null, parkedAttempt = 1): boolean {
+    if (live.midSessionModal) return true;
+    if (!live.role || !(BOOT_DIALOG_DETECTOR_ROLES as readonly string[]).includes(live.role)) return false;
+    // Pre-SessionStart the boot detector (dialogStuckScan) owns this; never double-handle.
+    if (!this.isPastBoot(live)) return false;
+    const signature = live.modalCandidate?.signature ?? null; // the frozen snapshot only: a cleared one never re-detects off the stale tail
+    if (signature === null) return false;
+    const escalateTimer = setTimeout(() => this.escalateMidSessionModal(sessionId, live), MODAL_HOLD_ESCALATE_MS);
+    live.midSessionModal = { signature, since: Date.now(), parkedGen, parkedAttempt, escalateTimer };
+    if (parkedGen !== null) live.modalParkedChainGen = parkedGen;
+    // eslint-disable-next-line no-console
+    console.error(`[claude-modal-hold] ${sessionId} unconfirmed delivery with a modal on screen (signature=${signature}, role=${live.role}) — holding all Loom writes; NOT answering it`);
+    try {
+      this.events.onClaudeBootDialogStuck?.(sessionId, { timeoutMs: 0, signatureName: signature, role: live.role, phase: "mid-session" });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[claude-modal-hold] ${sessionId} onClaudeBootDialogStuck handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
+    return true;
+  }
+
+  /** @decision 20ff76de — ONCE per episode, MODAL_HOLD_ESCALATE_MS after engage: ask for the owner-visible
+   *  alert. Never times out into the Enter ladder (an Enter on an unknown modal is an answer). */
+  private escalateMidSessionModal(sessionId: string, live: Live): void {
+    const held = live.midSessionModal;
+    if (!held || this.live.get(sessionId) !== live || !live.alive) return;
+    held.escalateTimer = null;
+    try {
+      this.events.onClaudeBootDialogStuck?.(sessionId, {
+        timeoutMs: Date.now() - held.since, signatureName: held.signature, role: live.role ?? null, phase: "mid-session", escalation: true,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[claude-modal-hold] ${sessionId} escalation handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
+  /** @decision 20ff76de — keeps `modalCandidate` current: created only by a chunk containing "cancel" (the
+   *  footer's last word) whose tail matches; cleared by a full-screen erase or a redrawn composer box. */
+  private trackModalCandidate(sessionId: string, live: Live, d: string): void {
+    const c = live.modalCandidate;
+    if (c) {
+      // An erase restarts the post-snapshot evidence from the bytes that FOLLOW it (same chunk or later);
+      // it never clears the candidate on its own. Dismissal evidence only STARTS a settle window: the
+      // candidate is dropped by the timer, and only if no footer re-appeared (evidence lost) meanwhile.
+      let cut = -1;
+      for (const m of d.matchAll(MODAL_FRAME_RESET_RE)) cut = (m.index ?? 0) + m[0].length;
+      let chunk = d;
+      if (cut >= 0) { c.frameReset = true; c.shown = false; c.recent = ""; chunk = d.slice(cut); } // a frame reset: `after` is now the whole current frame, `tail` is stale
+      c.after = (cut >= 0 ? chunk : c.after + d).slice(-MODAL_TAIL_MAX_CHARS);
+      // TRACKED "still shown" state (never a re-scan): a footer sighting since the last reset/dismissal evidence. `recent` is
+      // a small rolling raw window so a footer split across chunks is still sighted; status repaints change nothing here.
+      // Test the footer over (previous window + the WHOLE post-erase chunk) BEFORE trimming: a footer followed by >200 bytes
+      // in the same chunk (an erase-led redraw plus coalesced repaints) must still be sighted. A footer only BEFORE an erase
+      // in this chunk is excluded (`chunk` starts after the erase); one AFTER it counts.
+      const win = c.recent + chunk;
+      if (/esctocancel/i.test(collapseBoot(win))) { c.shown = true; c.recent = ""; }
+      else c.recent = win.slice(-MODAL_FOOTER_WINDOW_CHARS);
+      if (c.shown && modalDismissedBy(collapseBoot(c.after))) c.shown = false; // positive dismissal evidence: a composer box after the last footer
+      if (modalDismissedBy(collapseBoot(c.after))) {
+        if (c.dismissSince === null) {
+          c.dismissSince = Date.now();
+          c.settleTimer = setTimeout(() => this.settleModalDismissal(sessionId, live, c), MODAL_DISMISS_SETTLE_MS);
+          c.settleTimer.unref?.();
+        }
+      } else if (c.dismissSince !== null) {
+        if (c.settleTimer) clearTimeout(c.settleTimer);
+        c.dismissSince = null; c.settleTimer = null;
+      }
+      return; // a candidate that exists is never replaced by a new snapshot
+    }
+    // The footer's last word may be split across chunks ("can|cel"): look at the tail END, not the chunk.
+    if (!(live.modalTail ?? "").slice(-(d.length + 6)).includes("cancel")) return;
+    const signature = detectMidSessionModal(live.modalTail ?? "", { echoText: live.lastPrompt });
+    if (signature === null) return;
+    live.modalCandidate = { tail: live.modalTail ?? "", signature, after: "", frameReset: false, shown: true, recent: "", dismissSince: null, settleTimer: null };
+    // A candidate is an episode: with anything pending or an unconfirmed turn outstanding it engages at once
+    // (otherwise it engages on the first blocked attempt, see modalBlockedEngaging).
+    if (this.modalWriteBlocked(live) && (live.pending.length > 0 || (live.busy && this.parkedGenNow(live) !== null))) this.modalBlockedEngaging(sessionId, live);
+  }
+
+  /** @decision 20ff76de — "still shown" is TRACKED STATE (`modalCandidate.shown`: a footer sighted since the last frame
+   *  reset or composer-box dismissal evidence), never a re-scan of a sliding window: ~23 status repaints would evict the
+   *  footer. A hit makes a UserPromptSubmit a no-op and soft-refuses Resume. */
+  private modalFrameStillShown(live: Live): boolean {
+    return live.modalCandidate?.shown === true;
+  }
+
+  /** The unconfirmed submit generation a hold would park, or null when no submit is outstanding. */
+  private parkedGenNow(live: Live): number | null {
+    return live.submitGeneration > 0 && !live.enterConfirmed ? live.submitGeneration : null;
+  }
+
+  /** @decision 20ff76de — the ONE predicate behind every surface (chokepoint, drain gate, composer 409, interrupt/
+   *  flush/redirect refusals): true when a Loom write must not happen; engages the episode (hold + escalation +
+   *  `midSessionModalSince`) on the first blocked attempt of a candidate-only session. */
+  private modalBlockedEngaging(sessionId: string, live: Live): boolean {
+    if (!this.modalWriteBlocked(live)) return false;
+    if (!live.midSessionModal) this.engageMidSessionModalHold(sessionId, live, this.parkedGenNow(live));
+    return true;
+  }
+
+  /** @decision 20ff76de — the human release: the ONLY non-hook way out of an episode (human-only loopback REST route,
+   *  never an agent tool). Drops the candidate, ends the hold, requeues what it parked and drains. */
+  releaseModalHoldByHuman(sessionId: string, opts?: { force?: boolean }): { released: boolean; held: boolean; candidate: boolean; stillOnScreen?: boolean } {
+    const live = this.live.get(sessionId);
+    if (!live) return { released: false, held: false, candidate: false };
+    const held = !!live.midSessionModal;
+    const candidate = !!live.modalCandidate;
+    // SOFT refusal (the dismissal evidence is synthetic, so overridable): the current frame still shows a modal footer.
+    if (!opts?.force && (held || candidate) && this.modalFrameStillShown(live)) return { released: false, held, candidate, stillOnScreen: true };
+    this.dropModalCandidate(live, opts?.force ? "wipe" : "after-footer"); // only a FORCE release wipes (a stale footer must not resurrect a hold)
+    if (held) this.releaseMidSessionModal(sessionId, live, "human", "explicit human release");
+    else if (candidate) this.drainPending(sessionId);
+    return { released: held || candidate, held, candidate };
+  }
+
+  /** @decision 20ff76de — the settle timer: drops a candidate that blocked nothing (never an engaged hold) only if the
+   *  dismissal evidence still stands after MODAL_DISMISS_SETTLE_MS with no modal footer re-appearing. */
+  private settleModalDismissal(sessionId: string, live: Live, c: NonNullable<Live["modalCandidate"]>): void {
+    if (live.modalCandidate !== c || this.live.get(sessionId) !== live || !live.alive) return;
+    c.settleTimer = null;
+    // Once an episode is engaged (something was blocked) the screen alone never releases it: only a
+    // UserPromptSubmit or the human does. The settle only clears a candidate that blocked NOTHING (a quoted footer).
+    if (live.midSessionModal) { c.dismissSince = null; return; }
+    if (c.dismissSince === null || !modalDismissedBy(collapseBoot(c.after))) { c.dismissSince = null; return; }
+    this.dropModalCandidate(live, "after-footer");
+    this.drainPending(sessionId);
+  }
+
+  /** Drops the frozen candidate + its settle timer and seeds the fresh tail. "frame" (a UPS-driven drop) carries the last
+   *  MODAL_CARRY_CHARS of the frame so a footer split across the hook still completes; "after-footer" (settle, non-force human
+   *  release) carries only the bytes AFTER the last sighted footer/dismissal (`recent`: they hold no complete stale footer but
+   *  can complete a NEW half-painted one); "wipe" (a FORCE release) carries nothing, so a stale footer cannot resurrect a hold. */
+  private dropModalCandidate(live: Live, mode: "wipe" | "frame" | "after-footer" = "wipe"): void {
+    if (live.modalCandidate?.settleTimer) clearTimeout(live.modalCandidate.settleTimer);
+    const c = live.modalCandidate;
+    const carry = mode === "wipe" ? "" : !c ? (live.modalTail ?? "") : mode === "frame" ? (c.frameReset ? c.after : c.tail + c.after) : c.recent;
+    live.modalCandidate = null;
+    live.modalTail = carry.slice(-MODAL_CARRY_CHARS);
+  }
+
+  /** @decision 20ff76de — the write-chokepoint predicate: a past-boot detector-role session with a hold OR a
+   *  frozen candidate takes NO Loom-originated write (a candidate is a modal Loom currently detects). */
+  private modalWriteBlocked(live: Live): boolean {
+    if (live.midSessionModal) return true;
+    return !!live.modalCandidate && !!live.role && (BOOT_DIALOG_DETECTOR_ROLES as readonly string[]).includes(live.role) && this.isPastBoot(live);
+  }
+
+  /** Epoch-ms the live session has been held on a mid-session modal; null = not held / not live. */
+  getMidSessionModalSince(sessionId: string): number | null {
+    return this.live.get(sessionId)?.midSessionModal?.since ?? null;
+  }
+
+  /** Manager-readable refusal for a Loom-originated interrupt/flush on a held pane; null = not held. */
+  modalHoldRefusal(sessionId: string): string | null {
+    const live = this.live.get(sessionId);
+    return live && this.modalBlockedEngaging(sessionId, live) ? MODAL_HOLD_REFUSAL : null;
+  }
+
+  /**
+   * @decision 20ff76de — exactly two release kinds, neither writes an Enter: "hook" (a UserPromptSubmit: the engine
+   * accepted a prompt) clears only; "human" (the explicit release route) requeues the parked turn and drains.
+   */
+  private releaseMidSessionModal(sessionId: string, live: Live, kind: "hook" | "human", why: string): void {
+    const held = live.midSessionModal;
+    if (!held) return;
+    this.clearMidSessionModal(live);
+    // eslint-disable-next-line no-console
+    console.log(`[claude-modal-hold] ${sessionId} released (${kind}: ${why}) after ${Date.now() - held.since}ms`);
+    try {
+      this.events.onClaudeBootDialogResolved?.(sessionId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[claude-modal-hold] ${sessionId} onClaudeBootDialogResolved handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
+    const parkedStillOutstanding = held.parkedGen !== null && live.submitGeneration === held.parkedGen && !live.enterConfirmed;
+    const wroteNothingGen = parkedStillOutstanding && live.modalBodyRefusedGen === held.parkedGen;
+    if (kind === "hook") {
+      // A UserPromptSubmit is the engine accepting SOME prompt. A parked body that was never written (refused at the
+      // chokepoint) is not that prompt: requeue it as a no-write generation (no dirty mark, busy is the new turn's).
+      if (wroteNothingGen) { live.modalBodyRefusedGen = null; this.requeueGiveUpOrigin(sessionId, held.parkedGen!, true); }
+      return;
+    }
+    // "human": NO Enter is written by the release. The parked, still-unconfirmed generation goes back through the
+    // normal give-up requeue (resuming an Enter into a possibly still-up consent modal would answer it).
+    if (parkedStillOutstanding) {
+      // A generation whose body paste the chokepoint refused put nothing in the composer: no dirty mark, and it
+      // is a no-write generation for the requeue (never enrolled in the positional confirm queue).
+      const wroteNothing = live.modalBodyRefusedGen === held.parkedGen;
+      if (!wroteNothing) this.markGiveUpDirty(live, held.parkedGen!);
+      live.modalBodyRefusedGen = null;
+      this.setBusy(sessionId, false, `modal-hold-${kind}-release`);
+      this.requeueGiveUpOrigin(sessionId, held.parkedGen!, wroteNothing);
+    } else {
+      this.drainPending(sessionId);
+    }
+  }
+
+  /** Clears the hold + its escalation timer (no events, no writes). Safe to call when not held. */
+  private clearMidSessionModal(live: Live): void {
+    const held = live.midSessionModal;
+    if (held?.escalateTimer) clearTimeout(held.escalateTimer);
+    live.midSessionModal = null;
   }
 
   // @decision e29923e3 — a single Esc write, never a retry loop, never keyed on screen output or
@@ -12691,7 +13010,18 @@ export class PtyHost {
    */
   // OBSERVATION ONLY: this log is a passthrough — never change what's written, its outcome, or its
   // timing relative to a bare live.pty.write(data) call.
-  private ptyWrite(sessionId: string, live: Live, data: string, tag: string): void {
+  private ptyWrite(sessionId: string, live: Live, data: string, tag: string, human = false): void {
+    // @decision 20ff76de — THE chokepoint: while held on a mid-session modal, every LOOM-originated write
+    // is dropped here. Human keystrokes (`human`) and stop's Ctrl-C / Ctrl-L repaint are the only exceptions.
+    // A refused write on a candidate-only session (a modal Loom currently detects) ENGAGES the hold, parking
+    // the delivery that tried to write, so no path (drain/requeue/heal/retry/kickoff) can type into it.
+    if (!human && !MODAL_HOLD_EXEMPT_TAGS.has(tag) && this.modalWriteBlocked(live)) {
+      if (tag === "bracket-start") live.modalBodyRefusedGen = live.submitGeneration;
+      this.modalBlockedEngaging(sessionId, live);
+      // eslint-disable-next-line no-console
+      console.log(`[pty-write] ${sessionId} tag=${tag} DROPPED — session held on an unrecognized on-screen prompt`);
+      return;
+    }
     const seq = ++live.writeSeq;
     // eslint-disable-next-line no-console
     console.log(`[pty-write] ${sessionId} seq=${seq} tag=${tag} gen=${live.submitGeneration} len=${data.length} h=${fnv1a32(data)}`);
@@ -13110,7 +13440,7 @@ export class PtyHost {
   private sendEnterAndVerify(sessionId: string, attempt: number, gen: number, boundLive: Live): void {
     if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
     const live = boundLive;
-    if (!live.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
+    if (!live.alive || live.enterConfirmed || live.submitGeneration !== gen || live.modalParkedChainGen === gen) return; // 20ff76de: a parked chain is dead for good
     if (attempt > 1) {
       this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
       if (attempt === SUBMIT_MAX_ATTEMPTS) {
@@ -13134,7 +13464,7 @@ export class PtyHost {
   private awaitReassertSettle(sessionId: string, gen: number, reassertWrittenAt: number, polls: number, onDone: () => void, boundLive: Live): void {
     if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
     const live = boundLive;
-    if (!live.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
+    if (!live.alive || live.enterConfirmed || live.submitGeneration !== gen || live.modalParkedChainGen === gen) return;
     if (live.lastOutputAt > reassertWrittenAt || polls >= REASSERT_SETTLE_MAX_POLLS) { onDone(); return; }
     setTimeout(() => this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, polls + 1, onDone, live), REASSERT_SETTLE_POLL_MS);
   }
@@ -13238,7 +13568,7 @@ export class PtyHost {
   private fireEnterAndVerify(sessionId: string, attempt: number, gen: number, boundLive: Live): void {
     if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
     const live = boundLive;
-    if (!live.alive || live.enterConfirmed || live.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
+    if (!live.alive || live.enterConfirmed || live.submitGeneration !== gen || live.modalParkedChainGen === gen) return; // re-check: state may have changed during the settle wait
     this.ptyWrite(sessionId, live, ENTER, "enter");
     // Anchor for the give-up branch's liveness check below — captured for THIS attempt's own Enter write,
     // never an earlier one (each attempt gets its own closure). See the give-up branch's comment for why.
@@ -13271,7 +13601,10 @@ export class PtyHost {
     setTimeout(() => {
       if (this.live.get(sessionId) !== boundLive) return; // respawned — never act on a stale generation's chain
       const l = live;
-      if (!l.alive || l.enterConfirmed || l.submitGeneration !== gen) return; // confirmed / stale generation / dead — nothing more to do
+      if (!l.alive || l.enterConfirmed || l.submitGeneration !== gen || l.modalParkedChainGen === gen) return; // confirmed / stale generation / dead / parked on a modal — nothing more to do
+      // Card 20ff76de: unconfirmed + a modal on the CURRENT tail → park this chain (no retry Enter, no
+      // give-up requeue); the release path resumes it. Never answers the modal.
+      if (this.engageMidSessionModalHold(sessionId, l, gen, attempt)) return;
       if (attempt < SUBMIT_MAX_ATTEMPTS) {
         // eslint-disable-next-line no-console
         console.log(`[submit] ${sessionId} Enter attempt ${attempt} NOT confirmed within ${SUBMIT_VERIFY_TIMEOUT_MS}ms — retrying`);
@@ -13515,6 +13848,8 @@ export class PtyHost {
       if (this.liveCodex.get(sessionId)?.alive) return Promise.resolve({ ok: false, reason: "not-applicable-codex" });
       return Promise.resolve({ ok: false, reason: "session-dead" });
     }
+    // Card 20ff76de: a held pane refuses a Loom flush (its paste-reassert + Enter would answer the modal).
+    if (this.modalBlockedEngaging(sessionId, live)) return Promise.resolve({ ok: false, reason: MODAL_HOLD_REFUSAL });
     const stranded = !live.enterConfirmed && (live.busy || live.composerDirtyLen > 0);
     if (!stranded) return Promise.resolve({ ok: false, reason: "composer-empty" });
     // Card 29b3c396 (CR follow-up): captured BEFORE this call writes anything, so `recovered` below can
@@ -15130,7 +15465,10 @@ export class PtyHost {
     // here, so a subsequent write is strictly behind that Enter in BYTE ORDER. Card 2521bf51: byte order
     // is NOT state-transition order — it says nothing about whether claude has actually PROCESSED the
     // Enter and cleared its own composer by the time a later write lands. See the drain gate below.
-    this.writeChunked(sessionId, data);
+    // @decision 20ff76de — human raw bytes pass through a modal hold (exempt at the chokepoint) but NEVER release
+    // it: arrows, focus reports and mouse bytes are not evidence the modal was resolved. The human releases
+    // explicitly (`releaseModalHoldByHuman`) or a UserPromptSubmit does.
+    this.writeChunked(sessionId, data, undefined, true);
     if (live) {
       // Track the human's UNCOMMITTED raw-terminal draft (composer-dirty) so a programmatic turn never
       // lands on half-typed text. We NEVER touch the human's bytes — we only HOLD delivery while dirty.
@@ -15178,7 +15516,7 @@ export class PtyHost {
    * console host drain between them. Keystroke-sized writes go in a single chunk; `done` fires
    * after the last chunk (submit() uses it to send Enter only once the whole turn has landed).
    */
-  private writeChunked(sessionId: string, text: string, done?: () => void): void {
+  private writeChunked(sessionId: string, text: string, done?: () => void, human = false): void {
     const pinned = this.live.get(sessionId);
     // Card 9ed20572: `done` must fire on every exit path of the SAME Live (death/kill/empty) — a
     // skipped `done` here would leave the caller's own busy/cleanup bookkeeping stuck forever if the
@@ -15206,7 +15544,7 @@ export class PtyHost {
       if (this.live.get(sessionId) !== pinned) return; // respawned — stale chunks never reach the new pty
       if (!pinned.alive || pinned.killed) { finish(); return; }
       const end = surrogateSafeChunkEnd(text, i, PTY_WRITE_CHUNK_UNITS);
-      this.ptyWrite(sessionId, pinned, text.slice(i, end), "chunk");
+      this.ptyWrite(sessionId, pinned, text.slice(i, end), "chunk", human);
       i = end;
       if (i >= text.length) { finish(); return; }
       setTimeout(step, PTY_WRITE_CHUNK_DELAY_MS);
@@ -15359,6 +15697,12 @@ export class PtyHost {
     const liveCodexEntry = this.liveCodex.get(sessionId);
     if (liveCodexEntry) { this.interruptForRedirectCodex(sessionId, liveCodexEntry); return; }
     const live = this.live.get(sessionId);
+    if (live && this.modalBlockedEngaging(sessionId, live)) {
+      // Card 20ff76de: no generation bump, no Esc — the interrupt would answer the on-screen modal.
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} redirect: Esc NOT sent — ${MODAL_HOLD_REFUSAL}`);
+      return;
+    }
     if (!live?.alive || live.stopping || !live.ready || !live.busy) {
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} redirect: Esc NOT sent (nothing in flight to interrupt — alive=${!!live?.alive} stopping=${live?.stopping} ready=${live?.ready} busy=${live?.busy})`);

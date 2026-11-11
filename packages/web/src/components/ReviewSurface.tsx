@@ -41,8 +41,10 @@ export function ReviewSurface({ workerId }: { workerId: string }) {
     onError: (e) => setResult(`error — ${errorText(e)}`),
   });
   const requestChanges = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.sendInput(workerId, `[loom:review] Changes requested before merge:\n${note}`),
     onSuccess: (r) => { setResult(r.delivered ? "changes requested (sent to worker)" : "worker not live — couldn't send"); setNote(""); },
+    onError: (e) => setResult(`error — ${errorText(e)}`), // e.g. the worker is held on an on-screen prompt; the note is kept
   });
 
   // Parse + risk-rank once per diff payload. Files for the OVERVIEW are sorted risk-desc then by churn

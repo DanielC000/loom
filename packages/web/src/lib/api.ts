@@ -290,9 +290,17 @@ async function guardedFetch(url: string, init?: RequestInit): Promise<Response> 
 // (the guard covers all of them, not a config subset), so this is no longer a rare edge case. Shared
 // with `getErr`/`postErr`/`delErr`/`putErr`/`patch`'s own inline version of the same parse.
 async function errorMessageFrom(url: string, r: Response): Promise<string> {
+  return (await apiErrorFrom(url, r)).message;
+}
+/** An Error that keeps the server's structured JSON body, so a caller can key on a field (e.g. `stillOnScreen`) instead of prose. */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly body: Record<string, unknown> | null) { super(message); }
+}
+async function apiErrorFrom(url: string, r: Response): Promise<ApiError> {
   let msg = `${url} -> ${r.status}`;
-  try { const j = (await r.json()) as { error?: string }; if (j?.error) msg = j.error; } catch { /* non-JSON body */ }
-  return msg;
+  let body: Record<string, unknown> | null = null;
+  try { body = (await r.json()) as Record<string, unknown>; if (typeof body?.error === "string" && body.error) msg = body.error; } catch { /* non-JSON body */ }
+  return new ApiError(msg, r.status, body);
 }
 
 // The optional `signal` on `get`/`getOrNull`/`getErr` is react-query's per-query AbortSignal: it aborts the
@@ -335,7 +343,7 @@ async function post<T>(url: string, body?: unknown): Promise<T> {
     headers: body === undefined ? authHeaders() : { "content-type": "application/json", ...authHeaders() },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(await errorMessageFrom(url, r));
+  if (!r.ok) throw await apiErrorFrom(url, r);
   return r.json() as Promise<T>;
 }
 async function del<T>(url: string): Promise<T> {
@@ -707,6 +715,8 @@ export const api = {
   // Manual per-session rate-limit override + retry-now (HUMAN-only; mirrors stop — no agent MCP
   // surface). Clears the park + episode deadline, drops the global usage latch, and re-submits the
   // held turn if the session is live; returns the updated session (rateLimitedUntil now null).
+  // Human-only: resume a session held on an unrecognized on-screen prompt once the human resolved it (card 20ff76de).
+  releaseModalHold: (id: string, force = false) => post<{ released: boolean }>(`/api/sessions/${id}/modal-hold/release`, force ? { force: true } : undefined),
   clearSessionRateLimit: (id: string) => post<Session>(`/api/sessions/${id}/rate-limit/clear`),
   allSessions: (signal?: AbortSignal) => get<SessionListItem[]>("/api/sessions", signal),
 

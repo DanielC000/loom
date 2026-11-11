@@ -25,6 +25,7 @@ import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, Enqueue
 import type { PasteLengthLossCandidate } from "../orchestration/paste-tripwire.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, giveUpHoldExtraMs, withinKickoffConfirmWindow, kickoffConfirmWindowMs, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame, redactedExcerpt, PROMPT_MISMATCH_NOTICE_TAG, PROMPT_MISMATCH_UNRESOLVED_NOTICE_TAG, PROMPT_MISMATCH_UNMATCHED_NOTICE_TAG, READY_FALLBACK_ABSOLUTE_CEILING_MS, CODEX_BOOT_READY_TIMEOUT_MS } from "../pty/host.js";
 import { removeClaudeConfigEntryForWorktree } from "../pty/claude-config.js";
+import { MODAL_RESOLVE_STEPS } from "../pty/modal-hold-text.js";
 import { contextTelemetryFor } from "../pty/adapter.js";
 import { isConfirmedSubagent, type ToolAttributionState } from "../pty/tool-attribution.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -12517,6 +12518,7 @@ export class SessionService {
     const result = this.deliverRedirect(target, text, {
       supersedeQueue: false,
       headInsert: true,
+      refuseWhenModalHeld: false, // card 20ff76de — system path: never throws; the host's own guard still writes no Esc
       frame: (t) => `[${CONTEXT_EMERGENCY_REDIRECT_TAG}]\n${t}`,
       enqueueSender: "system",
       eventManagerId: sessionId,
@@ -12536,6 +12538,7 @@ export class SessionService {
     const result = this.deliverRedirect(target, text, {
       supersedeQueue: false,
       headInsert: true,
+      refuseWhenModalHeld: false, // card 20ff76de — system path: never throws; the host's own guard still writes no Esc
       frame: (t) => `[${WORKER_CONTEXT_INTERRUPT_TAG}]\n${t}`,
       enqueueSender: "system",
       eventManagerId: target.parentSessionId ?? "",
@@ -12565,11 +12568,18 @@ export class SessionService {
        * `pty.interruptForRedirect` primitive below, it just never touches whatever else was already queued.
        */
       supersedeQueue?: boolean;
+      /** Card 20ff76de: default true — a target HELD on an unrecognized on-screen modal refuses the redirect
+       *  (manager-readable reason) instead of enqueueing a turn whose interrupt Esc would answer it. */
+      refuseWhenModalHeld?: boolean;
       /** @decision dacc6d9e — threads to `enqueueDurableMessage`'s `headInsert`: places this redirect at
        *  the queue FRONT, not the FIFO tail. Default omitted/false — byte-identical for every caller. */
       headInsert?: boolean;
     },
   ): RedirectResult {
+    if (opts.refuseWhenModalHeld !== false) {
+      const heldReason = this.pty.modalHoldRefusal?.(target.id) ?? null; // optional call: hermetic pty stubs predate it
+      if (heldReason) throw new Error(heldReason);
+    }
     // (a) FLUSH + SUPERSEDE the target's queued direction before the authoritative redirect lands — SKIPPED
     // when `opts.supersedeQueue === false` (see that field's own doc for why).
     const flushed = opts.supersedeQueue === false ? [] : this.pty.flushPending(target.id);
@@ -13790,8 +13800,21 @@ export class SessionService {
    * regardless of liveness and redrives once the parent comes back), rather than silently dropping it the
    * way treating "unknown" the same as "live and stuck" previously did.
    */
-  handleClaudeBootDialogStuck(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null }): void {
+  handleClaudeBootDialogStuck(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null; phase?: "boot" | "mid-session"; escalation?: boolean }): void {
     const s = this.db.getSession(sessionId);
+    if (info.escalation) {
+      // @decision 20ff76de — the once-per-episode OWNER escalation of a still-held mid-session modal: files
+      // an owner-visible (parentNudged:false) event UNLESS this episode's own event already is. Never nudges.
+      const trail = this.db.listEventsForWorkerKinds(sessionId, ["claude_boot_dialog_stuck", "claude_boot_dialog_resolved"]);
+      const latest = trail[trail.length - 1];
+      if (latest?.kind === "claude_boot_dialog_stuck" && (latest.detail as { parentNudged?: boolean } | undefined)?.parentNudged === false) return;
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+        workerSessionId: sessionId, taskId: s?.taskId ?? null, kind: "claude_boot_dialog_stuck",
+        detail: { timeoutMs: info.timeoutMs, signatureName: info.signatureName, role: info.role, parentNudged: false, phase: "mid-session", escalated: true },
+      });
+      return;
+    }
     const sigLabel = info.signatureName ?? "none recognized";
     const parentLiveAndPreBoot = !!s?.parentSessionId && this.pty.isLiveAndPreBoot(s.parentSessionId);
     const parentNudged = !!s?.parentSessionId && !parentLiveAndPreBoot;
@@ -13807,6 +13830,7 @@ export class SessionService {
       kind: "claude_boot_dialog_stuck",
       detail: {
         timeoutMs: info.timeoutMs, signatureName: info.signatureName, role: info.role, parentNudged,
+        ...(info.phase === "mid-session" ? { phase: "mid-session" } : {}), // card 20ff76de
         ...(info.role === "manager" ? { leadNotified, ...(leadBoardTaskId ? { leadBoardTaskId } : {}) } : {}),
       },
     });
@@ -13814,7 +13838,7 @@ export class SessionService {
     // lib/attention.ts both derive the owner alert from THIS event via `parentNudged===false`. For a
     // manager this means BOTH the Lead nudge above AND the owner alert always fire, never an either/or.
     if (parentNudged) {
-      const senderMsg = `[loom:claude-boot-dialog-stuck] your ${info.role ?? "unattended"} session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} never reached SessionStart within ${info.timeoutMs}ms — possible blocking CLI dialog (${sigLabel}). It will not resolve on its own; check the session's live screen and, if it's genuinely stuck on a dialog, worker_stop + respawn.`;
+      const senderMsg = `[loom:claude-boot-dialog-stuck] your ${info.role ?? "unattended"} session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} ${info.phase === "mid-session" ? "has an UNCONFIRMED delivery with a modal prompt on screen (its Enter/queue writes are held; nothing was answered)" : `never reached SessionStart within ${info.timeoutMs}ms`} — possible blocking CLI dialog (${sigLabel}). ${info.phase === "mid-session" ? `You have no tool to resolve it: the OWNER must ${MODAL_RESOLVE_STEPS}; worker_stop + respawn is the fallback.` : "It will not resolve on its own; check the session's live screen and, if it's genuinely stuck on a dialog, worker_stop + respawn."}`;
       this.enqueueSystemNudge(s!.parentSessionId!, senderMsg, { kind: "warning", taskId: s?.taskId ?? null });
     }
   }
@@ -13841,6 +13865,7 @@ export class SessionService {
     taskTitle: string,
     taskBody: string,
     liveNudgeText: (leadBoardTaskId: string) => string,
+    phase?: "boot" | "mid-session", // card 20ff76de — reuse only a prior card of the SAME episode phase
   ): { leadNotified: boolean; leadBoardTaskId?: string } {
     const home = resolveLiveLeadHome(this.db);
     if (!home) return { leadNotified: false };
@@ -13857,7 +13882,8 @@ export class SessionService {
     // later check re-derived the FIRST episode's task rather than the most recently filed one. `findLast`
     // walks from the end, so this always resolves to the LATEST matching event.
     const priorWithTask = this.db.listEventsForWorker(sessionId).findLast(
-      (e) => e.kind === dedupEventKind && typeof (e.detail as Record<string, unknown> | undefined)?.leadBoardTaskId === "string",
+      (e) => e.kind === dedupEventKind && typeof (e.detail as Record<string, unknown> | undefined)?.leadBoardTaskId === "string"
+        && (phase === undefined || (((e.detail as Record<string, unknown>).phase as string | undefined) ?? "boot") === phase),
     );
     const priorTaskId = priorWithTask ? (priorWithTask.detail as Record<string, unknown>).leadBoardTaskId as string : undefined;
     const priorTask = priorTaskId ? this.db.getTask(priorTaskId) : undefined;
@@ -13901,11 +13927,20 @@ export class SessionService {
   private notifyLeadOfStuckManager(
     sessionId: string,
     s: Session | undefined,
-    info: { timeoutMs: number; signatureName: string | null },
+    info: { timeoutMs: number; signatureName: string | null; phase?: "boot" | "mid-session" },
     sigLabel: string,
   ): { leadNotified: boolean; leadBoardTaskId?: string } {
     const originProject = s?.projectId ? this.db.getProject(s.projectId) : undefined;
-    const body = [
+    const midSession = info.phase === "mid-session"; // card 20ff76de — never word a mid-session episode as a boot failure
+    const body = (midSession ? [
+      "**A project manager is HELD on an unrecognized on-screen prompt (mid-session — it booted fine).**",
+      "",
+      `- **Manager session:** \`${sessionId}\``,
+      `- **Origin project:** ${originProject?.name ?? s?.projectId ?? "unknown"} (\`${s?.projectId ?? "unknown"}\`)`,
+      `- **Signature:** ${sigLabel}`,
+      "",
+      "Loom paused every Enter/queue write to it and answered nothing (the prompt may be a consent prompt). The owner must " + MODAL_RESOLVE_STEPS + " (raw terminal input alone does not release the hold). Do NOT session_stop it unless the prompt cannot be resolved.",
+    ] : [
       "**A project manager never reached SessionStart — possibly stuck on a blocking CLI dialog.**",
       "",
       `- **Manager session:** \`${sessionId}\``,
@@ -13914,10 +13949,11 @@ export class SessionService {
       `- **Signature:** ${sigLabel}`,
       "",
       "It will not resolve on its own; check the session's live screen and, if it's genuinely stuck on a dialog, session_stop + respawn.",
-    ].join("\n");
+    ]).join("\n");
     return this.notifyLeadOfParentlessManagerIssue(
-      sessionId, "claude_boot_dialog_stuck", `[Manager boot stuck] ${sessionId.slice(0, 8)}`, body,
-      (leadBoardTaskId) => `[loom:claude-boot-dialog-stuck] manager session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} never reached SessionStart within ${info.timeoutMs}ms — possible blocking CLI dialog (${sigLabel}). Filed as Platform task ${leadBoardTaskId}. Check the session's live screen and, if genuinely stuck, session_stop + respawn.`,
+      sessionId, "claude_boot_dialog_stuck", midSession ? `[Manager held on prompt] ${sessionId.slice(0, 8)}` : `[Manager boot stuck] ${sessionId.slice(0, 8)}`, body,
+      (leadBoardTaskId) => `[loom:claude-boot-dialog-stuck] manager session ${sessionId}${s?.taskId ? ` (task ${s.taskId})` : ""} ${info.phase === "mid-session" ? "has an UNCONFIRMED delivery with a modal prompt on screen (its Enter/queue writes are held; nothing was answered)" : `never reached SessionStart within ${info.timeoutMs}ms`} — possible blocking CLI dialog (${sigLabel}). Filed as Platform task ${leadBoardTaskId}. Check the session's live screen and, if genuinely stuck, session_stop + respawn.`,
+      midSession ? "mid-session" : "boot",
     );
   }
 

@@ -32,6 +32,7 @@
 import { randomUUID } from "node:crypto";
 import { columnKeyForRole, resolveConfig as resolveLoomConfig, type OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
+import { MODAL_RESOLVE_STEPS } from "../pty/modal-hold-text.js";
 import type { HeartbeatPty } from "./heartbeat.js";
 import { resolveCompanionGrant, type ResolvedGrantScope } from "./capabilities.js";
 import { inAppHomeRoute } from "./in-app.js";
@@ -607,7 +608,10 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     case "claude_boot_dialog_stuck": {
       const sigName = typeof detail.signatureName === "string" ? detail.signatureName : "none recognized";
       const roleLabel = typeof detail.role === "string" ? detail.role : "session";
-      line = `${projectName}: ${roleLabel} never reached SessionStart — possible blocking CLI dialog (${sigName}) — ${who}`;
+      // Card 20ff76de: mid-session episodes share this kind — never word them as a boot failure.
+      line = detail.phase === "mid-session"
+        ? `${projectName}: ${roleLabel} is held on an unrecognized on-screen prompt (${sigName}) — its writes are paused until the owner does this: ${MODAL_RESOLVE_STEPS} — ${who}`
+        : `${projectName}: ${roleLabel} never reached SessionStart — possible blocking CLI dialog (${sigName}) — ${who}`;
       break;
     }
     case "skill_permission_frontmatter_warning": {

@@ -3,7 +3,8 @@ import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
+import { errorText } from "../lib/loopbackCredential";
 import { attentionKindLabel, isRateLimited, isAnswerableRequest, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
 import { fleetRollup, workerBuckets, capArchived, ARCHIVED_ONLY_CAP, WAITING_ON_YOU, type ArchivedOnlyProject } from "../lib/fleet";
 import { harnessOf } from "../lib/harnessFields";
@@ -120,6 +121,7 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
   );
   const stateChip = decision && <DecisionStateChip q={{ state: "pending", answeredAt: null }} now={0} />;
   const clearRateLimit = item.rateLimitSessionId && <ClearRateLimitButton sessionId={item.rateLimitSessionId} />;
+  const resumeDeliveries = item.modalHoldSessionId && <ResumeDeliveriesButton sessionId={item.modalHoldSessionId} />;
   const snooze = item.staleQuestionId && <SnoozeButton questionId={item.staleQuestionId} />;
   const openButton = onOpen && <Button variant={decision ? "primary" : "default"} onClick={onOpen}>{decision ? "Answer →" : "Open"}</Button>;
   /* Dismiss — passed whenever item.dismissKey is set, which since card 611e76ba is every kind the
@@ -140,6 +142,7 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
       <span style={{ flex: 1 }} />
       {stateChip}
       {clearRateLimit}
+      {resumeDeliveries}
       {snooze}
       {openButton}
       {dismissButton}
@@ -227,6 +230,29 @@ export function AttentionRow({ item, onOpen, onDismiss, footer, compact }: {
 // hold button but scoped to one session: POST /api/sessions/:id/rate-limit/clear ends the park, drops
 // the global latch, and re-submits the held turn. HUMAN-only REST (no agent MCP surface). On success
 // we invalidate the session poll so the cleared row drops out of the queue promptly.
+// Card 20ff76de: the human's explicit release of a session held on an unrecognized on-screen prompt.
+function ResumeDeliveriesButton({ sessionId }: { sessionId: string }) {
+  const qc = useQueryClient();
+  const [confirmUntil, setConfirmUntil] = useState(0);
+  const release = useMutation({
+    meta: { inlineError: true },
+    mutationFn: (force: boolean) => api.releaseModalHold(sessionId, force),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["allSessions"] }),
+    onError: (e) => { if (e instanceof ApiError && e.body?.stillOnScreen === true) { setConfirmUntil(Date.now() + 10_000); window.setTimeout(() => setConfirmUntil(0), 10_000); } },
+  });
+  // The daemon's SOFT refusal: a 409 whose STRUCTURED body carries `stillOnScreen:true` (never prose). The second click is the
+  // confirm and sends force; the confirm state expires (~10s) so a stale second click re-checks the screen instead of forcing blindly.
+  const softRefused = release.isError && release.error instanceof ApiError && release.error.body?.stillOnScreen === true;
+  const stillOnScreen = softRefused && Date.now() < confirmUntil;
+  return (
+    <Button variant="default" disabled={release.isPending}
+      title={release.isError ? errorText(release.error) : "Only after you resolved the prompt in the session's terminal: resume this session's held deliveries"}
+      onClick={() => release.mutate(stillOnScreen)}>
+      {release.isPending ? "Resuming…" : stillOnScreen ? "Prompt still on screen — resume anyway?" : softRefused ? "Resume deliveries" : release.isError ? (/not held/.test(errorText(release.error)) ? "Not held" : "Failed") : "Resume deliveries"}
+    </Button>
+  );
+}
+
 function ClearRateLimitButton({ sessionId }: { sessionId: string }) {
   const qc = useQueryClient();
   const clear = useMutation({

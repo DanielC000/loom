@@ -126,14 +126,15 @@ function useRoutedAgentName(sessionId: string, enabled: boolean): string | null 
 function NudgeMgrButton({ q }: { q: QuestionInboxItem }) {
   const [done, setDone] = useState(false);
   const nudge = useMutation({
+    meta: { inlineError: true },
     mutationFn: () => api.sendInput(q.sessionId, `[loom] Reminder: your request "${q.title}" was answered — pull it (question_pull) at that decision point.`),
     onSuccess: () => { setDone(true); window.setTimeout(() => setDone(false), 4000); },
   });
   return (
     <Button variant="default" disabled={!q.sessionLive || nudge.isPending}
-      title={q.sessionLive ? "Re-nudge the manager to pull this answered request" : "The asking session isn't live — nothing to nudge"}
+      title={nudge.isError ? errorText(nudge.error) : q.sessionLive ? "Re-nudge the manager to pull this answered request" : "The asking session isn't live — nothing to nudge"}
       onClick={() => nudge.mutate()}>
-      {done ? "✓ nudged" : nudge.isPending ? "Nudging…" : "Nudge mgr"}
+      {done ? "✓ nudged" : nudge.isPending ? "Nudging…" : nudge.isError ? (/on-screen prompt/.test(errorText(nudge.error)) ? "Not sent — held" : "Failed") : "Nudge mgr"}
     </Button>
   );
 }
