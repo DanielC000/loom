@@ -27313,9 +27313,12 @@ export class SessionService {
     // @decision cee17efe — reports every settle via ONE distImporterCheckOnly worker_gate event (LEAD
     // round-3 ruling 2): before this, only a real gate pass/fail ever reached `gate_history` at all.
     const recordEvent = (detail: Record<string, unknown>): void => {
+      // gate_history reads `detail.durationMs` for the Gates table's Duration column; stamp the admission→settle
+      // span whenever the check was admitted (gateStartedAt stays 0 for a queued cancel/supersede: no duration then).
+      const durationMs = gateStartedAt ? Math.max(0, Date.now() - gateStartedAt) : undefined;
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "worker_gate",
-        detail: { opId, distImporterCheckOnly: true, landedSha, touchedDistPaths, ...detail },
+        detail: { opId, distImporterCheckOnly: true, landedSha, touchedDistPaths, ...(durationMs !== undefined ? { durationMs } : {}), ...detail },
       });
     };
     try {

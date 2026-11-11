@@ -583,6 +583,8 @@ try {
     const ev = await waitUntil(() => db.listEvents(P.mgrId).find((e) => e.kind === "worker_gate" && e.detail?.distImporterCheckOnly === true && e.detail?.landedSha), { label: "(4) capped-run event", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(4) NEVER skipped: a real distImporterCheckOnly event WAS recorded (it reached gate admission)", !!ev);
     check("(4) exactly cap=2 of the 3 matched files ran", ev.detail.ranSize === 2 && ev.detail.matchedSize === 3);
+    check("(4) the recorded row carries a numeric durationMs (the Gates table's Duration column reads it)", typeof ev.detail.durationMs === "number" && ev.detail.durationMs >= 0 && ev.detail.gateSpawned === true);
+    check("(4) gate_history projects that duration (not null) for the row", db.listGateEvents({ projectId: P.projId, limit: 50, offset: 0 }).items.some((r) => r.distImporterCheckOnly === true && typeof r.durationMs === "number"));
     const nudge = await waitUntil(() => ctx.spy.nudges[0], { label: "(4) capped-run nudge", timeoutMs: SCENARIO_EVENT_WAIT_MS });
     check("(4) the nudge says 'ran 2 of 3' and names the cap", nudge.text.includes("ran 2 of 3") && nudge.text.includes("cap 60% of corpus"));
     check("(4) the nudge still reads as an ordinary pass (never a skip)", nudge.text.includes("passed") && !nudge.text.includes("skipped"));
