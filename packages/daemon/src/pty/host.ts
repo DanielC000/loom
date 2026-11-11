@@ -1285,13 +1285,18 @@ const RESUME_GATE_MAX_POLLS = Number(process.env.LOOM_RESUME_GATE_MAX_POLLS) || 
  * @decision sha:c1d71ff2 — LENGTH not a bool (a full backspace-to-empty must still release the hold),
  * and never a whole-chunk short-circuit on a freeing control (a paste's own \r/\n is draft content,
  * not a free).
+ *
+ * @decision d9af5472 — `imageKey` (the CLI's image-paste key for the daemon host's OS) counts as exactly
+ * ONE draft unit, matched BEFORE the generic ESC skip (which would drop ESC+v as zero-length); never
+ * count the other OS's key. Omitted = no chip counting (pure-classifier callers).
  */
-export function nextComposerLen(prevLen: number, data: string): number {
+export function nextComposerLen(prevLen: number, data: string, imageKey?: string): number {
   if (data === ESC_KEY) return 0;                 // a lone Esc dismisses/clears the box
   let len = prevLen;
   let inPaste = false;                            // inside a \x1b[200~ … \x1b[201~ bracketed-paste span
   for (let i = 0; i < data.length; i++) {
     const c = data.charCodeAt(i);
+    if (!inPaste && imageKey && data.startsWith(imageKey, i)) { len++; i += imageKey.length - 1; continue; }
     if (c === 0x1b) {
       // Escape/CSI/SS3 sequence (arrow keys, Home/End, bracketed-paste \x1b[200~ markers, …). The paste
       // markers toggle inPaste; any other sequence is skipped to its final byte so its param bytes
@@ -1337,12 +1342,21 @@ export function nextComposerLen(prevLen: number, data: string): number {
  * multi-free chunk only reports the FIRST free (matching nextComposerLen's own limitation) — acceptable
  * because a `submitted` false-negative only means the tripwire misses a detection, never a wrong write.
  */
-export function nextRawDraftState(prevText: string, data: string): { text: string; submitted: string | null } {
-  if (data === ESC_KEY) return { text: "", submitted: null };
+export function nextRawDraftState(
+  prevText: string,
+  data: string,
+  imageKey?: string,
+  prevImages = 0,
+): { text: string; submitted: string | null; images: number; imageSubmit: boolean } {
+  if (data === ESC_KEY) return { text: "", submitted: null, images: 0, imageSubmit: false };
   let text = prevText;
+  let images = prevImages;
   let inPaste = false;
   for (let i = 0; i < data.length; i++) {
     const c = data.charCodeAt(i);
+    // @decision d9af5472 — a chip is one unit of `images`, NEVER appended to `text` (so what a text draft
+    // reports as `submitted` is unchanged); an Enter freeing a chip-only draft reports `imageSubmit`.
+    if (!inPaste && imageKey && data.startsWith(imageKey, i)) { images++; i += imageKey.length - 1; continue; }
     if (c === 0x1b) {
       if (data.startsWith(BRACKET_PASTE_START, i)) { inPaste = true; i += BRACKET_PASTE_START.length - 1; continue; }
       if (data.startsWith(BRACKET_PASTE_END, i)) { inPaste = false; i += BRACKET_PASTE_END.length - 1; continue; }
@@ -1355,11 +1369,16 @@ export function nextRawDraftState(prevText: string, data: string): { text: strin
       }
       continue;
     }
-    if (c === 0x7f || c === 0x08) { text = text.slice(0, -1); continue; } // backspace / DEL
+    if (c === 0x7f || c === 0x08) { // backspace / DEL — mirrors composerLen's single -1: text first, else a chip
+      if (text.length > 0) text = text.slice(0, -1);
+      else if (images > 0) images--;
+      continue;
+    }
     if (c === 0x0d || c === 0x0a || c === 0x03 || c === 0x15) {
       if (!inPaste) {
-        const submitted = (c === 0x0d || c === 0x0a) && text.length > 0 ? text : null;
-        return { text: "", submitted };
+        const isEnter = c === 0x0d || c === 0x0a;
+        const submitted = isEnter && text.length > 0 ? text : null;
+        return { text: "", submitted, images: 0, imageSubmit: isEnter && text.length === 0 && images > 0 };
       }
       if (c === 0x0d || c === 0x0a) text += "\n";
       continue;
@@ -1367,7 +1386,19 @@ export function nextRawDraftState(prevText: string, data: string): { text: strin
     if (c >= 0x20) text += data[i]; // printable → one more draft char
     // other C0 controls (Tab, etc.) — ignore, same as nextComposerLen
   }
-  return { text, submitted: null };
+  return { text, submitted: null, images, imageSubmit: false };
+}
+
+/**
+ * The CLI's "paste image from clipboard" key as the DAEMON host's OS delivers it: the CLI reads the
+ * clipboard of the machine the daemon runs on, and binds Alt+V (ESC v) on Windows, Ctrl+V (0x16)
+ * elsewhere. Exactly ONE key per OS — the other OS's key is not the image key on this host, so counting
+ * it would only over-hold. PURE + exported for the hermetic test.
+ * @decision d9af5472 — never count both keys; the platform comes from `PtyHost.imagePasteKey()`, an
+ * injectable seam, not a bare `process.platform` read at the call site.
+ */
+export function imagePasteKeyForPlatform(platform: string): string {
+  return platform === "win32" ? "\x1bv" : "\x16";
 }
 
 /**
@@ -3182,6 +3213,9 @@ interface Live {
   // nextComposerLen's parsing), tracked ONLY so writeStdin can capture the composed text into
   // `lastRawSubmit` at the moment of a genuine Enter-submit. Never read outside writeStdin.
   rawDraftText: string;
+  // Card d9af5472: count of image-paste chips (`[Image #N]`) in the raw draft, each tracked as ONE unit — the
+  // text-less companion of `rawDraftText`, so an image-only Enter can still arm the human-submit hold.
+  rawDraftImages: number;
   // Card 3ce3fa39: cumulative count of characters that MAY still be physically sitting in the composer from
   // an earlier submit() whose give-up (RECOVERY or SUPPRESSED) or heal-if-stuck clear was never CONFIRMED
   // to have actually landed — see submit()'s own doc for why the clear is deliberately DEFERRED to the next
@@ -6837,6 +6871,7 @@ export class PtyHost {
       giveUpLineages: new Set(),
       composerOwnerLineage: null,
       rawDraftText: "",
+      rawDraftImages: 0,
       pending: [],
       stopping: false,
       drainHeld: false,
@@ -7168,7 +7203,7 @@ export class PtyHost {
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, contextExhausted: false, // a shell is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], mcpRouterSeenAt: new Map(), // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "", rawDraftImages: 0,
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastSubmitExemptAsOwnNotice: false, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null, raceDiscardedOwnerSubmitSeq: null, ownerAttributionSeq: 0,
@@ -8496,7 +8531,7 @@ export class PtyHost {
       logBroken: false,
       busy: false, busyPersistDirty: false, ready: true, readyFallbackTimer: null, busySince: null, contextExhausted: false, // a canned entry is ready immediately — no fallback timer is ever armed for it
       mcpSeen: true, mcpSeenWaiters: [], mcpRouterSeenAt: new Map(), // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenBelieved: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedGens: new Map(), composerBodyWrittenForGen: null, giveUpLineages: new Set(), composerOwnerLineage: null, rawDraftText: "", rawDraftImages: 0,
       pending: [], stopping: false, drainHeld: false, rateLimited: false, humanSubmitHeldUntil: null, humanSubmitHeldArmedDuringTurn: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastSubmitExemptAsOwnNotice: false, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       raceDiscardedOwnerSubmitAt: null, raceDiscardedOwnerSubmitGen: null, raceDiscardedOwnerSubmitSeq: null, ownerAttributionSeq: 0,
@@ -12244,6 +12279,12 @@ export class PtyHost {
     return live.composerLen > 0;
   }
 
+  /** Injectable seam (card d9af5472): the image-paste key counted as a draft unit. Tests override it to
+   *  cover both OS branches on one host. */
+  protected imagePasteKey(): string {
+    return imagePasteKeyForPlatform(process.platform);
+  }
+
   /**
    * PUBLIC read of the same composer-dirty signal (see deferForHumanDraft), for restart-intent capture
    * (SessionService.liveFleetResumeSet): a daemon restart kills this pty — and the uncommitted raw-
@@ -15094,13 +15135,15 @@ export class PtyHost {
       // Track the human's UNCOMMITTED raw-terminal draft (composer-dirty) so a programmatic turn never
       // lands on half-typed text. We NEVER touch the human's bytes — we only HOLD delivery while dirty.
       const wasDirty = live.composerLen > 0;
-      live.composerLen = nextComposerLen(live.composerLen, data);
+      const imageKey = this.imagePasteKey();
+      live.composerLen = nextComposerLen(live.composerLen, data, imageKey);
       // Card 0f9268cc: the text-carrying twin of the composerLen update above — see Live.lastRawSubmit's
       // doc. A genuine Enter-submit freezes the composed text into lastRawSubmit for the paste-tripwire;
       // any OTHER free (Ctrl-C/kill-line/Esc/backspace-to-empty) just resets the accumulator, same as
       // composerLen, with no tripwire baseline captured (nothing will be recorded to the transcript).
-      const draft = nextRawDraftState(live.rawDraftText, data);
+      const draft = nextRawDraftState(live.rawDraftText, data, imageKey, live.rawDraftImages);
       live.rawDraftText = draft.text;
+      live.rawDraftImages = draft.images;
       if (draft.submitted !== null) {
         live.lastRawSubmit = draft.submitted;
         // Card b4b9b707: same capture, SEPARATE field/lifecycle — see Live.pendingRawOwnerSubmit's doc.
@@ -15110,7 +15153,9 @@ export class PtyHost {
       // @decision 2521bf51 — `writeStdin` arms the hold on `draft.submitted !== null` ALONE, never
       // `wasDirty && composerLen===0`: a lone chunk (e.g. "abc\r") can dirty AND free the composer
       // within the SAME call, reading `wasDirty` false while still being a genuine submit.
-      if (draft.submitted !== null) {
+      // Card d9af5472: a chip-only draft's Enter is a genuine submit too (no text to capture, so no
+      // lastRawSubmit above) — it must arm the same hold, or the queue drains onto the engine mid-transition.
+      if (draft.submitted !== null || draft.imageSubmit) {
         live.humanSubmitHeldUntil = Date.now() + HUMAN_SUBMIT_CONFIRM_HOLD_MS;
         // Card 3ff89cbc: snapshot whether an unrelated turn is ALREADY in flight right now — see
         // `humanSubmitHeldArmedDuringTurn`'s own doc for why this discriminates the pre-existing turn's
