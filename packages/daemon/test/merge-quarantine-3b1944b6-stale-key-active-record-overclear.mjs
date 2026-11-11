@@ -961,6 +961,29 @@ function rebootThenCollapseAndDoubleClearInChildProcess(R, sub, tag) {
   check("(round6-markfail) result reports wasQuarantined:true (sub was, and still is, blocked)", result.wasQuarantined === true);
 }
 
+// ===================== (round6-route-token-markfail, 1be24e71) the TOKEN route's own refusal is reported on the returned object =====================
+{
+  const R = freshDir("round6tokenmarkfail-R");
+  markAsGitRoot(R);
+  enterMergeQuarantine(R, "branch-R", "R's own real raise (round6-route-token-markfail)");
+  const rFinalPath = finalPathFor(R);
+  const sub = path.join(R, "sub");
+  markAsGitRoot(sub);
+  const subToken = enterMergeQuarantine(sub, "branch-sub", "sub's own independent raise, own .git at raise time (round6-route-token-markfail)");
+  fs.rmSync(path.join(sub, ".git"), { recursive: true, force: true }); // collapses onto R
+
+  const inj = injectOpenSyncFailureForPrefix(rFinalPath); // fails the marker's own durable write at R's final path
+  let tokenResult;
+  try {
+    tokenResult = clearMergeQuarantineByToken(sub, subToken);
+  } finally {
+    inj.restore();
+  }
+  check("(round6-route-token-markfail) the injected failure actually fired", inj.count() > 0);
+  check("*** (round6-route-token-markfail) *** the token route reports {lifted:false, refusedBeforeClear:true, reason}", tokenResult?.lifted === false && tokenResult?.refusedBeforeClear === true && typeof tokenResult?.reason === "string" && tokenResult.reason.includes("could not durably mark"));
+  check("(round6-route-token-markfail) sub's own record is KEPT", listActiveMergeQuarantines().filter((e) => e.repoPath === sub).length === 1);
+}
+
 // ===================== (round7-probeA) REPLACES the old (round6-crashsim), a confirmed TAUTOLOGY =====================
 // Round 7, test gap (item 4): round6-crashsim's own construction left sub's record genuinely INTACT
 // (never cleared) and called /clear(sub) only ONCE, in the SAME process — `matched.length > 0` alone
@@ -1265,7 +1288,8 @@ for (const which of ["own", "contrib"]) {
   enterMergeQuarantine(sub, "branch-sub", "sub's own independent raise, own .git at raise time (round8-q2b)");
   fs.rmSync(path.join(sub, ".git"), { recursive: true, force: true }); // collapses onto R
 
-  clearMergeQuarantineByToken(sub, "no-such-token-ever-issued");
+  const bogusResult = clearMergeQuarantineByToken(sub, "no-such-token-ever-issued");
+  check("(round8-q2b, 1be24e71) the bogus token's result is an honest no-op: matched:false, lifted:false", bogusResult?.matched === false && bogusResult?.lifted === false);
   const postSettle = readLatchFileIfExists(R);
   check("*** THE FIX (round8-q2b) *** settling a bogus, never-issued token must NEVER stamp R reduced", !reducedContributorsOf(postSettle).includes(directPathIdentity(sub)));
   check("(round8-q2b) sub's own record is untouched — nothing actually matched the bogus token", listActiveMergeQuarantines().filter((e) => e.repoPath === sub).length === 1);

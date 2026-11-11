@@ -108,7 +108,10 @@ try {
       const dirSnapshot = snapshotDir(mod.MERGE_QUARANTINE_DIR);
       const inProcess = mod.stillBlockedEntryFor(x);
       check(`*** THE FIX (${route}) *** X is ARMED in-process right after the clear, with X's OWN tokens`, inProcess !== undefined && sortedTokens(inProcess) === JSON.stringify([xToken]));
-      if (result !== undefined) {
+      if (route === "token") {
+        // The token route has no co-occupant report (1be24e71): it returns `{lifted, stillBlockedBy?}`, which names the armed X.
+        check(`(${route} main) ...and the token result discloses P is still blocked, by X`, result?.lifted === true && result?.stillBlockedBy?.repoPath === x);
+      } else {
         check(`(${route} main) ...and surfaced as a routable still-blocked co-occupant`, !!result.stillBlockedCoOccupants?.some((c) => c.repoPath === x));
       }
       restoreDirSnapshot(mod.MERGE_QUARANTINE_DIR, dirSnapshot);

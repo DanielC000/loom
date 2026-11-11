@@ -6412,15 +6412,16 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
  * SOMEWHERE" gate is too coarse here: `token` can belong to a DIFFERENT holder than `repoPath`'s own
  * record (a contributor token, or none) — computed precisely instead, below. See "Round 8" (q2/q2b).
  */
-export function clearMergeQuarantineByToken(repoPath: string, token: string): void {
+export function clearMergeQuarantineByToken(repoPath: string, token: string): ClearByTokenResult {
   const identity = directPathIdentity(repoPath);
+  const matched = tokenIsHeld(token);
   const tokenHolderIsOwnRecord = [...activeQuarantines.values()].some((e) => e.tokens.includes(token) && directPathIdentity(e.repoPath) === identity)
     || pendingUnresolvedQuarantines.some((p) => p.entry.tokens.includes(token) && directPathIdentity(p.entry.repoPath) === identity);
   const preClear = preClearForeignKeyStamp(repoPath, tokenHolderIsOwnRecord);
   if (!preClear.ok) {
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] refusing to release token for ${repoPath} via clearMergeQuarantineByToken — ${preClear.reason}`);
-    return;
+    return { lifted: false, matched, refusedBeforeClear: true, reason: preClear.reason };
   }
   // @decision 028837ad — captured at CALL START, BEFORE the pre-loop pass below: that pass's own
   // full-lift branch can itself arm a NEW foreign identity mid-pass, so capturing any later would wrongly
@@ -6469,6 +6470,40 @@ export function clearMergeQuarantineByToken(repoPath: string, token: string): vo
   // now that every phase of this public call (including every delegate) has fully settled — a crash
   // before this point only OVER-blocks (fail-closed; never worse than the pre-fix behavior).
   decideDeferredTombstones(deferredTombstoneJobs, writeFailedIdentitiesThisCall);
+  return disclosureAfterTokenClear(repoPath, token, matched, writeFailedIdentitiesThisCall.size === 0);
+}
+
+function tokenIsHeld(token: string): boolean {
+  return [...activeQuarantines.values()].some((e) => e.tokens.includes(token)) || pendingUnresolvedQuarantines.some((p) => p.entry.tokens.includes(token));
+}
+
+/** What {@link clearMergeQuarantineByToken} reports. `matched` = some entry held `token` when the call started (false = a
+ *  no-op: nothing to clear). `lifted` = `matched` AND no live entry (active or pending) holds `token` now; it is the IN-MEMORY
+ *  outcome only. `durable:false` = a durable write failed during the call, so a reboot may re-arm the token despite
+ *  `lifted:true`. `stillBlockedBy` = `repoPath` is nonetheless still blocked, by the named entry (an independent claimant's
+ *  stale arm, a surviving same-identity record); lifting a token never lifts a block another entry holds. */
+export interface ClearByTokenResult {
+  lifted: boolean;
+  matched: boolean;
+  durable?: false;
+  /** The pre-clear foreign-key stamp refused: nothing was cleared. */
+  refusedBeforeClear?: true;
+  reason?: string;
+  stillBlockedBy?: { repoPath: string; reason: string };
+}
+
+/** @decision 1be24e71 — computed AFTER the clear with the PURE {@link stillBlockedEntryFor}, never a mutating resolver
+ *  (same rule as `1b49fb56`): a lazy graduation here would change the very state being reported. Skipped while no
+ *  entry exists at all, so a healthy landing's auto-clear pays nothing. */
+function disclosureAfterTokenClear(repoPath: string, token: string, matched: boolean, durable: boolean): ClearByTokenResult {
+  const result: ClearByTokenResult = { lifted: matched && !tokenIsHeld(token), matched, ...(durable ? {} : { durable: false as const }) };
+  if (activeQuarantines.size === 0 && pendingUnresolvedQuarantines.length === 0) return result;
+  const after = stillBlockedEntryFor(repoPath);
+  if (!after) return result;
+  const reason = stillQuarantinedReason(after, repoPath);
+  // eslint-disable-next-line no-console
+  console.error(`[merge-quarantine] token cleared for ${repoPath} but it is still blocked — ${reason}`);
+  return { ...result, stillBlockedBy: { repoPath: after.repoPath, reason } };
 }
 
 /**
