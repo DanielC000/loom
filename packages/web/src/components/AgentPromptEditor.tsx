@@ -77,7 +77,7 @@ export function AgentPromptEditor({ agent, homeKey, readOnly = false }:
           style={{ fontSize: fs.sm, color: empty ? color.text3 : color.text2, lineHeight: 1.45,
             display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
           {empty ? "No startup prompt — this agent boots inert until told what to do."
-            : <Markdown source={saved} files={NO_FILES} onOpen={noop} untrusted />}
+            : <Markdown source={saved} files={NO_FILES} onOpen={noop} />}
         </div>
       )}
 

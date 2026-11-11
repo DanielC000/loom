@@ -400,12 +400,12 @@ function SkillEditor({
       {bundled && customized && !updateAvailable && <FilesDivergedBanner name={name} />}
 
       {/* Preview renders the CURRENT text (unsaved edits included), so it doubles as a check before Save.
-          `untrusted`: a store skill can be agent-written, so no external image is fetched from it. */}
+          A store skill can be agent-written; the renderer blocks external images by default. */}
       {view === "preview" ? (
         <div data-testid="skill-preview"
           style={{ flex: 1, minHeight: 360, overflow: "auto", background: color.inset, border: `1px solid ${color.line}`,
             borderRadius: radius.sm, padding: "10px 16px" }}>
-          <Markdown source={text} files={[]} onOpen={() => {}} untrusted />
+          <Markdown source={text} files={[]} onOpen={() => {}} />
         </div>
       ) : (
         <textarea value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} aria-label={`${name} SKILL.md`}

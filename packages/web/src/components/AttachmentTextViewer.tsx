@@ -11,8 +11,8 @@ import { color, font, radius, fs } from "../theme";
 // not download the file, it must show it in a large dialog. The bytes come through the SAME serving route
 // by (questionId, attachmentId) as every other kind; nothing here ever names a host path.
 //
-// The content is UNTRUSTED (an agent wrote it). Markdown renders through the shared renderer with
-// `untrusted` set (no raw HTML, no external image fetches, `javascript:` links emptied); plain text is a
+// The content is UNTRUSTED (an agent wrote it). Markdown renders through the shared renderer, which is
+// inert by default (no raw HTML, external images blocked behind click-to-load, `javascript:` links emptied); plain text is a
 // React text node inside a <pre>, which can never become markup.
 
 const EMPTY_FILES: string[] = [];
@@ -120,7 +120,7 @@ export function AttachmentTextViewer({ questionId, a, remote, onClose }: {
           )}
           {load.state === "ready" && a.kind === "markdown" && (
             <div style={{ maxWidth: 860, margin: "0 auto", padding: "20px 28px 40px" }}>
-              <Markdown source={load.text} files={EMPTY_FILES} onOpen={noop} untrusted />
+              <Markdown source={load.text} files={EMPTY_FILES} onOpen={noop} />
             </div>
           )}
           {load.state === "ready" && a.kind !== "markdown" && (

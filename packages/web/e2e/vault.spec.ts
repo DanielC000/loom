@@ -589,3 +589,65 @@ test("an in-note [[wikilink]] opens the target note, and still works after the p
   await page.locator("a.md-wikilink").filter({ hasText: "Target" }).click();
   await expect(page.getByText(targetBody)).toBeVisible();
 });
+
+// Card 86ea3ea6 (owner answer d51060bb "1B"): an EXTERNAL image in a vault note is blocked by default. Vault
+// notes are agent-written, so an `<img src>` to an arbitrary host is a read beacon. The note shows the
+// `md-ext-img` placeholder and makes NO request to that host until the reader clicks Load; the click loads
+// that one image for this mount only, so opening another note and coming back (or a reload) blocks it again.
+// Every request to the beacon host is intercepted and COUNTED, so "blocked" is proven by a zero, not by the
+// absence of a visible <img> (which would also pass on a broken image).
+test("blocks an external image in a vault note until Load is clicked, and only for that mount", async ({ page, loomDaemon }) => {
+  const beaconHost = "beacon.e2e-86ea3ea6.invalid";
+  const beaconURL = `https://${beaconHost}/pixel.png`;
+  const altText = uniq("remote-beacon");
+  const otherBody = uniq("other-note-body");
+  const { id } = await seedVaultProject(loomDaemon.baseURL, {
+    "Beacon.md": `# Beacon\n\n![${altText}](${beaconURL})\n`,
+    "Other.md": `# Other\n\n${otherBody}\n`,
+  });
+  await pinActiveProject(page, id);
+
+  const hits: string[] = [];
+  await page.route(`https://${beaconHost}/**`, async (route) => {
+    hits.push(route.request().url());
+    await route.fulfill({ status: 200, contentType: "image/png", body: PNG_1X1 });
+  });
+
+  await page.goto(`${loomDaemon.baseURL}/vault`);
+  await treeRow(page, "Beacon.md").click();
+  await expect(page.getByRole("heading", { name: "Beacon" })).toBeVisible();
+
+  // Blocked: the placeholder names the image, keeps the URL in its title, and nothing reached the host.
+  const placeholder = page.locator(".md-ext-img").filter({ hasText: altText });
+  await expect(placeholder).toBeVisible();
+  await expect(placeholder).toHaveAttribute("title", `External image not loaded: ${beaconURL}`);
+  await expect(page.locator(`img[src="${beaconURL}"]`)).toHaveCount(0);
+  expect(hits).toEqual([]);
+
+  // Keyboard-accessible: the Load control is a real button reachable by focus and fired by Enter.
+  const load = placeholder.getByRole("button", { name: new RegExp(`Load external image "${altText}"`) });
+  await load.focus();
+  await expect(load).toBeFocused();
+  await page.keyboard.press("Enter");
+
+  // Loaded: exactly this image, decoded from the (intercepted) host.
+  const img = page.locator(`img[src="${beaconURL}"]`);
+  await expect(img).toBeVisible();
+  await expect.poll(() => img.evaluate((el) => (el as HTMLImageElement).naturalWidth)).toBe(1);
+  await expect(placeholder).toHaveCount(0);
+  expect(hits).toEqual([beaconURL]);
+
+  // Ephemeral: opening another note and coming back blocks it again, with no further request.
+  await treeRow(page, "Other.md").click();
+  await expect(page.getByText(otherBody)).toBeVisible();
+  await treeRow(page, "Beacon.md").click();
+  await expect(page.locator(".md-ext-img").filter({ hasText: altText })).toBeVisible();
+  await expect(page.locator(`img[src="${beaconURL}"]`)).toHaveCount(0);
+
+  // …and so does a full reload (nothing was persisted).
+  await page.reload();
+  await treeRow(page, "Beacon.md").click();
+  await expect(page.locator(".md-ext-img").filter({ hasText: altText })).toBeVisible();
+  await expect(page.locator(`img[src="${beaconURL}"]`)).toHaveCount(0);
+  expect(hits).toEqual([beaconURL]);
+});

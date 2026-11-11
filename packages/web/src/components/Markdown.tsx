@@ -228,13 +228,35 @@ function resolveRelative(href: string, currentPath: string, files: string[]): st
 }
 
 /**
- * `untrusted` (card c7f999f4 — a Request attachment written by an agent): an external image is NOT
- * fetched (an `<img src>` to an arbitrary host is a read beacon), it renders as a labelled placeholder
- * instead. Everything else that keeps agent bytes inert holds for every caller, not just this one: raw
- * HTML is never rendered (no `rehype-raw`, so `<script>`/`on*` attributes never reach the DOM), and
- * `defaultUrlTransform` empties a `javascript:`/`data:` URL, which then renders as an unresolved span.
+ * An off-host image, BLOCKED until the reader asks for it. An `<img src>` to an arbitrary host is a read
+ * beacon, and every surface this renderer serves can carry agent-written bytes (vault notes included), so
+ * nothing is fetched on render. The button loads THIS image only, for this mount only: no persistence, no
+ * per-host memory, so reopening the note blocks it again. The URL stays in the title so the reader sees
+ * what they are about to load.
+ * @decision 86ea3ea6 — blocked is the default for every caller; never auto-load, never remember a click.
  */
-export default function Markdown({ source, files, currentPath = "", onOpen, AssetImage, untrusted = false }: { source: string; files: string[]; currentPath?: string; onOpen: (path: string) => void; AssetImage?: ComponentType<{ path: string; alt: string; className?: string }>; untrusted?: boolean }) {
+function ExternalImage({ src, alt }: { src: string; alt: string }) {
+  const [load, setLoad] = useState(false);
+  if (load) return <img className="md-img" src={src} alt={alt} loading="lazy" referrerPolicy="no-referrer" />;
+  return (
+    <span className="md-ext-img" title={`External image not loaded: ${src}`}>
+      image not loaded · {alt || "untitled"}
+      <button type="button" className="md-ext-img-load" onClick={() => setLoad(true)}
+        aria-label={`Load external image${alt ? ` "${alt}"` : ""} from ${src}`} title={`Load ${src}`}>
+        Load
+      </button>
+    </span>
+  );
+}
+
+/**
+ * Agent bytes stay inert for every caller: raw HTML is never rendered (no `rehype-raw`, so
+ * `<script>`/`on*` attributes never reach the DOM), and `defaultUrlTransform` empties a
+ * `javascript:`/`data:` URL, which then renders as an unresolved span. External images are blocked by
+ * default ({@link ExternalImage}); `allowExternalImages` is the explicit opt-in for a caller whose source
+ * is known not to be agent-written (no caller needs it today).
+ */
+export default function Markdown({ source, files, currentPath = "", onOpen, AssetImage, allowExternalImages = false }: { source: string; files: string[]; currentPath?: string; onOpen: (path: string) => void; AssetImage?: ComponentType<{ path: string; alt: string; className?: string }>; allowExternalImages?: boolean }) {
   const { props, body } = splitFrontmatter(source);
   const transformed = transformWikilinks(body);
 
@@ -255,7 +277,7 @@ export default function Markdown({ source, files, currentPath = "", onOpen, Asse
     // resolve to a vault file, then render through the caller's `AssetImage`. That is a COMPONENT, not a
     // `(path) => string`, because resolving a vault asset can need an authenticated fetch on a remote
     // origin (card f7525818) — a URL-returning callback cannot express that, a component can.
-    // External http(s) images pass through as a plain <img>.
+    // External http(s) images are blocked behind a click-to-load placeholder unless the caller opted in.
     img({ src, alt }) {
       const s = typeof src === "string" ? src : "";
       const altText = typeof alt === "string" ? alt : "";
@@ -265,10 +287,11 @@ export default function Markdown({ source, files, currentPath = "", onOpen, Asse
         if (path && AssetImage) return <AssetImage className="md-img" path={path} alt={altText || baseName(path)} />;
         return <span className="md-broken" title="unresolved image">{altText || decodeURIComponent(target)}</span>;
       }
-      if (isExternalHref(s) && untrusted) {
-        return <span className="md-ext-img" title={`External image not loaded: ${s}`}>image not loaded · {altText || "untitled"}</span>;
+      if (isExternalHref(s)) {
+        return allowExternalImages
+          ? <img className="md-img" src={s} alt={altText} loading="lazy" />
+          : <ExternalImage src={s} alt={altText} />;
       }
-      if (isExternalHref(s)) return <img className="md-img" src={s} alt={altText} loading="lazy" />;
       const path = resolveRelative(s, currentPath, files);
       if (path && AssetImage) return <AssetImage className="md-img" path={path} alt={altText || baseName(path)} />;
       return <span className="md-broken" title="unresolved image">{altText || s}</span>;
@@ -315,7 +338,7 @@ export default function Markdown({ source, files, currentPath = "", onOpen, Asse
       const level = head && head.type === "element" && /^h[1-6]$/.test(head.tagName) ? Number(head.tagName.slice(1)) : 1;
       return <CollapsibleSection level={level}>{children}</CollapsibleSection>;
     },
-  }), [files, currentPath, AssetImage, untrusted]);
+  }), [files, currentPath, AssetImage, allowExternalImages]);
 
   return (
     <div className="loom-md">
@@ -362,6 +385,13 @@ const MD_CSS = `
 .loom-md .md-embed { display: inline-block; color: var(--loom-accent-fg); cursor: pointer; background: var(--loom-inset); border: 1px solid var(--loom-line); border-radius: 4px; padding: 0 6px; font-size: 0.92em; }
 .loom-md .md-broken { color: var(--loom-danger); cursor: default; text-decoration: none; }
 .loom-md .md-ext-img { display: inline-block; color: var(--loom-text-3); background: var(--loom-inset); border: 1px dashed var(--loom-line-strong); border-radius: 4px; padding: 0 6px; font-size: 0.85em; font-family: ui-monospace, Consolas, monospace; }
+.loom-md .md-ext-img-load {
+  margin-left: 0.6em; padding: 0 0.45em; font: inherit; line-height: inherit; color: var(--loom-accent-fg);
+  background: none; border: 1px solid var(--loom-line-strong); border-radius: 3px; cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+}
+.loom-md .md-ext-img-load:hover { color: var(--loom-text); border-color: var(--loom-accent-fg); }
+.loom-md .md-ext-img-load:focus-visible { outline: 2px solid var(--loom-ring); outline-offset: 1px; }
 .loom-md .md-callout { --md-callout: var(--loom-md-callout-note); border: 1px solid var(--loom-line); border-left: 4px solid var(--md-callout); border-radius: 6px; padding: 8px 12px; margin: 0.8em 0; background: color-mix(in oklab, var(--md-callout) 7%, transparent); }
 .loom-md .md-callout-title { font-weight: 600; color: var(--loom-text); margin-bottom: 0.2em; }
 .loom-md .md-callout-body > :first-child { margin-top: 0; } .loom-md .md-callout-body > :last-child { margin-bottom: 0; }
