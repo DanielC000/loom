@@ -2667,10 +2667,15 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-gl.inbox { border: 2px solid var(--loom-attn); border-radius: 1px; }
 .loom-mcp-gl.self { border: 2px solid var(--loom-text-2); border-radius: 50%; }
 
-/* Expanded: facet rail + turn-grouped log. */
+/* Expanded: facet rail + turn-grouped log. The height bound sits on the BODY, never the log alone
+   (card d3d10823): the one row is `minmax(0, 1fr)`, so it grows to the taller column up to max-height,
+   both columns stretch to that row, and each scrolls on its own. A log capped by itself stopped short
+   of a taller rail and left a blank band under the list. */
 .loom-mcp-x {
   display: grid;
   grid-template-columns: 208px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  max-height: clamp(420px, 70vh, 760px);
   border-top: 1px solid var(--loom-line);
 }
 .loom-mcp-facets {
@@ -2680,6 +2685,8 @@ button.loom-atlas-node.is-branch.is-open {
   flex-direction: column;
   gap: 14px;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 .loom-mcp-fh {
   display: flex;
@@ -2760,7 +2767,7 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-legend b { font-family: var(--loom-font-mono); font-weight: 500; color: var(--loom-text-2); }
 .loom-mcp-stack i.pending { background: none; outline: 1px dashed var(--loom-text-3); outline-offset: -1px; }
 
-.loom-mcp-log { min-width: 0; max-height: 520px; overflow: auto; padding-bottom: 6px; }
+.loom-mcp-log { min-width: 0; min-height: 0; overflow: auto; padding-bottom: 6px; }
 .loom-mcp-none { margin: 0; padding: 18px 12px; color: var(--loom-text-3); font-size: var(--loom-fs-xs); }
 .loom-mcp-turnh {
   position: sticky;
@@ -2911,7 +2918,7 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-lk span { color: var(--loom-text-3); }
 
 @container mcp (max-width: 700px) {
-  .loom-mcp-x { grid-template-columns: minmax(0, 1fr); }
+  .loom-mcp-x { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .loom-mcp-facets {
     flex-direction: row;
     overflow-x: auto;
@@ -2928,7 +2935,6 @@ button.loom-atlas-node.is-branch.is-open {
   .loom-mcp-ob { padding-left: 12px; grid-template-columns: minmax(0, 1fr); }
   .loom-mcp-say { font-size: 14px; }
   .loom-mcp-meta, .loom-mcp-stack { display: none; }
-  .loom-mcp-log { max-height: 680px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
