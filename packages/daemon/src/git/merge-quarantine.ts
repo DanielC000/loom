@@ -8578,7 +8578,8 @@ export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolea
     // Byte-identical to before this card: a single, unconditional clearMergeQuarantineByKey at the fresh
     // key — covers the ordinary case, the ancestor-collapse fallback, AND every dual-tracked-twin shape.
     // @decision 656fdf39 (CR d1e02886 round 3) — `true`: this is one of the three identity-wide routes.
-    return clearMergeQuarantineByKey(freshKey, repoPath, undefined, true);
+    // @decision 1b49fb56 — disclose a same-identity pending entry this key-addressed clear left standing.
+    return discloseStillBlockedAfterKeyClear(repoPath, clearMergeQuarantineByKey(freshKey, repoPath, undefined, true));
   }
   // repoPath's own identity has a genuinely independent active record elsewhere (the over-clearing bug,
   // or the round-5-finding-3 multi-key-twin shape). Clear it there too — but never silently drop the
@@ -8598,6 +8599,41 @@ export function clearMergeQuarantine(repoPath: string): { wasQuarantined: boolea
   // `overrideTargets` is never empty, so `own.matched` is guaranteed true here; the fallback below is
   // defensive only, never expected to run.
   return own.matched ? own.result : clearMergeQuarantineByKey(freshKey, repoPath, undefined, true);
+}
+
+/**
+ * The tail of {@link clearMergeQuarantine}'s ordinary `!freshIsForeign` clear, a direct
+ * {@link clearMergeQuarantineByKey} call that runs no pending pass afterwards — so a same-identity pending
+ * entry it deliberately leaves (a "reduce"-planned twin keeping its private token, 64119847; or an untied
+ * one) still blocks `repoPath` while the raw result read as a clean success. (The `"none"` route is
+ * already truthful: its helper composes `stillQuarantined` itself.) Re-resolves with the PURE {@link stillBlockedEntryFor} AFTER the clear and, when `repoPath`
+ * is still blocked, returns `stillQuarantined:true` plus the SAME reason text the project-resolved wrapper
+ * composes. Disclosure only: it never clears anything (the identity-wide sweep is clear-by-path's job), never
+ * sets `refusedBeforeClear` (that marks a pre-clear refusal), and never names the queried identity as lifted.
+ *
+ * @decision 1b49fb56 — never call `resolveQuarantineFor`/`activeMergeQuarantineFor` here: both mutate
+ * (lazy graduation, sibling absorb) and would change the very state being disclosed.
+ */
+function discloseStillBlockedAfterKeyClear<R extends ReturnType<typeof clearMergeQuarantine>>(repoPath: string, result: R): R {
+  if (result.stillQuarantined) return result;
+  const after = stillBlockedEntryFor(repoPath);
+  if (!after) return result;
+  const queriedIdentity = directPathIdentity(repoPath);
+  const { relocated } = splitCoOccupants(result.stillBlockedCoOccupants, result.referencingRepoPaths);
+  const reason = withUnlinkFailedClause(
+    composeReasonWithRelocated(
+      [stillQuarantinedReason(after, repoPath), liveForeignBlockedOrderClause(result.referencingRepoPaths ?? [], new Map(result.contentKeptBlockedBy?.map((e) => [e.repoPath, e.blockedBy])))].filter((s) => s !== "").join(" "),
+      relocated,
+    ),
+    result.unlinkFailedFiles ?? [],
+  );
+  return {
+    ...result,
+    stillQuarantined: true as const,
+    reason,
+    liftedRepoPaths: result.liftedRepoPaths.filter((rp) => directPathIdentity(rp) !== queriedIdentity),
+    ...(result.releasedRepoPaths ? { releasedRepoPaths: result.releasedRepoPaths.filter((rp) => directPathIdentity(rp) !== queriedIdentity) } : {}),
+  };
 }
 
 /**
