@@ -718,7 +718,7 @@ try {
   // this is also the dedicated "distinct sourceFile" case (never relying on the same-identity-coincidence
   // the fix must not).
   //
-  // @decision 8db913e2 (Follow-up 6c04633d) — SUPERSEDES this round's own merge-everything shape for a DIFFERENT identity: S
+  // @decision 6c04633d — SUPERSEDES this round's own merge-everything shape for a DIFFERENT identity: S
   // (identity ≠ D's own) is no longer folded into D's divert record at all — it is pushed straight back,
   // untouched, under its own identity (decision record, Follow-up 6c04633d). `sibFile` is a THIRD valid
   // state the check below now accounts for: live and correct, never an orphan, never gone.
@@ -763,7 +763,7 @@ try {
   const filesAfterRaise = fs.readdirSync(MERGE_QUARANTINE_DIR);
   const allEntriesX = listActiveMergeQuarantines();
   const referencedOrphansX = new Set(allEntriesX.flatMap((e) => e.orphanLatchFiles ?? []));
-  // @decision 8db913e2 (Round 2 M3, Code Review `e8c78d98`) — tie the check to THIS exact file, captured at the
+  // @decision 6c04633d (Round 2 M3, Code Review `e8c78d98`) — tie the check to THIS exact file, captured at the
   // SAME pre-query snapshot as `filesAfterRaise`/`referencedOrphansX` above — `activeMergeQuarantineFor`
   // below is a QUERY whose own lazy-graduation tail can ITSELF trigger a (pre-existing, unchanged, out of
   // this card's scope) successful consolidation of D+S once reads succeed again, which would delete
@@ -1290,7 +1290,7 @@ try {
   check("(item3) r's raise still persists IN-PROCESS despite the double fault (e1cb7d33)", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has(rToken));
   check("(item3) the ORIGINAL pending-divert file was NEVER actually written (the injected failure held)", !fs.existsSync(pendingPrefix));
 
-  // @decision 8db913e2 (Follow-up dd34da46, N3) — select by r's OWN hash prefix (quarantineHashFor(r) ===
+  // @decision dd34da46 (N3) — select by r's OWN hash prefix (quarantineHashFor(r) ===
   // Krhash, since r is fully resolvable), never a bare "any safety-tmp exists" — the shared
   // MERGE_QUARANTINE_DIR can already hold OTHER scenarios' own safety-tmp residues at this point in the
   // file, which would make a bare existence check pass vacuously regardless of whether THIS fallback ran.
@@ -3529,9 +3529,9 @@ try {
   // (occupantRepoPath)` before letting the write through. It used to trust ONLY the in-memory
   // `atFilenameIdx` lookup against `pendingUnresolvedQuarantines`, never reading whatever currently
   // occupies that deterministic filename ON DISK -- the exact 8a79dd31 bug shape, at the one call site
-  // that card's own "Do not" section explicitly left unaudited (@decision 8db913e2, Follow-up 29fe2372's
+  // that card's own "Do not" section explicitly left unaudited (@decision 29fe2372's
   // own "Do not" section). THE FIX: it now routes through the SAME {@link reconcilePendingDivertTarget}
-  // chokepoint {@link mintPendingDivert} uses (@decision 8db913e2, Follow-up 6451a749).
+  // chokepoint {@link mintPendingDivert} uses (@decision 6451a749).
   //
   // Setup: D (a never-created subdir of R, unresolvable) sits at R's own key's physical `final` -- the
   // same "degraded occupant" shape SHAPE 1 (control, above) already exercises via this SAME call site. A
@@ -3596,7 +3596,7 @@ try {
   // key's `final`, protect's blind write to the PRIMARY filename destroyed the very occupant 8a79dd31's
   // own reconcile had specifically refused to touch there. THE FIX: the SAME shared
   // {@link reconcilePendingDivertTarget} chokepoint never overwrites a primary occupied by a different
-  // identity (@decision 8db913e2, Follow-up 6451a749).
+  // identity (@decision 6451a749).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const r2 = makeToplevelRepo("6451a749-cf-r2");
@@ -4123,7 +4123,7 @@ try {
   // occupant file for D is written directly to R's own key (never scanned into this process), and R
   // raises -- reaching protectOccupantContentBeforeDelete via the "no existing" front door, which finds
   // the twin at atFilenameIdx (sourceFile === D's own pending-divert path). THE FIX: route the re-point
-  // through replaceEntryEverywhere, exactly like mergeTokenIntoPendingEntries (@decision 8db913e2,
+  // through replaceEntryEverywhere, exactly like mergeTokenIntoPendingEntries (@decision 37452ddd,
   // Follow-up 37452ddd).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
@@ -4341,7 +4341,7 @@ try {
   // discovering D (X's content) at its own final -- `atFilenameIdx` matches Y's slot (same deterministic
   // pending-divert filename), `atFinalBasenameIdx` matches X's slot -- BOTH >= 0, branch 1. THE FIX: a
   // SECOND `replaceEntryEverywhere` call, for whichever entry sits at `atFinalBasenameIdx`, before that
-  // slot is spliced away (@decision 8db913e2, Follow-up 37452ddd).
+  // slot is spliced away (@decision 37452ddd).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const s = makeToplevelRepo("37452ddd-b1-s");
@@ -4416,7 +4416,7 @@ try {
   // W, armed at S's own key, pending ref at R's own final basename only) -- but R's raise is wrapped in
   // `injectOpenSyncFailureForPrefix` targeting D's own pending-divert filename, forcing
   // `writePendingDivertFile` to fail and reach the double-fault branch. THE FIX: `replaceEntryEverywhere`
-  // before the slot is overwritten with `kept` (@decision 8db913e2, Follow-up 37452ddd).
+  // before the slot is overwritten with `kept` (@decision 37452ddd).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const s = makeToplevelRepo("37452ddd-df-s");
@@ -5453,7 +5453,7 @@ try {
   // instead saw the latch file persist (content rewritten, NOT removed — correct: 2 tokens remained) plus
   // assertRepoNotQuarantined's own pre-existing ambiguous-collision refusal (unrelated to the clear call
   // itself — the union already had >1 contributor before any clear ever ran). Verdict: correct
-  // fail-closed behaviour, not a bug. See docs/decisions/8db913e2-*.md, "Follow-up bfc9356e".
+  // fail-closed behaviour, not a bug. See docs/decisions/bfc9356e-follow-up-bfc9356e.md.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
   const r6 = makeToplevelRepo("bfc9356e-r6");

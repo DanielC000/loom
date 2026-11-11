@@ -18,7 +18,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // THE FIX: `reconcileMarkedBasenameBeforeWrite` now also folds the on-disk record's own
 // `informativeKeysFor` (scalar ∪ plural, card 43cf3b26's own helper) into `entry.resolvedKeys` via the
 // SAME `unionResolvedKeysRetaining` retention/cap/eviction-log every other writer in this module already
-// uses — see docs/decisions/8db913e2-raise-diverts-instead-of-overwriting-a-kept-occupant.md's own
+// uses — see docs/decisions/150aed7b-reconcile-marked-basename-dropped-the-on-disk-resolvedkeys.md's own
 // "Follow-up 150aed7b" section for the full design and why it cannot arm a key for a repo that was never
 // quarantined (the function's pre-existing same-identity gate already restricts the fold to the SAME
 // repoPath identity as the entry being written).

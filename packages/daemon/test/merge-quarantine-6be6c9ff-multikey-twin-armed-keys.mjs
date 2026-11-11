@@ -21,7 +21,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // now derive their candidate key set via the shared `liveArmedKeys(key, entry)` helper — a UNION of
 // `entry.armedKeys`, a fresh live scan of `activeQuarantines` for every key `k` where
 // `activeQuarantines.get(k) === entry`, and `key` itself — never `entry.armedKeys` alone. See
-// @decision 8db913e2 ("armedKeys — left unfixed (Lead ruling)") for why a UNION-never-replace live scan
+// @decision 37452ddd ("armedKeys — a SEPARATE question from resolvedKey") for why a UNION-never-replace live scan
 // is the ruling's own endorsed alternative to copying a replaced object's own stale list forward.
 //
 // SF2 (Code Review 2029fcf5 of this card): the third fix site — enterMergeQuarantine's existing-branch

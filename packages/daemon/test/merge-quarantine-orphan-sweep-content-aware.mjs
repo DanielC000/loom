@@ -296,7 +296,7 @@ try {
   // `latchKept`, never silently — a kept file indistinguishable from "nothing was kept" is exactly the
   // shape 9cabd143's own doc warns against.
   //
-  // @decision 8db913e2 (Follow-up 0a783fb2) — MIGRATED: the parsed repoPath now reports via
+  // @decision 0a783fb2 — MIGRATED: the parsed repoPath now reports via
   // `contentKeptRepoPaths`, never `referencingRepoPaths` (that field is TRUE in-memory referencers only).
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
@@ -449,7 +449,7 @@ try {
     const pI = path.join(os.tmpdir(), `loom-mqosca-pI-never-exists-${freshSfx()}`);
     const orphanBasenameI = `${randomBytes(12).toString("hex")}.json`;
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
-    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d, NIT) — the production runtime-divert
+    // @decision 0a783fb2 (Code Review 47289f8d, NIT) — the production runtime-divert
     // shape (d4b25feb): `pending-<sha256(directPathIdentity(repoPath)).slice(0,24)>.json`, never an
     // arbitrary `pending-i-...` basename — pI never resolves, so directPathIdentity falls back to
     // `path.resolve(pI).toLowerCase()` (win32), mirroring the real function exactly.
@@ -491,7 +491,7 @@ try {
     const pJ = path.join(os.tmpdir(), `loom-mqosca-pJ-never-exists-${freshSfx()}`);
     const orphanBasenameJ = `${randomBytes(12).toString("hex")}.json`;
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
-    // @decision 8db913e2 (Follow-up 0a783fb2, test-construction fix) — a PASS-1-sourced pending entry's
+    // @decision 0a783fb2 (test-construction fix) — a PASS-1-sourced pending entry's
     // own sourceFile must be `<24-hex>.json` — pendingLatchIdFor's fallback (no other naming pattern
     // matches) returns everything before `.json` VERBATIM as the id, never hashing it; a `pending-j-...`
     // basename derived an invalid, non-24-hex id and clearMergeQuarantineLatchFile refused it outright.
@@ -536,7 +536,7 @@ try {
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
   {
     const pK = path.join(os.tmpdir(), `loom-mqosca-pK-never-exists-${freshSfx()}`);
-    // @decision 8db913e2 (Follow-up 0a783fb2, test-construction fix) — same reason as (J) above: must be
+    // @decision 0a783fb2 (test-construction fix) — same reason as (J) above: must be
     // `<24-hex>.json`, not a `pending-k-...`-shaped basename, or pendingLatchIdFor derives an invalid id.
     const sourceFileK = `${randomBytes(12).toString("hex")}.json`;
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
@@ -589,7 +589,7 @@ try {
     l2Record.orphanLatchFiles = [sharedOrphanL];
     fs.writeFileSync(l2FinalPath, JSON.stringify(l2Record));
 
-    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — a WELL-FORMED record (repoPath/
+    // @decision 0a783fb2 (Code Review 47289f8d) — a WELL-FORMED record (repoPath/
     // branch/reason/tokens all present), never a bare placeholder: PASS 1 treats a record missing those
     // fields as CORRUPT debris needing its own fail-closed broad protection, which REWRITES every
     // currently-unresolvable entry's own orphanLatchFiles to point at it — exactly the kind of
@@ -629,7 +629,7 @@ try {
       repoPath: pM2, branch: "p-m2-branch", reason: "P — M2, unresolvable, survives, carries the shared orphan reference",
       enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [sharedOrphanM],
     }, null, 2) + "\n");
-    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — see (L)'s own identical note: a
+    // @decision 0a783fb2 (Code Review 47289f8d) — see (L)'s own identical note: a
     // WELL-FORMED record, never a bare placeholder (avoids PASS 1's corrupt-debris fail-closed fold).
     fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanM), JSON.stringify({
       repoPath: path.join(os.tmpdir(), `loom-mqosca-sharedOrphan-owner-${freshSfx()}`), branch: "b", reason: "r",
@@ -667,7 +667,7 @@ try {
       repoPath: pN2, branch: "p-n2-branch", reason: "P — N2, unresolvable, survives, carries the shared orphan reference",
       enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [sharedOrphanN],
     }, null, 2) + "\n");
-    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — see (L)'s own identical note: a
+    // @decision 0a783fb2 (Code Review 47289f8d) — see (L)'s own identical note: a
     // WELL-FORMED record, never a bare placeholder (avoids PASS 1's corrupt-debris fail-closed fold).
     fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanN), JSON.stringify({
       repoPath: path.join(os.tmpdir(), `loom-mqosca-sharedOrphan-owner-${freshSfx()}`), branch: "b", reason: "r",
@@ -709,7 +709,7 @@ try {
       repoPath: pO2, branch: "p-o2-branch", reason: "P — O2, unresolvable, survives, carries the shared orphan reference",
       enteredAt: Date.now(), tokens: [randomUUID()], orphanLatchFiles: [sharedOrphanO],
     }, null, 2) + "\n");
-    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — see (L)'s own identical note: a
+    // @decision 0a783fb2 (Code Review 47289f8d) — see (L)'s own identical note: a
     // WELL-FORMED record, never a bare placeholder (avoids PASS 1's corrupt-debris fail-closed fold).
     fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, sharedOrphanO), JSON.stringify({
       repoPath: path.join(os.tmpdir(), `loom-mqosca-sharedOrphan-owner-${freshSfx()}`), branch: "b", reason: "r",

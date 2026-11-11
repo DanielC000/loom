@@ -300,7 +300,7 @@ try {
   }, null, 2) + "\n");
 
   reenterMergeQuarantinesAtBoot([]);
-  // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — R is no longer evicted at all: D's own
+  // @decision 43cf3b26 (CR 46c5c492) — R is no longer evicted at all: D's own
   // coincidentally-matching scalar now diverts D to pending at boot (card 43cf3b26's own fix) rather than
   // falling through to a tautological primary arm that used to evict R.
   check("(tp precondition) R's own token is active, never evicted by D", new Set(listActiveMergeQuarantines().flatMap((q) => q.tokens ?? [])).has("r-token-tp"));
@@ -318,7 +318,7 @@ try {
   check("*** THE FIX (tmp-path) *** D's own tmp residue SURVIVES a read failure (marked kept, never swept)", fs.existsSync(dTmpFile));
   check("*** THE FIX (tmp-path) *** D's own content is still physically present in the tmp residue", (contentIfExists(dTmpFile) ?? "").includes("d-token-tp"));
   check("*** THE FIX (tmp-path) *** R's own file is still cleanly removed (its own clear is unaffected by D's read failure)", !fs.existsSync(rFile));
-  // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — this residual is RETIRED, not merely
+  // @decision 43cf3b26 (CR 46c5c492) — this residual is RETIRED, not merely
   // unaffected: D's own degraded identity (resolvedKey coincidentally equal to its own walked-up
   // currentKey, same shape as card 43cf3b26's own natural.mjs repro) is now UNCONDITIONALLY diverted to
   // `pendingUnresolvedQuarantines` at BOOT TIME, independent of R's own key — so D's own content was
@@ -644,7 +644,7 @@ try {
   // real branch/reason with the stub's placeholder ("" branch, anchor reason) plus a phantom token. With
   // the identity-less Set, a fresh raise after a failed clear finds NOTHING STUB-SHAPED to absorb.
   //
-  // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — RE-GROUNDED, not merely re-asserted: card
+  // @decision 43cf3b26 (CR 46c5c492) — RE-GROUNDED, not merely re-asserted: card
   // 43cf3b26's own fix means D's tmp here is no longer a transient residue the CLEAR's own protect call
   // first learns about — D's coincidentally-matching scalar diverts it to `pendingUnresolvedQuarantines`
   // at BOOT, independent of R's own key (same mechanism as the "tp" scenario above), so D's own REAL

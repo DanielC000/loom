@@ -25,7 +25,7 @@ A new shared helper, `liveArmedKeys(key, entry)`: the UNION of `entry.armedKeys`
 `replaceEntryEverywhere` uses), and `key`. Union only — ADDS a key never recorded, never DROPS one (a
 caller's own `entryStillOwnsKey` gate screens stale members for an ACTING decision).
 
-This is `@decision 8db913e2`'s own ("armedKeys — left unfixed (Lead ruling)") endorsed alternative to
+This is `@decision 37452ddd`'s own ("`armedKeys` — a SEPARATE question from `resolvedKey`") endorsed alternative to
 copying a replaced object's stale `armedKeys` forward — applied at three chokepoints:
 
 1. **`clearActiveEntryTokenAtKey`'s `armedKeysForEntry`** — via `liveArmedKeys`, BEFORE building
@@ -38,7 +38,7 @@ copying a replaced object's stale `armedKeys` forward — applied at three choke
    stamped onto `baseEntry` too — union-only, every existing raise-path test stays byte-identical.
 
 **Direction (a) — unioning the OLD objects' `armedKeys` onto `written.entry` at the re-point — NOT
-taken:** `@decision 8db913e2` already forbids this. Direction (b) is that ruling's own endorsed
+taken:** `@decision 37452ddd` already forbids this. Direction (b) is that ruling's own endorsed
 alternative: robust against this file's 20+ `replaceEntryEverywhere` sites leaving `armedKeys` stale
 (already recurred: `37452ddd`/`d4b25feb`/`4b06875f`), fail-safe (union-only never omits an armed key).
 
@@ -63,7 +63,7 @@ alternative: robust against this file's 20+ `replaceEntryEverywhere` sites leavi
 ## Do not
 
 - Do not union a replaced/discarded object's own `armedKeys` forward onto a replacement — derive from
-  LIVE occupancy instead. See `@decision 8db913e2`'s own "Do not" for the regression this avoids.
+  LIVE occupancy instead. See `@decision 37452ddd`'s own "Do not" for the regression this avoids.
 - Do not use `liveArmedKeys`'s raw output as `liftedKeys` directly, unfiltered — `enterMergeQuarantine`'s
   own `liftedKeys` (`ownedKeysIncluding`) now ALSO derives from `liveArmedKeys` (card `c52b290e` widened
   it, after re-deriving the formula does not reopen the FAIL-OPEN `78fccd3f` guards against), but always

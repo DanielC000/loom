@@ -3624,7 +3624,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // co-occupant never sets latchKept, so gating here would silently drop it at the REST boundary.
       stillBlockedCoOccupants,
       ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
-      // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep (no live entry) never joins
+      // @decision 0a783fb2 — a content-parsed keep (no live entry) never joins
       // `referencingRepoPaths` above — its own, separately-gated field.
       ...(contentKeptRepoPaths?.length ? { contentKeptRepoPaths } : {}),
       // @decision 25d0d45b (Round 5) — the `blockedBy` disclosure rides alongside `contentKeptRepoPaths`
@@ -3678,7 +3678,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // calling this route sees the SAME still-quarantined/host-contributor disclosure clear-by-id gives.
         ...(stillQuarantined ? { stillQuarantined: true, reason } : {}),
         ...(latchKept ? { latchKept: true, referencingRepoPaths } : {}),
-        // @decision 8db913e2 (Follow-up 0a783fb2) — same split as `/clear` above.
+        // @decision 0a783fb2 — same split as `/clear` above.
         ...(contentKeptRepoPaths?.length ? { contentKeptRepoPaths } : {}),
         // @decision 25d0d45b (Round 5) — same disclosure as `/clear` above.
         ...(contentKeptBlockedBy?.length ? { contentKeptBlockedBy } : {}),
@@ -3706,7 +3706,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // human; the stillQuarantined spread above only forwards it for the still-blocked shape.
       ...(result.latchKept && !result.stillQuarantined && result.reason ? { reason: result.reason } : {}),
       ...(result.latchKept ? { latchKept: true, referencingRepoPaths: result.referencingRepoPaths } : {}),
-      // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep (no live entry) never joins
+      // @decision 0a783fb2 — a content-parsed keep (no live entry) never joins
       // `referencingRepoPaths` above — its own, separately-gated field.
       ...(result.contentKeptRepoPaths?.length ? { contentKeptRepoPaths: result.contentKeptRepoPaths } : {}),
       // @decision 25d0d45b (Round 5) — same disclosure as the two routes above.

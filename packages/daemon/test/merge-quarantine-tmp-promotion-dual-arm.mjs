@@ -12,7 +12,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Discovered from Code Review 31ba43b4 of card 48bda567 (round 3) — see that card's own "Do not" bullet
 // (48bda567-no-fire-both-sides-informative-and-different) and
-// docs/decisions/8db913e2-raise-diverts-instead-of-overwriting-a-kept-occupant.md's "Follow-up 1e739f4a"
+// docs/decisions/1e739f4a-promote-site-self-stamp-and-the-pass-1b-divert-attempt.md's "Follow-up 1e739f4a"
 // section for the full history, including a ROUND-2 Code Review (cd9b1e3e) that found an initially-shipped
 // divert (attempting to also PRESERVE the losing side of a two-informative-keys collision) unsound and
 // had it reverted — see that section for why, and for card 43cf3b26, which owns the real fix.
@@ -333,7 +333,7 @@ try {
   } else if (scenarioName === "two-tmps") {
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     // TWO-TMPS — FIXED by card 43cf3b26's own persisted, plural `resolvedKeys` (generalizing THIS card's
-    // own single-scalar `resolvedKey` mechanism) — see docs/decisions/8db913e2-*.md's "Follow-up
+    // own single-scalar `resolvedKey` mechanism) — see docs/decisions/43cf3b26-persisted-plural-resolvedkeys.md's "Follow-up
     // 43cf3b26" section. Two sibling tmps for the SAME key, each carrying its OWN, DIFFERENT, genuinely
     // informative resolvedKey (K1 older, K2 newer). The scalar `resolvedKey` field still only ever keeps
     // ONE (K1, for backward compat with an old reader) — but BOTH now survive via `resolvedKeys`, so BOTH

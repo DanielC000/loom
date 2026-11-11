@@ -120,7 +120,7 @@ other site.
 
 - Do not have `protectOccupantContentBeforeDelete`'s own re-point stamp `armedKeys` onto `written.entry`
   as "the" fix for this shape — the Lead's own ruling rejected this for THIS card specifically because it
-  only covers one of 20+ `replaceEntryEverywhere` sites; see `@decision 8db913e2`'s own "Do not" for the
+  only covers one of 20+ `replaceEntryEverywhere` sites; see `@decision 37452ddd`'s own "Do not" for the
   broader prohibition against copy-forwarding a replaced object's stale `armedKeys`, which this doesn't
   reopen (this card never unions an OLD object's list forward — every site here derives fresh from LIVE
   occupancy).

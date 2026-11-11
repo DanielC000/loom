@@ -280,3 +280,35 @@ and still pass unchanged (amendment E): `merge-quarantine-orphan-sweep-content-a
 `merge-quarantine-1fea8b15-tmp-sweep-content-check.mjs`. All 94 `merge-quarantine*.mjs` files run
 individually, serially, in both `env -u LOOM_DEV -u LOOM_SUPERVISED` and `LOOM_DEV=1 LOOM_SUPERVISED=1`,
 green. `pnpm --filter @loom/daemon guards` green.
+
+_Split out of the former single `8db913e2` record by card `3608937e` so each record's injected Do-not extract fits the per-record cap; the section below is verbatim from it (pinned blob `2f1a55286d01`). The core record keeps the card's own rounds 1 and 3 and holds the index of every split-out record (rounds 2 and 4 of the card are in `sha:d529d42d`, record `d529d42d-raise-divert-rounds-2-and-4-chokepoint-union-and-in-memory-repoint.md`): `8db913e2-raise-diverts-instead-of-overwriting-a-kept-occupant.md`._
+
+## Follow-up 1dd00dca — a kept, genuinely foreign, uncovered orphan was never enforced within the SAME
+process; the next boot's own PASS 1 was the only thing that ever armed it
+
+From CR `745c3736` of this card. O surviving a full clear (the fix above) left T wholly unenforced in
+this process until the next restart — confirmed via a hermetic repro: `activeMergeQuarantineFor(T)` read
+`undefined` in the SAME booted instance right after a clear that kept O.
+
+THE FIX: `sweepOrphanLatchFileIfUnreferenced`'s keep branch now calls a new helper,
+`armForeignOrphanContentInMemoryIfUnenforced`, synchronously inline, arming T in memory (active if
+resolvable, pending if not) UNLESS `resolveQuarantineFor(T)` already answers non-`undefined` — the SAME
+lookup `assertRepoNotQuarantined` uses, which (via `activeMergeQuarantineFor`'s own lookup order) answers
+truthy whenever EITHER T's own identity is already enforced OR T's canonical key is already occupied by a
+DIFFERENT identity. Either shape is a plain skip, never a union — the boot-only degraded-collision
+union/eviction machinery (six-plus CR rounds deep) was deliberately not replicated at runtime.
+`orphanSweepSafeToDelete`'s return was widened, additively only, to carry the already-parsed armable
+record forward (no second read). NEVER touches disk — O is left exactly as kept today, so the next boot
+is byte-for-byte unaffected.
+
+DEFERRED to its own follow-up card: the `.tmp`-residue twin (`sweepTmpResidueForHashIfUnreferenced`) has
+the IDENTICAL gap — `1fea8b15`'s own "fail-open at runtime" accepted residual stays true for it until
+that card lands. The new helper takes an already-parsed record + a bare basename specifically so that
+follow-up can adopt it with no copy. The second CR nitpick (consolidating `markedFinalFullyCoveredByClear`/
+`orphanFileTokensAccountedForByUpdate`/`orphanSweepSafeToDelete` behind one polarity-parameterized helper)
+is also deferred, to its own refactor card.
+
+Tests: `merge-quarantine-1dd00dca-arm-foreign-orphan-in-memory.mjs` — see
+`docs/decisions/1dd00dca-arm-foreign-orphan-latch-in-memory.md` for the full design and scenario list.
+Verified RED (pre-fix sha `91bb76277cac3986ef91ab85b5a32d96387847a6`) via `negative-control`, GREEN after.
+All 6 `contentKeptRepoPath(s)`-referencing files re-run in full, unchanged.

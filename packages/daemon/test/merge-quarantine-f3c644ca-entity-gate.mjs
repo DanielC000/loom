@@ -49,7 +49,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Probe G (pre-existing, same general class, OUTSIDE this predicate) was found by Code Review and carded
 // separately -- not fixed here.
 //
-// See docs/decisions/8db913e2-raise-diverts-instead-of-overwriting-a-kept-occupant.md, Follow-up f3c644ca.
+// See docs/decisions/f3c644ca-entity-still-owns-key-gated-on-identity-alone-not-entity.md.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-f3c644ca-entity-gate.mjs
 import fs from "node:fs";

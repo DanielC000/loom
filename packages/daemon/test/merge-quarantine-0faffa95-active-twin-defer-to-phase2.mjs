@@ -4,7 +4,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // TWIN protectOccupantContentBeforeDelete's own BOTH-INDICES branch just re-pointed — that branch calls
 // replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename, written.entry) for the twin's own key,
 // but the armedKeys union feeding written.entry is gated to atFilenameIdx alone (@decision c9114934;
-// see also @decision 8db913e2 (Follow-up cd5a3cf9)), so the twin's own armedKeys never join it.
+// see also @decision cd5a3cf9), so the twin's own armedKeys never join it.
 // clearTokenFromPendingIndices' re-derived plan is sourced purely from live.entry.armedKeys, so the
 // twin's key is invisible to it, even though
 // activeQuarantines now genuinely points that key at live.entry.

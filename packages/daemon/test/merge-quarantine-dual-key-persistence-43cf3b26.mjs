@@ -1,8 +1,8 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Card 43cf3b26 — persisted `resolvedKeys` (plural), generalizing the single-secondary-key mechanism
 // cards 48bda567/1e739f4a already shipped (a scalar `resolvedKey` field) to N keys. Closes the
-// reboot-persistence gap documented in docs/decisions/8db913e2-raise-diverts-instead-of-overwriting-a-
-// kept-occupant.md's "Follow-up 1e739f4a" ACCEPTED RESIDUALS, plus a fourth, independently-reproduced
+// reboot-persistence gap documented in docs/decisions/1e739f4a-promote-site-self-stamp-and-the-pass-1b-divert-attempt.md's
+// "Follow-up 1e739f4a" ACCEPTED RESIDUALS, plus a fourth, independently-reproduced
 // SILENT loss at `consumeMatchedPendingsIntoArmedEntry`'s own self-stamp — see that record's own
 // "Follow-up 43cf3b26" section for the full design.
 //

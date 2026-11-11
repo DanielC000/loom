@@ -38,7 +38,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // pending-side bookkeeping reference changes nothing observable. Confirmed directly (Code Review): with
 // ONLY :2222 reverted, SCENARIO 4 stays fully GREEN.
 //
-// See docs/decisions/8db913e2-raise-diverts-instead-of-overwriting-a-kept-occupant.md, Follow-up cd5a3cf9.
+// See docs/decisions/cd5a3cf9-a-basename-match-is-never-proof-of-same-identity.md.
 //
 // Run: 1) build daemon (pnpm build), 2) node test/merge-quarantine-cd5a3cf9-identity-gate.mjs
 import fs from "node:fs";

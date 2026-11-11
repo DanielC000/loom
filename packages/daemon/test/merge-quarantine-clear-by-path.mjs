@@ -433,7 +433,7 @@ function hashKey(key) {
 // order has the NO-FILE key first and the HAS-FILE key second — the shape PASS 1's original (now-removed)
 // degraded-dual-arm used to produce, and the one the round-3 sort (card c0be9bf9) exists for.
 //
-// @decision 8db913e2 (Follow-up 3152ec90) — a bare, hand-constructed entry object (never actually armed
+// @decision 3152ec90 — a bare, hand-constructed entry object (never actually armed
 // anywhere) is no longer valid here: quarantineLatchFileIdsFor now gates every armedKeys member through
 // entryStillOwnsKey, so an unarmed synthetic object reports ZERO ids. Arm both synthetic keys for real
 // via a single pending latch's own `resolvedKeys` (PASS 1's genuine degraded dual-arm) instead.
@@ -2462,7 +2462,7 @@ function hashKey(key) {
     // --- (AL2) /clear-by-path {id} → clearMergeQuarantineLatchFile's own pending-match branch ---
     const pAL2 = path.join(os.tmpdir(), `loom-mqcbp-pAL2-never-exists-${sfx}`);
     const orphanBasenameAL2 = `${createHash("sha256").update(`al2-${sfx}`).digest("hex").slice(0, 24)}.json`;
-    // @decision 8db913e2 (Follow-up 0a783fb2, test-construction fix) — a PASS-1-sourced pending entry's
+    // @decision 0a783fb2 (test-construction fix) — a PASS-1-sourced pending entry's
     // own sourceFile must be `<24-hex>.json` — pendingLatchIdFor's fallback (no other naming pattern
     // matches) returns everything before `.json` VERBATIM as the id, never hashing it; a `pending-al2-...`
     // basename derived an invalid, non-24-hex id and clearMergeQuarantineLatchFile refused it outright.

@@ -10,13 +10,13 @@ in-memory tokens being dropped by the re-point) remains separately open."
 ## The shape
 
 `protectOccupantContentBeforeDelete` (`merge-quarantine.ts`) re-reads `final`'s own on-disk bytes into
-`toPersist`, optionally unions `atFilenameIdx`'s own in-memory entry on top (`@decision 8db913e2`,
-Follow-up `6451a749` Round 2), and writes the result as `written.entry`. When `atFinalBasenameIdx` also
-matches a SAME-IDENTITY armed twin (`atFinalBasenameSameIdentity`, `@decision 8db913e2` Follow-up
-`cd5a3cf9`), both the both-indices branch and the `atFinalBasenameIdx`-only branch call
+`toPersist`, optionally unions `atFilenameIdx`'s own in-memory entry on top (`@decision 6451a749`,
+Round 2), and writes the result as `written.entry`. When `atFinalBasenameIdx` also
+matches a SAME-IDENTITY armed twin (`atFinalBasenameSameIdentity`, `@decision cd5a3cf9`),
+both the both-indices branch and the `atFinalBasenameIdx`-only branch call
 `replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename, written.entry)` — re-pointing EVERY key
 that referenced the twin onto `written.entry`. `written.entry` never includes `oldAtFinalBasename`'s own
-tokens (`@decision 8db913e2` Follow-up `37452ddd`: "re-point for the REPLACEMENT only, never as a union
+tokens (`@decision 37452ddd`: "re-point for the REPLACEMENT only, never as a union
 source — `c9114934` still forbids unioning `atFinalBasenameIdx`'s own tokens into `toWrite`"), so any
 token the twin held ONLY in memory — never reflected in `final`'s own on-disk bytes — is dropped the
 instant this re-point runs.
@@ -87,8 +87,8 @@ twin — there is no discriminator available today to gate a safe union.
 
 ## Q4 — decision: accept as a documented, LOGGED residual
 
-Same posture/severity class as the existing `armedKeys` residual (`@decision 8db913e2` "armedKeys — left
-unfixed (Lead ruling)"): fail-closed in effect, bounded harm. The entry stays armed/blocking under its
+Same posture/severity class as the existing `armedKeys` residual (`@decision 37452ddd` "`armedKeys` — a SEPARATE
+question from `resolvedKey`"): fail-closed in effect, bounded harm. The entry stays armed/blocking under its
 OTHER tokens and keys — this never unblocks a repo. Only the specific dropped token's own distinguishing
 trace is lost (e.g. a specific merge-op's own outstanding marker), not the occupant's overall quarantine.
 A union fix is NOT safely buildable today (see Q3) without reopening `c9114934` Round 3's MAJOR #2 —

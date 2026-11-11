@@ -1,11 +1,11 @@
 // Board card 8bff3cae — PASS 1's own `.json` migrate branch (merge-quarantine.ts, search
-// "@decision 8db913e2 (Follow-up 8bff3cae)") unconditionally stamped `entry.resolvedKey = currentKey`,
+// "@decision 8bff3cae") unconditionally stamped `entry.resolvedKey = currentKey`,
 // discarding whatever informative key the scalar already carried, with nothing folding it into
 // `entry.resolvedKeys` first. Flagged (not reproduced) by `8db913e2`'s own "Follow-up 1e739f4a" Do-not
 // section as a THIRD near-identical arbitration site; investigated and reproduced hermetically by this
 // card's own worker (INVESTIGATE-FIRST, before any source edit; see the task's own `worker_report`
-// history), then fixed on manager direction. See docs/decisions/8db913e2-raise-diverts-instead-of-
-// overwriting-a-kept-occupant.md's own "Follow-up 8bff3cae" section for the full narrative.
+// history), then fixed on manager direction. See docs/decisions/8bff3cae-pass-1-json-migrate-branch-unconditional-overwrite.md's
+// own "Follow-up 8bff3cae" section for the full narrative.
 //
 // TWO INDEPENDENT fail-opens, both closed by the SAME fix (fold forward BEFORE the scalar overwrite,
 // via the shared isInformativeKey/unionResolvedKeysRetaining/hashToRepo primitives — no new mechanism):
@@ -222,7 +222,7 @@ try {
       check(`boot${i}: X stays blocked by its own record`, last.assertRepoNotQuarantined(x).ok === false);
       check(`boot${i}: T itself is not blocked`, last.assertRepoNotQuarantined(t).ok === true);
     }
-    // @decision 8db913e2 (Follow-up 8bff3cae, CR 0b975d2a round 2) — `clearMergeQuarantine` returns void;
+    // @decision 8bff3cae (CR 0b975d2a round 2) — `clearMergeQuarantine` returns void;
     // asserting on a bare truthy/falsy read of it is VACUOUS (always passes, even if P WAS blocked).
     // `clearMergeQuarantineReporting` re-resolves P fresh, both before and after the clear, so its
     // `wasQuarantined` genuinely reflects whether P was blocked going into this call.

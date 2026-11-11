@@ -212,13 +212,13 @@ export interface MergeQuarantineEntry {
    *  capped at {@link RESOLVED_KEYS_CAP}. Generalizes the legacy scalar `resolvedKey` (kept for backward
    *  compat) from exactly one surviving secondary key to N.
    *
-   *  @decision 8db913e2 (Follow-up 43cf3b26) — see the decision record's own "Follow-up 43cf3b26" section. */
+   *  @decision 43cf3b26 — see the decision record's own "Follow-up 43cf3b26" section. */
   resolvedKeys?: string[];
 }
 
 /** Cap on {@link MergeQuarantineEntry.resolvedKeys}' own length — see
  *  {@link unionResolvedKeysRetaining}'s own doc for the retention/eviction rule this enforces.
- *  @decision 8db913e2 (Follow-up 43cf3b26) — Lead-ruled cap value; see the decision record. */
+ *  @decision 43cf3b26 — Lead-ruled cap value; see the decision record. */
 const RESOLVED_KEYS_CAP = 16;
 
 /** Unions `fresh` into `existing` (both treated as "keys this entry is, or has been, armed at"), deduped,
@@ -228,7 +228,7 @@ const RESOLVED_KEYS_CAP = 16;
  *  NEVER removed for any other reason (no verification in this file proves a key that merely fails to
  *  re-arm one boot is permanently invalid) — only a human clear or this cap ever drops one.
  *
- *  @decision 8db913e2 (Follow-up 43cf3b26) — see the decision record's own "retention rule" section. */
+ *  @decision 43cf3b26 — see the decision record's own "retention rule" section. */
 function unionResolvedKeysRetaining(existing: string[] | undefined, fresh: Iterable<string>, label: string): string[] {
   const ordered = [...(existing ?? [])];
   for (const k of fresh) {
@@ -258,7 +258,7 @@ function parseResolvedKeysField(parsed: { resolvedKeys?: unknown }): string[] | 
  *  whose scalar was never set but whose array was), or both — this is the ONE place that reads either
  *  field without risking a caller that only checks one of them.
  *
- *  @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — every scalar-only gate must route through
+ *  @decision 43cf3b26 (CR 46c5c492) — every scalar-only gate must route through
  *  this. See the decision record's own CR-46c5c492 section. */
 function informativeKeysFor(entry: MergeQuarantineEntry): string[] {
   return [...new Set([
@@ -286,7 +286,7 @@ function secondaryKeysToAttempt(entry: MergeQuarantineEntry, anchorKey: string):
  *  operation's own fresh write to `final`) — neither premise applies to a hand-rolled union of several
  *  already-current records.
  *
- *  @decision 8db913e2 (Follow-up d524d1c4) — see the decision record's own "Follow-up d524d1c4" section
+ *  @decision d524d1c4 — see the decision record's own "Follow-up d524d1c4" section
  *  for the full rationale. Extracted (card 00fd29d7) so {@link divertRaiseEntry} and
  *  {@link mergeTokenIntoPendingEntries} share ONE implementation instead of two that can drift. */
 function unionInformativeResolvedKeys(all: MergeQuarantineEntry[], label: string): { resolvedKey: string | undefined; resolvedKeys: string[] | undefined } {
@@ -310,7 +310,7 @@ function unionInformativeResolvedKeys(all: MergeQuarantineEntry[], label: string
  *  walk (clear, latch rewrite) sees only the ONE key it was told about and never touches the other's
  *  physical file.
  *
- *  @decision 8db913e2 (Follow-up 3d27c045) — extracted so {@link divertRaiseEntry} and {@link mergeTokenIntoPendingEntries}
+ *  @decision 3d27c045 — extracted so {@link divertRaiseEntry} and {@link mergeTokenIntoPendingEntries}
  *  share ONE implementation instead of two that can drift, same reason {@link unionInformativeResolvedKeys}
  *  was extracted for the sibling field. */
 function unionArmedKeys(all: MergeQuarantineEntry[]): string[] | undefined {
@@ -554,7 +554,7 @@ const durablyTombstonedTokens = new Map<string, { direct: Set<string>; literal: 
 let clearedTokensTombstoneLoadedThisBoot = false;
 
 /**
- * @decision 8db913e2 (round 4, CR3 BLOCKER 1) — THE ONE place any token is ever added to
+ * @decision sha:d529d42d (round 4, CR3 BLOCKER 1) — THE ONE place any token is ever added to
  * {@link clearedTokens}; every clear site calls this, never `clearedTokens.add` directly.
  *
  * For each of `tokens`, tombstones it ONLY IF, at the moment this is called, (a) NO surviving record —
@@ -1612,7 +1612,7 @@ export function directPathIdentity(repoPath: string): string {
  * Every `JSON.parse(raw)` site in this module already guards the PARSE call itself with a try/catch for
  * corrupt/unparsable text — this guard closes the gap one line later, before the first property read.
  *
- * @decision 8db913e2 (Follow-up 495fd320) — see the decision record.
+ * @decision 495fd320 — see the decision record.
  */
 function isReadableLatchRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -1705,7 +1705,7 @@ function quarantinePathFor(repoPath: string): string {
  * placeholder's own `Date.now()` stamp (or a tmp missing `enteredAt`, or a clock set back) can otherwise
  * coincidentally look "older" and let fail-closed boilerplate win over a real identity.
  *
- * @decision 8db913e2 (Follow-up 4b06875f, Round 3) — `options.explicitResolvedKeyRule` defaults OFF,
+ * @decision 4b06875f (Round 3) — `options.explicitResolvedKeyRule` defaults OFF,
  * SEMANTICALLY (never byte-) equivalent to the pre-card `{...older}` spread — see the decision record
  * for the boot fail-open an unscoped rule reproduces.
  *
@@ -1740,7 +1740,7 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
   const provenanceUnknown = older.provenanceUnknown || newer.provenanceUnknown ? true : undefined;
   // @decision db0a9db0 (round 2) — same OR, same carry-forward posture, for the precision-guard field.
   const provenanceTracked = older.provenanceTracked || newer.provenanceTracked ? true : undefined;
-  // @decision 8db913e2 (Follow-up 43cf3b26, CR 4c59172f round 2, MAJOR) — SET semantics over A/B =
+  // @decision 43cf3b26 (CR 4c59172f round 2, MAJOR) — SET semantics over A/B =
   // informativeKeysFor(older/newer), not scalar-only: either empty ⇒ union everything; both non-empty ⇒
   // keep the intersection, exclude the whole symmetric difference. See the decision record's Round 3.
   const olderInformativeKeys = informativeKeysFor(older);
@@ -1753,7 +1753,7 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
     : new Set<string>();
   const explicitRuleFailedClosed = !!options?.explicitResolvedKeyRule && symmetricKeyDifference.size > 0;
   const conflictExclusions = explicitRuleFailedClosed ? symmetricKeyDifference : undefined;
-  // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — EXPLICIT rule, opt-in ONLY: equal ⇒ keep it; one
+  // @decision 4b06875f (Round 2/3) — EXPLICIT rule, opt-in ONLY: equal ⇒ keep it; one
   // side undefined ⇒ keep the other UNLESS it lost the SET arbitration above; both DIFFERENT ⇒ `undefined`.
   // Every other caller keeps the legacy `older.resolvedKey`.
   const resolvedKey = !options?.explicitResolvedKeyRule ? older.resolvedKey
@@ -1825,7 +1825,7 @@ function isInformativeKey(entry: MergeQuarantineEntry | undefined, key: string):
  *  @decision a2f381dc — the exclusion is IDENTITY-CONDITIONAL (compare `prior` against `armed`, not
  *  `entry`), never absolute — see the decision record for the M-1 fix and why M-2 stays excluded.
  *
- *  @decision 8db913e2 (Follow-up 48bda567) — never widen this correction beyond this one call site
+ *  @decision 48bda567 — never widen this correction beyond this one call site
  *  (never a second `unionQuarantineEntries` option, never persist `armedKeys` to fix it instead) — see
  *  the decision record for the age-dependent dual-arm loss this closes and why it stays scoped here. */
 function armQuarantineKey(byRepoKey: Map<string, MergeQuarantineEntry>, key: string, entry: MergeQuarantineEntry): MergeQuarantineEntry {
@@ -1936,7 +1936,7 @@ function differentUnresolvableOccupantRepoPathAt(final: string, ownIdentityRepoP
   // "different but resolvable" is the write-side's own today's-behavior exclusion (e1cb7d33) — but the
   // clear-side (`protectResolvableToo: true`) must NOT share it; see this function's own doc for why.
   if (!protectResolvableToo && isRepoPathCurrentlyResolvable(existing.repoPath)) {
-    // @decision 8db913e2 (Follow-up 0dc514dc) — "resolvable ⇒ safe" assumes the occupant's own backing lives at ITS OWN key —
+    // @decision 0dc514dc — "resolvable ⇒ safe" assumes the occupant's own backing lives at ITS OWN key —
     // false if an earlier graduation write there failed. Content-based, reusing THIS read (never a
     // second one): only a real token overlap with a surviving OTHER entry means this file is load-bearing.
     const { surviving } = readSurvivingOnDiskTokens(existing, existing.repoPath);
@@ -1979,7 +1979,7 @@ function unincorporatedOccupantRepoPathAt(final: string, clearedEntry: MergeQuar
   if (typeof existing.repoPath !== "string") return { state: "none" };
   if (directPathIdentity(existing.repoPath) === directPathIdentity(clearedEntry.repoPath)) return { state: "none" }; // same identity
   if (clearIdentity && directPathIdentity(existing.repoPath) === clearIdentity) return { state: "none" }; // genuinely the clearer's own data
-  // @decision 8db913e2 (Follow-up 25f6a7dc) — route through the SHARED reader, never a re-derived inline parser: skipping its
+  // @decision 25f6a7dc — route through the SHARED reader, never a re-derived inline parser: skipping its
   // empty-array-falls-back-to-legacy-`token` fix here wrongly treats an already-incorporated legacy token
   // as foreign, minting a redundant protect copy-aside. See the decision record.
   const { raw: existingTokens } = readSurvivingOnDiskTokens(existing, existing.repoPath);
@@ -2025,10 +2025,10 @@ function wouldOverwriteDifferentUnresolvableOccupant(final: string, entry: Merge
  * the two. `surviving` is `raw` with every tombstoned token removed — this is what a resurrection union
  * must use.
  *
- * @decision 8db913e2 (Follow-up 7a7e041b) — route every on-disk-token read through this ONE reader; a caller that re-parses
+ * @decision 7a7e041b — route every on-disk-token read through this ONE reader; a caller that re-parses
  * `tokens`/`token` independently skips the subtraction and can resurrect an already-cleared token.
  *
- * @decision 8db913e2 (Follow-up 5b55149b) — an EMPTY `tokens` array also falls back to legacy `token`, never treated as a
+ * @decision 5b55149b — an EMPTY `tokens` array also falls back to legacy `token`, never treated as a
  * valid (if empty) array. See the decision record's Follow-up section.
  *
  * @decision 8bc779f0 (round 3) — `recordIdentity` REQUIRED (nullable): this record's own `repoPath`,
@@ -2336,7 +2336,7 @@ function tokenTombstonedForIdentity(token: string, recordIdentity: string | unde
  * ONLY the purely content-based {@link survivingTokenHolderRepoPaths} check below, which never needs to
  * (and must not) distinguish those cases itself.
  *
- * @decision 8db913e2 (Follow-up 0dc514dc) — see the decision record's Follow-up section.
+ * @decision 0dc514dc — see the decision record's Follow-up section.
  */
 function readFinalOnDiskSurvivingTokens(final: string): string[] {
   let raw: string;
@@ -2353,7 +2353,7 @@ function readFinalOnDiskSurvivingTokens(final: string): string[] {
  * identity, and still carries `token`. Never checks `excludeFinalPath` itself — that would
  * tautologically "confirm" a stale leftover using its own soon-to-be-destroyed/overwritten bytes.
  *
- * @decision 8db913e2 (Follow-up 0dc514dc, Round 2, CR 582ce5a9) — see the decision record's open-question follow-up: a
+ * @decision sha:3de60f6e (0dc514dc, Round 2, CR 582ce5a9) — see the decision record's open-question follow-up: a
  * RESOLVABLE occupant's own content check must not flag a genuinely STALE leftover when that same
  * occupant is ALREADY durably, independently backed elsewhere (e.g. properly migrated to its own key).
  *
@@ -2391,7 +2391,7 @@ export function confirmedDurableBackingElsewhere(entry: MergeQuarantineEntry, to
  * confirmedDurableBackingElsewhere}) — optional, and every existing caller that omits it keeps today's
  * behavior byte-identical.
  *
- * @decision 8db913e2 (Follow-up 0dc514dc) — see the decision record. Must NOT fire when the only on-disk token is the clearer/
+ * @decision 0dc514dc — see the decision record. Must NOT fire when the only on-disk token is the clearer/
  * raiser's own (e.g. `95ea8d3f-r3-orphanref`, where `bToken` is held only by B, which is being cleared).
  */
 function survivingTokenHolderRepoPaths(tokens: string[], excludeIdentity: string, excludeFinalPath?: string): string[] {
@@ -2564,11 +2564,11 @@ function buildReingestedEntryFromDisk(
  * genuinely unreadable FILE (not a directory) RIGHT NOW — the caller decides what that means for its own
  * write (see {@link writeMergeQuarantineLatch}'s own call site).
  *
- * @decision 8db913e2 (round 2) — the chokepoint round 1 was missing: its union lived only inside
+ * @decision sha:d529d42d (round 2) — the chokepoint round 1 was missing: its union lived only inside
  * `enterMergeQuarantine`, so a DIFFERENT writer reaching the SAME marked basename (lazy graduation, via
  * {@link consumeMatchedPendingsIntoArmedEntry}) lost whatever only `final`'s own bytes still held.
  *
- * @decision 8db913e2 (Follow-up 150aed7b) — also folds the on-disk record's own
+ * @decision 150aed7b — also folds the on-disk record's own
  * {@link informativeKeysFor}, not just `tokens`; dropping them here silently unblocked a dual-armed
  * entry's own secondary worktrees after the next reboot. See the decision record's own section.
  *
@@ -2616,7 +2616,7 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
     return buildReingestedEntryFromDisk(final, entry, parsed as Record<string, unknown> & { repoPath: string; branch: string; reason: string }, dropped, ownershipMap, "reconcileMarkedBasenameBeforeWrite-reingest");
   }
   const { surviving: resurrectable } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
-  // @decision 8db913e2 (Follow-up 150aed7b) — exclude the key `final`'s OWN basename hash names, never
+  // @decision 150aed7b — exclude the key `final`'s OWN basename hash names, never
   // a recomputed `canonicalRepoLockKey(entry.repoPath)` (82032b5c/97cff6db's own rule: this write may
   // target a SECONDARY key via `targetKey`, which can differ from entry's own repoPath-derived key).
   const finalOwnHash = path.basename(final, ".json");
@@ -2695,7 +2695,8 @@ function reconcileMarkedBasenameBeforeWrite(final: string, entry: MergeQuarantin
  * {@link writeMergeQuarantineLatch} via `reconciledAlready:true` — that is what makes this the single
  * read, not merely an additional one.
  *
- * @decision 8db913e2 (round 2; round 3 — now a shared result, not a silent swallow)
+ * @decision sha:d529d42d (round 2; round 3 — now a shared result, not a silent swallow)
+ * @decision 8db913e2 (round 3) — the Round-3 half of the line above: its own Do-nots live in the core record.
  *
  * @decision 2dd97aaa (Follow-up 58957b1e) — `droppedTokens` (REQUIRED) is forwarded straight to
  * {@link reconcileMarkedBasenameBeforeWrite}; see that function's own doc.
@@ -2737,7 +2738,7 @@ function foldInOnDiskTokensIfMarked(final: string, entry: MergeQuarantineEntry, 
  * TWO opt-out families: `bootWriteLatch` (Phase 0 already secured the at-risk content) and
  * {@link enterMergeQuarantine} (a refused raise is lost on reboot). See the decision record.
  *
- * @decision 8db913e2 (round 2) — ALSO the ONE chokepoint for {@link reconcileMarkedBasenameBeforeWrite},
+ * @decision sha:d529d42d (round 2) — ALSO the ONE chokepoint for {@link reconcileMarkedBasenameBeforeWrite},
  * run for every caller right after the guard above. Its own doc comment has the full behavior; see that
  * instead of restating it here.
  *
@@ -2778,7 +2779,7 @@ function writeMergeQuarantineLatch(entry: MergeQuarantineEntry, dropped: Dropped
     // rebuilds it fresh via arming, and a stale persisted value from a PRIOR process's keying would be
     // actively misleading to a human reading the raw file.
     const { armedKeys: _armedKeys, ...persistable } = entry;
-    // @decision 8db913e2 (Follow-up 43cf3b26) — the retention formula (prior resolvedKeys UNION this
+    // @decision 43cf3b26 — the retention formula (prior resolvedKeys UNION this
     // write's own fresh secondary armedKeys) — see the decision record's own "retention rule" section.
     const ownKeyForWrite = targetKey ?? canonicalRepoLockKey(entry.repoPath);
     // @decision d69a6744 — derived from LIVE occupancy (liveArmedKeysOf), filtered by ownership
@@ -3031,7 +3032,7 @@ function consumeMatchedPendingsIntoArmedEntry(
   // launder, since provenanceUnknown (if any) already arrived via unioned's own sticky OR and wins at
   // the next boot's parse regardless. See the decision record.
   //
-  // @decision 8db913e2 (Follow-up 43cf3b26) — never self-stamp `resolvedKey` away from an already-
+  // @decision 43cf3b26 — never self-stamp `resolvedKey` away from an already-
   // informative value; fold it into `resolvedKeys` too — see the decision record's own "silent loss" section.
   const resolvedKeysForArm = unionResolvedKeysRetaining(
     unioned.resolvedKeys,
@@ -3044,7 +3045,8 @@ function consumeMatchedPendingsIntoArmedEntry(
     resolvedKeys: resolvedKeysForArm.length > 0 ? resolvedKeysForArm : undefined,
     armedKeys, orphanLatchFiles: strippedOrphanLatchFiles, provenanceTracked: true,
   };
-  // @decision 8db913e2 (round 2; round 3 — now also the ONE read for the write below, per
+  // @decision 8db913e2 (round 3) — the Round-3 half of the anchor below: its own Do-nots live in the core record.
+  // @decision sha:d529d42d (round 2; round 3 — now also the ONE read for the write below, per
   // foldInOnDiskTokensIfMarked's own doc) — fold on-disk tokens forward before arming, so every caller
   // here sets an in-memory record matching the durable bytes.
   // @decision 2dd97aaa (Follow-up 58957b1e) — this union only ever ADDS matched pendings' tokens, never
@@ -3056,7 +3058,7 @@ function consumeMatchedPendingsIntoArmedEntry(
   const folded = foldInOnDiskTokensIfMarked(quarantinePathForKey(key), armed, droppedHere, activeQuarantines);
   if (folded === "unreadable") {
     if (skipDegradedOccupantGuard) {
-      // @decision 8db913e2 (Follow-up 6c04633d) — a divert union keeps the RAISER's own identity for the raiser's own tokens;
+      // @decision 6c04633d — a divert union keeps the RAISER's own identity for the raiser's own tokens;
       // never fold one identity's tokens into a record keyed to a DIFFERENT identity — group matched
       // entries by identity and divert each identity separately (decision record, Follow-up 6c04633d).
       const raiserIdentity = directPathIdentity((extra ?? first.entry).repoPath);
@@ -3069,10 +3071,10 @@ function consumeMatchedPendingsIntoArmedEntry(
         if (group) group.push(p); else foreignGroups.set(id, [p]);
       }
       let raiserUnion = ownGroup.reduce((acc, p) => unionQuarantineEntries(acc, p.entry), extra ?? (ownGroup[0] as PendingUnresolvedQuarantine).entry);
-      // @decision 8db913e2 (Follow-up 6c04633d, M2) — PRESERVE the field set this function's own `armed` object always
+      // @decision 6c04633d (M2) — PRESERVE the field set this function's own `armed` object always
       // stamped before a divert (resolvedKey/armedKeys/provenanceTracked, `500e307a`) — this card is
       // about identity partition, never about what a divert record carries. See the decision record.
-      // @decision 8db913e2 (Follow-up 43cf3b26) — never self-stamp away an already-informative
+      // @decision 43cf3b26 — never self-stamp away an already-informative
       // `resolvedKey` here either — same `isInformativeKey` guard as this function's own main arm above.
       raiserUnion = {
         ...raiserUnion,
@@ -3080,7 +3082,7 @@ function consumeMatchedPendingsIntoArmedEntry(
         armedKeys: [...new Set([...(raiserUnion.armedKeys ?? []), key])],
         provenanceTracked: true,
       };
-      // @decision 8db913e2 (Follow-up 6c04633d, b) — fold EVERY own-group sourceFile in UNCONDITIONALLY, never excluding the
+      // @decision 6c04633d (b) — fold EVERY own-group sourceFile in UNCONDITIONALLY, never excluding the
       // assumed fresh-divert filename — `divertRaiseEntry` may instead reuse an unmatched same-identity
       // pending's own `base.sourceFile`, leaving an excluded file untracked and fail-open at reboot.
       const ownSourceFiles = ownGroup.map((p) => p.sourceFile);
@@ -3208,15 +3210,15 @@ function consumeMatchedPendingsIntoArmedEntry(
  * is trivially covered; any OTHER read failure, corrupt/unparsable JSON, or a real on-disk token not in
  * `candidateTokens`, cannot be proven safe.
  *
- * @decision 8db913e2 (Follow-up dd34da46, Item 1) — see the decision record for the stale-mark-outliving-a-transient-read-failure
+ * @decision dd34da46 (Item 1) — see the decision record for the stale-mark-outliving-a-transient-read-failure
  * shape this closes, and why this content-containment check differs from round 5 of `63e49ee2`'s
  * forbidden identity-only detector trust.
  *
- * @decision 8db913e2 (Follow-up 95ea8d3f, Round 2) — corrupt/unparsable content is NO LONGER trivially covered — a corrupt
+ * @decision sha:4dba1d37 (95ea8d3f, Round 2) — corrupt/unparsable content is NO LONGER trivially covered — a corrupt
  * latch can be a card-882d6cff shared backing for SEVERAL distinct claimants at once, and unparseable
  * content can never prove it holds nothing but `candidateTokens`' own tokens. See the decision record.
  *
- * @decision 8db913e2 (Follow-up 495fd320) — a bare scalar (number/string/boolean, never `null`) now ALSO counts as "cannot
+ * @decision 495fd320 — a bare scalar (number/string/boolean, never `null`) now ALSO counts as "cannot
  * prove coverage" rather than vacuously `true`, a strictly safer tightening. See the decision record.
  */
 function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]): boolean {
@@ -3230,7 +3232,7 @@ function markedFinalFullyCoveredByClear(final: string, candidateTokens: string[]
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { return false; } // corrupt — cannot prove coverage
   if (!isReadableLatchRecord(parsed)) return false; // e.g. the bare literal `null` — cannot prove coverage
-  // @decision 8db913e2 (Follow-up 25f6a7dc) — tests the RAW on-disk tokens, each covered by being cleared NOW (candidateTokens)
+  // @decision 25f6a7dc — tests the RAW on-disk tokens, each covered by being cleared NOW (candidateTokens)
   // or ALREADY tombstoned (clearedTokens) — never `.surviving` alone, which folds "already cleared"
   // silently into the array instead of deciding it here. See the decision record.
   // @decision 8bc779f0 (round 3) — `recordIdentity` (this record's OWN repoPath, `undefined` when not a
@@ -3327,7 +3329,7 @@ export function reconcileClearedEntryIfPlaceholderTestOnly(entry: MergeQuarantin
  * parsed), for both `final` (this function's own unlink below) and a tmp residue (protected inside
  * {@link protectForeignTmpResidueBeforeSweep} itself). See the decision record.
  *
- * @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, Critical) — returns the repoPaths of every SURVIVING structural shared
+ * @decision sha:4dba1d37 (95ea8d3f, Round 2, Critical) — returns the repoPaths of every SURVIVING structural shared
  * claimant ({@link survivingSharedClaimRepoPaths}) that kept `final` on disk (empty if none) — a check
  * that never yields to `provenCoverage`. See the decision record.
  */
@@ -3335,10 +3337,10 @@ export function reconcileClearedEntryIfPlaceholderTestOnly(entry: MergeQuarantin
 // a real `directPathIdentity(...)` value, and the content-check protection above depends on it structurally.
 function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string | undefined, clearedEntry: MergeQuarantineEntry | undefined, clearIdentity: string, liftedKeys: ReadonlySet<string>, identityWideHumanClear: boolean, pendingBeingRemoved?: ReadonlySet<PendingUnresolvedQuarantine>): { kept: Array<{ repoPath: string; sourceFile: string }>; relocated: Array<{ repoPath: string; sourceFile: string }>; contentKept: Array<{ repoPath: string; sourceFile: string; blockedBy?: ContentKeptBlockedBy }>; unattributed?: true; writeFailed?: true; unlinkFailedFiles?: string[] } {
   const final = quarantinePathForKey(key);
-  // @decision 8db913e2 (Follow-up 4b06875f, Round 2/3) — every key THIS clear is itself touching, never
+  // @decision 4b06875f (Round 2/3) — every key THIS clear is itself touching, never
   // `key` alone — the caller computes it (via `ownedKeysIncluding`/`keysToLift`) and must pass it
   // explicitly; see the decision record's Follow-up 78fccd3f for why there is deliberately no default.
-  // @decision 8db913e2 (Follow-up 0dc514dc) — ONLY when neither protect call below would read `final` at all (both
+  // @decision 0dc514dc — ONLY when neither protect call below would read `final` at all (both
   // `clearingRepoPath`/`clearedEntry` absent) — a new read here otherwise steals an injected-failure
   // slot several tests key to a specific read NUMBER. See the decision record's Follow-up.
   const contentClaimants = clearIdentity && !clearingRepoPath && !clearedEntry
@@ -3408,19 +3410,19 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
   // @decision 63e49ee2 (round 5) — ALWAYS, unconditionally: a fresh read or a detector "none" never
   // overrides a mark — only a durable rename-over or copy-aside (both already removed it by this point).
   //
-  // @decision 8db913e2 (Follow-up dd34da46, Item 1) — a THIRD way to settle a mark: a fresh content read
+  // @decision dd34da46 (Item 1) — a THIRD way to settle a mark: a fresh content read
   // proving every token in `final` is one THIS clear is dropping, with the mark itself dropped only AFTER
   // the unlink below CONFIRMS removal. See the decision record for the N4 EPERM/EBUSY ordering fix.
   const finalBasename = path.basename(final);
   const marked = keptUnreadableLatchFiles.has(finalBasename);
   const provenCoverage = marked && finalProtectOk && !!clearedEntry && markedFinalFullyCoveredByClear(final, clearedEntry.tokens);
   if (marked && !provenCoverage) finalProtectOk = false;
-  // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, Critical, CR c9af122d) — a SURVIVING structural shared claim on this
+  // @decision sha:4dba1d37 (95ea8d3f, Round 2, Critical, CR c9af122d) — a SURVIVING structural shared claim on this
   // exact file is NEVER overridden by provenCoverage (or anything else above) — see this function's own
   // doc. Checked last, after every other signal, so it can only ever narrow `finalProtectOk` further.
   const sharedClaimants = survivingSharedClaimRepoPaths(finalBasename);
   if (sharedClaimants.length > 0) finalProtectOk = false;
-  // @decision 8db913e2 (Follow-up 0dc514dc) — `contentClaimants` (computed at this function's own top, before any mutation
+  // @decision 0dc514dc — `contentClaimants` (computed at this function's own top, before any mutation
   // above) is NEVER overridden by `provenCoverage` either — same "checked last, only ever narrows"
   // posture as `sharedClaimants`, applied to a content-based rather than structural claim.
   if (contentClaimants.length > 0) finalProtectOk = false;
@@ -3455,7 +3457,7 @@ function deleteMergeQuarantineLatchByKey(key: string, clearingRepoPath: string |
       // eslint-disable-next-line no-console
       console.error(`[merge-quarantine] ${finalBasename}'s own unlink could not be CONFIRMED (an EPERM/EBUSY-shaped failure) — it may still physically hold tokens this clear meant to remove; the caller must withhold any durable tombstone for this clear until that is resolved.`);
     }
-    // @decision 8db913e2 (round 4, CR3 BLOCKER 1) — NEVER tombstone here: `finalProtectOk` true also
+    // @decision sha:d529d42d (round 4, CR3 BLOCKER 1) — NEVER tombstone here: `finalProtectOk` true also
     // covers "copied aside, still enforced". The caller's own top-level clear tombstones once, at its own
     // end, via `tombstoneIfNotSurviving` — the only place that knows the full outcome.
   } else if (keptClaimants.length > 0) {
@@ -3618,7 +3620,7 @@ const PENDING_DIVERT_TMP_RE = /^pending-[0-9a-f]{24}\.json\.tmp-\d+(-[0-9a-f]+)?
  *  hash the whole basename for it, same posture as {@link PENDING_DIVERT_RE}'s own branch below — never
  *  written to directly by anything other than {@link mintPendingDivert}.
  *
- *  @decision 8db913e2 (Follow-up 8a79dd31) */
+ *  @decision 8a79dd31 */
 const PENDING_DIVERT_COLLISION_RE = /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}\.json$/;
 
 /** Matches a crash-left TORN-WRITE residue of {@link writePendingDivertFile}'s own write to a
@@ -3631,7 +3633,7 @@ const PENDING_DIVERT_COLLISION_RE = /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}
  *  `.json`-index cut (which recovers a non-24-hex basename `clearMergeQuarantineLatchFile` then rejects as
  *  an "invalid latch id").
  *
- *  @decision 8db913e2 (Follow-up 8a79dd31) */
+ *  @decision 8a79dd31 */
 const PENDING_DIVERT_COLLISION_TMP_RE = /^pending-[0-9a-f]{24}-collision-[0-9a-f]{8}\.json\.tmp-\d+(-[0-9a-f]+)?$/;
 
 /** Deterministic, collision-proof filename for a repoPath's own pending-divert entry — hashes
@@ -3650,7 +3652,7 @@ function pendingDivertFilenameFor(repoPath: string): string {
  *  SECOND collision vanishingly unlikely — the same residual-risk posture this module already accepts for
  *  every other PID/random-suffixed tmp name.
  *
- *  @decision 8db913e2 (Follow-up 8a79dd31) */
+ *  @decision 8a79dd31 */
 function pendingDivertCollisionFilenameFor(repoPath: string): string {
   const base = pendingDivertFilenameFor(repoPath).slice(0, -".json".length); // "pending-<24hex>"
   return `${base}-collision-${randomUUID().replace(/-/g, "").slice(0, 8)}.json`;
@@ -4428,7 +4430,7 @@ function mixedKeptReasonAfterGraduatedClearFor(graduatedRefs: string[], otherRef
  *  ()" when `refs` is empty — this is the DISTINCT clause for a content-only keep, so every content-only
  *  branch names a real reason instead of falling through to that broken text or to none at all.
  *
- * @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — shared by every call site that can
+ * @decision 0a783fb2 (Code Review 47289f8d) — shared by every call site that can
  * report a content-only keep (clearMergeQuarantineReporting, clearMergeQuarantineByRecordedPath), so
  * neither drifts from the other.
  */
@@ -4449,7 +4451,7 @@ function contentKeptOnlyReasonFor(repoPaths: string[], blockedBy?: ReadonlyMap<s
  *  unlink, or a marked-but-unprovable-coverage keep) — shared so this exact wording never drifts between
  *  every branch that can report it.
  *
- * @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — factored out of
+ * @decision 0a783fb2 (Code Review 47289f8d) — factored out of
  * clearMergeQuarantineByRecordedPath's own inline literal so clearMergeQuarantineReporting's own
  * latchKept branch can share it instead of hand-rolling a second copy.
  */
@@ -4552,7 +4554,7 @@ function protectUnincorporatedOccupantBeforeDelete(final: string, clearedEntry: 
  * physically filed under right now (the caller-independent fallback — safe even if some future call site
  * forgets to thread a complete `liftedKeys`).
  *
- * @decision 8db913e2 (Follow-up 4b06875f) — see the decision record's "Follow-up 4b06875f" (Round 2)
+ * @decision 4b06875f — see the decision record's "Follow-up 4b06875f" (Round 2)
  * section for the two-finding repro this chokepoint closes and why a single shared helper, not two
  * independently-written checks, is required.
  */
@@ -4569,7 +4571,7 @@ function excludeLiftedResolvedKey(resolvedKey: string | undefined, final: string
  *  every member of a `resolvedKeys` array, so a protective copy made during a clear can never carry
  *  forward a key that clear is itself lifting.
  *
- *  @decision 8db913e2 (Follow-up 43cf3b26) — see the decision record's own "retention rule" section. */
+ *  @decision 43cf3b26 — see the decision record's own "retention rule" section. */
 function excludeLiftedResolvedKeys(keys: string[] | undefined, final: string, liftedKeys: ReadonlySet<string>): string[] | undefined {
   const filtered = (keys ?? []).filter((k): k is string => excludeLiftedResolvedKey(k, final, liftedKeys) !== undefined);
   return filtered.length > 0 ? filtered : undefined;
@@ -4607,7 +4609,7 @@ function logProtectRepointDroppedTokens(oldAtFinalBasename: MergeQuarantineEntry
  * left to copy aside, so keeping `final` itself, unmodified, is the only remaining protection. See the
  * decision record.
  *
- * @decision 8db913e2 (Follow-up 7a7e041b) — reads on-disk tokens via {@link readSurvivingOnDiskTokens} (shared with
+ * @decision 7a7e041b — reads on-disk tokens via {@link readSurvivingOnDiskTokens} (shared with
  * {@link reconcileMarkedBasenameBeforeWrite}) and skips the copy-aside when every real on-disk token is
  * already cleared — see the decision record for why that's safe.
  *
@@ -4633,16 +4635,16 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   if (!isReadableLatchRecord(parsed)) return { ok: true }; // e.g. the bare literal `null` — nothing to protect
   if (typeof parsed.repoPath !== "string" || typeof parsed.branch !== "string" || typeof parsed.reason !== "string") return { ok: true };
   const { raw: rawTokens, surviving: survivingTokens } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
-  // @decision 8db913e2 (Follow-up 7a7e041b) — every real on-disk token was already deliberately cleared by
+  // @decision 7a7e041b — every real on-disk token was already deliberately cleared by
   // THIS process — there is no owner left to protect, so skip the copy-aside entirely rather than persist
   // an empty or random-token record. See this function's own jsdoc above for why this is safe.
   if (rawTokens.length > 0 && survivingTokens.length === 0) return { ok: true };
   const tokens = survivingTokens.length > 0 ? survivingTokens : [randomUUID()];
-  // @decision 8db913e2 (Follow-up 4b06875f) — carry the occupant's own on-disk `resolvedKey` onto
+  // @decision 4b06875f — carry the occupant's own on-disk `resolvedKey` onto
   // `toPersist` via the shared {@link excludeLiftedResolvedKey} chokepoint — see that function's own doc.
   const occupantResolvedKey = typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined;
   const resolvedKeyToCarry = excludeLiftedResolvedKey(occupantResolvedKey, final, liftedKeys);
-  // @decision 8db913e2 (Follow-up 43cf3b26) — plural counterpart of the scalar carry-forward just above.
+  // @decision 43cf3b26 — plural counterpart of the scalar carry-forward just above.
   const occupantResolvedKeys = Array.isArray(parsed.resolvedKeys) && parsed.resolvedKeys.every((s): s is string => typeof s === "string")
     ? parsed.resolvedKeys : undefined;
   const resolvedKeysToCarry = excludeLiftedResolvedKeys(occupantResolvedKeys, final, liftedKeys);
@@ -4679,13 +4681,13 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
       ? true : undefined,
     // @decision db0a9db0 (round 2) — same carry-forward for the precision-guard field.
     provenanceTracked: parsed.provenanceTracked === true ? true : undefined,
-    // @decision 8db913e2 (Follow-up 4b06875f) — see the guard computed just above; `undefined` here is the pre-existing,
+    // @decision 4b06875f — see the guard computed just above; `undefined` here is the pre-existing,
     // unchanged behavior for every self-consistently-filed (collision) occupant.
     resolvedKey: resolvedKeyToCarry,
     resolvedKeys: resolvedKeysToCarry,
   };
   const finalBasename = path.basename(final);
-  // @decision 8db913e2 (Follow-up 6451a749) — route through the SAME chokepoint `mintPendingDivert`
+  // @decision 6451a749 — route through the SAME chokepoint `mintPendingDivert`
   // uses, never an in-memory-only lookup: an on-disk occupant never scanned, or now living at a
   // `-collision-` file, must never be silently overwritten.
   const diskReconciled = reconcilePendingDivertTarget(toPersist);
@@ -4697,25 +4699,25 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // slot away.
   const oldAtFilename = atFilenameIdx >= 0 ? pendingUnresolvedQuarantines[atFilenameIdx]!.entry : undefined;
   const oldAtFinalBasename = atFinalBasenameIdx >= 0 ? pendingUnresolvedQuarantines[atFinalBasenameIdx]!.entry : undefined;
-  // @decision 8db913e2 (Follow-up cd5a3cf9) — a basename match is never proof of same identity; gate
+  // @decision cd5a3cf9 — a basename match is never proof of same identity; gate
   // every union/re-point use of `oldAtFilename`/`oldAtFinalBasename` below on a verified identity match
   // against `toPersist.repoPath`, captured here before any union or mutation. See the decision record.
   const occupantIdentity = directPathIdentity(toPersist.repoPath);
   const atFilenameSameIdentity = oldAtFilename !== undefined && directPathIdentity(oldAtFilename.repoPath) === occupantIdentity;
   const atFinalBasenameSameIdentity = oldAtFinalBasename !== undefined && directPathIdentity(oldAtFinalBasename.repoPath) === occupantIdentity;
-  // @decision 8db913e2 (Follow-up 6451a749, Round 2) — ALSO union the in-memory record at
+  // @decision 6451a749 (Round 2) — ALSO union the in-memory record at
   // `atFilenameIdx` (never `atFinalBasenameIdx`) ON TOP of the disk read above — memory can legitimately
   // outrun disk (an earlier durable write for this identity already failed); see the decision record.
-  // @decision 8db913e2 (card 050a4428) — ACCEPTED RESIDUAL: this entry's own `resolvedKey` can be a STALE,
+  // @decision 050a4428 — ACCEPTED RESIDUAL: this entry's own `resolvedKey` can be a STALE,
   // never-filtered copy that resurrects an unrelated key a prior union already excluded (fail-closed only).
-  // @decision 8db913e2 (Follow-up cd5a3cf9) — gated on `atFilenameSameIdentity`, never the bare index.
+  // @decision cd5a3cf9 — gated on `atFilenameSameIdentity`, never the bare index.
   const toWriteUnfiltered = atFilenameSameIdentity
     ? unionQuarantineEntries(diskReconciled.toWrite, oldAtFilename!, { explicitResolvedKeyRule: true })
     : diskReconciled.toWrite;
-  // @decision 8db913e2 (Follow-up 4b06875f, Round 2) — re-apply the SAME exclusion to whatever either
+  // @decision 4b06875f (Round 2) — re-apply the SAME exclusion to whatever either
   // union above produced — a union against an on-disk or in-memory sibling can reintroduce a key
   // `toPersist` already correctly excluded; never trust a union's own output unfiltered.
-  // @decision 8db913e2 (Follow-up 43cf3b26) — plural counterpart of the re-filter just above.
+  // @decision 43cf3b26 — plural counterpart of the re-filter just above.
   const toWriteFiltered: MergeQuarantineEntry = toWriteUnfiltered.resolvedKey === undefined && toWriteUnfiltered.resolvedKeys === undefined
     ? toWriteUnfiltered
     : {
@@ -4749,7 +4751,7 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
       const orphans = (u.orphanLatchFiles ?? []).filter((f) => !relocatedNames.has(f));
       return { ...u, orphanLatchFiles: orphans.length > 0 ? orphans : undefined };
     })();
-  // @decision 8db913e2 (Follow-up 4b06875f) — `toPersist`/`toWrite` carry `resolvedKey` ONLY as filtered by
+  // @decision 4b06875f — `toPersist`/`toWrite` carry `resolvedKey` ONLY as filtered by
   // `excludeLiftedResolvedKey` (never `armedKeys`) — including the in-memory entry a union below may
   // introduce; nothing here bypasses that filter. This keeps 82032b5c/c9114934's own invariant intact.
   // @decision 702b4241 (round 4) — use whatever `writePendingDivertFile` ACTUALLY wrote to below, never
@@ -4766,7 +4768,7 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     // current name (self-referenced in `orphanLatchFiles`): enforces in THIS process too, not only on a
     // later boot, and every reference-aware sweep in this module already honours this ownership shape.
     //
-    // @decision 8db913e2 (Follow-up 6451a749, Round 2) — `orphanLatchFiles` comes from `toPersist`
+    // @decision 6451a749 (Round 2) — `orphanLatchFiles` comes from `toPersist`
     // ALONE, never `toWrite`: `toWrite` can carry a FOREIGN orphan reference (from `filename`'s own
     // record); `kept` lives at `finalBasename` and must never inherit one to wrongly sweep later.
     // @decision 8d80b736 (card da7bf48e) — track `written.strandedTmp`'s own basename (never the
@@ -4781,10 +4783,10 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
         ...(written.strandedTmp ? [path.basename(written.strandedTmp)] : []),
       ])],
     };
-    // @decision 8db913e2 (Follow-up 37452ddd) — `oldAtFinalBasename` can ALSO be an 883e29bc twin armed
+    // @decision 37452ddd — `oldAtFinalBasename` can ALSO be an 883e29bc twin armed
     // in `activeQuarantines`; re-point via `replaceEntryEverywhere` before overwriting this slot, or the
     // active side is left pointing at an object this double-fault branch is about to discard.
-    // @decision 8db913e2 (Follow-up cd5a3cf9) — gated on `atFinalBasenameSameIdentity`, never the bare
+    // @decision cd5a3cf9 — gated on `atFinalBasenameSameIdentity`, never the bare
     // index: a mismatched-identity slot is left completely untouched, not re-pointed or overwritten.
     if (atFinalBasenameSameIdentity) {
       replaceEntryEverywhere(activeQuarantines, oldAtFinalBasename!, kept);
@@ -4812,10 +4814,10 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
   // degraded-divert push) onto the new, durable filename — never leave it dangling at the name about to
   // be deleted.
   //
-  // @decision 8db913e2 (Follow-up 37452ddd) — EITHER index's own entry can be an 883e29bc twin, and the
+  // @decision 37452ddd — EITHER index's own entry can be an 883e29bc twin, and the
   // two indices' entries can be TWO DIFFERENT objects (one armed, one pending-only) — re-point BOTH via
   // `replaceEntryEverywhere` before either slot is overwritten/discarded, or the active side goes stale.
-  // @decision 8db913e2 (Follow-up cd5a3cf9) — every branch below is gated on `atFilenameSameIdentity`/
+  // @decision cd5a3cf9 — every branch below is gated on `atFilenameSameIdentity`/
   // `atFinalBasenameSameIdentity`, never the bare index — a mismatched-identity slot is left completely
   // untouched (no union, no re-point, no splice) and falls through to the independent-mint `else` below.
   if (atFilenameSameIdentity) {
@@ -4828,7 +4830,7 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
     pendingUnresolvedQuarantines[atFilenameIdx] = { entry: written.entry, sourceFile: written.filename };
     if (atFinalBasenameSameIdentity) pendingUnresolvedQuarantines.splice(atFinalBasenameIdx, 1);
   } else if (atFinalBasenameSameIdentity) {
-    // @decision 8db913e2 (Follow-up 37452ddd) — re-point for the REPLACEMENT only, never as a union
+    // @decision 37452ddd — re-point for the REPLACEMENT only, never as a union
     // source — `c9114934` still forbids unioning `atFinalBasenameIdx`'s own tokens into `toWrite`.
     // @decision f00e9de8 — log (never union) whatever in-memory-only tokens this re-point drops.
     logProtectRepointDroppedTokens(oldAtFinalBasename!, written.entry);
@@ -4938,7 +4940,7 @@ function sweepAbsorbedPendingFile(filename: string, merged: MergeQuarantineEntry
  * in `activeQuarantines`) — never rewrite only the pending side; route each through {@link
  * replaceEntryEverywhere} onto `merged`, or the active side goes stale.
  *
- * @decision 8db913e2 (Follow-up 3d27c045) — `merged` must ALSO carry that twin's own `armedKeys` forward (via {@link
+ * @decision 3d27c045 — `merged` must ALSO carry that twin's own `armedKeys` forward (via {@link
  * unionArmedKeys}), not just get re-pointed to by `replaceEntryEverywhere` — see the decision record for
  * the post-reboot re-block this fixes.
  *
@@ -4973,11 +4975,11 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
   const provenanceUnknown = matched.some((p) => p.entry.provenanceUnknown) ? true : undefined;
   // @decision db0a9db0 (round 2) — same cross-matched OR for the precision-guard field.
   const provenanceTracked = matched.some((p) => p.entry.provenanceTracked) ? true : undefined;
-  // @decision 8db913e2 (Follow-up 00fd29d7) — union EVERY informative resolvedKey/resolvedKeys across all
+  // @decision 00fd29d7 — union EVERY informative resolvedKey/resolvedKeys across all
   // matched entries, never spread only `base.entry`'s own (the SAME fail-open d524d1c4 fixed in
   // divertRaiseEntry) — see the shared helper's own doc.
   const { resolvedKey, resolvedKeys } = unionInformativeResolvedKeys(matched.map((p) => p.entry), `mergeTokenIntoPendingEntries(${base.entry.repoPath})`);
-  // @decision 8db913e2 (Follow-up 3d27c045) — union EVERY matched entry's own `armedKeys` too, never spread only `base.entry`'s
+  // @decision 3d27c045 — union EVERY matched entry's own `armedKeys` too, never spread only `base.entry`'s
   // own (the SAME fail-open d524d1c4/00fd29d7 fixed for resolvedKey/resolvedKeys) — see the shared
   // helper's own doc.
   const armedKeys = unionArmedKeys(matched.map((p) => p.entry));
@@ -4993,7 +4995,7 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
     resolvedKey, resolvedKeys, armedKeys,
   };
   for (const m of matched) replaceEntryEverywhere(activeQuarantines, m.entry, merged);
-  // @decision 8db913e2 (Follow-up 0dc514dc) — a DIFFERENT surviving pending entry can structurally depend on this EXACT
+  // @decision 0dc514dc — a DIFFERENT surviving pending entry can structurally depend on this EXACT
   // sourceFile (882d6cff's shared-corrupt-latch shape); content can't discriminate (a placeholder's
   // tokens never appear on disk), so this reuses the clear path's own structural check instead.
   if (survivingSharedClaimRepoPaths(base.sourceFile).length > 0) {
@@ -5106,7 +5108,7 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
   if (typeof parsed.repoPath !== "string") return false;
   if (directPathIdentity(parsed.repoPath) === directPathIdentity(ownRepoPath)) return false; // same identity — proceed; the chokepoint unions on-disk tokens forward
   if (isRepoPathCurrentlyResolvable(parsed.repoPath)) {
-    // @decision 8db913e2 (Follow-up 0dc514dc, Round 2) — "resolvable ⇒ safe" is false on a double fault (this raise's own
+    // @decision sha:3de60f6e (0dc514dc, Round 2) — "resolvable ⇒ safe" is false on a double fault (this raise's own
     // protect-copy just failed to write); gated on `!protectOk` so a transient-duplicate copy never
     // reaches it. Reuses `parsed` — never a second read.
     if (protectOk) return false;
@@ -5114,7 +5116,7 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
     if (survivingTokenHolderRepoPaths(surviving, directPathIdentity(ownRepoPath)).length === 0) return false;
     return true; // still held elsewhere — divert, never overwrite blind
   }
-  // @decision 8db913e2 (Follow-up 25f6a7dc) — route through the SHARED reader, never a re-derived inline parser: see
+  // @decision 25f6a7dc — route through the SHARED reader, never a re-derived inline parser: see
   // `unincorporatedOccupantRepoPathAt`'s own matching fix for why skipping its empty-array fallback here
   // wrongly treats an already-incorporated legacy token as foreign. See the decision record.
   const { raw: onDiskTokens } = readSurvivingOnDiskTokens(parsed, parsed.repoPath);
@@ -5144,7 +5146,7 @@ function resolveRaiseOverwrite(final: string, ownRepoPath: string, ownTokens: st
  * touches the in-memory `pendingUnresolvedQuarantines`/`activeQuarantines` structures itself. Returns
  * `false` on failure (logs loudly either way).
  *
- * @decision 8db913e2 (Follow-up dd34da46, Item 3) — never throws. See the decision record's Round 2 note
+ * @decision dd34da46 (Item 3) — never throws. See the decision record's Round 2 note
  * for the BLOCKER this signature closes: a round-1 version wrote the tmp but never re-pointed the
  * pending record at it, leaving the write durably orphaned and the token lost on the next reboot anyway.
  */
@@ -5173,7 +5175,7 @@ function attemptDivertSafetyTmpFallback(entry: MergeQuarantineEntry): string | f
  * now, corrupt JSON, a non-object/`null` parse, or no `repoPath` string — none of these can be proven
  * safe to trust) — the caller decides what either means for ITS OWN write; this function never does.
  *
- * @decision 8db913e2 (Follow-up 6451a749)
+ * @decision 6451a749
  */
 function readPendingDivertFileAt(filePath: string): { state: "enoent" } | { state: "unsafe" } | { state: "entry"; entry: MergeQuarantineEntry } {
   let raw: string;
@@ -5209,7 +5211,7 @@ function readPendingDivertFileAt(filePath: string): { state: "enoent" } | { stat
       ? parsed.reducedContributorRepoPaths : undefined,
     provenanceUnknown: parsed.provenanceUnknown === true ? true : undefined,
     provenanceTracked: parsed.provenanceTracked === true ? true : undefined,
-    // @decision 8db913e2 (Follow-up 4b06875f, Round 2) — this reader used to drop `resolvedKey`
+    // @decision 4b06875f (Round 2) — this reader used to drop `resolvedKey`
     // entirely, so a union against it always saw it as absent regardless of the file's real content.
     resolvedKey: typeof parsed.resolvedKey === "string" ? parsed.resolvedKey : undefined,
     resolvedKeys: parseResolvedKeysField(parsed),
@@ -5236,7 +5238,7 @@ function readPendingDivertFileAt(filePath: string): { state: "enoent" } | { stat
  * `undefined` when empty here, mirroring {@link divertRaiseEntry}'s own "never a cosmetic `armedKeys: []`
  * on a record with nothing to carry there" rule; a pending-only record is never armed anywhere.
  *
- * @decision 8db913e2 (Follow-up 6451a749)
+ * @decision 6451a749
  *
  * @decision 6b327712 — `options.retainConflictingKeysInResolvedKeys` defaults OFF (every pre-existing
  * caller stays byte-identical) and is threaded straight through to {@link unionQuarantineEntries}'s own
@@ -5258,7 +5260,7 @@ function unionIntoOnDiskPendingEntry(onDisk: MergeQuarantineEntry, entry: MergeQ
  * live record) and never touches one that is unreadable or genuinely foreign — those are left
  * byte-untouched, exactly like the primary-slot rule.
  *
- * @decision 8db913e2 (Follow-up 6451a749)
+ * @decision 6451a749
  */
 function findExistingSameIdentityCollisionFile(repoPath: string): { filename: string; entry: MergeQuarantineEntry } | undefined {
   const prefix = pendingDivertFilenameFor(repoPath).slice(0, -".json".length); // "pending-<24hex>"
@@ -5296,8 +5298,8 @@ function findExistingSameIdentityCollisionFile(repoPath: string): { filename: st
  * collisions against the same primary occupant converge on one record instead of proliferating; mint a
  * brand-new {@link pendingDivertCollisionFilenameFor} filename only when none does.
  *
- * @decision 8db913e2 (Follow-up 8a79dd31) — the primary-vs-collision divert rule itself.
- * @decision 8db913e2 (Follow-up 6451a749) — generalized to a second caller that used to trust only an
+ * @decision 8a79dd31 — the primary-vs-collision divert rule itself.
+ * @decision 6451a749 — generalized to a second caller that used to trust only an
  * in-memory lookup, and widened to union into an existing collision file rather than minting fresh ones.
  */
 function reconcilePendingDivertTarget(entry: MergeQuarantineEntry): { filename: string; toWrite: MergeQuarantineEntry } {
@@ -5321,13 +5323,13 @@ function reconcilePendingDivertTarget(entry: MergeQuarantineEntry): { filename: 
  * {@link divertRaiseEntry}'s own `indices.length === 0` branch and `enterMergeQuarantine`'s own direct
  * unresolvable brand-new-divert branch. ONE chokepoint, never two independently-maintained copies.
  *
- * @decision 8db913e2 (Follow-up 8a79dd31) — this consolidation also gives `enterMergeQuarantine`'s own call site the
+ * @decision 8a79dd31 — this consolidation also gives `enterMergeQuarantine`'s own call site the
  * double-fault safety-tmp fallback below, which its own prior inline copy never had.
  *
- * @decision 8db913e2 (Follow-up 8a79dd31) — reconciles against the primary filename's current occupant, via
+ * @decision 8a79dd31 — reconciles against the primary filename's current occupant, via
  * {@link reconcilePendingDivertTarget}, before ever writing — see that function's own doc.
  *
- * @decision 8db913e2 (Follow-up dd34da46, Item 3) — on a double fault (the chosen write ALSO fails), falls
+ * @decision dd34da46 (Item 3) — on a double fault (the chosen write ALSO fails), falls
  * back to a safety-tmp residue via {@link attemptDivertSafetyTmpFallback} rather than losing the entry
  * outright across a reboot.
  */
@@ -5350,7 +5352,7 @@ function mintPendingDivert(entry: MergeQuarantineEntry): void {
   }
   // eslint-disable-next-line no-console
   console.error(`[merge-quarantine] canonical repo ${toWrite.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted to a fresh pending-divert record) — the durable pending-divert latch failed to write; investigate (disk full? permissions on ${MERGE_QUARANTINE_DIR}?) immediately.`);
-  // @decision 8db913e2 (Follow-up dd34da46, Item 3) — the double fault: a safety-tmp residue is a
+  // @decision dd34da46 (Item 3) — the double fault: a safety-tmp residue is a
   // recoverable fallback, but ONLY once this process's own pending record is re-pointed at it — never
   // left pointing at `filename`, the file that was never actually written.
   const safetyTmpBasename = attemptDivertSafetyTmpFallback(toWrite);
@@ -5395,7 +5397,7 @@ function mintPendingDivert(entry: MergeQuarantineEntry): void {
  * helper {@link mergeTokenIntoPendingEntries} also uses, which already normalizes an empty union back to
  * `undefined`.
  *
- * @decision 8db913e2 (round 2, nitpick 4) — mirrors `188b145f`'s own "collect every identity-matching
+ * @decision sha:d529d42d (round 2, nitpick 4) — mirrors `188b145f`'s own "collect every identity-matching
  * index, never just the first" rule.
  */
 function divertRaiseEntry(entry: MergeQuarantineEntry): void {
@@ -5424,7 +5426,7 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   const reducedContributorRepoPaths = [...new Set(all.flatMap((e) => e.reducedContributorRepoPaths ?? []))];
   const provenanceUnknown = all.some((e) => e.provenanceUnknown) ? true : undefined;
   const provenanceTracked = all.some((e) => e.provenanceTracked) ? true : undefined;
-  // @decision 8db913e2 — union EVERY informative resolvedKey/resolvedKeys across all of `all`, never
+  // @decision d524d1c4 — union EVERY informative resolvedKey/resolvedKeys across all of `all`, never
   // spread only `base.entry`'s own (a real post-reboot fail-open). Not `explicitResolvedKeyRule`, not
   // `excludeLiftedResolvedKey(s)` — see the decision record's own "Follow-up d524d1c4" for why neither applies here.
   const { resolvedKey, resolvedKeys } = unionInformativeResolvedKeys(all, `divertRaiseEntry(${base.entry.repoPath})`);
@@ -5457,7 +5459,7 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
   }
   // eslint-disable-next-line no-console
   console.error(`[merge-quarantine] canonical repo ${entry.repoPath} is quarantined IN THIS PROCESS ONLY right now (diverted raise, merged into an existing pending record) — the durable pending-divert latch ALSO failed to re-write; investigate immediately.`);
-  // @decision 8db913e2 (Follow-up dd34da46, Item 3) — same re-pointed fallback as the fresh-divert branch
+  // @decision dd34da46 (Item 3) — same re-pointed fallback as the fresh-divert branch
   // above, using `merged` (never the raw `entry`); `replaceEntryEverywhere` also reaches an ALREADY-ARMED
   // twin (the existing-branch divert's own `baseEntry`), not just the pending side.
   const safetyTmpBasename = attemptDivertSafetyTmpFallback(merged);
@@ -5468,7 +5470,7 @@ function divertRaiseEntry(entry: MergeQuarantineEntry): void {
     };
     replaceEntryEverywhere(activeQuarantines, merged, secured);
     pendingUnresolvedQuarantines.push({ entry: secured, sourceFile: safetyTmpBasename });
-    // @decision 8db913e2 (Follow-up dd34da46, Round 2) — `base.sourceFile`'s own bytes are now STALE
+    // @decision dd34da46 (Round 2) — `base.sourceFile`'s own bytes are now STALE
     // (never rewritten, since this write failed) and fully superseded by the safety-tmp; sweep it so it
     // never survives as an untracked orphan a later boot could independently re-arm from (the P3g repro).
     sweepOwnLatchFileUnlessOwnedElsewhere(base.sourceFile);
@@ -5536,7 +5538,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // re-pointed multi-key-twin gap this card closes on the clear side; see the decision record.
     const armedKeysForEntry = liveArmedKeys(key, existing);
     const finalForKey = quarantinePathForKey(key);
-    // @decision 8db913e2 (Follow-up 78fccd3f) — `liftedKeys` is `ownedKeysIncluding`, NEVER the raw
+    // @decision 78fccd3f — `liftedKeys` is `ownedKeysIncluding`, NEVER the raw
     // `armedKeysForEntry` — the write loop below already re-gates each secondary key itself. See record.
     const liftedKeys: ReadonlySet<string> = new Set(ownedKeysIncluding(key, existing));
     // @decision e0192ffb — protect a foreign, unincorporated occupant's sole physical copy at `key`'s own
@@ -5650,7 +5652,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
   // @decision 8db913e2 — thread that protect call's own return into a divert decision, at the SAME
   // point in the sequence, for the same splice-safety reason. See the decision record.
   if (verified) {
-    // @decision 8db913e2 (Follow-up 4b06875f, Round 2) — nothing else is armed yet at this key (`verified`
+    // @decision 4b06875f (Round 2) — nothing else is armed yet at this key (`verified`
     // means no `existing` was found) — the only key THIS raise's own write touches is its own.
     const liftedKeys: ReadonlySet<string> = new Set([key]);
     const protectOk = protectDegradedOccupantBeforeDelete(quarantinePathForKey(key), repoPath, undefined, liftedKeys).ok;
@@ -5705,7 +5707,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
     // pendingUnresolvedQuarantines under its own, disjoint filename — never arm `activeQuarantines` at the
     // degraded, walked-up `key` (883e29bc's own fix, generalized here from boot to runtime).
     //
-    // @decision 8db913e2 (Follow-up 8a79dd31) — routes through the SAME chokepoint divertRaiseEntry's own `indices.length === 0`
+    // @decision 8a79dd31 — routes through the SAME chokepoint divertRaiseEntry's own `indices.length === 0`
     // branch uses, never a parallel inline copy — see mintPendingDivert's own doc comment.
     // @decision 3be11be4 (Round 3) — same reason as the sibling-absorb branch above: stamp
     // `identityAtRaise` on every genuinely new raise, verified or not.
@@ -5718,7 +5720,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
   // not only on writeMergeQuarantineLatch's own serialized bytes — this is the brand-new, genuinely
   // fresh raise, so there is nothing legacy to launder: unconditionally true is correct here.
   //
-  // @decision 8db913e2 — fold any on-disk tokens forward (same reason as the other two raise sites
+  // @decision sha:d529d42d — fold any on-disk tokens forward (same reason as the other two raise sites
   // above) before this entry is armed into `activeQuarantines`.
   //
   // @decision 3be11be4 (Round 3) — stamp `identityAtRaise` (via the SAME alias-resolving primitive every
@@ -5759,7 +5761,7 @@ export function enterMergeQuarantine(repoPath: string, branch: string, reason: s
  * hold TWO disjoint-token records at once (one active-only, one pending-only). Layer (a) of
  * {@link orphanRewriteOwnershipConfirmed}'s fix.
  *
- * @decision 8db913e2 (Follow-up 29fe2372) — see the decision record for the repro this closes.
+ * @decision 29fe2372 — see the decision record for the repro this closes.
  */
 function anotherLiveEntryOwnsFile(filename: string, updated: MergeQuarantineEntry): boolean {
   for (const [k, e] of activeQuarantines) {
@@ -5789,9 +5791,9 @@ function anotherLiveEntryOwnsFile(filename: string, updated: MergeQuarantineEntr
  * this is ever reached, so ENOENT/EISDIR need no special-casing here, unlike
  * `markedFinalFullyCoveredByClear`'s own).
  *
- * @decision 8db913e2 (Follow-up 29fe2372) — see the decision record.
+ * @decision 29fe2372 — see the decision record.
  *
- * @decision 8db913e2 (Follow-up 495fd320) — a bare scalar (number/string/boolean, never `null`) now ALSO counts as "cannot
+ * @decision 495fd320 — a bare scalar (number/string/boolean, never `null`) now ALSO counts as "cannot
  * prove this" rather than vacuously `true`, a strictly safer tightening. See the decision record.
  *
  * @decision eedf16f5 — widened from a single `clearedToken` to the full overlap set this call drops, in
@@ -5837,11 +5839,11 @@ function orphanFileTokensAccountedForByUpdate(orphanFile: string, updated: Merge
  * Fail-closed on every branch: a file whose ownership cannot be positively confirmed as `updated`'s own,
  * by ALL three layers, is left untouched rather than risk destroying another entity's only durable copy.
  *
- * @decision 8db913e2 (Follow-up 6c04633d, B1, Code Review `e8c78d98`) — this closes a BLIND-WRITE reachability of the
+ * @decision 6c04633d (B1, Code Review `e8c78d98`) — this closes a BLIND-WRITE reachability of the
  * `9cabd143` bug class (an orphan reference can name a file that is now ANOTHER live entry's own latch).
  * See the decision record.
  *
- * @decision 8db913e2 (Follow-up 29fe2372) — layers 2/3 close a FURTHER fail-open: a DIFFERENT, independent, same-identity
+ * @decision 29fe2372 — layers 2/3 close a FURTHER fail-open: a DIFFERENT, independent, same-identity
  * record's own file, silently destroyed by a partial clear of an unrelated record sharing only its
  * identity. See the decision record.
  */
@@ -5866,11 +5868,11 @@ function orphanRewriteOwnershipConfirmed(orphanFile: string, updated: MergeQuara
  * alone. A skipped, left-stale file is an accepted, fail-CLOSED residual (a stale record keeps its own
  * repo quarantined; it can never un-quarantine anyone else as a side effect).
  *
- * @decision 8db913e2 (Follow-up 6c04633d, a) — a partial by-token clear of a record with folded `orphanLatchFiles` used to
+ * @decision 6c04633d (a) — a partial by-token clear of a record with folded `orphanLatchFiles` used to
  * leave those files' own stale (un-reduced) bytes untouched; they re-armed the released token on reboot.
  * See the decision record.
  *
- * @decision 8db913e2 (Follow-up 29fe2372) — `clearedToken` (the token THIS SAME partial clear just dropped from `updated`) is
+ * @decision 29fe2372 — `clearedToken` (the token THIS SAME partial clear just dropped from `updated`) is
  * threaded through to {@link orphanRewriteOwnershipConfirmed}'s own layer (b) — see the decision record.
  *
  * @decision eedf16f5 — `droppedTokens` is the FULL set this call drops, passed ONCE, never once per token.
@@ -5954,7 +5956,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string, writeFai
   // same loop's own "remove" branch can splice an UNRELATED entry out of this array mid-loop, shifting a
   // not-yet-processed index onto a DIFFERENT wrapper (mirrors 07e3ad30's own fix for the identical hazard).
   //
-  // @decision 8db913e2 (Follow-up c93e9e7a) — one plan per entry (reduce-or-remove plus owned keys),
+  // @decision c93e9e7a — one plan per entry (reduce-or-remove plus owned keys),
   // computed ONCE before any delete, never re-derived against an already-mutated map or a second time
   // (round 2 CR item 3) — the mutating loop below reuses this exact plan. See the decision record.
   const planByEntry = new Map<PendingUnresolvedQuarantine, { action: "reduce" } | { action: "remove"; ownedArmedKeys: string[] }>();
@@ -6028,7 +6030,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string, writeFai
         console.error(`[merge-quarantine] expected to remove ${live.entry.repoPath}'s own pending entry (${live.sourceFile}) from pendingUnresolvedQuarantines during a token clear, but it was already absent from the live array by the time this ran — this was not expected; investigate if seen.`);
       }
       const orphanFilesToSweep = new Set(live.entry.orphanLatchFiles ?? []);
-      // @decision 8db913e2 (Follow-up c93e9e7a) — `plan.ownedArmedKeys` was computed in the pre-pass
+      // @decision c93e9e7a — `plan.ownedArmedKeys` was computed in the pre-pass
       // above, against the then-still-unmutated map — never recomputed here against a map an earlier
       // index's own removal in THIS SAME descending loop may have already mutated. A repeated
       // `deleteMergeQuarantineLatchByKey` on a key an earlier twin already deleted is intentional and
@@ -6051,7 +6053,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string, writeFai
           console.warn(`[merge-quarantine] partial token clear at key ${k} also relocated ${relocated.length} foreign co-occupant(s) to their own new latch (no human route reaches this path — logging only): ${relocated.map((r) => `'${r.repoPath}' -> id '${pendingLatchIdFor(r.sourceFile)}'`).join(", ")}`);
         }
       }
-      // @decision 8db913e2 (round 4) — tombstone `token` HERE, after the splice/delete above already
+      // @decision sha:d529d42d (round 4) — tombstone `token` HERE, after the splice/delete above already
       // removed every in-memory trace of this pending entry — see `tombstoneIfNotSurviving`'s own doc.
       // @decision 0d3b64c6 (round 2, S1) — `live.entry.repoPath` (RAW), never the already-normalized
       // `identity` local — see tombstoneIfNotSurviving's own doc for why a pre-normalized value drops
@@ -6064,12 +6066,12 @@ function clearTokenFromPendingIndices(indices: number[], token: string, writeFai
       // fresh-write-target file is kept and its cleared claimant re-arms at the next boot.
       const ownSourceSweep = sweepOwnLatchFileUnlessOwnedElsewhere(live.sourceFile, live.entry.tokens);
       if (ownSourceSweep.kept && ownSourceSweep.referencingRepoPaths.length === 0) removeWriteFailed = true;
-      // @decision 8db913e2 (Follow-up f2cc5f18) — `live.entry.tokens` captured via the `live` binding
+      // @decision f2cc5f18 — `live.entry.tokens` captured via the `live` binding
       // resolved above, BEFORE the splice above — this branch only fires when it's the full set being lifted.
       //
-      // @decision 8db913e2 (Follow-up 0a783fb2) — this path has NO human-facing return (clearMergeQuarantineByToken
+      // @decision 0a783fb2 — this path has NO human-facing return (clearMergeQuarantineByToken
       // is `void`), so fold only to LOG, same disclosure-safe convention as the warning just above.
-      // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — exclude this entry's OWN identity,
+      // @decision 0a783fb2 (Code Review 47289f8d) — exclude this entry's OWN identity,
       // same reason as every other orphan-sweep call site.
       const excludeOwnIdentity = new Set([identity]);
       // @decision 9f387d7e — ONE call over the whole set, never a per-file loop: unions a shared foreign
@@ -6078,7 +6080,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string, writeFai
       // @decision 59f4ebe8 — an orphan whose unlink failed still physically holds `token`.
       if (orphanSweepResult.unlinkFailed) removeWriteFailed = true;
       const orphanNamed = [...orphanSweepResult.referencingRepoPaths.map((r) => r.repoPath), ...orphanSweepResult.contentKept.map((c) => c.repoPath)];
-      // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d, NIT) — an unattributed keep (kept
+      // @decision 0a783fb2 (Code Review 47289f8d, NIT) — an unattributed keep (kept
       // but nothing nameable) must ALSO log, not just a named one, or it silently vanishes here.
       if (orphanNamed.length > 0 || orphanSweepResult.anyUnattributed) {
         // eslint-disable-next-line no-console
@@ -6115,7 +6117,7 @@ function clearTokenFromPendingIndices(indices: number[], token: string, writeFai
     // @decision 9c681680 — mutate `live` IN PLACE (never a stale-idx array reassignment) — mirrors
     // clearMergeQuarantineByKey's own reduce branch (64119847/b47cf261): no index lookup needed at all.
     live.entry = updated;
-    // @decision 8db913e2 (round 4) — tombstone `token` HERE, before the write loop below, same reason
+    // @decision sha:d529d42d (round 4) — tombstone `token` HERE, before the write loop below, same reason
     // as `clearActiveEntryTokenAtKey`'s own identical placement.
     // @decision 0d3b64c6 (round 2, S1) — `live.entry.repoPath` (RAW), never `identity` — see the doc
     // comment on `clearTokenFromPendingIndices`'s own first tombstone call above.
@@ -6249,7 +6251,7 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
     // re-deriving from a repoPath again — `entry.repoPath` can be a DIFFERENT, longer-outstanding
     // raiser's own identity (enterMergeQuarantine's `existing` branch).
     //
-    // @decision 8db913e2 (Follow-up d6efbc9b) — the delegated call's own touchedFinalBasenames-gated
+    // @decision d6efbc9b — the delegated call's own touchedFinalBasenames-gated
     // tombstone can leave a RELEASED token un-tombstoned; tombstone it unconditionally here too.
     // @decision 656fdf39 (CR d19f0490 round 4, nit 2) — `false` explicit: a token-scoped clear is never identity-wide.
     //
@@ -6270,7 +6272,7 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
       // eslint-disable-next-line no-console
       console.warn(`[merge-quarantine] a token-clear's own full lift at key ${key} also left ${kept.length} foreign co-occupant(s) genuinely blocked, now armed/enforced in this process (no human route reaches this path — logging only): ${kept.map((r) => `'${r.repoPath}' -> id '${r.route.id ?? "none"}'`).join(", ")}`);
     }
-    // @decision 8db913e2 (Follow-up 0a783fb2) — same no-human-route logging for a content-parsed orphan
+    // @decision 0a783fb2 — same no-human-route logging for a content-parsed orphan
     // keep this delegated call can now surface; previously discarded along with everything else here.
     if (result?.contentKeptRepoPaths?.length) {
       // eslint-disable-next-line no-console
@@ -6310,7 +6312,7 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
   // `.set()` — a stale `armedKeys` member can, by now, genuinely belong to a DIFFERENT entry, and a bare
   // `.set()` silently clobbered that OTHER entry's in-memory slot with `updated`.
   replaceEntryEverywhere(activeQuarantines, entry, updated);
-  // @decision 8db913e2 (round 4) — tombstone `token` HERE: the in-memory update above already reflects
+  // @decision sha:d529d42d (round 4) — tombstone `token` HERE: the in-memory update above already reflects
   // its removal, so the scan correctly finds nothing surviving. Doing this BEFORE the write loop below
   // lets that write's own chokepoint union correctly exclude `token` too (closes CR2's own B1 shape).
   tombstoneIfNotSurviving([token], entry.repoPath);
@@ -6444,10 +6446,10 @@ function clearActiveEntryTokenAtKey(key: string, entry: MergeQuarantineEntry, to
  * @decision 1922be3a (round 3, CRITICAL) — lifts `token` from EVERY matching record, active AND pending,
  * never stopping at the first match. See the decision record.
  *
- * @decision 8db913e2 (Follow-up 6c04633d) — generalized from "every record sharing the caller's own identity/key" to EVERY
+ * @decision 6c04633d — generalized from "every record sharing the caller's own identity/key" to EVERY
  * record of ANY identity still holding `token` — see the decision record.
  *
- * @decision 8db913e2 (Follow-up 6c04633d) — every NON-TWIN pending match clears FIRST; a genuine `883e29bc` dual-tracked TWIN
+ * @decision 6c04633d — every NON-TWIN pending match clears FIRST; a genuine `883e29bc` dual-tracked TWIN
  * (same object reference as an active entry) is EXCLUDED here — it stays `clearActiveEntryTokenAtKey`'s
  * own job, in its established `ae79d492` order. See the decision record.
  *
@@ -6605,15 +6607,15 @@ function physicalOwnerRepoPaths(filename: string): string[] {
  * {@link markedFinalFullyCoveredByClear}) can safely bypass THAT aspirational-claim half, while NEVER
  * bypassing this one.
  *
- * @decision 8db913e2 (Follow-up 95ea8d3f, Round 2) — a corrupt/unparsable latch can be diverted ONCE PER CLAIMANT (card
+ * @decision sha:4dba1d37 (95ea8d3f, Round 2) — a corrupt/unparsable latch can be diverted ONCE PER CLAIMANT (card
  * 882d6cff); a prior round's own proven-coverage override skipped `physicalOwnerRepoPaths` entirely and
  * destroyed a sibling claimant's only backing as collateral. See the decision record.
  *
- * @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, correction) — the `sourceFile` half is gated on `entry.placeholder`: an
+ * @decision sha:4dba1d37 (95ea8d3f, Round 2, correction) — the `sourceFile` half is gated on `entry.placeholder`: an
  * EVICTED, non-placeholder entry's own `sourceFile` can be a purely DEFENSIVE INFERENCE (card d163aef5
  * round 3) with its REAL backing already verified safely elsewhere. See the decision record.
  *
- * @decision 8db913e2 (Follow-up 95ea8d3f, Round 3 — SUPERSEDES Round 2's "any orphanLatchFiles" wording) — an
+ * @decision sha:4dba1d37 (95ea8d3f, Round 3 — SUPERSEDES Round 2's "any orphanLatchFiles" wording) — an
  * `orphanLatchFiles` hit counts ONLY when that SAME entry's own `sourceFile` also equals `filename`
  * (self-reference) — never a DIFFERENT entry merely LISTING `filename` (`9cabd143`'s forbidden shape).
  */
@@ -6663,7 +6665,7 @@ function unlinkLatchFileConfirmed(filename: string, why = "no remaining quaranti
  * `parsedRepoPath` (set whenever the content parses with a string `repoPath`, regardless of `safe`) lets
  * a caller that KEEPS the file report WHO it's keeping it for, instead of a silent/unattributed keep.
  *
- * @decision 8db913e2 (Follow-up f2cc5f18) — see the decision record.
+ * @decision f2cc5f18 — see the decision record.
  */
 /**
  * @decision 5d0820c7 — SUPERSEDES the narrow `ArmableOrphanRecord` shape 1dd00dca/028837ad established
@@ -6873,12 +6875,12 @@ function armForeignOrphanContentInMemoryIfUnenforced(record: MergeQuarantineEntr
  * reclaimed by its own rightful repo after being fanned out as someone else's orphan reference. See the
  * decision record for the fail-open repro this closes.
  *
- * @decision 8db913e2 (Follow-up f2cc5f18) — before this, deletion here never read the file's own content
+ * @decision f2cc5f18 — before this, deletion here never read the file's own content
  * at all: an unreferenced orphan holding a real, FOREIGN token nothing in memory currently owns was
  * destroyed unconditionally. See the decision record.
  */
 /**
- * @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d, MAJOR) — `excludeIdentities` drops any
+ * @decision 0a783fb2 (Code Review 47289f8d, MAJOR) — `excludeIdentities` drops any
  * candidate referencer sharing an identity with the clear CURRENTLY IN PROGRESS — a same-identity record
  * is never a "co-occupant"; see the decision record's own section for the self-reference bug this closes.
  *
@@ -7025,7 +7027,7 @@ function sweepOrphanLatchFilesUnioned(files: Iterable<string>, candidateTokens: 
  * state — shared by every own-latch-sweep call site (every orphan-sweep call site now goes through
  * {@link sweepOrphanLatchFilesUnioned} instead, which does its own, equivalent folding internally).
  *
- * @decision 8db913e2 (Follow-up 0a783fb2) — one helper for every orphan-sweep call site, so a TRUE
+ * @decision 0a783fb2 — one helper for every orphan-sweep call site, so a TRUE
  * in-memory referencer, a CONTENT-parsed repoPath (no live entry — never folds into
  * `stillBlockedCoOccupants`), and a fully UNATTRIBUTED keep can never again drift between sites.
  *
@@ -7583,7 +7585,7 @@ function sweepTmpResidueForClearedPendingEntries(removed: ReadonlyArray<PendingU
 function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens?: string[]): { kept: boolean; referencingRepoPaths: string[]; unlinkFailed?: true; unlinkFailedFile?: string } {
   // @decision 63e49ee2 (round 3) — same identity-less keep as {@link orphanLatchFileSweepDecision}.
   //
-  // @decision 8db913e2 (Follow-up 95ea8d3f) — a stale mark must not outlive the resolved read failure that set it; see the
+  // @decision 95ea8d3f — a stale mark must not outlive the resolved read failure that set it; see the
   // decision record for the pending-sweep-vs-deleteMergeQuarantineLatchByKey gap this closes. Omitting
   // `candidateTokens` (every pre-existing caller) keeps this byte-identical to before.
   //
@@ -7595,14 +7597,14 @@ function sweepOwnLatchFileUnlessOwnedElsewhere(filename: string, candidateTokens
     // @decision 14bdcb2f — this keep attempts NO unlink, so it carries no `unlinkFailed`; only a REAL failed
     // unlink (the returns below) may, since that flag feeds the human clear's write-failed set.
     if (!provenCoverage) return { kept: true, referencingRepoPaths: [] };
-    // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, Critical) — proven coverage may settle ONLY the active-armed-key/
+    // @decision sha:4dba1d37 (95ea8d3f, Round 2, Critical) — proven coverage may settle ONLY the active-armed-key/
     // fresh-write-target half of physicalOwnerRepoPaths below, NEVER a surviving pending entry's own
     // sourceFile or any entry's orphanLatchFiles naming this file. See the decision record.
     const sharedClaimants = survivingSharedClaimRepoPaths(filename);
     if (sharedClaimants.length > 0) return { kept: true, referencingRepoPaths: sharedClaimants };
     const unlinkConfirmed = unlinkLatchFileConfirmed(filename);
     if (unlinkConfirmed) keptUnreadableLatchFiles.delete(filename);
-    // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — an unconfirmed unlink (EPERM/EBUSY) must be reported as
+    // @decision sha:4dba1d37 (95ea8d3f, Round 2, nitpick) — an unconfirmed unlink (EPERM/EBUSY) must be reported as
     // kept, never as plain success — the file is still physically there.
     return { kept: !unlinkConfirmed, referencingRepoPaths: [], ...(unlinkConfirmed ? {} : { unlinkFailed: true as const, unlinkFailedFile: filename }) };
   }
@@ -7654,7 +7656,7 @@ function activeOwnerClaimIsSettledByCoverage(filename: string, owners: string[],
  *  can legitimately hold two INDEPENDENT records at once (e.g. a stale 883e29bc pending-divert twin whose
  *  own `armedKeys` still names a key a later, unrelated same-identity raise now genuinely owns).
  *
- *  @decision 8db913e2 (Follow-up f3c644ca, round 2 CR) — the direction is `occupant ⊆ entry` ONLY, never
+ *  @decision f3c644ca (round 2 CR) — the direction is `occupant ⊆ entry` ONLY, never
  *  the reverse: the reverse direction reopened a DIFFERENT over-unblock via the automatic settle-time
  *  `clearMergeQuarantineByToken`. Never reintroduce it.
  *
@@ -7756,7 +7758,7 @@ export function listPendingTokensTestOnly(): Array<{ repoPath: string; sourceFil
  * `toPersist`/`oldAtFilename` alone — so the replacement can carry NO `armedKeys` of its own even though
  * `activeQuarantines` now genuinely maps MULTIPLE keys to it.
  *
- * @decision 8db913e2 ("armedKeys — left unfixed (Lead ruling)") — derive from LIVE occupancy, never trust
+ * @decision 37452ddd ("armedKeys — a SEPARATE question from resolvedKey") — derive from LIVE occupancy, never trust
  * a cached list alone (and never copy a REPLACED object's own stale list forward uncritically) — this is
  * that ruling's own endorsed alternative, applied at each of this card's own consumption chokepoints.
  * @decision 6be6c9ff — the concrete gap this closes: a clear/lift/raise keyed off `entry.armedKeys` alone
@@ -7822,7 +7824,7 @@ function liveArmedKeys(key: string, entry: MergeQuarantineEntry): string[] {
  * `excludeLiftedResolvedKey(s)` — never hand-roll a second, unfiltered `[key, ...entry.armedKeys]` at a
  * new call site.
  *
- * @decision 8db913e2 (Follow-up 78fccd3f) — extracted because the raise path built this UNFILTERED,
+ * @decision 78fccd3f — extracted because the raise path built this UNFILTERED,
  * re-including a stale `armedKeys` member the entry no longer owns. See the decision record.
  * @decision c52b290e — widened from `entry.armedKeys` alone to `liveArmedKeys(key, entry)`, closing the
  * re-pointed-multi-key-twin under-inclusion `6be6c9ff`'s own audit left open here. See the decision
@@ -7917,7 +7919,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // Only for a clear addressed at the union's OWN identity: a foreign occupant's file (d2582692's shape) is read
   // by the protect path, whose fault-injection read counts an extra read here would shift.
   const unionedLosersBefore = entry && directPathIdentity(entry.repoPath) === directPathIdentity(identityRepoPath) ? unionedUnresolvableLoserRecords(entry) : undefined;
-  // @decision 8db913e2 (round 4) — candidate tokens for the ONE tombstone call at the end of this
+  // @decision sha:d529d42d (round 4) — candidate tokens for the ONE tombstone call at the end of this
   // function (`tombstoneIfNotSurviving`) — never tombstoned here, at this bare lookup: `entry` can be a
   // FOREIGN occupant (d2582692's shape) this clear ends up PROTECTING, not destroying.
   const candidateTokens: string[] = [...(entry?.tokens ?? [])];
@@ -7930,7 +7932,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // an orphan merge REBUILDS the entry object, so a map slot holding an OLDER build of the "same" logical
   // entry is no longer `===` the one `key` resolves to (round 2 finding 2).
   //
-  // @decision 8db913e2 (Follow-up 3152ec90) — gate every OTHER `armedKeys` member through
+  // @decision 3152ec90 — gate every OTHER `armedKeys` member through
   // `entryStillOwnsKey` (never `key` itself, already freshly matched) — an unconditional lift here
   // deletes an unrelated raise's own live map slot once a boot-diverted twin's `armedKeys` goes stale.
   //
@@ -7939,7 +7941,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   const keysToLift = entry
     ? liveArmedKeys(key, entry).filter((k) => k === key || entryStillOwnsKey(k, entry))
     : [key];
-  // @decision 8db913e2 (round 4) — every physical final this clear's own write path touches, for the
+  // @decision sha:d529d42d (round 4) — every physical final this clear's own write path touches, for the
   // `tombstoneIfNotSurviving` call at the end — see that function's own doc, part (b).
   const touchedFinalBasenames = keysToLift.map((k) => path.basename(quarantinePathForKey(k)));
   // A pending (boot-unverifiable, no-resolvedKey) entry isn't keyed into activeQuarantines at all — see
@@ -7949,7 +7951,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // file too (round 2 finding 1), or it survives to resurrect the quarantine.
   const identity = directPathIdentity(identityRepoPath);
 
-  // @decision 8db913e2 (Follow-up c93e9e7a) — compute the full lifted-key union `L` ONCE, before any
+  // @decision c93e9e7a — compute the full lifted-key union `L` ONCE, before any
   // delete in this call, never per-entry against a map an earlier tied twin's processing already
   // mutated. See the decision record's own Follow-up c93e9e7a section for the full design.
   //
@@ -7986,7 +7988,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       const remainingTokens = p.entry.tokens.filter((t) => !entry.tokens.includes(t));
       if (remainingTokens.length > 0) { pendingPlan.set(p, { action: "reduce" }); continue; }
     }
-    // @decision 8db913e2 (Follow-up 4b06875f, Round 4, CR be296830) — ownership gated through
+    // @decision 4b06875f (Round 4, CR be296830) — ownership gated through
     // `entryStillOwnsKey`, never the whole `armedKeys` list — over-including is FAIL-OPEN. Read against
     // the still-unmutated live map; nothing in this function has deleted anything yet at this point.
     // @decision 1fc3a561 — the candidate set is {@link liveArmedKeysOf}, never `p.entry.armedKeys` alone —
@@ -8018,7 +8020,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // (round 2, finding 2 — the old file is genuinely gone) but still lands in `stillBlockedCoOccupants`.
   const keptReferencingRepoPaths = new Map<string, string>();
   const relocatedCoOccupants = new Map<string, string>();
-  // @decision 8db913e2 (Follow-up 0a783fb2) — SEPARATE from `keptReferencingRepoPaths`: an orphan-sweep
+  // @decision 0a783fb2 — SEPARATE from `keptReferencingRepoPaths`: an orphan-sweep
   // referencer is a cross-reference, so it builds via `blockedCoOccupantForReferencer`, never the bare
   // `blockedCoOccupant` below; `keptContentRepoPaths` never joins `stillBlockedCoOccupants` at all.
   const orphanReferencingRepoPaths = new Map<string, string>();
@@ -8026,7 +8028,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 25d0d45b (Round 4) — a disclosure for a content-kept repoPath that is, right now, genuinely
   // refused by a DIFFERENT identity's own entry — never a working route for the content-kept repoPath.
   const keptContentBlockedBy = new Map<string, ContentKeptBlockedBy>();
-  // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — see the matching note at this function's own sourceFilesToSweep loop below.
+  // @decision sha:4dba1d37 (95ea8d3f, Round 2, nitpick) — see the matching note at this function's own sourceFilesToSweep loop below.
   let anyKeptUnattributed = false;
   // @decision b11056a9 — basenames of files whose unlink really failed in THIS call (see liveUnlinkFailedNames).
   const unlinkFailedFileNames = new Set<string>();
@@ -8034,7 +8036,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // own gate let a RESOLVABLE eviction winner's clear destroy a foreign file at one of its OTHER armed
   // keys); the PRIMARY ownership check and the token-overlap BACKSTOP both run for every key, every clear.
   //
-  // @decision 8db913e2 (Follow-up c93e9e7a) — pass `L` (computed above, before any delete in this call)
+  // @decision c93e9e7a — pass `L` (computed above, before any delete in this call)
   // rather than a `keysToLift`-only set, so a key only a tied pending twin owns is still correctly
   // recognised as already lifted by this call (round-2 MAJOR 2 — this active loop used to miss it).
   for (const k of keysToLift) {
@@ -8164,7 +8166,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
     }
     for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
     // @decision 883e29bc — a diverted-pending entry is also armed under resolvedKey; lift that too.
-    // @decision 8db913e2 (Follow-up c93e9e7a) — `plan.ownedArmedKeys` was computed in the PRE-PASS above,
+    // @decision c93e9e7a — `plan.ownedArmedKeys` was computed in the PRE-PASS above,
     // against the then-still-unmutated map — never recomputed here against a map an EARLIER tied twin's
     // own processing (in THIS SAME loop) may have already mutated.
 
@@ -8211,7 +8213,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // discarded) instead of a bare unqualified success, mirroring clearMergeQuarantineByRecordedPath's own
   // `latchKept` reporting for the SAME "a sibling still needs this file" shape.
   //
-  // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — `kept` with an EMPTY `referencingRepoPaths` (an unconfirmed
+  // @decision sha:4dba1d37 (95ea8d3f, Round 2, nitpick) — `kept` with an EMPTY `referencingRepoPaths` (an unconfirmed
   // EPERM/EBUSY unlink, or a marked-but-unprovable-coverage keep) still means something was kept — track
   // it via `anyKeptUnattributed` so it surfaces as `latchKept:true` too, never as plain success.
   // @decision 656fdf39 (CR 66fad7ed round 2) — pass each entry's OWN reconciled tokens as
@@ -8227,13 +8229,13 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
       else anyKeptUnattributed = true;
     }
   }
-  // @decision 8db913e2 (Follow-up f2cc5f18) — `candidateTokens` (captured at this function's own top,
+  // @decision f2cc5f18 — `candidateTokens` (captured at this function's own top,
   // before any deletes) already holds every token THIS clear is lifting — `tombstoneIfNotSurviving`
   // below hasn't run yet, so the GLOBAL `clearedTokens` tombstone set does not yet include them either.
   //
-  // @decision 8db913e2 (Follow-up 0a783fb2) — this sweep's own result used to be discarded entirely
+  // @decision 0a783fb2 — this sweep's own result used to be discarded entirely
   // (console.error only, no response field) — fold it through the shared helper like every other site.
-  // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — exclude this clear's OWN identity
+  // @decision 0a783fb2 (Code Review 47289f8d) — exclude this clear's OWN identity
   // from the orphan-sweep's own true-referencer check — see that function's own doc for why.
   const excludeOwnIdentity = new Set([identity]);
   // @decision 9f387d7e — ONE call over the whole set; see `sweepOrphanLatchFilesUnioned`'s own doc.
@@ -8247,7 +8249,7 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   // @decision 59f4ebe8 — an orphan whose unlink failed still physically holds a token of this clear.
   if (orphanSweepResult.unlinkFailed) anyWriteFailed = true;
   for (const n of orphanSweepResult.unlinkFailedFiles) unlinkFailedFileNames.add(n);
-  // @decision 8db913e2 (round 4) — THE ONE tombstone call for this clear, now that every mutation above
+  // @decision sha:d529d42d (round 4) — THE ONE tombstone call for this clear, now that every mutation above
   // (deletes, the pending filter, every sweep) is done; see `tombstoneIfNotSurviving`'s own doc for why
   // this replaces round 3's own per-site, outcome-gated tombstone attempts (CR3 BLOCKER 1).
   // @decision 0d3b64c6 (round 2, S1) — `identityRepoPath` (this function's own RAW parameter), never
@@ -8352,13 +8354,13 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
         ? { referencingRepoPaths: [...keptReferencingRepoPaths.keys(), ...orphanReferencingRepoPaths.keys()] } : {}),
       // @decision c4f0d786 (round 6) — the exact file each kept referencer was kept for, for a delegating body's post-pass re-check.
       ...(keptReferencingRepoPaths.size > 0 ? { keptSourceFiles: [...keptReferencingRepoPaths].map(([repoPath, sourceFile]) => ({ repoPath, sourceFile })) } : {}),
-      // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep names no live entry to clear by
+      // @decision 0a783fb2 — a content-parsed keep names no live entry to clear by
       // id, so it never joins `stillBlockedCoOccupants` below — only this field.
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths.keys()] } : {}),
       // @decision 25d0d45b (Round 4) — a disclosure for whichever content-kept repoPath(s) are, right
       // now, genuinely refused by a DIFFERENT identity's own entry — never a route for them.
       ...(keptContentBlockedBy.size > 0 ? { contentKeptBlockedBy: contentKeptBlockedByEntries(keptContentBlockedBy) } : {}),
-      // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d, MINOR) — an EXPLICIT flag, never
+      // @decision 0a783fb2 (Code Review 47289f8d, MINOR) — an EXPLICIT flag, never
       // left for a caller to re-derive from an empty `referencingRepoPaths` (that misfires the instant
       // `latchKept` is true SOLELY because `contentKeptRepoPaths` fired).
       ...(anyKeptUnattributed ? { unattributed: true as const } : {}),
@@ -9001,10 +9003,10 @@ function identityHasOwnRecordAnywhere(identity: string): boolean {
  * function purely so the test corpus can assert on `activeLiftedKeys` directly; behavior is byte-identical
  * to being inlined.
  *
- * @decision 8db913e2 (Follow-up 4b06875f, Round 3, CR be296830 finding 1) — every key this phase's own
+ * @decision 4b06875f (Round 3, CR be296830 finding 1) — every key this phase's own
  * matched-active clears will unconditionally lift, collected HERE (before any clear runs) so the caller's
  * own matchedPending loop can union it into its own liftedKeysOverride — see the decision record.
- * @decision 8db913e2 (Follow-up 3152ec90) — gated through `entryStillOwnsKey` (never `key` itself) — same
+ * @decision 3152ec90 — gated through `entryStillOwnsKey` (never `key` itself) — same
  * reason as `clearMergeQuarantineByKey`'s own `keysToLift`.
  * @decision c52b290e — `activeLiftedKeys.add(key)` runs BEFORE the `seen` de-dup gate: `seen` governs
  * `matched`/the `armedKeys` scan, never whether a live key belongs in `activeLiftedKeys` — the old order
@@ -9139,7 +9141,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   const identity = directPathIdentity(repoPath);
   const { matched: computedMatched, activeLiftedKeys } = activeMatchesAndLiftedKeysFor(identity);
   const matched = matchedOverride ?? computedMatched;
-  // @decision 8db913e2 (Follow-up c93e9e7a) — the full lifted-key union `L`, computed ONCE before any
+  // @decision c93e9e7a — the full lifted-key union `L`, computed ONCE before any
   // delegated clear — this function's own pending sweep is unconditional, so every identity-matched
   // pending entry's owned keys belong in it from the start. See the decision record's own section.
   const pendingOwnedArmedKeys = new Map<PendingUnresolvedQuarantine, string[]>();
@@ -9176,7 +9178,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   // @decision 182c01cc (round 2, finding 2) — a SEPARATE bucket for a co-occupant relocated to a new
   // latch (never folded into keptReferencingRepoPaths — that one must stay latchKept-eligible only).
   const relocatedCoOccupants = new Map<string, BlockedCoOccupant>();
-  // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed repoPath has no live entry behind it, so
+  // @decision 0a783fb2 — a content-parsed repoPath has no live entry behind it, so
   // it is tracked SEPARATELY, never folded into `keptReferencingRepoPaths`/`stillBlockedCoOccupants`.
   const keptContentRepoPaths = new Set<string>();
   // @decision 25d0d45b (Round 4) — a disclosure for a content-kept repoPath genuinely refused right now
@@ -9185,7 +9187,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   // @decision 8596ddfb — the file(s) each content keep above stands on (ByKey fills it for its own keeps; this
   // body notes the pending branch's), so a keep whose file a LATER step of this same call deleted can be dropped.
   const contentKeptFiles = deferred.contentKeptFiles!; // the sole caller (the wrapper) always supplies it
-  // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — see the matching note at the matchedPending loop's own
+  // @decision sha:4dba1d37 (95ea8d3f, Round 2, nitpick) — see the matching note at the matchedPending loop's own
   // sweepOwnLatchFileUnlessOwnedElsewhere call below: an unconfirmed EPERM/EBUSY unlink (or a
   // marked-but-unprovable-coverage keep) still means something was kept, with no repoPath to name.
   let anyKeptUnattributed = false;
@@ -9231,7 +9233,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       for (const co of kept) keptReferencingRepoPaths.set(co.repoPath, co);
       for (const ks of result?.keptSourceFiles ?? []) { const co = keptReferencingRepoPaths.get(ks.repoPath); if (co !== undefined) delegatedKept.set(ks.repoPath, { co, sourceFile: ks.sourceFile }); }
       for (const co of relocated) relocatedCoOccupants.set(co.repoPath, co);
-      // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — use ByKey's own EXPLICIT
+      // @decision 0a783fb2 (Code Review 47289f8d) — use ByKey's own EXPLICIT
       // `unattributed` flag, never infer it from an empty `referencingRepoPaths`: `latchKept` can ALSO be
       // true purely because `contentKeptRepoPaths` fired, which is NOT the unattributed case.
       if (result?.unattributed) anyKeptUnattributed = true;
@@ -9294,7 +9296,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     // @decision 6237bef6 — sweep each dropped pending entry's OWN orphanLatchFiles too, not just its
     // sourceFile; see the decision record (site 3 of 3 — abccee85's own trace named only the other two).
     const orphanFilesToSweep = new Set<string>();
-    // @decision 8db913e2 (round 4) — candidates + touched basenames for the ONE tombstone call below,
+    // @decision sha:d529d42d (round 4) — candidates + touched basenames for the ONE tombstone call below,
     // made after every mutation in this block is already applied — see `tombstoneIfNotSurviving`'s doc.
     const pendingCandidateTokens: string[] = [];
     const pendingTouchedBasenames: string[] = [];
@@ -9320,7 +9322,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
         if (reducedCandidateBlockedBefore.get(c)) candidateIdentities.add(c);
       }
       for (const f of p.entry.orphanLatchFiles ?? []) orphanFilesToSweep.add(f);
-      // @decision 8db913e2 (Follow-up c93e9e7a) — reuse `pendingOwnedArmedKeys`'s own pre-delegation
+      // @decision c93e9e7a — reuse `pendingOwnedArmedKeys`'s own pre-delegation
       // snapshot value, never a live recompute (a sibling delegated clear, or an earlier entry in THIS
       // loop, may have already mutated `activeQuarantines`). `L` is the complete, precomputed union.
       for (const k of pendingOwnedArmedKeys.get(p) ?? []) {
@@ -9358,7 +9360,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       // pendingUnresolvedQuarantines above, so this correctly checks whether a SURVIVING entry (e.g. a
       // fresh raise reusing the freed key) now physically owns this exact filename.
       //
-      // @decision 8db913e2 (Follow-up 95ea8d3f) — `p.entry.tokens` as `candidateTokens`, so a stale mark
+      // @decision 95ea8d3f — `p.entry.tokens` as `candidateTokens`, so a stale mark
       // can't outlive it forever. `p.entry` was already re-ingested above (656fdf39) when still placeholder-shaped.
       const sweepResult = sweepOwnLatchFileUnlessOwnedElsewhere(p.sourceFile, p.entry.tokens);
       if (sweepResult.unlinkFailedFile) unlinkFailedFileNames.add(sweepResult.unlinkFailedFile);
@@ -9382,13 +9384,13 @@ function tryClearMergeQuarantineByOwnIdentityBody(
         pendingAnyKept = true;
       }
     }
-    // @decision 8db913e2 (Follow-up f2cc5f18) — `pendingCandidateTokens` already holds every matched
+    // @decision f2cc5f18 — `pendingCandidateTokens` already holds every matched
     // pending entry's own tokens, captured as each is processed above, before `tombstoneIfNotSurviving`.
     //
-    // @decision 8db913e2 (Follow-up 0a783fb2) — this sweep's own result used to be discarded entirely —
+    // @decision 0a783fb2 — this sweep's own result used to be discarded entirely —
     // fold it through the shared helper, same as every other orphan-sweep call site.
     //
-    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — exclude this clear's OWN identity
+    // @decision 0a783fb2 (Code Review 47289f8d) — exclude this clear's OWN identity
     // (the MAJOR self-reference fix) — see orphanLatchFileSweepDecision's own doc for why.
     const excludeOwnIdentity = new Set([identity]);
     // @decision 9f387d7e — ONE call over the whole set; see `sweepOrphanLatchFilesUnioned`'s own doc.
@@ -9498,7 +9500,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   }
   if (keptReferencingRepoPaths.size > 0) {
     const refs = [...keptReferencingRepoPaths.keys()];
-    // @decision 8db913e2 (Follow-up 95ea8d3f, Round 3) — generalized from "sharing this exact degraded key" (true only for
+    // @decision sha:4dba1d37 (95ea8d3f, Round 3) — generalized from "sharing this exact degraded key" (true only for
     // the 882d6cff shared-corrupt-latch shape): a self-referencing protected-copy/safety-tmp keep
     // (4900c365/ef651188) is a DIFFERENT mechanism, and the old wording misdescribed its own keep cause.
     //
@@ -9524,7 +9526,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       latchKept: true, referencingRepoPaths: refs,
       liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
-      // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep names no live entry, so it never
+      // @decision 0a783fb2 — a content-parsed keep names no live entry, so it never
       // joins `stillBlockedCoOccupants` above — only this field, alongside whatever TRUE referencer fired
       // this branch.
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
@@ -9533,7 +9535,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       reason: withUnlinkFailedClause(composeReasonWithRelocated(keptReason, combinedRelocated), unlinkFailedFileNames),
     } };
   }
-  // @decision 8db913e2 (Follow-up 95ea8d3f, Round 2, nitpick) — kept for an UNATTRIBUTED reason (an unconfirmed EPERM/EBUSY
+  // @decision sha:4dba1d37 (95ea8d3f, Round 2, nitpick) — kept for an UNATTRIBUTED reason (an unconfirmed EPERM/EBUSY
   // unlink, or a marked-but-unprovable-coverage keep) still reports latchKept:true, never plain success.
   if (anyKeptUnattributed) {
     return { matched: true, result: {
@@ -9553,7 +9555,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       wasQuarantined: true, stillBlockedCoOccupants: relocated,
       liftedRepoPaths, releasedRepoPaths, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
-      // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — a content-only keep can ALSO
+      // @decision 0a783fb2 (Code Review 47289f8d) — a content-only keep can ALSO
       // coexist with a pure relocation; compose its own clause on, never silently drop it.
       reason: keptContentRepoPaths.size > 0
         ? `${relocatedCoOccupantsReason(relocated)} ${contentKeptOnlyReasonFor([...keptContentRepoPaths], keptContentBlockedBy)}`
@@ -9562,7 +9564,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       ...(keptContentBlockedBy.size > 0 ? { contentKeptBlockedBy: contentKeptBlockedByEntries(keptContentBlockedBy) } : {}),
     } };
   }
-  // @decision 8db913e2 (Follow-up 0a783fb2) — nothing referencing, unattributed, or relocated — but a
+  // @decision 0a783fb2 — nothing referencing, unattributed, or relocated — but a
   // content-parsed keep can still be the ONLY thing this clear found; report it, with a real reason, rather
   // than a plain, uninformative success (Code Review 47289f8d: this branch gave no reason at all).
   if (keptContentRepoPaths.size > 0) {
@@ -9830,7 +9832,7 @@ function findPendingIndicesFor(repoPath: string, key: string, excludedEntries?: 
   if (indices.length === 0) {
     // @decision 883e29bc — match a STILL-unresolvable entry by key, gated on its OWN resolvedKey (PASS
     // 1/1b's divert); never a bare never-resolved no-resolvedKey latch (abccee85/r7's "nothing to walk").
-    // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — gate on informativeKeysFor (scalar ∪
+    // @decision 43cf3b26 (CR 46c5c492) — gate on informativeKeysFor (scalar ∪
     // resolvedKeys), never the scalar alone, or a plural-only pending entry never matches here.
     indices = pend((p) => !isRepoPathCurrentlyResolvable(p.entry.repoPath) && informativeKeysFor(p.entry).length > 0 && canonicalRepoLockKey(p.entry.repoPath) === key);
   }
@@ -9859,7 +9861,7 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
       // resolvable `repoPath`) still returns `direct` exactly as before, and the verified-`direct`
       // branch below stays untouched.
       //
-      // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492, CRITICAL) — skip the pending search entirely
+      // @decision 43cf3b26 (CR 46c5c492, CRITICAL) — skip the pending search entirely
       // when `direct` is ALREADY the query's own identity — tier 4 matches purely by KEY, so an unrelated
       // sibling sharing this key could otherwise shadow an already-correct `direct` with its own content.
       if (!isRepoPathCurrentlyResolvable(repoPath) && directPathIdentity(direct.repoPath) !== directPathIdentity(repoPath)) {
@@ -10110,7 +10112,7 @@ function pendingLatchIdFor(sourceFile: string): string {
   // @decision d4b25feb — a pending-divert basename (clean final OR a crash-left tmp residue) is NOT
   // itself a valid 24-hex id — hash the FULL basename, mirroring the SAFETY_TMP_RE branch above.
   //
-  // @decision 8db913e2 (Follow-up 8a79dd31) — a collision-suffixed fresh mint (clean, OR its own
+  // @decision 8a79dd31 — a collision-suffixed fresh mint (clean, OR its own
   // crash-left tmp residue) is the SAME shape: its own basename is not a valid 24-hex id either.
   if (
     PENDING_DIVERT_RE.test(sourceFile) || PENDING_DIVERT_TMP_RE.test(sourceFile)
@@ -10136,7 +10138,7 @@ function pendingLatchIdFor(sourceFile: string): string {
  * none with a file at all — see the decision record.
  */
 export function quarantineLatchFileIdsFor(entry: MergeQuarantineEntry): string[] {
-  // @decision 8db913e2 (Follow-up 3152ec90) — gate every member through `entryStillOwnsKey` first — a
+  // @decision 3152ec90 — gate every member through `entryStillOwnsKey` first — a
   // stale `armedKeys` member would otherwise hand out a FOREIGN entry's own latch id as if it belonged
   // to `entry`.
   // @decision 1fc3a561 — widened to {@link liveArmedKeysOf}, never `entry.armedKeys` alone — a
@@ -10331,7 +10333,7 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
     return {
       wasQuarantined, latchKept: true, referencingRepoPaths: clearResult.referencingRepoPaths,
       liftedRepoPaths, ...provenanceUnknownFields,
-      // @decision 8db913e2 (Follow-up 0a783fb2) — forward the content-parsed keep too; it can be the
+      // @decision 0a783fb2 — forward the content-parsed keep too; it can be the
       // ONLY reason `latchKept` fired here (no true referencer at all).
       ...("contentKeptRepoPaths" in clearResult && clearResult.contentKeptRepoPaths ? { contentKeptRepoPaths: clearResult.contentKeptRepoPaths } : {}),
       ...("contentKeptBlockedBy" in clearResult && clearResult.contentKeptBlockedBy ? { contentKeptBlockedBy: clearResult.contentKeptBlockedBy } : {}),
@@ -10348,7 +10350,7 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
       // ByKey result (no relocated co-occupant to compose a clause from either) used to return NO reason
       // text at all, unlike clearMergeQuarantineByRecordedPath's own equivalent branch.
       //
-      // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — `keptOnlyReasonFor` assumes a TRUE
+      // @decision 0a783fb2 (Code Review 47289f8d) — `keptOnlyReasonFor` assumes a TRUE
       // referencer and reads as a garbled "0 other claimant(s) … ()" when there is none — pick the base
       // reason by WHICH kind of keep actually fired, never `keptOnlyReasonFor` unconditionally.
       reason: clearResult.reason !== undefined
@@ -10491,7 +10493,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // silently dropping a pure relocation — split first, carry it unconditionally.
     const activeStillBlocked = activeClearResult?.stillBlockedCoOccupants ?? [];
     const { relocated: activeRelocated } = splitCoOccupants(activeStillBlocked, activeClearResult?.referencingRepoPaths);
-    // @decision 8db913e2 (Follow-up 0a783fb2) — forward the content-parsed keep too; it can be the ONLY
+    // @decision 0a783fb2 — forward the content-parsed keep too; it can be the ONLY
     // reason `latchKept` fired here.
     const activeLatchKeptFields = activeClearResult && "latchKept" in activeClearResult && activeClearResult.latchKept
       ? {
@@ -10592,7 +10594,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // never just its repoPath, so `stillBlockedCoOccupants` can name a real `{id}` route — see the
     // decision record's "Round 4" section for why this branch used to hard-code `[]`.
     const keptCoOccupants = new Map<string, BlockedCoOccupant>();
-    // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep (no live entry) never joins
+    // @decision 0a783fb2 — a content-parsed keep (no live entry) never joins
     // `keptCoOccupants`/`stillBlockedCoOccupants`; `anyKeptUnattributed` closes the gap this branch had —
     // none of ownSweep/finalSweep/tmpSweep tracked a kept-but-unattributed result before this card.
     const keptContentRepoPaths = new Set<string>();
@@ -10605,10 +10607,10 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision d2592cd5 (Follow-up) — this branch's own write-success signal for the durable tombstone
     // below, mirroring clearMergeQuarantineByKey's own anyWriteFailed-combined gate.
     let pendingAnyKept = false;
-    // @decision 8db913e2 (round 4) — candidates + touched basenames for the ONE tombstone call below,
+    // @decision sha:d529d42d (round 4) — candidates + touched basenames for the ONE tombstone call below,
     // made after every mutation in this block is already applied — see `tombstoneIfNotSurviving`'s doc.
     const pendingCandidateTokens: string[] = [];
-    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — every identity THIS call is already
+    // @decision 0a783fb2 (Code Review 47289f8d) — every identity THIS call is already
     // clearing (882d6cff's multi-claimant shape can span several) — excluded from the orphan-sweep's own
     // true-referencer check below, same reason as ByKey/ByRecordedPath's own single-identity exclusion.
     const matchedIdentities = new Set(matchedPending.map((p) => directPathIdentity(p.entry.repoPath)));
@@ -10638,7 +10640,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       // @decision d2592cd5 (Follow-up) — this entry's own sourceFile sweep kept something too.
       if (ownFolded.referencingRepoPaths.length > 0 || ownFolded.unattributed) pendingAnyKept = true;
     }
-    // @decision 8db913e2 (Follow-up f2cc5f18) — `pendingCandidateTokens` already holds every matched
+    // @decision f2cc5f18 — `pendingCandidateTokens` already holds every matched
     // pending entry's own tokens, captured as each is processed above, before `tombstoneIfNotSurviving`.
     //
     // Belt-and-suspenders: `${id}.json` is check-2-only (9cabd143 unchanged) ONLY when it's actually one
@@ -10653,7 +10655,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     const matchedSourceFileEntry = matchedPending.find((p) => p.sourceFile === `${id}.json`);
     const idJsonIsMatchedSourceFile = matchedSourceFileEntry !== undefined;
     if (!idJsonIsMatchedSourceFile) orphanFilesToSweep.add(`${id}.json`);
-    // @decision 8db913e2 (Follow-up 0a783fb2) — this sweep's own result used to be discarded entirely —
+    // @decision 0a783fb2 — this sweep's own result used to be discarded entirely —
     // fold it through the shared helper, same as every other orphan-sweep call site.
     const orphanSweepResult = sweepOrphanLatchFilesUnioned(orphanFilesToSweep, pendingCandidateTokens, matchedIdentities);
     // @decision 182c01cc (round 5, MAJOR) — `blockedCoOccupantForReferencer`, never the bare
@@ -10703,7 +10705,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
     // @decision 7aa9c406 — the computation lives in `freedKeysForClearedPendingEntries`, shared by every pending-tier clear.
     const freedKeys = freedKeysForClearedPendingEntries(matchedPending.map((p) => p.entry));
     const tmpSweep = sweepTmpResidueForHashIfUnreferenced(id, pendingCandidateTokens, undefined, false, [], matchedIdentities, freedKeys);
-    // @decision 8db913e2 (Follow-up 0a783fb2, Code Review 47289f8d) — deliberately INLINE, never through
+    // @decision 0a783fb2 (Code Review 47289f8d) — deliberately INLINE, never through
     // `foldOrphanSweepResult`: its multi-entry shape doesn't fit that helper's one-sourceFile-per-call form.
     if (tmpSweep.referencingRepoPaths.length > 0) for (const ke of tmpSweep.keptEntries) { keptRepoPaths.add(ke.repoPath); keptCoOccupants.set(ke.repoPath, blockedCoOccupantForReferencer(ke.repoPath, ke.sourceFile)); }
     // @decision 21ec39e5 — a content-parsed keep never joins `referencingRepoPaths`/`stillBlockedCoOccupants`
@@ -10749,7 +10751,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
       })() : {}),
       ...(keptRepoPaths.size > 0 || anyKeptUnattributed || keptContentRepoPaths.size > 0 ? { latchKept: true as const } : {}),
       ...(keptRepoPaths.size > 0 || anyKeptUnattributed ? { referencingRepoPaths: [...keptRepoPaths] } : {}),
-      // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed keep names no live entry, so it never
+      // @decision 0a783fb2 — a content-parsed keep names no live entry, so it never
       // joins `stillBlockedCoOccupants` above — only this field.
       ...(keptContentRepoPaths.size > 0 ? { contentKeptRepoPaths: [...keptContentRepoPaths] } : {}),
       ...(keptContentBlockedBy.size > 0 ? { contentKeptBlockedBy: contentKeptBlockedByEntries(keptContentBlockedBy) } : {}),
@@ -10759,10 +10761,10 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // residue) with no repoPath to delegate to. Routed through the shared helper (card 9cabd143 — see this
   // function's own doc), never a bare unlink: `<id>.json` can still be a SURVIVING entry's own reference
   // or physical latch even when nothing in-memory matches `id` itself.
-  // @decision 8db913e2 (Follow-up f2cc5f18) — no in-memory entry matches `id` at all, so nothing is
+  // @decision f2cc5f18 — no in-memory entry matches `id` at all, so nothing is
   // being lifted here: `[]` is correct, never a guess — a real foreign token found on disk is kept.
   //
-  // @decision 8db913e2 (Follow-up 0a783fb2) — a content-parsed repoPath now reports via
+  // @decision 0a783fb2 — a content-parsed repoPath now reports via
   // `contentKeptRepoPaths`, never folded into `referencingRepoPaths` alongside a true referencer.
   const ownContentKept = new Map<string, string>();
   // @decision 25d0d45b (Round 4) — a disclosure for a content-kept repoPath genuinely refused right now
@@ -10787,7 +10789,7 @@ export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuaran
   // — fold it into the SAME `ownContentKept` map the `.json` sweep above already feeds.
   for (const { repoPath, sourceFile, blockedBy } of ownSweepResult.contentKept) { ownContentKept.set(repoPath, sourceFile); if (blockedBy) ownContentBlockedBy.set(repoPath, blockedBy); }
   for (const ke of tmpSweep.contentKeptEntries) { ownContentKept.set(ke.repoPath, ke.sourceFile); if (ke.blockedBy) ownContentBlockedBy.set(ke.repoPath, ke.blockedBy); }
-  // @decision 8db913e2 (Follow-up f2cc5f18) — a KEPT sweep with no attributable repoPath must still
+  // @decision f2cc5f18 — a KEPT sweep with no attributable repoPath must still
   // surface as `latchKept`, mirroring `clearMergeQuarantineByKey`'s own `anyKeptUnattributed`.
   const anyKeptUnattributed = ownSweepResult.anyUnattributed || tmpSweep.anyUnattributed;
   // @decision b11056a9 — the raw fallback has no base reason, so a failed unlink's clause (still-present
@@ -11347,7 +11349,7 @@ function reenterMergeQuarantinesAtBootImpl(
   // by its OWN, simpler loop below that is ALWAYS a pure pending-divert, never the resolvable self-heal
   // branch `deferredCorruptJsons` can take — an ancestor walk is never proof of ownership.
   const deferredAncestorCorruptJsons: { f: string; matchedRepo: string }[] = [];
-  // @decision 8db913e2 (Follow-up 8bff3cae) — collect-then-decide: ANY way this boot can independently
+  // @decision 8bff3cae — collect-then-decide: ANY way this boot can independently
   // arm this stale key (clean parse, corrupt `.json`, or corrupt tmp) gets its own chance FIRST —
   // resolved once, below, only after every one of those has fully settled, never right after PASS 1.
   const staleKeyRetentionCandidates: { currentKey: string; staleKey: string }[] = [];
@@ -11426,7 +11428,7 @@ function reenterMergeQuarantinesAtBootImpl(
       if (!parsedIsPlaceholder) cleanlyParsedKeys.add(currentKey);
       const freshHash = createHash("sha256").update(currentKey).digest("hex").slice(0, 24);
       const resolvableNow = isRepoPathCurrentlyResolvable(entry.repoPath);
-      // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — gate on informativeKeysFor (scalar ∪
+      // @decision 43cf3b26 (CR 46c5c492) — gate on informativeKeysFor (scalar ∪
       // resolvedKeys), never the scalar alone (CR 46c5c492's probe2: a plural-only record, no scalar at
       // all, was wrongly treated as a pre-upgrade no-key latch and never got its own resolvedKeys attempted).
       if (!resolvableNow && informativeKeysFor(entry).length === 0) {
@@ -11452,18 +11454,18 @@ function reenterMergeQuarantinesAtBootImpl(
           // never on an unresolvable path, or a transient drive-unmount destroys a genuinely good latch.
           // eslint-disable-next-line no-console
           console.warn(`[merge-quarantine] boot-time latch ${f} was filed under a STALE key for ${entry.repoPath} (its canonical key resolution changed) — migrating to ${freshHash}.json so a future clear can find it.`);
-          // @decision 8db913e2 (Follow-up 8bff3cae) — fold the scalar's OWN already-informative key
+          // @decision 8bff3cae — fold the scalar's OWN already-informative key
           // forward before it is overwritten below; a stale-but-still-live SIBLING key is handled
           // separately, deferred — see the decision record's own "Follow-up 8bff3cae" section.
           if (isInformativeKey(entry, currentKey)) {
             entry = { ...entry, resolvedKeys: unionResolvedKeysRetaining(entry.resolvedKeys, [entry.resolvedKey!], `PASS1-migrate(${entry.repoPath})`) };
           }
-          // @decision 8db913e2 (Follow-up 8bff3cae) — queue `hash` for deferred retention (never fold it
+          // @decision 8bff3cae — queue `hash` for deferred retention (never fold it
           // in HERE) — see `staleKeyRetentionCandidates`'s own doc comment for why.
           const staleKeyStillOwnedBy = hashToRepo.get(hash);
           if (staleKeyStillOwnedBy !== undefined) {
             const staleKeyStillLive = canonicalRepoLockKey(staleKeyStillOwnedBy);
-            // @decision 8db913e2 (Follow-up 8bff3cae, CR 0b975d2a) — never trust a LEGACY-tier
+            // @decision 8bff3cae (CR 0b975d2a) — never trust a LEGACY-tier
             // `hashToRepo` match without this check: it can recompute to an ANCESTOR's key that durably
             // blocks an unrelated repo, never `hash`'s own true owner.
             if (staleKeyStillLive !== currentKey && legacyMatchStillResolvesToHash(staleKeyStillLive, hash)) {
@@ -11494,7 +11496,7 @@ function reenterMergeQuarantinesAtBootImpl(
           // @decision d163aef5 — but never union at resolvedKey either, if that key is ALREADY occupied
           // by a different, currently-verified entry — see armKeyUnlessDegradedCollision's own doc.
           //
-          // @decision 8db913e2 (Follow-up 43cf3b26) — generalized from ONE `entry.resolvedKey` attempt to
+          // @decision 43cf3b26 — generalized from ONE `entry.resolvedKey` attempt to
           // a loop over EVERY candidate in `entry.resolvedKeys` (falling back to the scalar) — see the
           // decision record's own "boot-time re-arm generalization" section.
           const secondaryCandidates = secondaryKeysToAttempt(entry, currentKey);
@@ -11508,7 +11510,7 @@ function reenterMergeQuarantinesAtBootImpl(
             }
             armedAtResolvedKey = attempt;
           }
-          // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492, MINOR) — reached only when every
+          // @decision 43cf3b26 (CR 46c5c492, MINOR) — reached only when every
           // candidate was attempted AND refused; wording no longer fires when there was nothing to try.
           if (secondaryCandidates.length > 0 && armedAtResolvedKey === undefined) {
             // eslint-disable-next-line no-console
@@ -11524,7 +11526,7 @@ function reenterMergeQuarantinesAtBootImpl(
             if (k === currentKey) continue;
             degradedOccupiedKeys.add(k);
           }
-          // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492, CRITICAL) — ALWAYS divert, even when the
+          // @decision 43cf3b26 (CR 46c5c492, CRITICAL) — ALWAYS divert, even when the
           // scalar happens to equal `currentKey` — see the decision record's own CR-46c5c492 section.
           degradedDivertsToFlush.push({ entry: armedAtResolvedKey ?? entry, sourceFile: f });
           continue;
@@ -11537,7 +11539,7 @@ function reenterMergeQuarantinesAtBootImpl(
       // @decision d163aef5 — `entry` can ALSO be degraded here (self-consistently named at its own
       // degenerate key) — a primary arm's claim is tautological either way; see the helper's own doc.
       //
-      // @decision 8db913e2 (Follow-up 43cf3b26) — generalized to a loop over every candidate secondary
+      // @decision 43cf3b26 — generalized to a loop over every candidate secondary
       // key, threading the accumulator through each attempt exactly like the single-key case did.
       let armedEntry = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
       for (const k of secondaryKeysToAttempt(armedEntry, currentKey)) {
@@ -11772,7 +11774,7 @@ function reenterMergeQuarantinesAtBootImpl(
       // @decision 6237bef6 — mirror PASS 1's own unresolvable/no-resolvedKey gate (card 369b97be): defer
       // to pendingUnresolvedQuarantines here too, rather than arming a tmp-sourced entry under a possibly-
       // degraded key the way the rest of this loop otherwise would.
-      // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — gate on informativeKeysFor, never the
+      // @decision 43cf3b26 (CR 46c5c492) — gate on informativeKeysFor, never the
       // scalar alone (mirrors PASS 1's own identical fix above).
       if (!isRepoPathCurrentlyResolvable(entry.repoPath) && informativeKeysFor(entry).length === 0) {
         // eslint-disable-next-line no-console
@@ -11780,7 +11782,7 @@ function reenterMergeQuarantinesAtBootImpl(
         pendingUnresolvedQuarantines.push({ entry, sourceFile: f });
         continue;
       }
-      // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492, CRITICAL) — this branch's own ENTRY gate no
+      // @decision 43cf3b26 (CR 46c5c492, CRITICAL) — this branch's own ENTRY gate no
       // longer requires `entry.resolvedKey !== currentKey` to fire — a coincidental match used to skip
       // this branch entirely, arming currentKey directly instead. See the decision record's CR section.
       if (!isRepoPathCurrentlyResolvable(entry.repoPath)) {
@@ -11824,7 +11826,7 @@ function reenterMergeQuarantinesAtBootImpl(
       // no-mismatch, self-consistent shape) — its claim is tautological either way.
       const priorAtCurrentKey = byRepoKey.get(currentKey);
       let armedTmpEntry = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
-      // @decision 8db913e2 (Follow-up 43cf3b26) — a collision HERE no longer drops either side (both
+      // @decision 43cf3b26 — a collision HERE no longer drops either side (both
       // ride `resolvedKeys` now); downgraded to an info-level line — see the decision record.
       if (isInformativeKey(priorAtCurrentKey, currentKey) && isInformativeKey(entry, currentKey) && priorAtCurrentKey!.resolvedKey !== entry.resolvedKey) {
         const priorSourceList = tmpsToUnlinkByKey.get(currentKey);
@@ -11833,7 +11835,7 @@ function reenterMergeQuarantinesAtBootImpl(
         // eslint-disable-next-line no-console
         console.log(`[merge-quarantine] boot found sibling latches for ${entry.repoPath} with DIFFERENT, equally informative resolvedKeys (${priorAtCurrentKey!.resolvedKey}, ${entry.resolvedKey}) — sources: ${path.basename(tmpPath)} and ${priorSourceDisplay} — both retained via resolvedKeys (card 43cf3b26); no enforcement is lost.`);
       }
-      // @decision 8db913e2 (Follow-up 43cf3b26, CR 4c59172f round 2, MAJOR) — thread the accumulator like
+      // @decision 43cf3b26 (CR 4c59172f round 2, MAJOR) — thread the accumulator like
       // PASS 1's own loop above: never reassigning broke the identity invariant with >=2 secondaries.
       for (const k of secondaryKeysToAttempt(armedTmpEntry, currentKey)) {
         // `entry` can ALSO be degraded here — mirrors PASS 1's own second-arm note above (a
@@ -11991,7 +11993,7 @@ function reenterMergeQuarantinesAtBootImpl(
       // `continue`s) — this primary arm's own claim is tautological anyway; only a degraded PRIOR
       // sharing `currentKey` only via some unrelated secondary claim could ever be evicted.
       let armedSafety = armCurrentKeyUnlessDegradedCollision(currentKey, entry);
-      // @decision 8db913e2 (Follow-up 43cf3b26) — generalized to a loop, mirrors PASS 1/1b's own identical
+      // @decision 43cf3b26 — generalized to a loop, mirrors PASS 1/1b's own identical
       // generalization.
       for (const k of secondaryKeysToAttempt(armedSafety, currentKey)) {
         // This second arm can only decline-and-evict a DIFFERENT, degraded occupant at this stale key.
@@ -12439,7 +12441,7 @@ function reenterMergeQuarantinesAtBootImpl(
     pendingUnresolvedQuarantines.push({ entry, sourceFile: f, sharedCorruptLatch: true });
   }
 
-  // @decision 8db913e2 (Follow-up 8bff3cae) — resolve every deferred stale-key candidate only NOW, with
+  // @decision 8bff3cae — resolve every deferred stale-key candidate only NOW, with
   // every OTHER kind of arm already settled and before any migrate-pass write below — see the decision
   // record for why this exact point (an occupied key is left to its own owner; an unclaimed one is armed).
   for (const { currentKey, staleKey } of staleKeyRetentionCandidates) {
@@ -12652,7 +12654,7 @@ function reenterMergeQuarantinesAtBootImpl(
       console.warn(`[merge-quarantine] recovered ${tmps.length} torn-write tmp(s) for ${unionEntry.repoPath} but could NOT verify its key — the path does not currently resolve on disk — leaving every tmp AS WRITTEN.`);
       continue;
     }
-    // @decision 8db913e2 (Follow-up 1e739f4a) — never overwrite an ALREADY-INFORMATIVE
+    // @decision 1e739f4a — never overwrite an ALREADY-INFORMATIVE
     // `unionEntry.resolvedKey` with the self-referential promote key: that durably drops a genuine
     // cross-repo dual-arm the instant any tmp residue for this key is promoted, even when nothing was wrong.
     let armedForWrite: MergeQuarantineEntry = isInformativeKey(unionEntry, key) ? unionEntry : { ...unionEntry, resolvedKey: key };
