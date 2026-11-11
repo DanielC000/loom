@@ -242,7 +242,7 @@ export type DiffLineKind = "add" | "del" | "hunk" | "context" | "meta";
 // header — a deleted line whose CONTENT starts with `---`/`--`/`+++` (a markdown thematic break, a YAML
 // front-matter delimiter, a SQL/CLI `-- comment`) is a genuine deletion and must read as "del" (RED),
 // NOT the muted "meta" header gray that a shared colorizer wrongly gave it. There is deliberately NO
-// "meta" case here; do NOT special-case `+++`/`---`. (rawPatchLineKind below DOES see real headers.)
+// "meta" case here; do NOT special-case `+++`/`---`.
 export function hunkLineKind(ln: string): DiffLineKind {
   switch (ln[0]) {
     case "@": return "hunk";
@@ -250,17 +250,4 @@ export function hunkLineKind(ln: string): DiffLineKind {
     case "-": return "del";
     default: return "context";
   }
-}
-
-// Classifier for a RAW unified patch rendered line-by-line (the fleet-card expansion's worker branch-diff
-// DiffView), which legitimately CONTAINS the `diff --git`/`index `/`+++ b/`/`--- a/` file headers and
-// dims them as "meta". This header-dimming is WRONG for FileHunks (header-stripped content), which uses
-// hunkLineKind — the two callers have opposite needs and must stay separate (the merge-gate render-bug
-// split). Header check precedes +/- so `--- a/`/`+++ b/` dim before the +/- fallthrough.
-export function rawPatchLineKind(ln: string): DiffLineKind {
-  if (ln.startsWith("@@")) return "hunk";
-  if (ln.startsWith("+++") || ln.startsWith("---") || ln.startsWith("diff ") || ln.startsWith("index ")) return "meta";
-  if (ln.startsWith("+")) return "add";
-  if (ln.startsWith("-")) return "del";
-  return "context";
 }

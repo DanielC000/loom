@@ -9,7 +9,7 @@
 // CI (which runs `pnpm build`). Run it standalone with:
 //   node --experimental-strip-types packages/web/test/diff.mjs
 import assert from "node:assert/strict";
-import { parseDiff, analyzeDiff, defaultOpenPaths, AUTO_EXPAND_MAX_FILES, hunkLineKind, rawPatchLineKind } from "../src/lib/diff.ts";
+import { parseDiff, analyzeDiff, defaultOpenPaths, AUTO_EXPAND_MAX_FILES, hunkLineKind } from "../src/lib/diff.ts";
 
 let pass = 0;
 const check = (name, fn) => { fn(); pass++; console.log(`ok   ${name}`); };
@@ -223,20 +223,6 @@ check("hunkLineKind classifies a plain hunk by first char (no meta case)", () =>
   assert.equal(hunkLineKind("-old"), "del");
   assert.equal(hunkLineKind("@@ -1 +1 @@"), "hunk");
   assert.equal(hunkLineKind(" context"), "context");
-});
-
-// 10) DiffView's raw whole-patch classifier (rawPatchLineKind) STILL marks a real `+++ b/`/`--- a/` (and
-//     `diff `/`index `) file header as "meta" (→ dimmed) — the header-dimming variant kept ONLY for the
-//     raw render. This is the opposite need to hunkLineKind and must not regress in the split.
-check("rawPatchLineKind marks real file headers as meta in the raw whole-patch render", () => {
-  assert.equal(rawPatchLineKind("+++ b/src/file.ts"), "meta", "+++ b/ header is meta");
-  assert.equal(rawPatchLineKind("--- a/src/file.ts"), "meta", "--- a/ header is meta");
-  assert.equal(rawPatchLineKind("diff --git a/x b/x"), "meta", "diff --git header is meta");
-  assert.equal(rawPatchLineKind("index 0000001..0000002 100644"), "meta", "index header is meta");
-  // but real +/- content and the hunk header still classify normally
-  assert.equal(rawPatchLineKind("@@ -1 +1 @@"), "hunk");
-  assert.equal(rawPatchLineKind("+added"), "add");
-  assert.equal(rawPatchLineKind("-removed"), "del");
 });
 
 // 11) HEADLINE SINGLE-SOURCING (card dc97b111). The approver panel shows two diffstats: the header chip

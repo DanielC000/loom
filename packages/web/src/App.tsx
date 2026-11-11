@@ -89,7 +89,7 @@ function UpdateBanner() {
 //     job (no other always-on surface carries them) and are rarely numerous, so they don't stack up.
 //   • Pending REQUESTS (decision/input/permission/credential — anything carrying a questionId) — collapsed
 //     into ONE compact count pill, level-triggered off the current count. They're already shown by the
-//     sidebar badge, the Mission Control / Overview attention queues, and the /inbox page, so N requests
+//     sidebar badge, the Workspace node's attention queue, and the /inbox page, so N requests
 //     no longer stack N toasts; the pill returns the screen while keeping the signal (+ its deep-link).
 const TOAST_TTL_MS = 6000;
 let nextToastId = 0;

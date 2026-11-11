@@ -7,15 +7,14 @@ import { WEB_BUNDLE_QUERY_KEY, isDismissed, isSuperseded, markDismissed, ownBund
 
 // Card e98bf784 — "A new version of Loom is available. Reload", for a tab still running a superseded JS
 // bundle after a daemon_restart rebuilt web. Mounted once in App.tsx's ShellBanners, which BOTH shells
-// render (the Atlas shell receives it as a prop), so classic and Atlas are covered by this one mount.
+// render (the Atlas shell receives it as a prop), so this one mount covers it.
 //
 // Styling deliberately mirrors the sibling UpdateBanner — the established slim-bar "a newer version
 // exists → act" lane — but tinted CYAN rather than amber: amber is that npm-release banner's lane, cyan
-// is the "reload to apply" lane (AtlasSwitchNotice). Both can be up at once, so they must stay apart.
+// is the "reload to apply" lane. Both can be up at once, so they must stay apart.
 //
 // ⛔ NEVER auto-reload. The owner may have unsent composer text, and destroying unfinished input is a
-// standing red line — the reload is a button they press. (Same reason AtlasSwitchNotice OFFERS a
-// cross-tab UI change rather than applying it.)
+// standing red line — the reload is a button they press. (An offer, never an automatic apply.)
 //
 // NO POLL: the query refetches on window focus, and FleetSocketProvider invalidates it on a ws RECONNECT
 // (the strongest restart signal — a daemon restart always drops the socket). There is no refetchInterval.

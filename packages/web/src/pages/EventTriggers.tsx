@@ -298,7 +298,7 @@ function EventTriggerModal({
               <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents available —" : "— select an agent —"}</option>
               {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
             </Select>
-            {noAgents && <span style={{ color: color.attnText, fontSize: fs.sm }}>No agents exist yet — create one on the Projects page first.</span>}
+            {noAgents && <span style={{ color: color.attnText, fontSize: fs.sm }}>No agents exist yet — create one on the project's Agents node first.</span>}
             {!agentId && !noAgents && !agentsLoading && <span style={{ color: color.attnText, fontSize: fs.sm }}>Spawn mode requires a target agent.</span>}
           </label>
         )}

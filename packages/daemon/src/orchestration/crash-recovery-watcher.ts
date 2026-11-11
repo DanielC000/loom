@@ -477,7 +477,7 @@ export class CrashRecoveryWatcher {
             }
           }
           // eslint-disable-next-line no-console
-          console.log(`[crash-recovery-watcher] GAVE UP on ${s.id} (${s.role}) after ${attempts} re-death(s) — escalated on Mission Control`);
+          console.log(`[crash-recovery-watcher] GAVE UP on ${s.id} (${s.role}) after ${attempts} re-death(s) — escalated via the session's lastError banner`);
         }
         continue;                                                        // never resume past the cap
       }

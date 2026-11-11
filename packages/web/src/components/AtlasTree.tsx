@@ -81,8 +81,8 @@ import { color, fs } from "../theme";
 // the WORKSPACE tier. The depth test is unchanged — it is still what keeps `/terminals` (an unscoped
 // page the project node carries as its Sessions tab) out of that tier.
 //
-// ⚠️ `/overview` is left with no Atlas NAVIGATION at all — neither a tab nor a row nor retired,
-// still routed and still rendered at its own address under both shells. Why it was not retired onto
+// ⚠️ `/overview` is left with no Atlas NAVIGATION at all — neither a tab nor a row. It is now just a
+// redirect (card acbb6df6 made Atlas the only shell). Why it was not retired onto
 // the project node instead, and what that would cost, is in card 4a0ad464's record.
 //
 // @decision 4a0ad464 — a project branch holds entities, never pages. Don't re-add a row for a

@@ -3,7 +3,7 @@ import { useSyncExternalStore } from "react";
 // The colour-theme preference (Graphite epic e25fa8a9, card 593674a7): System, Light or Dark.
 //
 // Contract:
-//   • A per-browser, HUMAN-only display preference, built like lib/atlasUi.ts: never project or daemon
+//   • A per-browser, HUMAN-only display preference, built as a plain localStorage preference: never project or daemon
 //     config, so it goes nowhere near `resolveConfig` or any `api.ts` member.
 //   • Anything stored other than exactly "system" | "light" | "dark" (absent, stale, garbage, a throw)
 //     reads as THEME_DEFAULT. EVERY storage access is wrapped: storage can throw outright (private
@@ -76,9 +76,9 @@ function update(next: ThemePref): void {
   emit();
 }
 
-// ✅ A cross-tab change IS applied immediately here, unlike lib/atlasUi.ts, and that difference is
+// ✅ A cross-tab change IS applied immediately here, and that is
 // deliberate: switching the theme flips one attribute on <html> and unmounts nothing, so no
-// half-typed input can be lost. Don't "harmonise" this with Atlas's offer-and-reload notice.
+// half-typed input can be lost. Don't turn it into an offer-and-reload notice.
 // `localStorage.clear()` fires with `key === null`, so re-read rather than trust the event payload.
 function onStorage(e: StorageEvent): void {
   if (e.key !== null && e.key !== THEME_STORAGE_KEY) return;

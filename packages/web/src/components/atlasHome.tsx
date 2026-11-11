@@ -514,7 +514,7 @@ export function KpiPill({ value, label, tone: t = "live", title, testId }: {
  *  never `"1"`/`"0"`: EXPANDED is the default (a first visit must look like the page always did and
  *  hide nothing by surprise — Lead ruling on card 44f725fe), so an absent key is the same state as a
  *  never-visited browser and unfolding leaves no residue to reason about later. Same encoding
- *  discipline as `ATLAS_UI_STORAGE_KEY` (lib/atlasUi.ts). */
+ *  discipline as the other per-browser display preferences. */
 export const DASHBOARD_OPEN_STORAGE_KEY = "loom.atlasDashboardOpen";
 
 /**
@@ -524,10 +524,9 @@ export const DASHBOARD_OPEN_STORAGE_KEY = "loom.atlasDashboardOpen";
  * store or any `api.ts` member, and no agent can flip it. EVERY read and write is wrapped: storage
  * can throw outright (private mode, a blocked-cookies origin, quota) and the only safe answer to
  * "can't tell" is the default, which here is OPEN. Deliberately plain `useState` rather than
- * lib/atlasUi.ts's module store + `useSyncExternalStore`: that machinery exists to keep two
- * SEPARATE consumers (the Settings toggle and the shell) in step and to hold a cross-tab change
- * back from hot-applying it; this preference has one consumer and folding a band destroys no
- * unfinished input, so there is nothing for either mechanism to protect.
+ * a module store + `useSyncExternalStore`: that machinery exists to keep two
+ * SEPARATE consumers in step; this preference has one consumer and folding a band destroys no
+ * unfinished input, so there is nothing for a shared store to protect.
  */
 export function useDashboardOpen(): [boolean, (open: boolean) => void] {
   const [open, setOpen] = useState<boolean>(() => {

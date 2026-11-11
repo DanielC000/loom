@@ -7,7 +7,7 @@ import { color, fs } from "../theme";
 // (the full diff pane) and "Approve & merge" (the EXISTING fail-closed daemon merge gate) over existing
 // endpoints (/api/sessions/:id/diff + /merge); no new backend, no merge-logic change.
 
-// ── The merge write path, shared by both renderings of it ──────────────────────────────────────
+// ── The merge write path, shared by its two renderings ──────────────────────────────────────
 // Card c2968651 (Atlas P2-1 parity gap a): the Atlas Needs-you band renders a pending review as a
 // compact row rather than as the card below (a band column is ~300px; the card grid is
 // minmax(340px,1fr)), and that row needs the SAME one-click merge. So the mutation, the button's

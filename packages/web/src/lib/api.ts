@@ -1650,11 +1650,11 @@ export const api = {
 export const WORKER_DIFF_STALE_MS = 10_000;
 
 // The single source of the worker-diff query: its cache key, its fetcher, and its freshness window. All
-// three consumers — the project Overview's per-worker Diff tab, the full ReviewPanel, and the shared
+// three consumers — the project node's per-worker Diff tab, the full ReviewPanel, and the shared
 // Review-queue cards — spread this, so they SHARE one cache entry and cannot drift on the key or the
 // staleTime (they previously hand-wrote `["workerDiff", id]` in three places with three different
 // freshness policies). Spread it first and add your own options after it (reviewQueue's refetchInterval,
-// ReviewPanel's `enabled`, Overview's `placeholderData`).
+// ReviewPanel's `enabled`, the Diff tab's `placeholderData`).
 export const workerDiffQuery = (sessionId: string) => ({
   queryKey: ["workerDiff", sessionId] as const,
   queryFn: ({ signal }: { signal: AbortSignal }) => api.workerDiff(sessionId, signal),
@@ -1667,7 +1667,7 @@ export const workerDiffQuery = (sessionId: string) => ({
 export const ORCH_STATUS_STALE_MS = 10_000;
 
 // The single source of the orchestration-status query: its cache key, its fetcher, and its freshness
-// window. All three consumers — the Sidebar rail's run pill, Mission Control's orchestration badge, and
+// window. All three consumers — the shell's run pill, the workspace node's orchestration badge, and
 // the Schedules page's scheduler-off warning — spread this, so they SHARE one cache entry and cannot
 // drift on the key. They previously hand-wrote it in three places under TWO different names
 // (`["orchStatus"]` twice, `["orchestrationStatus"]` once), which is why the /ws/fleet status feed had to

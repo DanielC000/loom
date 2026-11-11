@@ -534,7 +534,7 @@ function ScheduleBuilderModal({
                 <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents in this project —" : "— select an agent —"}</option>
                 {projectAgents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
               </Select>
-              {noAgents && <span style={{ color: color.attnText, fontSize: fs.sm }}>This project has no agents yet — create one on the Projects page first.</span>}
+              {noAgents && <span style={{ color: color.attnText, fontSize: fs.sm }}>This project has no agents yet — create one on the project's Agents node first.</span>}
             </>
           )}
         </label>

@@ -54,7 +54,7 @@ human-configured trigger — never something you start.)
 ## Home & board
 
 Your home is your reserved platform project — hidden from the ordinary project picker, visible to
-Mission Control and the Platform UI. Its **board is the platform backlog**: agent-friction findings,
+the Workspace node and the Platform UI. Its **board is the platform backlog**: agent-friction findings,
 cross-project improvements, and the manager bug-escalations you triage. Run it the way a manager runs a
 project board — well-scoped cards with a clear definition of done, prioritised, kept honest.
 

@@ -299,6 +299,7 @@ function SettingsIndex({ sections }: { sections: SettingsSection[] }) {
 // affects nobody else on this daemon, and no agent can reach it.
 function InterfacePanel() {
   const [theme, setTheme] = useThemePref();
+  const version = useQuery({ queryKey: ["version"], queryFn: ({ signal }) => api.version(signal), staleTime: 60_000 });
   return (
     <Panel>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -318,6 +319,12 @@ function InterfacePanel() {
           System follows your operating system's setting. Applies at once and is stored in this browser
           alone. Terminals stay dark in every theme.
         </Hint>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 14 }}>
+        <span style={fieldLabel}>Version</span>
+        <span data-testid="loom-version" style={{ fontFamily: font.mono, fontSize: fs.body, color: color.text }}>
+          {version.data ? `v${version.data.version}` : "…"}
+        </span>
       </div>
     </Panel>
   );
@@ -3746,7 +3753,7 @@ function PollJobForm({ initial, connections, sessions, agents, agentsLoading, se
             <option value="">{agentsLoading ? "Loading agents…" : noAgents ? "— no agents —" : "— select an agent —"}</option>
             {agents.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
           </Select>
-          {noAgents && <span style={{ color: color.attnText, fontSize: fs.sm }}>No agents exist yet — create one on the Projects page first.</span>}
+          {noAgents && <span style={{ color: color.attnText, fontSize: fs.sm }}>No agents exist yet — create one on the project's Agents node first.</span>}
         </label>
       ) : (
         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
