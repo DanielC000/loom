@@ -1,5 +1,7 @@
 # Atlas UI build plan
 
+> **Status: complete.** Atlas is the only web UI. Card `acbb6df6` made the switch-over and retirement in one step, on the owner's 2026-11-11 "remove the old UI" directive: the classic shell, its pages (Mission Control, Projects, the classic project Overview) and the per-browser switch are gone, and their old addresses redirect into Atlas nodes. What moved where, and the deliberate losses, are in `docs/decisions/acbb6df6-atlas-only-web-ui.md`. This plan is kept as a record of how the build was decomposed; every mention of "behind a switch" or "today's UI" below describes the build period, not the shipped app.
+
 Card `e7717e43`. The owner approved the Atlas V2 design (an Overview tab + a Deck tab, round-4 mockup,
 decision request `49e57872`) and asked for a plan that loses nothing from today's app: *"Build this in
 its own branch I want to be able to compare before we switch over since I'm still missing some

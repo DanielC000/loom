@@ -10,7 +10,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/images/hero.png" alt="Loom's Mission Control: live agent fleets across three projects on isolated git branches with context meters, an attention queue of decisions and inputs awaiting the owner, and a real-time activity feed — one phosphor-on-dark cockpit." width="100%" /> </p>
+  <img src="docs/images/hero.png" alt="Loom's Workspace node: the entity tree of projects and their live sessions on the left; on the right a KPI strip, fleet controls, a Needs-you band with a pending decision and a merge awaiting review, the operators, gate lanes, plan usage and a Pulse of recent activity, above the list of live sessions across every project." width="100%" /> </p>
 
 Loom orchestrates the **real interactive `claude`** — the same terminal session you'd run by hand, driven over a PTY, never a headless `claude -p` one-shot or an API-key agent loop. A daemon on your own machine owns those sessions, so they're **durable**: closing the window — or rebooting — never kills the work. Around them, one lead agent decomposes a goal, delegates to workers on isolated git branches, **reviews each diff, and merges through a build gate** — while your code, transcripts, task board, and the knowledge the fleet accumulates all stay **local, on your hardware**. It even self-hosts: Loom is built using Loom.
 
@@ -20,13 +20,13 @@ Because every agent is a genuine `claude` session rather than an API-key agent l
 
 - **🖥️ Durable real sessions.** Real `claude` sessions that survive a closed tab or a reboot without losing the thread.
 - **⛓️ Review-gated orchestration.** A lead agent delegates to workers on isolated git branches, reviews each diff, and merges through a build gate (docs-only diffs skip it; a human can switch the gate off per project, or with it off set an interval N so N merges land ungated and the next one runs the gate).
-- **🚦 Gates page.** A read-only view of every merge, deploy and self-check gate: what's running, what's queued, and past results.
+- **🚦 Gates.** A read-only view of every merge, deploy and self-check gate: what's running, what's queued, and past results.
 - **🗂️ Multi-repo projects.** One project can span several repos, with each board card routed to the right one.
 - **✦ A versioned knowledge layer.** An Obsidian vault of notes and decisions kept versioned with the code, plus a Memory view of what the fleet remembers across sessions.
 - **📌 Decision records.** Load-bearing decisions are written to `docs/decisions/` and linked from the code, so the reasoning reaches whoever edits it next.
 - **◧ A task board agents can use.** A per-project kanban that agents read and update as part of the same loop, with parent cards and blocks/related/discovered-from relations.
 - **💳 Runs on your subscription.** Uses your Claude Pro/Max plan instead of per-token API billing, within its usage and rate limits.
-- **❯ The terminal cockpit.** A web UI that attaches to live sessions and detaches freely, alongside your board, Memory and repository views.
+- **❯ The web cockpit.** A web UI organised as an entity tree — your Workspace, the Platform node, and one branch per project opening onto its live sessions — where every node carries its own tabs. It attaches to live sessions and detaches freely, alongside your board, Memory and repository views.
 - **💬 A personal companion.** A long-lived agent you chat with over Telegram or in the app, with durable memory and reminders.
 - **🧪 An experimental second harness.** Off by default: a profile can run the Codex CLI instead of `claude`, with narrower support: a worker gets a condensed doctrine in its `AGENTS.md` while other roles get a pointer to their doctrine skill atop the kickoff, there is no context or usage telemetry, sessions can't be forked, and `allowDelta` is ignored (a profile's pinned skills only narrow the list Codex is told it may read; nothing is injected). On Linux and macOS, each Codex session's Loom MCP token stays in that process's environment for the whole session, where other processes running as the same user can typically read it (see `docs/decisions/2e7373ab-codex-mcp-token-posix-env-residual.md`).
 - **🌐 Per-worker browser testing.** Opt-in: give a worker profile its own headless browser to test a running app.
@@ -34,7 +34,7 @@ Because every agent is a genuine `claude` session rather than an API-key agent l
 - **🔐 An Elevated Operator.** Off by default: a session whose Loom tools are limited to one project's branch, commit, push and vault — a tool boundary, not a sandbox.
 - **🔎 A suggest-only Workspace Auditor.** A read-only reviewer that files suggestions for your prompts and skills as cards on your board.
 - **🧩 Editable skills.** Bundled skills injected into every session, editable in the app, with an adopt step that three-way-merges shipped updates into skills you've edited.
-- **🛰️ Agents as API endpoints.** Expose an agent through scoped, capped API keys, with a Runs page for results.
+- **🛰️ Agents as API endpoints.** Expose an agent through scoped, capped API keys, with a Runs tab for results.
 - **🔑 Connections.** Encrypted credentials that agents use through Loom without ever seeing the secret.
 - **⏱️ A built-in cron scheduler.** Off by default: run a manager or the Workspace Auditor on a cron schedule (restart the daemon after enabling it).
 - **📄 Document conversion.** Opt-in: worker profiles can convert PDFs, Office files, images and HTML to Markdown.
@@ -239,7 +239,7 @@ A run, end to end:
 4. **The lead reviews each diff** and merges what passes through a build gate; a failing gate bounces the card back to the worker instead of merging.
 5. **The board and vault stay versioned** with the code, so the whole run stays legible after the fact.
 
-You watch it live in **Mission Control** — the fleet, context meters, an activity feed, and an attention queue that surfaces a merge the moment it needs your review.
+You watch it live in the web UI. The **Workspace** node shows every project at once — live sessions, gate lanes, plan usage, a Pulse of recent activity, and a **Needs you** band that surfaces a merge the moment it needs your review. Each **project** node narrows that to one project: its Overview, Board, Sessions, Agents, Repository, Memory, Runs, Archive, Usage and Settings tabs, with the project's own context readings and attention queue on its Overview.
 
 <p align="center">
   <img src="docs/images/architecture.svg" alt="Loom architecture: a loopback daemon owning SQLite, the PTY host, the HTTP/WS gateway, git, and the vault, with a stateless web viewport attaching over WebSockets and a lead agent orchestrating worker sessions on isolated branches." width="100%" /> </p>
@@ -260,33 +260,33 @@ The companion grows with you. It curates a **durable memory** of what matters �
 
 What it may actually *do* is yours to grant, one lever at a time. Out of the box it talks; grant it more and it can commit and push on your behalf, against either the project's vault or its code repo — the target resolved by the daemon, never a path the agent supplies, and a push always asks you first. If you'd rather not hand out levers one by one, there's an opt-in **lead mode** that gives one companion full capability across every project; the UI states that blast radius plainly before you turn it on.
 
-You set it up and run it from a single **Companion** page: chat on one side; configuration, channels, memory, reminders, capability grants, and its editable persona on the other. Every inbound message is treated as untrusted input, the bot token is encrypted at rest, senders are allowlisted, enrollment uses one-time DM pairing codes, and all configuration is human-only — never something the chat-reachable agent can change about itself. It can't be driven through a raw terminal either: text pushed at a companion session over the API or a terminal socket is refused outright, so nothing can put words in your mouth for it to act on.
+You set it up and run it from the Workspace node's **Companion** tab: chat on one side; configuration, channels, memory, reminders, capability grants, and its editable persona on the other. Every inbound message is treated as untrusted input, the bot token is encrypted at rest, senders are allowlisted, enrollment uses one-time DM pairing codes, and all configuration is human-only — never something the chat-reachable agent can change about itself. It can't be driven through a raw terminal either: text pushed at a companion session over the API or a terminal socket is refused outright, so nothing can put words in your mouth for it to act on.
 
 ## Screenshots
 
 <p align="center">
-  <img src="docs/images/screenshot-terminals.png" alt="Loom's terminal cockpit: a lead session and its worker fleet tiled side by side — live interactive claude transcripts, per-session context meters, branch names, and voice controls in one phosphor-on-dark panel." width="100%" /> <br /> <em>The terminal cockpit — a lead orchestrating its worker fleet, every pane a real interactive <code>claude</code> session with its own context meter and branch.</em> </p>
+  <img src="docs/images/screenshot-project.png" alt="A Loom project node: the entity tree with the project's branch open on its manager and workers, and the project's Overview tab showing a KPI strip, a Needs-you card with a decision and a merge to review, and a Work-in-flight roster of each agent's state, card, branch and context." width="100%" /> <br /> <em>A project node — its Overview tab gathers what needs you and the work in flight; the tab row carries the rest of the project.</em> </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-board.png" alt="Loom's per-project task board: a kanban of cards that both you and the agents read and move through columns, each card tagged with its priority and the repository it is routed to." width="100%" /> <br /> <em>The per-project task board — a kanban you and the agents share. On a multi-repo project each card carries the repo it's routed to, so one board can drive several checkouts.</em> </p>
+  <img src="docs/images/screenshot-terminals.png" alt="Loom's Sessions tab: a project's lead session and a worker tiled side by side as terminal cards, each a live interactive claude transcript with its state, task and controls." width="100%" /> <br /> <em>The Sessions tab — a lead orchestrating its worker fleet, every card a real interactive <code>claude</code> session you can watch and steer.</em> </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-gates.png" alt="Loom's Gates page: the daemon-wide gate lanes across every project, showing semaphore occupancy on top and a history table of settled merge, worker and deploy runs with outcome, branch, worker, duration and how long ago each ended." width="100%" /> <br /> <em>The Gates page — every merge, worker self-check, and deploy run across all projects, sharing one concurrency budget, with the failing test named on a rejection.</em> </p>
+  <img src="docs/images/screenshot-board.png" alt="Loom's per-project Board tab: a kanban of cards that both you and the agents read and move through columns, each card tagged with its priority and the repository it is routed to." width="100%" /> <br /> <em>The Board tab — a kanban you and the agents share. On a multi-repo project each card carries the repo it's routed to, so one board can drive several checkouts.</em> </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-terminal.png" alt="A live Loom session terminal: the real interactive claude running in a daemon-owned PTY, attached over a WebSocket." width="100%" /> <br /> <em>A live session terminal — the real interactive <code>claude</code>, attached over a WebSocket.</em> </p>
+  <img src="docs/images/screenshot-gates.png" alt="Loom's Gates tab on the Workspace node: the daemon-wide gate lanes across every project, showing semaphore occupancy on top and a history table of settled merge, worker and deploy runs with outcome, branch, worker, duration and how long ago each ended." width="100%" /> <br /> <em>The Gates tab — every merge, worker self-check, and deploy run across all projects, sharing one concurrency budget, with the failing test named on a rejection.</em> </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-companion.png" alt="Loom's Companion page: a chat with a long-lived personal agent, on the same daemon-owned real-claude runtime, reachable over Telegram or in-app web chat." width="100%" /> <br /> <em>The Companion — chat with a long-lived personal agent over Telegram or in-app web chat, on the same durable runtime.</em> </p>
+  <img src="docs/images/screenshot-terminal.png" alt="A Loom session node: the real interactive claude running in a daemon-owned PTY, attached over a WebSocket, under the session's header with its context reading, its bound task and a composer." width="100%" /> <br /> <em>A session node — the real interactive <code>claude</code>, attached over a WebSocket.</em> </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-skills.png" alt="Loom's Skills store (under Actors): a SKILL.md open in the editor with save and reset-to-shipped controls, beside the list of bundled skills." width="100%" /> <br /> <em>The editable skill store — read, edit, and three-way-merge Loom's shipped skills; changes apply on the next session spawn.</em> </p>
+  <img src="docs/images/screenshot-companion.png" alt="Loom's Companion tab on the Workspace node: a chat with a long-lived personal agent, here over Telegram, on the same daemon-owned real-claude runtime." width="100%" /> <br /> <em>The Companion — chat with a long-lived personal agent over Telegram or in-app web chat, on the same durable runtime.</em> </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-platform.png" alt="Loom's Platform page: the standing Platform agent and the suggest-only Workspace Auditor, with the auditor's run-on-a-schedule control." width="100%" /> <br /> <em>The Platform agent administers your whole workspace; the Workspace Auditor reviews your own sessions on a deliberately narrow, suggest-only surface.</em> </p>
+  <img src="docs/images/screenshot-skills.png" alt="Loom's Skills store on the Workspace node's Actors tab: a SKILL.md open in the editor with save and reset-to-shipped controls, beside the list of bundled skills." width="100%" /> <br /> <em>The editable skill store — read, edit, and three-way-merge Loom's shipped skills; changes apply on the next session spawn.</em> </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-projects.png" alt="Loom's Projects page: the list of projects with live-session dots, a selected project's repo and vault, its agents, and an agent's editable startup prompt." width="100%" /> <br /> <em>The Projects page — create and manage projects and their agents, each agent carrying an editable startup prompt injected as its first turn.</em> </p>
+  <img src="docs/images/screenshot-platform.png" alt="Loom's Platform node: the guided setup for a new project, and the standing Platform agent beside the suggest-only Workspace Auditor." width="100%" /> <br /> <em>The Platform agent administers your whole workspace — including creating projects through its guided setup — and the Workspace Auditor reviews your own sessions on a deliberately narrow, suggest-only surface.</em> </p>
 
 ## Docs & links
 

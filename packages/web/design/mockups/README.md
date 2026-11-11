@@ -1,6 +1,8 @@
 # Mockups — Loom "Terminal Cockpit"
 
-Stitch-generated reference mockups for the UI redesign. See `../DESIGN.md` for the design language spec.
+Stitch-generated reference mockups for the "Terminal Cockpit" UI redesign. See `../DESIGN.md` for the design language spec.
+
+> **Historical.** These describe the pre-Atlas web UI. The Atlas UI replaced it (card `acbb6df6`): Mission Control (`05-mission-control.png`) and the workspace master-detail page (`02-workspace.png`) no longer exist in the app, and their old addresses redirect into Atlas nodes; the board, vault and review surfaces survive inside Atlas nodes in a different frame. Keep the files as design history; don't build against them.
 
 | File | Surface | Status |
 |---|---|---|
