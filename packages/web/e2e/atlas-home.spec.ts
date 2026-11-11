@@ -1,5 +1,5 @@
 // The Atlas home nodes — the Workspace root and the project node (card fd99b2d7, Atlas build plan
-// P2-1: docs/plans/atlas-ui/03-decomposition.md row P2-1).
+// P2-1: docs/plans/archive/atlas-ui/03-decomposition.md row P2-1).
 //
 // The card's claims, and how each is measured against SEEDED data rather than against "something
 // rendered":

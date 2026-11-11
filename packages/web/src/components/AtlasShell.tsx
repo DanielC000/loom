@@ -24,7 +24,7 @@ const ATLAS_CONTENT_ID = "atlas-content";
 
 // The Atlas shell — the app's only shell since card acbb6df6 deleted the classic one. Cards 757c80dd
 // (P1-0, the frame) and 8cbb2ac2 (P1-1, the nodes) built it; the history is in
-// docs/plans/atlas-ui/02-architecture.md + 03-decomposition.md.
+// docs/plans/archive/atlas-ui/02-architecture.md + 03-decomposition.md.
 //
 // The tree (components/AtlasTree.tsx) holds the nodes, and every route below renders a destination's
 // component from its ONE declaration in src/nav.tsx: the nav destinations, the Atlas nodes, the three

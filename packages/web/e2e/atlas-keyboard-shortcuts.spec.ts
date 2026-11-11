@@ -1,6 +1,6 @@
 // Keyboard shortcuts under BOTH Atlas switch states (card a1c6e339, Atlas build plan P2-8 —
-// docs/plans/atlas-ui/03-decomposition.md row P2-8). Closes parity gaps §J.3 and §J.10 of
-// docs/plans/atlas-ui/01-parity-checklist.md.
+// docs/plans/archive/atlas-ui/03-decomposition.md row P2-8). Closes parity gaps §J.3 and §J.10 of
+// docs/plans/archive/atlas-ui/01-parity-checklist.md.
 //
 // @decision a1c6e339 — never re-wire one of these shortcuts per Atlas surface (the handler belongs to
 // the component, and a second shell-level copy makes "which one fired" unanswerable), and never drop a

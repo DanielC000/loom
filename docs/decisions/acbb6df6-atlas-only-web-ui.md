@@ -1,6 +1,6 @@
 # acbb6df6 — Atlas is the only web UI; where the classic-only surfaces went
 
-Card `acbb6df6`. Owner directive in chat, 2026-11-11 (request `76db10b1`): "before the push I want to remove the old UI." That directive is the sign-off both plan rows P3-switch-over and P3-retire required (`docs/plans/atlas-ui/03-decomposition.md`), and it folds them into one card with no default-flip and no safety-net release.
+Card `acbb6df6`. Owner directive in chat, 2026-11-11 (request `76db10b1`): "before the push I want to remove the old UI." That directive is the sign-off both plan rows P3-switch-over and P3-retire required (`docs/plans/archive/atlas-ui/03-decomposition.md`), and it folds them into one card with no default-flip and no safety-net release.
 
 ## What was removed
 

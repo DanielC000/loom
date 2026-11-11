@@ -1,6 +1,6 @@
 # The Atlas breadcrumb's deepest crumb shrinks last, by ratio and never by a cap
 
-Card `1d3192dc` (Atlas P1-2 — `docs/plans/atlas-ui/03-decomposition.md` row P1-2). Anchored from `packages/web/src/components/AtlasShell.tsx`.
+Card `1d3192dc` (Atlas P1-2 — `docs/plans/archive/atlas-ui/03-decomposition.md` row P1-2). Anchored from `packages/web/src/components/AtlasShell.tsx`.
 
 ## What happened
 

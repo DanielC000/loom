@@ -1,5 +1,5 @@
 // The two query-param deep links, verified against the ATLAS URL scheme (card 3ed3dc31, Atlas build
-// plan P2-10: docs/plans/atlas-ui/03-decomposition.md row P2-10). Closes parity gap §J.5 —
+// plan P2-10: docs/plans/archive/atlas-ui/03-decomposition.md row P2-10). Closes parity gap §J.5 —
 // `01-parity-checklist.md` §G listed both rows as "NOT VERIFIED AGAINST ATLAS'S OWN URL SCHEME".
 //
 //   `?task=<id>`                      → opens THAT card's dialog (pages/Board.tsx)

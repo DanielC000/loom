@@ -1,5 +1,5 @@
 // The Atlas legacy-URL redirects (card 82bde849, Atlas build plan P1-3 —
-// docs/plans/atlas-ui/03-decomposition.md row P1-3; the redirect rows are
+// docs/plans/archive/atlas-ui/03-decomposition.md row P1-3; the redirect rows are
 // 01-parity-checklist.md §A), plus the four addresses card acbb6df6 deleted with the classic shell
 // (`/`, `/projects`, `/workspace`, `/overview`). Each old path must land on the right Atlas node + tab.
 //

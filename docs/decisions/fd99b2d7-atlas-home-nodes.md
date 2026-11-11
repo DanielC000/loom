@@ -1,6 +1,6 @@
 # The Atlas home nodes are Atlas-only addresses, and the tree's parity check had to learn that
 
-Card `fd99b2d7` — Atlas build plan P2-1 (`docs/plans/atlas-ui/03-decomposition.md`). Two decisions, both made while adding the Workspace root node and the project node.
+Card `fd99b2d7` — Atlas build plan P2-1 (`docs/plans/archive/atlas-ui/03-decomposition.md`). Two decisions, both made while adding the Workspace root node and the project node.
 
 > **Superseded in part by card `acbb6df6` (2026-11-11).** The owner's chat directive of 2026-11-11 ("before the push I want to remove the old UI") is the sign-off this record deferred to P3-switch-over. The classic shell, `LegacyShell` and the switch are deleted; Atlas is the only shell. `/` now redirects to `/home` and `/overview` to `/project` (plain `LEGACY_REDIRECTS` rows). Section 1's first two prohibitions are void with the shell they protected; the third, and all of section 2's reasoning about parsing declarations rather than hand-listing, still stand.
 
@@ -10,7 +10,7 @@ Card `fd99b2d7` — Atlas build plan P2-1 (`docs/plans/atlas-ui/03-decomposition
 
 `ATLAS_HOMES` is the opposite case and is declared beside them anyway, so a reader looking for "what addresses does this app have" finds all four in one file.
 
-`/home` and `/project` are **new nodes the classic IA has no equivalent of.** The parity checklist (`docs/plans/atlas-ui/01-parity-checklist.md` §A rows 1–2) maps Mission Control (`/`) onto *Workspace › Deck* and the project Overview (`/overview`) onto *project › Deck* — but that re-pointing is P3-switch-over's job. Phase 1's content-identity contract (`e2e/atlas-tree.spec.ts`) requires `/` and `/overview` to render byte-identically under both shells until then, so the home nodes could not simply take those paths.
+`/home` and `/project` are **new nodes the classic IA has no equivalent of.** The parity checklist (`docs/plans/archive/atlas-ui/01-parity-checklist.md` §A rows 1–2) maps Mission Control (`/`) onto *Workspace › Deck* and the project Overview (`/overview`) onto *project › Deck* — but that re-pointing is P3-switch-over's job. Phase 1's content-identity contract (`e2e/atlas-tree.spec.ts`) requires `/` and `/overview` to render byte-identically under both shells until then, so the home nodes could not simply take those paths.
 
 ### Do not
 

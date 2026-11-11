@@ -1,6 +1,6 @@
 # Where the Companion's Chat / Manage / Terminal modes live in Atlas
 
-Card `e2af6ad7` (Atlas build plan P2-6, epic `9fe8cd4e`). Closes gap §J.1 of `docs/plans/atlas-ui/01-parity-checklist.md`.
+Card `e2af6ad7` (Atlas build plan P2-6, epic `9fe8cd4e`). Closes gap §J.1 of `docs/plans/archive/atlas-ui/01-parity-checklist.md`.
 
 ## The gap this answers
 

@@ -1,5 +1,5 @@
 // Hermetic unit test for the Companion Manage section/group model (lib/companionManage.ts) — card
-// e2af6ad7, Atlas build plan P2-6, closing §J.1 of docs/plans/atlas-ui/01-parity-checklist.md.
+// e2af6ad7, Atlas build plan P2-6, closing §J.1 of docs/plans/archive/atlas-ui/01-parity-checklist.md.
 //
 // WHAT IS ACTUALLY AT RISK, and why this is a list test rather than a render test. The classic
 // Companion page renders all twelve Manage sections down one column; the Atlas Companion node renders

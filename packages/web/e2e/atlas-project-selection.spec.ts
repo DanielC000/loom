@@ -1,5 +1,5 @@
 // Atlas project selection (card e47df20a, Atlas build plan P1-4 —
-// docs/plans/atlas-ui/03-decomposition.md row P1-4).
+// docs/plans/archive/atlas-ui/03-decomposition.md row P1-4).
 //
 // The card's claim: selecting a project node in the tree sets ActiveProjectProvider's active
 // project — the SAME context the rail chip writes and every `scoped` page reads — so a page you

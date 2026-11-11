@@ -48,7 +48,7 @@ Each group bar now carries one `why` beside its label. The dispatched group's co
 
 ## What the card reads, and what it does not fetch
 
-Every new fact comes from a field the page already fetched and was throwing away. No `api.ts` member was added — the same hard rule the roster was built under (`docs/plans/atlas-ui/02-architecture.md`):
+Every new fact comes from a field the page already fetched and was throwing away. No `api.ts` member was added — the same hard rule the roster was built under (`docs/plans/archive/atlas-ui/02-architecture.md`):
 
 | Fact | Source |
 |---|---|

@@ -1,8 +1,8 @@
 // Derivations shared by the two Atlas home nodes — the Workspace root and the project node
-// (card fd99b2d7, Atlas build plan P2-1: docs/plans/atlas-ui/03-decomposition.md).
+// (card fd99b2d7, Atlas build plan P2-1: docs/plans/archive/atlas-ui/03-decomposition.md).
 //
 // ⛔ Every figure below is COMPOSED CLIENT-SIDE from calls `lib/api.ts` already exposes, per the
-// plan's one hard rule (docs/plans/atlas-ui/02-architecture.md): Atlas is a new presentation layer
+// plan's one hard rule (docs/plans/archive/atlas-ui/02-architecture.md): Atlas is a new presentation layer
 // over the existing data layer, never a parallel one. No `api.ts` member was added for this card.
 //
 // Pure functions here, hooks at the bottom. The split is the point: a figure a KPI tile shows and

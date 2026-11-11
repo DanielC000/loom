@@ -1,5 +1,5 @@
 // Atlas board cards open the CENTRED DIALOG, on every board surface (card a6d7a102, Atlas build plan
-// P2-5: docs/plans/atlas-ui/03-decomposition.md row P2-5).
+// P2-5: docs/plans/archive/atlas-ui/03-decomposition.md row P2-5).
 //
 // The owner's rule, verbatim in intent: a board card opens the centred dialog, never a drawer, and the
 // board never reflows. Atlas has four board surfaces, and ALL FOUR mount the one `<Board>` component

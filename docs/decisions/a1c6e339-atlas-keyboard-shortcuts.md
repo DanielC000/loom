@@ -1,6 +1,6 @@
 # The keyboard shortcuts carry into Atlas by construction — the gap was that nobody had ever pressed the keys
 
-Card `a1c6e339` — Atlas build plan P2-8 (`docs/plans/atlas-ui/03-decomposition.md`), closing parity gaps §J.3 and §J.10 of `docs/plans/atlas-ui/01-parity-checklist.md`.
+Card `a1c6e339` — Atlas build plan P2-8 (`docs/plans/archive/atlas-ui/03-decomposition.md`), closing parity gaps §J.3 and §J.10 of `docs/plans/archive/atlas-ui/01-parity-checklist.md`.
 
 ## 1 · The inventory: where each shortcut lives, and where its host lives in Atlas
 
@@ -70,7 +70,7 @@ A key that "works" is easy to assert falsely: a box that empties, a bar that app
 
 - **`/projects`' own agent editor still has no ⌘/Ctrl+Enter.** `pages/Projects.tsx`'s `AgentEditor` edits an ordinary project agent's `startupPrompt` through a plain textarea with no key handler, while `/platform`'s reserved-home editor has one. That is a real inconsistency, it predates Atlas entirely, and it is not a parity gap — §F never claimed the shortcut was there. Carded separately as `c6b80cf7`.
 - **No discoverability affordance was added.** The card is parity, and parity is "the same keys still fire." Worth knowing for whoever picks that up, though: the session composer already advertises its own shortcut in its placeholder — `Send a turn to this session…  (Ctrl/Cmd+Enter)` — so one of the four editors is already discoverable and the other three (preset form, queue editor, startup-prompt editor) are not. Eyeballed at 1600×1000 under the Atlas Platform node.
-- **`docs/plans/atlas-ui/01-parity-checklist.md` was not edited.** Its §F rows still read `⚠️ NOT IN MOCKUPS`, which is a true statement about the mockups. P3-sign-off is the card that produces a signed-off copy of the checklist against the *built* Atlas; the corrections in §1 above are written here for it to pick up, the same way P2-5 recorded its "the Workspace node has no board" correction rather than editing the row.
+- **`docs/plans/archive/atlas-ui/01-parity-checklist.md` was not edited.** Its §F rows still read `⚠️ NOT IN MOCKUPS`, which is a true statement about the mockups. P3-sign-off is the card that produces a signed-off copy of the checklist against the *built* Atlas; the corrections in §1 above are written here for it to pick up, the same way P2-5 recorded its "the Workspace node has no board" correction rather than editing the row.
 
 ## 5 · Found while measuring: ⌘/Ctrl+C copied and cleared the model, but the selection HIGHLIGHT stayed painted
 

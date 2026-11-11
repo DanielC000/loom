@@ -1,5 +1,5 @@
 // The Atlas parameterized addresses (card 1d3192dc, Atlas build plan P1-2 —
-// docs/plans/atlas-ui/03-decomposition.md row P1-2). Homes per 01-parity-checklist.md §A:
+// docs/plans/archive/atlas-ui/03-decomposition.md row P1-2). Homes per 01-parity-checklist.md §A:
 // /review/:workerId → the worker node's Diff tab · /question/:id → the Inbox detail (+ its pop-over)
 // · /session/:id → the session node itself.
 //

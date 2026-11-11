@@ -89,13 +89,13 @@ export const NAV_PAGES: NavPage[] = [
 // ── The parameterized routes ───────────────────────────────────────────────────────────────────
 // Where a parameterized address lives in the Atlas tree. Only the frame reads this; the page
 // component underneath neither knows nor cares, which is phase 1's one hard rule
-// (docs/plans/atlas-ui/02-architecture.md).
+// (docs/plans/archive/atlas-ui/02-architecture.md).
 //
 // Two shapes, because the three routes genuinely are two shapes. A SESSION address names an entity
 // the tree holds a node for in its own right — the node hangs off that session's OWN project, which
 // is not necessarily the active one — optionally with a node tab below it. A DETAIL address names a
 // row WITHIN an existing nav destination, so the node stays that destination and the row is the last
-// crumb. Homes assigned by `docs/plans/atlas-ui/01-parity-checklist.md` §A, not re-decided here.
+// crumb. Homes assigned by `docs/plans/archive/atlas-ui/01-parity-checklist.md` §A, not re-decided here.
 export type AtlasAddress =
   /** `param` names a SESSION: the node IS that session, under its own project node, `tab` below it. */
   | { kind: "session"; param: string; tab?: string }

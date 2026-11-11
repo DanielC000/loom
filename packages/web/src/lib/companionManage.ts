@@ -1,5 +1,5 @@
 // The Companion Manage surface, as data — card e2af6ad7 (Atlas build plan P2-6), closing §J.1 of
-// docs/plans/atlas-ui/01-parity-checklist.md. Both layouts are a VIEW over the one list below, so a
+// docs/plans/archive/atlas-ui/01-parity-checklist.md. Both layouts are a VIEW over the one list below, so a
 // thirteenth section cannot reach one of them and miss the other.
 //
 // @decision e2af6ad7 — never re-order COMPANION_MANAGE_SECTIONS to match the Atlas grouping: that

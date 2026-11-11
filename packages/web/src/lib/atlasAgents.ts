@@ -1,8 +1,8 @@
 // The agent roster behind every Atlas spawn surface — card c6160c7d (Atlas build plan P2-2:
-// docs/plans/atlas-ui/03-decomposition.md row P2-2).
+// docs/plans/archive/atlas-ui/03-decomposition.md row P2-2).
 //
 // ⛔ Composed CLIENT-SIDE from calls lib/api.ts already exposes, per the plan's one hard rule
-// (docs/plans/atlas-ui/02-architecture.md). No `api.ts` member was added for this card: a roster is
+// (docs/plans/archive/atlas-ui/02-architecture.md). No `api.ts` member was added for this card: a roster is
 // `api.agents(projectId)` × `api.profiles()` × `api.allSessions()` — three reads the Atlas homes
 // already make, through the SAME cache keys the classic Overview fills, joined once here instead of
 // three times in three components.

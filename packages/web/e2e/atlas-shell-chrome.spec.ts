@@ -1,5 +1,5 @@
 // The cross-cutting chrome, under BOTH Atlas switch states (card a045bec3, Atlas build plan P1-5 —
-// docs/plans/atlas-ui/03-decomposition.md row P1-5). Six elements: the Command Palette, UpdateBanner,
+// docs/plans/archive/atlas-ui/03-decomposition.md row P1-5). Six elements: the Command Palette, UpdateBanner,
 // CredentialBanner, GatewayTokenBanner, ToastContainer and FirstRunWelcome.
 //
 // WHY THIS SPEC EXISTS AT ALL, and what P1-0's fingerprint could not do. atlas-switch.spec.ts compares a

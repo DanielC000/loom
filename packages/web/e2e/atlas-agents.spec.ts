@@ -1,5 +1,5 @@
 // The Atlas Agents surfaces — the band panel, the Agents node, the tree node and the quick-spawn
-// dialog (card c6160c7d, Atlas build plan P2-2: docs/plans/atlas-ui/03-decomposition.md row P2-2).
+// dialog (card c6160c7d, Atlas build plan P2-2: docs/plans/archive/atlas-ui/03-decomposition.md row P2-2).
 //
 // The card's claim is that the spawn controls round 4 found homeless are now REACHABLE AND REAL, so
 // every assertion below is driven against seeded rigs rather than against "something rendered":

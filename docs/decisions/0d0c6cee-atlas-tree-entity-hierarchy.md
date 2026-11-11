@@ -25,7 +25,7 @@ Two consequences follow, and both are load-bearing:
 
 ### Metrics come only from caches another surface already fills
 
-Every figure on a row is composed client-side from a query key some other surface already polls — `["allSessions"]` (ActiveProjectProvider), `useAttention()` (mounted app-wide by `App.tsx` for both shells), `["agents", id]` and `["board", id]` (`pages/ProjectHome.tsx`). No `api.ts` member was added, per `docs/plans/atlas-ui/02-architecture.md`'s reuse rule.
+Every figure on a row is composed client-side from a query key some other surface already polls — `["allSessions"]` (ActiveProjectProvider), `useAttention()` (mounted app-wide by `App.tsx` for both shells), `["agents", id]` and `["board", id]` (`pages/ProjectHome.tsx`). No `api.ts` member was added, per `docs/plans/archive/atlas-ui/02-architecture.md`'s reuse rule.
 
 Metrics are therefore on the **selected** branch's rows only, and stop at Agents and Board. Widening them to every open branch would mean a board read and an agent read per project on every Atlas page; Memory, Runs and Archive have no shell-shared cache at all. An absent metric is honest; an approximated one is not, and card `25c08fba` is about to own these counts as node-tab counts anyway.
 

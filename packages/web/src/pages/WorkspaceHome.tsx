@@ -43,7 +43,7 @@ import { useNavigate } from "react-router-dom";
 // "Scope is depth": this node is the shallowest thing containing every project, so every figure here
 // is cross-project. Nothing on this page reads the active project.
 //
-// ⛔ Composed from EXISTING `api.*` calls only (docs/plans/atlas-ui/02-architecture.md's hard rule),
+// ⛔ Composed from EXISTING `api.*` calls only (docs/plans/archive/atlas-ui/02-architecture.md's hard rule),
 // through the cache keys the classic pages already fill — so this node adds no poll Mission Control
 // or the Gates page was not already making.
 

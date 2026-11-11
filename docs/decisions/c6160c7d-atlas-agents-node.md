@@ -10,7 +10,7 @@ What follows is the handful of decisions that are not obvious from the code, and
 
 The Agents node is a third row in `ATLAS_HOMES` (`packages/web/src/nav.tsx`), not an eighteenth `NAV_PAGES` destination.
 
-`NAV_PAGES` is mounted by **both** shells, and the classic rail renders one link per entry. An Agents entry there would put a new destination in the classic Instrument Rail for every user who never opted into Atlas — which is precisely what "behind the switch" forbids (`docs/plans/atlas-ui/03-decomposition.md`, the preamble: with the switch at its default, a phase-2 card's diff is observable nowhere in the running app). `ATLAS_HOMES` is the one declaration in that file `LegacyShell` deliberately does not map, so it is the only correct home for an Atlas-only address.
+`NAV_PAGES` is mounted by **both** shells, and the classic rail renders one link per entry. An Agents entry there would put a new destination in the classic Instrument Rail for every user who never opted into Atlas — which is precisely what "behind the switch" forbids (`docs/plans/archive/atlas-ui/03-decomposition.md`, the preamble: with the switch at its default, a phase-2 card's diff is observable nowhere in the running app). `ATLAS_HOMES` is the one declaration in that file `LegacyShell` deliberately does not map, so it is the only correct home for an Atlas-only address.
 
 That list was named for its first two members, which are tier heads. It now carries a node that is not one, so `AtlasHome` gained `tierHead`:
 

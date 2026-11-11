@@ -1,6 +1,6 @@
 // First-run, credential-lock and browser-notification states under BOTH Atlas switch states (card
-// 19683d2f, Atlas build plan P2-11 — docs/plans/atlas-ui/03-decomposition.md row P2-11). Closes parity
-// gaps §J.6–§J.8 of docs/plans/atlas-ui/01-parity-checklist.md.
+// 19683d2f, Atlas build plan P2-11 — docs/plans/archive/atlas-ui/03-decomposition.md row P2-11). Closes parity
+// gaps §J.6–§J.8 of docs/plans/archive/atlas-ui/01-parity-checklist.md.
 //
 // WHAT P1-5 ALREADY PROVED, AND WHAT IS LEFT. atlas-shell-chrome.spec.ts (card a045bec3) drives all six
 // chrome elements under both shells, so "does it mount at all" is settled and is NOT re-asserted here.

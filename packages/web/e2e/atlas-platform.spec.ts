@@ -1,4 +1,4 @@
-// The Atlas Platform node (card c07ff42a, Atlas build plan P2-4 — docs/plans/atlas-ui/03-decomposition.md
+// The Atlas Platform node (card c07ff42a, Atlas build plan P2-4 — docs/plans/archive/atlas-ui/03-decomposition.md
 // row P2-4). Behind the Atlas switch, today's single-column Platform page becomes a five-tab node (Home /
 // Cadence / History / Board / Findings) carrying BOTH editions: both go-live cards, both session layouts,
 // both cadence variants, both histories, its own board, and Findings with inline Adopt / Dismiss.

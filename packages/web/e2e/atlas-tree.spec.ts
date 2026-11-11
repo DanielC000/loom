@@ -1,5 +1,5 @@
 // The Atlas entity tree (card 8cbb2ac2, Atlas build plan P1-1 —
-// docs/plans/atlas-ui/03-decomposition.md row P1-1).
+// docs/plans/archive/atlas-ui/03-decomposition.md row P1-1).
 //
 // Two claims, each derived from the live app and the real declarations rather than a list typed here:
 //   1. PLACEMENT. Every NAV_PAGES destination is in EXACTLY ONE Atlas placement — a tree node, a

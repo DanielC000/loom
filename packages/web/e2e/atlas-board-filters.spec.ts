@@ -1,5 +1,5 @@
 // The Board's REAL multi-select filters work on every Atlas board surface (card 5dcb5ae9, Atlas build
-// plan P2-9: docs/plans/atlas-ui/03-decomposition.md row P2-9, closing parity gap §J.4).
+// plan P2-9: docs/plans/archive/atlas-ui/03-decomposition.md row P2-9, closing parity gap §J.4).
 //
 // §J.4 was a gap in the round-4 MOCKUP, not in the built Atlas: `atlas.js`'s `wireBoardBar` wired only
 // free-text search plus a SINGLE-select priority chip, with no lane filter at all. The built Atlas has

@@ -1,6 +1,6 @@
 # The fleet controls are one renderer behind two mounts, kept in step by cache keys rather than by shared code
 
-Card `7b893d54` — Atlas build plan P2-3 (`docs/plans/atlas-ui/03-decomposition.md`), against the owner-approved round-4 V2 design (`Mockups/2026-10-19 UI Overhaul Round 4` §2). Four decisions, all made while giving `clearUsageHold` / `pauseOrchestration` / `resumeOrchestration` / `killOrchestration` a home in Atlas.
+Card `7b893d54` — Atlas build plan P2-3 (`docs/plans/archive/atlas-ui/03-decomposition.md`), against the owner-approved round-4 V2 design (`Mockups/2026-10-19 UI Overhaul Round 4` §2). Four decisions, all made while giving `clearUsageHold` / `pauseOrchestration` / `resumeOrchestration` / `killOrchestration` a home in Atlas.
 
 Round 2 dissolved Mission Control into the Workspace root and these four controls did not follow; round 4's action-level inventory is what caught that they had no home at all.
 

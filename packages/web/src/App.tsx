@@ -330,7 +330,7 @@ function FirstRunWelcome() {
 }
 
 // The cross-cutting chrome, ONE definition each, handed to the shell as two slots (the placement rule:
-// docs/plans/atlas-ui/02-architecture.md). The overlays are fixed-position or null and sit at the shell
+// docs/plans/archive/atlas-ui/02-architecture.md). The overlays are fixed-position or null and sit at the shell
 // root; the banners are in document flow directly above the page content. Nothing here is inside a route
 // table.
 function ShellOverlays() {

@@ -1,5 +1,5 @@
 // Card e2af6ad7 (Atlas build plan P2-6) — the Companion's Chat / Manage / Terminal modes on the Atlas
-// tree, closing §J.1 of docs/plans/atlas-ui/01-parity-checklist.md. Placement decision + its
+// tree, closing §J.1 of docs/plans/archive/atlas-ui/01-parity-checklist.md. Placement decision + its
 // prohibitions: docs/decisions/e2af6ad7-atlas-companion-modes.md.
 //
 // WHAT IS ACTUALLY AT RISK HERE, and what each test is therefore for:

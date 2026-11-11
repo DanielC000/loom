@@ -1413,7 +1413,7 @@ button.loom-cardtab:focus-visible {
 /* ── Atlas shell (card 757c80dd; the app's only shell since card acbb6df6) ────────────────
    A fixed entity-tree rail, a breadcrumb + node-head topbar, and a content column that scrolls on its
    own rather than the document. Structure only — every colour, font and radius is the same token every other surface reads.
-   Plan: docs/plans/atlas-ui/02-architecture.md. */
+   Plan: docs/plans/archive/atlas-ui/02-architecture.md. */
 .loom-atlas {
   display: grid;
   grid-template-columns: var(--loom-atlas-tree-w) minmax(0, 1fr);
