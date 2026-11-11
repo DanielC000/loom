@@ -168,6 +168,28 @@ export function formatDistImporterResultNudge(args: {
   return `${head} — FAILED: ${failingClause}. ⚠️ This names a matching LINE, not an attributed file — re-run it directly on main before carding; this ran on a possibly-loaded host, so a red here is a candidate, not a verdict. This did not block the landing and does not affect the gate interval counter or gateOwed.`;
 }
 
+/**
+ * Bounded head + tail excerpt of a failing step's output. A Node stack puts the key line
+ * (`Error: Cannot find module '<X>'`) at the HEAD and a long frame list after it, so a tail-only cut
+ * drops exactly the line that tells a missing dependency from a real build break. Output at or under
+ * `headChars + tailChars` is returned whole (trimmed); longer output keeps both ends with an explicit
+ * elision marker.
+ */
+export function headTailExcerpt(out: string, headChars = 300, tailChars = 300): string {
+  const s = out.trim();
+  if (s.length <= headChars + tailChars) return s;
+  return `${s.slice(0, headChars)} […${s.length - headChars - tailChars} chars elided…] ${s.slice(-tailChars)}`;
+}
+
+/** Reason text for a failed isolated-worktree build step: exit code + head/tail excerpt, naming the
+ *  likely class when the output shows an unresolved module (dependency provisioning in the check worktree). */
+export function formatDistImporterBuildFailureReason(code: number | null | undefined, out: string): string {
+  const hint = /Cannot find module|MODULE_NOT_FOUND/.test(out)
+    ? " [unresolved module — likely incomplete dependency provisioning in the check worktree, not a real build break]"
+    : "";
+  return `turbo build exited ${code}${hint}: ${headTailExcerpt(out)}`;
+}
+
 /** A diagnostic-only failure shape for the scan/build/run machinery itself (not a test FAILURE — a
  *  mechanism failure: the worktree couldn't be built, the scan child process errored, etc.). The nudge
  *  for this is deliberately distinct from a real red (see `formatDistImporterMechanismFailureNudge`

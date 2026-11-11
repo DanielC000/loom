@@ -132,6 +132,20 @@ check("(2) that SAME run-set would have exceeded the ORIGINAL 50% skip threshold
 }
 check("(4) formatDistImporterOversizeSkipNudge was REMOVED (second LEAD ruling: never skip)", M.formatDistImporterOversizeSkipNudge === undefined && M.isRunSetOversize === undefined);
 
+// ── (5) build-failure reason keeps the HEAD of a long Node stack, not just the tail ───────────────────
+{
+  const key = "Error: Cannot find module 'zod'";
+  const frames = Array.from({ length: 60 }, (_, i) => `    at frame${i} (node:internal/modules/cjs/loader:${1000 + i}:19)`).join("\n");
+  const out = `${key}\n${frames}\n  code: 'MODULE_NOT_FOUND'`;
+  const reason = M.formatDistImporterBuildFailureReason(1, out);
+  check("(5) long output: the key head line survives (a tail-only slice(-500) cut it off)", reason.includes(key) && !out.slice(-500).includes(key));
+  check("(5) long output: the tail survives too, and the cut is marked", reason.includes("MODULE_NOT_FOUND'") && reason.includes("chars elided"));
+  check("(5) long output: bounded", reason.length < 800);
+  check("(5) MODULE_NOT_FOUND names the likely dependency-provisioning class", reason.includes("dependency provisioning"));
+  const plain = M.formatDistImporterBuildFailureReason(2, "src/a.ts(1,1): error TS2322: bad");
+  check("(5) short non-module output: kept whole, no elision, no provisioning hint", plain.includes("error TS2322") && !plain.includes("elided") && !plain.includes("provisioning") && plain.startsWith("turbo build exited 2"));
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — src->dist mapping, the corpus-relative oversize cap, the coalescing queue, and every nudge shape behave as the LEAD ruling specifies."
   : `\n❌ ${failures} FAILURE(S).`);

@@ -96,7 +96,7 @@ import { resetScheduleProvenanceOnAgentRebind } from "../orchestration/scheduler
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, describeGateProximity, identifyRetriableTestFiles, remainingGateSteps, mergeResumedGateResult, formatWeakerPassWarning, formatRetryAlsoFailedWarning, formatRetryRescuedButGateRejectedWarning, formatTransientRetryWarning, formatReducedGateWarning, GATE_TIMEOUT_BREAKER_THRESHOLD, GATE_EXTEND_IDLE_MS, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks, type GateProximity, type RetryDeclineReason } from "../orchestration/gate-runner.js";
 import { gateSpillPath, gateOnlyListPath, pruneGateSpills, listGateSpillOpIds, GATE_SPILL_DIR, GATE_SPILL_RETAIN_COUNT, GATE_SPILL_MAX_TOTAL_BYTES, GATE_SPILL_PROTECTED_RETAIN_COUNT } from "../orchestration/gate-spill.js";
 import { decideMergeGate, redSelfCheckOnTip, applyUngatedLanding, applyGatePass, applyGateFail, applyGateNext, applyCadenceCleared, agentViewOf, statusOf, counterNote, type MergeGateDecision, type RedSelfCheck } from "../orchestration/merge-gate-interval.js";
-import { touchedDistPathsFor, computeDistImporterCap, rankAndCapRunSet, newDistImporterCheckQueueState, enqueueLanding, drainFollowUp, formatDistImporterResultNudge, formatDistImporterMechanismFailureNudge, formatDistImporterCancelledNudge, formatDistImporterSupersededNudge, type DistImporterCheckQueueState } from "../orchestration/dist-importer-check.js";
+import { touchedDistPathsFor, computeDistImporterCap, rankAndCapRunSet, newDistImporterCheckQueueState, enqueueLanding, drainFollowUp, formatDistImporterResultNudge, formatDistImporterMechanismFailureNudge, formatDistImporterBuildFailureReason, formatDistImporterCancelledNudge, formatDistImporterSupersededNudge, type DistImporterCheckQueueState } from "../orchestration/dist-importer-check.js";
 import { GateSemaphore, GateCancelledError, isMergeGateRed, type GateContinuation, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { GateIntentRegistry, INTENT_MAX_LEAD_MS, type GateIntentRow } from "../orchestration/gate-intent.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
@@ -2855,7 +2855,7 @@ async function defaultDistImporterCheckBuild(worktreePath: string, cancelSignal?
     { label: "build", command: process.execPath, args: [turbo, "build", "--filter=@loom/daemon"], shell: false, timeoutMs: DIST_IMPORTER_CHECK_PROVISION_TIMEOUT_MS },
     worktreePath, cancelSignal,
   );
-  return result.code === 0 ? { ok: true } : { ok: false, reason: `turbo build exited ${result.code}: ${result.out.slice(-500)}` };
+  return result.code === 0 ? { ok: true } : { ok: false, reason: formatDistImporterBuildFailureReason(result.code, result.out) };
 }
 
 /**
@@ -27499,6 +27499,7 @@ export class SessionService {
 
     if (outcome.kind === "mechanism-failure") {
       this.db.settlePendingGateOp(opId, { kind: "error", payload: { reason: outcome.reason.slice(0, 200) } });
+      console.warn(`[dist-importer-check] mechanism failure for ${landedSha.slice(0, 8)}: ${outcome.reason}`);
       recordEvent({ mechanismLike: true, reason: outcome.reason.slice(0, 200), gateSpawned: false });
       pushNudge(formatDistImporterMechanismFailureNudge({ landedSha, reason: outcome.reason }));
       return;
