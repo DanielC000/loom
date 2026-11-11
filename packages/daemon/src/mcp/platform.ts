@@ -85,7 +85,10 @@ const TASK_MERGED_DOC =
   "the branch is gone); absent means unknown, never a red flag. `merged.verification` is recomputed on every read; a full row also carries " +
   "`mergedVerificationAtMerge`, recorded once at landing. They can legitimately disagree once the branch is deleted — not a bug — and " +
   "`mergedVerificationAtMerge:null` on a MERGED card (a solo ALREADY_MERGED/boot-reconcile landing, a `noop` batch landing, a batch landing " +
-  "on a `commitTrailers:\"off\"` project, or pre-fix history) is never an anomaly to chase.";
+  "on a `commitTrailers:\"off\"` project, or pre-fix history) is never an anomaly to chase. `mergeGate` (merged cards only, else null) is the " +
+  "landing's recorded gate provenance: {gateRan, skipReason, gateOpId, gatedTip, overrideReason?, redSelfCheckOpId?}; `gateRan:null` = a landing " +
+  "recorded before this was stamped (unknown, not 'no gate'), `gateRan:false` = nothing was run for it (never a pass), and a gate claim should " +
+  "cite `gateOpId` (read its verdict with `gate_status`/`gate_history`).";
 
 /**
  * The machine-writable config schema the architecture promised: a strict zod mirror of

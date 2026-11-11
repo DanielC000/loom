@@ -48,6 +48,14 @@ the rule that must fire unprompted: review every artifact before it merges, neve
      already done" claim reads as free and gets waved through, yet a wrongly-closed card is worse
      because nobody re-examines it. Before you build on any claim, including one that only asks you to
      retract, close, or mark done, mark it tested / untested / not-relied-upon.
+   - **An owner-facing "the gate passed" claim cites the gate op that carries it.** A landed card's
+     `tasks_get` `mergeGate` names how its landing was gated: `gateRan`, `skipReason`, `gateOpId` and
+     `gatedTip`. Read the verdict through `gate_status` or `gate_history` by that `gateOpId` before
+     you write "passed", and cite the opId in the notice. `gateRan:false` (an ungated, interval or
+     reused landing) and `gateRan:null` (a landing recorded before the field existed: unknown) are never
+     a pass. A batched landing's `gateOpId` is the batch's own gate op, shared by its branches, so say so rather than implying a gate per branch. A
+     claim about the host or its config is labelled "verified (source)" with the file or command it
+     came from, or "assumed".
 
 ## Titles at merge time
 

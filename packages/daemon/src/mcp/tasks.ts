@@ -816,7 +816,45 @@ export interface TaskRequestsSummary {
 }
 
 /** A task extended with its connected-requests summary + git-derived merged state — what getProjectTask/tasks_get returns. */
-export type TaskWithRequests = TaskWithMerged & TaskRelationView & { requests: TaskRequestsSummary; incomingDeferredItems: IncomingDeferredItemsSummary; heldRequestState: HeldRequestState | null; policy?: ReturnType<typeof policyView> };
+/**
+ * Gate provenance of a card's landing, read from its durable `merge_done` event (never git). `gateRan:null` =
+ * the landing predates the stamp (unknown, NOT "no gate"). `gateOpId` is the op whose verdict covered the
+ * landing (read it via `gate_status`/`gate_history`; a reused self-check's op when `skipReason` is
+ * `"reused-self-check"`); `gatedTip` is the head that gate ran on. An ungated landing is never a pass.
+ */
+export interface MergeGateProvenance {
+  gateRan: boolean | null;
+  skipReason: string | null;
+  gateOpId: string | null;
+  gatedTip: string | null;
+  overrideReason?: string;
+  redSelfCheckOpId?: string;
+}
+
+/** The newest real landing's {@link MergeGateProvenance} for `task`, or `null` when no `merge_done` was filed for it. */
+export function resolveMergeGateProvenance(db: Db, task: Task): MergeGateProvenance | null {
+  const done = db.listEventsForTaskKind(task.id, "merge_done").filter((e) => e.detail?.reconciled !== true);
+  if (done.length === 0) return null;
+  // Prefer the landing whose recorded sha is the one the card now shows (a re-tasked card has several).
+  const sha = task.mergedSha ?? null;
+  const matching = sha ? done.filter((e) => typeof e.detail?.mergedSha === "string" && (e.detail.mergedSha as string).startsWith(sha)) : [];
+  const d = (matching.length > 0 ? matching : done)[(matching.length > 0 ? matching : done).length - 1]!.detail ?? {};
+  const gp = d.gateProvenance as { gateRan?: unknown; gateOpId?: unknown; gatedTip?: unknown; skipReason?: unknown } | undefined;
+  const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const extras = {
+    ...(typeof d.overrideReason === "string" ? { overrideReason: d.overrideReason } : {}),
+    ...(typeof d.redSelfCheckOpId === "string" ? { redSelfCheckOpId: d.redSelfCheckOpId } : {}),
+  };
+  if (gp && typeof gp.gateRan === "boolean") {
+    return { gateRan: gp.gateRan, skipReason: str(gp.skipReason) ?? str(d.skipReason), gateOpId: str(gp.gateOpId), gatedTip: str(gp.gatedTip), ...extras };
+  }
+  // Pre-stamp landing: only what the older event already said.
+  if (d.gateSkipped === "already-landed") return { gateRan: false, skipReason: "already-landed", gateOpId: null, gatedTip: null, ...extras };
+  if (typeof d.skipReason === "string") return { gateRan: false, skipReason: d.skipReason, gateOpId: null, gatedTip: null, ...extras };
+  return { gateRan: null, skipReason: null, gateOpId: null, gatedTip: null, ...extras };
+}
+
+export type TaskWithRequests = TaskWithMerged & TaskRelationView & { mergeGate: MergeGateProvenance | null; requests: TaskRequestsSummary; incomingDeferredItems: IncomingDeferredItemsSummary; heldRequestState: HeldRequestState | null; policy?: ReturnType<typeof policyView> };
 
 /**
  * Card 9623e943 — the READ-ONLY card-policy verdict for `tasks_get` (agents may read, never write). Present ONLY
@@ -1006,6 +1044,7 @@ export async function getProjectTask(
   return {
     ...foundRest, deferred, deferredStuck: stuck, merged,
     mergedVerificationAtMerge: mergedVerification ?? null,
+    mergeGate: merged ? resolveMergeGateProvenance(db, found) : null,
     ...buildRelationView(db, found), // card 3df86c87: parentId/parent/children/relations
     requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
     incomingDeferredItems: summarizeIncomingDeferredItems(db, projectId, found.id),

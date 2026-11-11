@@ -2782,6 +2782,8 @@ export interface GateHistoryRow {
   /** Card 4a95e9fc: the manager's RECORDED (never authenticated) reason a landing went ungated although a red `run_gate` self-check sat on its
    *  branch tip; `null` on every other row. Never a pass — read `outcome` first. */
   overrideReason: string | null;
+  /** The branch head this gate actually ran on: a `worker_gate` row's `settleHead`, a `build_gate` row's `gatedTip`. `null` when no gate ran (a skip or reuse), when the head could not be read, and on every row recorded before this field existed (never backfilled). Read it with `outcome`/`gateRan`, never alone. */
+  gatedTip: string | null;
   /** Card bd9a483b: `true` ONLY for the `ungatedLandingCheckCommand` safety-net check — see that field's
    *  own canonical doc (`OrchestrationConfig.ungatedLandingCheckCommand`, shared/config.ts) for the full
    *  contract; not restated here. Its OWN distinct `worker_gate`-kind row (`gateType:"worker"`, own

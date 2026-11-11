@@ -22713,6 +22713,8 @@ export class SessionService {
           // Card 4a95e9fc: the red self-check that bore on this decision, and the manager's recorded override reason when it let a skip through.
           ...(mergeGateDecision.redSelfCheck ? { redSelfCheckOpId: mergeGateDecision.redSelfCheck.opId } : {}),
           ...(appliedOverrideReason !== undefined ? { overrideReason: appliedOverrideReason } : {}),
+          // The branch head the REAL gate ran on (absent for a skip/reuse); `gate_history`'s `gatedTip`.
+          ...(gateRan && gatedTip ? { gatedTip } : {}),
           // Absent (never an empty array) whenever reuse actually fired.
           // @decision 2e52bf99 — reuseRefusalReasons is stamped independent of the inertSkip/reused
           //  ternary above, so it reflects why REUSE specifically was refused regardless of a later
@@ -23693,7 +23695,7 @@ export class SessionService {
     // return — persisted onto the task alongside the rest of finalize's bookkeeping.
     // @decision cc9bce38 — pin finalize to the tip the squash landed (the landing pin, else mergeBranchLocked's frozen resolve); a late worker commit retains the branch.
     const soloTipGuard = this.soloFinalizeTipGuard({ opId: thisOpId, managerSessionId: owner, workerSessionId, taskId, branch, landedTip: expectedTipForLanding(landingPin) ?? merge.landedTip, landedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
-    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, expectedBranchTip: soloTipGuard.expectedBranchTip, onBranchRetained: soloTipGuard.onBranchRetained, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: mergeSkipReason } : {}), ...(appliedOverrideReason !== undefined ? { overrideReason: appliedOverrideReason } : {}), ...(mergeGateDecision.redSelfCheck ? { redSelfCheckOpId: mergeGateDecision.redSelfCheck.opId } : {}), ...(worker.cutBaseSha == null ? { cutBaseUnknown: true } : {}) });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId: owner, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, releaseHold: true, expectedBranchTip: soloTipGuard.expectedBranchTip, onBranchRetained: soloTipGuard.onBranchRetained, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null, ...(gateDisabled && inertSkip ? { gateSkipReason: mergeSkipReason } : {}), ...(appliedOverrideReason !== undefined ? { overrideReason: appliedOverrideReason } : {}), ...(mergeGateDecision.redSelfCheck ? { redSelfCheckOpId: mergeGateDecision.redSelfCheck.opId } : {}), gateProvenance: { gateRan, gateOpId: gateRan ? thisOpId : (reusedOpId ?? null), gatedTip: (gateRan ? gatedTip : undefined) ?? null, skipReason: gateRan ? null : reusedOpId ? "reused-self-check" : inertSkip ? (gateDisabled ? mergeSkipReason : "inert-docs-only-diff") : null }, ...(worker.cutBaseSha == null ? { cutBaseUnknown: true } : {}) });
     // Card 6f13746c: the counter line for the merge result / [loom:merge-done] (read AFTER the landing was recorded, at the squash above).
     const mergeGateNote = this.mergeGateNoteFor(project.id, { gatedLanding: !gateDisabled, periodic: mergeGateDecision.cadence !== "every", inertSkip }, worker.repoKey ?? "primary");
     // SKILL-LIVENESS WARNING (card 64a30c79): a merge that just landed a change under
@@ -24141,6 +24143,8 @@ export class SessionService {
     /** @decision 0eaaa693 — forwarded verbatim into {@link finalizeMerge}: this candidate carried no
      *  recorded `cutBaseSha` (a legacy worker), stamped on `merge_done`. */
     cutBaseUnknown?: boolean;
+    /** Forwarded verbatim into {@link finalizeMerge} (a batch landing's gate provenance). */
+    gateProvenance?: { gateRan: boolean; gateOpId: string | null; gatedTip: string | null; skipReason: string | null };
   }): Promise<ConfirmMergeResult> {
     // Card 42daa283: an ALREADY_MERGED-style finish must never delete a HELD branch (its late commit was never landed) — refuse up front,
     // BEFORE the worker is hard-stopped or anything is announced. The held branch is released only by a real new squash (Green path) or its
@@ -25592,6 +25596,8 @@ export class SessionService {
               projectId: finalProjectId, opId: randomUUID(), mergedSha: lb.sha, repoKey: c?.repoKey ?? null,
               mergedVerification, suppressNotify: true,
               expectedBranchTip: lb.assembledTip,
+              // The batch's own gate run (its opId) validated the assembled tip, not this branch's own head.
+              gateProvenance: { gateRan: batchGateRan, gateOpId: batchGateRan ? opId : null, gatedTip: batchGateRan ? (lb.assembledTip ?? null) : null, skipReason: batchGateRan ? null : "batch-gate-not-run" },
               // @decision 0eaaa693 — stamp cutBaseUnknown on this candidate's own merge_done when it
               // carried no recorded cut base (a legacy worker) — the fork-point check was grandfathered.
               ...(lb.cutBaseSha == null ? { cutBaseUnknown: true } : {}),
@@ -29932,6 +29938,8 @@ export class SessionService {
     /** Card 4a95e9fc: stamped onto the `merge_done` event — the manager's RECORDED override reason, and the red self-check op that bore on the decision. */
     overrideReason?: string;
     redSelfCheckOpId?: string;
+    /** Gate provenance stamped onto `merge_done` (read back by `tasks_get.mergeGate`): whether a gate process ran for this landing, the op that carries its verdict (the reused self-check's op when reused; null when nothing ran), the branch head that gate saw, and why no gate ran. Never a pass by itself. */
+    gateProvenance?: { gateRan: boolean; gateOpId: string | null; gatedTip: string | null; skipReason: string | null };
     /** Card 293d418e: stamped on `merge_done` (with `landedSha` = `mergedSha`) when an ALREADY_MERGED finish ran without the gate. */
     gateSkipped?: "already-landed";
     /** Card 293d418e: `merge_done.landedSha` reports this (the introducing commit) instead of `mergedSha` when set; see {@link finishAlreadyMerged}'s own doc. */
@@ -30109,7 +30117,7 @@ export class SessionService {
           const mergeDoneSeq = this.db.appendEvent({
             id: randomUUID(), ts: new Date().toISOString(),
             managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
-            taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.mergedSha ? { mergedSha: args.mergedSha } : {}), ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.overrideReason !== undefined ? { overrideReason: args.overrideReason } : {}), ...(args.redSelfCheckOpId ? { redSelfCheckOpId: args.redSelfCheckOpId } : {}),...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}), ...(args.cutBaseUnknown ? { cutBaseUnknown: true } : {}) },
+            taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch, repoKey: args.repoKey, ...(args.mergedSha ? { mergedSha: args.mergedSha } : {}), ...(args.gateSkipReason ? { skipReason: args.gateSkipReason } : {}), ...(args.overrideReason !== undefined ? { overrideReason: args.overrideReason } : {}), ...(args.redSelfCheckOpId ? { redSelfCheckOpId: args.redSelfCheckOpId } : {}), ...(args.gateProvenance ? { gateProvenance: args.gateProvenance } : {}),...(args.gateSkipped ? { gateSkipped: args.gateSkipped, landedSha: args.attributedSha ?? args.mergedSha ?? null } : {}), ...(args.cutBaseUnknown ? { cutBaseUnknown: true } : {}) },
           });
           args.onMergeDoneAppended?.(args.branch, args.repoKey, mergeDoneSeq);
         }

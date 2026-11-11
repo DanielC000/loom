@@ -9409,6 +9409,11 @@ export class Db {
       `SELECT * FROM orchestration_events WHERE worker_session_id = ? AND kind IN (${placeholders}) ORDER BY ts, rowid`,
     ).all(workerSessionId, ...kinds) as Row[]).map(toOrchestrationEvent);
   }
+  /** Every event of one kind filed against `taskId`, chronological (`ts, rowid`) — the card read's `mergeGate` source. */
+  listEventsForTaskKind(taskId: string, kind: OrchestrationEventKind): OrchestrationEvent[] {
+    return (this.db.prepare("SELECT * FROM orchestration_events WHERE task_id = ? AND kind = ? ORDER BY ts, rowid")
+      .all(taskId, kind) as Row[]).map(toOrchestrationEvent);
+  }
   /**
    * Card 42daa283 — every event of one kind whose `detail.branch` is `branch`, chronological. The branch-keyed lookup behind the
    * merge_batch HOLD (`SessionService.isBranchHeld`): a `worker_recycle` mints a NEW session id on the SAME branch, so a hold keyed on the
@@ -12948,6 +12953,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     // human-only gate-disabled skip stamp it), so /api/gates/history can tell the two apart.
     skipReason: typeof detail.skipReason === "string" ? detail.skipReason : null,
     overrideReason: typeof detail.overrideReason === "string" ? detail.overrideReason : null,
+    gatedTip: typeof detail.gatedTip === "string" ? detail.gatedTip : typeof detail.settleHead === "string" ? detail.settleHead : null,
     emitCompareIdenticalCount,
     emitCompareTestFiles,
     batched,
