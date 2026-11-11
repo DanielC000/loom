@@ -12953,6 +12953,7 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     // human-only gate-disabled skip stamp it), so /api/gates/history can tell the two apart.
     skipReason: typeof detail.skipReason === "string" ? detail.skipReason : null,
     overrideReason: typeof detail.overrideReason === "string" ? detail.overrideReason : null,
+    redSelfCheckOpId: typeof detail.redSelfCheckOpId === "string" ? detail.redSelfCheckOpId : null,
     gatedTip: typeof detail.gatedTip === "string" ? detail.gatedTip : typeof detail.settleHead === "string" ? detail.settleHead : null,
     emitCompareIdenticalCount,
     emitCompareTestFiles,

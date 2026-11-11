@@ -200,6 +200,8 @@ try {
     check("(B) merge_done carries overrideReason", db.listEvents(P.mgrId).some((e) => e.kind === "merge_done" && e.detail?.overrideReason === "unrelated flake in X"));
     const row = db.listGateEvents({ projectId: P.projId, limit: 10, offset: 0 }).items.find((i) => i.opId === opId);
     check("(B) gate_history row: outcome skipped (NEVER pass) + overrideReason", row?.outcome === "skipped" && row?.overrideReason === "unrelated flake in X");
+    check("(B) gate_history row: redSelfCheckOpId names the overridden red self-check (card 87798130)", row?.redSelfCheckOpId === sc.opId);
+    check("(B) gate_history: the red self-check's OWN row carries no redSelfCheckOpId/overrideReason", (() => { const r = db.listGateEvents({ projectId: P.projId, limit: 10, offset: 0 }).items.find((i) => i.opId === sc.opId); return r !== undefined && r.redSelfCheckOpId === null && r.overrideReason === null; })());
     const done = ctx.enqueued.find((e) => /\[loom:merge-done\]/.test(e.text));
     check("(B) the [loom:merge-done] nudge carries the override, says RECORDED/not authenticated/NOT a pass", done !== undefined && /unrelated flake in X/.test(done.text) && /RECORDED, not authenticated/.test(done.text) && /NOT a pass/.test(done.text));
     check("(B) the ungated counter advanced (an ungated landing, not a pass)", db.getMergeGateState(P.projId).ungatedSinceLastPass === 1);

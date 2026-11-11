@@ -1805,6 +1805,26 @@ button.loom-cardtab:focus-visible {
 .loom-gate-row:hover {
   background: var(--loom-inset);
 }
+/* Card 87798130: the override detail panel under a History row. The table's scroller is the query
+   container, so the panel sizes to what is actually visible (Gates.tsx's 100cqw) and, when that is narrow,
+   stacks each label above its value instead of squeezing the value into a sliver. */
+.loom-gate-scroller {
+  container-type: inline-size;
+}
+.loom-gate-override {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 8px 16px;
+}
+@container (max-width: 560px) {
+  .loom-gate-override {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px 0;
+  }
+  .loom-gate-override dd + dt {
+    margin-top: 8px;
+  }
+}
 /* Settled: a solid full-width fill (color set inline — phosphor merged / red failed). */
 .loom-merge-fill {
   position: absolute;

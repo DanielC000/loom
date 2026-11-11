@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { Fragment, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useQuery, useInfiniteQuery } from "@tanstack/react-query";
 import type { GateRun, GateHistoryRow, GateType, GateOutcome, TaskPriority } from "@loom/shared";
 import { api } from "../lib/api";
@@ -86,11 +86,37 @@ const NON_RUN_NOTE =
 function nonRunReason(outcome: GateOutcome, skipReason?: string | null): string {
   // Card e8df2659: a human-only "merge gate off" landing is NOT an inert docs-only skip — say which it was.
   if (outcome === "skipped" && skipReason === "gate-disabled") return "The project's merge gate is switched OFF, so the merge landed without running the gate (not a pass).";
+  // Card 87798130: an interval skip is neither of the above. The merge-gate interval let this landing through
+  // ungated because it was not its turn to run the real gate.
+  if (outcome === "skipped" && skipReason === "gate-interval") return "The merge-gate interval let this landing through ungated: it was not this landing's turn to run the gate (not a pass).";
   if (outcome === "skipped") return "The merge diff was proven inert, so the gate was never attempted.";
   if (outcome === "cancelled") return "This run was withdrawn before a gate process spawned.";
   if (outcome === "error") return "The check's own scan/build/run machinery failed before it could reach a verdict — not a real test red.";
   if (outcome === "pass") return "This merge reused an already-green worker self-check.";
   return "No gate process spawned for this run.";
+}
+
+// ── override landings (card 87798130, owner pick B · Disclosure, request 0b1a2240) ──────────────
+// `overrideReason` is the manager's own free text for landing an interval-skipped merge although the
+// branch's own run_gate self-check was red on that tip (card 4a95e9fc). It is RECORDED, never verified,
+// and the landing never counts as a pass. The row carries an amber outlined `override` chip, the same
+// shape as ForfeitTag (amber: a human should look; not red, since nothing failed in THIS row). The chip
+// is a real button that discloses the detail panel below the row, so the reason is one click away and
+// always labelled with who wrote it and that Loom did not check it.
+const OVERRIDE_LABEL = "override";
+const OVERRIDE_NOTE =
+  " marks a merge that landed without its gate although the branch's own run_gate self-check was red on that exact commit. The merging manager wrote the reason when it confirmed the merge. Loom stores the text as written and does not check it, and the landing never counts as a pass.";
+
+function OverrideChip() {
+  return (
+    <span
+      style={{
+        fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, padding: "1px 5px", borderRadius: radius.sm, border: `1px solid ${color.attn}`, color: color.attnText, flex: "none", lineHeight: 1.45,
+      }}
+    >
+      {OVERRIDE_LABEL}
+    </span>
+  );
 }
 
 // ── batched merge gates (card 10fd660b) ─────────────────────────────────────────
@@ -743,8 +769,33 @@ function HistoryTable({
   if (rows.length === 0) {
     return <Panel style={{ padding: 16, color: color.text3, fontSize: fs.sm }}>No gate history yet — settled merge, worker, and deploy gates will appear here newest-first.</Panel>;
   }
+  return <HistoryTableBody rows={rows} now={now} projectName={projectName} />;
+}
+
+function HistoryTableBody({ rows, now, projectName }: { rows: GateHistoryRow[]; now: number; projectName: (id: string) => string }) {
+  // Card 87798130: an override panel links to the red self-check it overrode. That row is usually loaded
+  // (it sits just below the landing), so the link jumps to it and briefly marks it; when it is not in the
+  // loaded pages the panel names its op id instead of offering a dead control.
+  const byOpId = useMemo(() => {
+    const m = new Map<string, GateHistoryRow>();
+    for (const r of rows) if (r.opId) m.set(r.opId, r);
+    return m;
+  }, [rows]);
+  const [flashOpId, setFlashOpId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!flashOpId) return;
+    const t = setTimeout(() => setFlashOpId(null), 1600);
+    return () => clearTimeout(t);
+  }, [flashOpId]);
+  const jumpTo = (opId: string) => {
+    const el = document.querySelector<HTMLElement>(`tr[data-gate-op="${CSS.escape(opId)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.focus({ preventScroll: true });
+    setFlashOpId(opId);
+  };
   return (
-    <div style={{ overflowX: "auto", border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.surface }}>
+    <div className="loom-gate-scroller" style={{ overflowX: "auto", border: `1px solid ${color.line}`, borderRadius: radius.base, background: color.surface }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: fs.sm }}>
         <thead>
           <tr>
@@ -755,7 +806,15 @@ function HistoryTable({
         </thead>
         <tbody>
           {rows.map((r) => (
-            <HistoryRow key={r.id} row={r} now={now} projectName={projectName} />
+            <HistoryRow
+              key={r.id}
+              row={r}
+              now={now}
+              projectName={projectName}
+              redRow={r.redSelfCheckOpId ? byOpId.get(r.redSelfCheckOpId) : undefined}
+              flash={r.opId != null && r.opId === flashOpId}
+              onJump={jumpTo}
+            />
           ))}
         </tbody>
       </table>
@@ -773,17 +832,34 @@ function HistoryTable({
           <ForfeitTag />{" "}{FORFEIT_NOTE}
         </div>
       )}
+      {rows.some((r) => r.overrideReason != null) && (
+        <div data-testid="override-note" style={{ padding: "9px 12px", borderTop: `1px solid ${color.line}`, fontSize: fs.sm, lineHeight: 1.55, color: color.text2, maxWidth: "78ch", whiteSpace: "normal" }}>
+          <OverrideChip />{OVERRIDE_NOTE}
+        </div>
+      )}
       {rows.some((r) => !r.gateRan) && (
         <div style={{ padding: "9px 12px", borderTop: `1px solid ${color.line}`, fontSize: fs.sm, lineHeight: 1.55, color: color.text2, maxWidth: "78ch", whiteSpace: "normal" }}>
           <span style={{ fontSize: fs.xs, color: color.text2 }}>{NON_RUN_LABEL}</span>
-          {" marks a run where no gate process ever spawned: a merge that reused a green worker self-check, a run withdrawn before it was admitted, or a diff proven inert. Its duration is parenthesised because it is a real number measuring op overhead, not gate execution. Leave those rows out of a gate-duration trend."}
+          {" marks a run where no gate process ever spawned: a merge that reused a green worker self-check, a run withdrawn before it was admitted, a diff proven inert, or a landing the merge-gate interval let through ungated. Its duration is parenthesised because it is a real number measuring op overhead, not gate execution. Leave those rows out of a gate-duration trend."}
         </div>
       )}
     </div>
   );
 }
 
-function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: number; projectName: (id: string) => string }) {
+function HistoryRow({
+  row, now, projectName, redRow, flash, onJump,
+}: {
+  row: GateHistoryRow;
+  now: number;
+  projectName: (id: string) => string;
+  redRow: GateHistoryRow | undefined;
+  flash: boolean;
+  onJump: (opId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const hasOverride = row.overrideReason != null;
+  const panelId = `gate-override-${row.id}`;
   // Card bd9a483b: a landing-check row is gateType:"worker" underneath (it shares that admission lane),
   // but must never render as an ordinary worker self-check — the whole point of `landingCheckOnly` is
   // that a reader can tell it apart from a real gate at a glance, not just in the underlying data.
@@ -791,27 +867,53 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
   const kindC = row.landingCheckOnly ? color.text2 : row.distImporterCheckOnly ? color.text2 : KIND_COLOR[row.gateType];
   const outC = OUTCOME_COLOR[row.outcome];
   const killed = row.outcome === "kill" || row.outcome === "timeout";
+  // With the panel open the row and its panel read as one unit: the hairline moves below the panel.
+  const td: CSSProperties = hasOverride && open ? { ...tdStyle, borderBottom: "none" } : tdStyle;
   return (
-    <tr className="loom-gate-row">
-      <td style={tdStyle}>
+    <Fragment>
+    <tr
+      className="loom-gate-row"
+      id={row.opId ? `gate-op-${row.opId}` : undefined}
+      data-gate-op={row.opId ?? undefined}
+      tabIndex={-1}
+      style={flash ? { background: color.attnSoft, outline: "none" } : { outline: "none" }}
+    >
+      <td style={td}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: fs.sm, color: row.outcome === "pass" ? color.liveFg : outC }}>
             <span style={{ width: 7, height: 7, borderRadius: radius.base, background: outC, ...(OUTCOME_GLOW[row.outcome] ? { boxShadow: `0 0 5px ${outC}` } : null) }} />
             {row.outcome}
           </span>
           {row.batchForfeited && <ForfeitTag />}
+          {hasOverride && (
+            <button
+              type="button"
+              className="loom-btn loom-btn-ghost"
+              aria-expanded={open}
+              aria-controls={panelId}
+              onClick={() => setOpen((o) => !o)}
+              title={open ? "Hide the manager's override reason" : "Show the manager's override reason"}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 4px", margin: "-2px -4px",
+                borderRadius: radius.sm, font: "inherit", cursor: "pointer", color: color.attnText,
+              }}
+            >
+              <OverrideChip />
+              <span aria-hidden="true" style={{ fontSize: fs.xs }}>{open ? "▾" : "▸"}</span>
+            </button>
+          )}
         </span>
       </td>
-      <td style={tdStyle}><span style={{ fontSize: fs.xs, color: kindC }}>{kindLabel}</span></td>
-      <td style={tdStyle}>{row.projectName ?? (row.projectId ? projectName(row.projectId) : "—")}</td>
+      <td style={td}><span style={{ fontSize: fs.xs, color: kindC }}>{kindLabel}</span></td>
+      <td style={td}>{row.projectName ?? (row.projectId ? projectName(row.projectId) : "—")}</td>
       {row.batched
         ? <BatchBranchCell row={row} />
-        : <td style={{ ...tdStyle, color: color.text2, fontFamily: font.mono }}>{row.branch ?? "—"}</td>}
-      <td style={{ ...tdStyle, color: color.text2, fontFamily: font.mono }} title={row.failingTest ?? undefined}>
+        : <td style={{ ...td, color: color.text2, fontFamily: font.mono }}>{row.branch ?? "—"}</td>}
+      <td style={{ ...td, color: color.text2, fontFamily: font.mono }} title={row.failingTest ?? undefined}>
         {row.workerLabel ?? "—"}
         {row.failingTest && <span style={{ color: color.danger }}> · {row.failingTest}</span>}
       </td>
-      <td style={tdStyle} title={row.gateRan ? undefined : `${nonRunReason(row.outcome, row.skipReason)} ${NON_RUN_NOTE}`}>
+      <td style={td} title={row.gateRan ? undefined : `${nonRunReason(row.outcome, row.skipReason)} ${NON_RUN_NOTE}`}>
         {row.gateRan ? (
           <span style={{ fontVariantNumeric: "tabular-nums", color: killed ? color.danger : color.text }}>
             {fmtDurationMs(row.durationMs)}
@@ -829,10 +931,84 @@ function HistoryRow({ row, now, projectName }: { row: GateHistoryRow; now: numbe
           </span>
         )}
       </td>
-      <td style={{ ...tdStyle, color: color.text3, fontFamily: font.mono }}>{relTime(row.endedAt, now)}</td>
+      <td style={{ ...td, color: color.text3, fontFamily: font.mono }}>{relTime(row.endedAt, now)}</td>
     </tr>
+    {hasOverride && open && (
+      <tr>
+        <td colSpan={7} style={{ padding: "0 12px 11px", borderBottom: `1px solid ${color.line}`, whiteSpace: "normal" }}>
+          <OverridePanel id={panelId} row={row} redRow={redRow} now={now} onJump={onJump} />
+        </td>
+      </tr>
+    )}
+    </Fragment>
   );
 }
+
+// The disclosed detail for an override landing. Every line answers a question a human reading a
+// manager's free text needs answered before trusting it: who wrote it, whether Loom checked it, what it
+// set aside, and what the landing counts as.
+function OverridePanel({
+  id, row, redRow, now, onJump,
+}: {
+  id: string;
+  row: GateHistoryRow;
+  redRow: GateHistoryRow | undefined;
+  now: number;
+  onJump: (opId: string) => void;
+}) {
+  const redOpId = row.redSelfCheckOpId;
+  return (
+    <dl id={id} data-testid="override-panel" className="loom-gate-override" style={overridePanelStyle}>
+      <dt style={overrideDtStyle}>Reason</dt>
+      {/* Verbatim, as written: pre-wrap keeps the manager's own line breaks; nothing is trimmed or clamped. */}
+      <dd style={{ ...overrideDdStyle, color: color.text, whiteSpace: "pre-wrap" }}>“{row.overrideReason}”</dd>
+      <dt style={overrideDtStyle}>Written by</dt>
+      <dd style={overrideDdStyle}>The manager that confirmed this merge, as free text.</dd>
+      <dt style={overrideDtStyle}>Verified</dt>
+      <dd style={overrideDdStyle}>
+        <span style={{ color: color.attnText, fontWeight: 600 }}>No.</span> Loom stores the text exactly as written and does not check any claim in it.
+      </dd>
+      <dt style={overrideDtStyle}>What it overrode</dt>
+      <dd style={overrideDdStyle}>
+        A red run_gate self-check on this branch's own tip
+        {redOpId && redRow ? (
+          <>
+            {" ("}
+            {/* An in-page link, not a button: it must wrap with the sentence at phone width. The handler
+                scrolls + focuses the row itself, so the URL hash is never touched. */}
+            <a
+              href={`#gate-op-${redOpId}`}
+              onClick={(e) => { e.preventDefault(); onJump(redOpId); }}
+              title="Jump to that self-check's row"
+              style={{ color: color.accentFg, textDecoration: "underline", textUnderlineOffset: 2, borderRadius: radius.sm }}
+            >
+              the worker {redRow.outcome} {relTime(redRow.endedAt, now)}, op <span style={{ fontFamily: font.mono }}>{shortOpId(redOpId)}</span>
+            </a>
+            {")"}
+          </>
+        ) : redOpId ? (
+          <>
+            {" (op "}<span style={{ fontFamily: font.mono, color: color.text }}>{shortOpId(redOpId)}</span>{", not in the loaded history)"}
+          </>
+        ) : null}
+        . The merge gate interval would otherwise have run the real gate.
+      </dd>
+      <dt style={overrideDtStyle}>Counts as</dt>
+      <dd style={overrideDdStyle}>An ungated landing. Never a pass.</dd>
+    </dl>
+  );
+}
+
+const overridePanelStyle: CSSProperties = {
+  margin: "2px 0 4px 13px", padding: "12px 14px", border: `1px solid ${color.line}`, borderLeft: `2px solid ${color.attn}`,
+  borderRadius: radius.sm, background: color.inset,
+  // At phone width the table scrolls sideways; pinning the panel to the scroller's left edge and sizing it
+  // to the scroller (100cqw: `.loom-gate-scroller` is the query container) keeps the whole panel readable
+  // without scrolling to find it. 37px = the cell's 12px side paddings + this panel's 13px left margin.
+  position: "sticky", left: 12, boxSizing: "border-box", width: "min(92ch, calc(100cqw - 37px))",
+};
+const overrideDtStyle: CSSProperties = { fontFamily: font.ui, fontSize: fs.xs, fontWeight: 700, color: color.text3, paddingTop: 1 };
+const overrideDdStyle: CSSProperties = { margin: 0, fontFamily: font.ui, fontSize: fs.sm, lineHeight: 1.55, color: color.text2, overflowWrap: "anywhere" };
 
 // The Branch cell for a BATCHED row. The count alone already beats the old em-dash (it can no longer be
 // mistaken for missing data), but a batch's whole point is WHICH branches landed together, so the count
