@@ -1269,7 +1269,10 @@ const platformConfigPatchSchema = z.object({
   gateRetry: gateRetryPatchOverride.nullable().optional(),
   harness: harnessPatchOverride.nullable().optional(),
   connections: connectionsOverride.optional(),
-  integrations: integrationsOverride.optional(),
+  // Card eaf2d79f: `integrations.codescape` fields are individually nullable (a `null` deletes that field;
+  // the PATCH handler deep-merges two levels), so `{codescape:{path:null}}` clears the path now that a
+  // submitted `codescape:{}` no longer replaces the persisted one.
+  integrations: z.object({ codescape: z.object(nullableShape(codescapeIntegrationOverride.shape)).strict().optional() }).strict().optional(),
   coalesceAgentMessages: z.boolean().nullable().optional(),
   companionVoiceEnabled: z.boolean().optional(),
   // Card 6f27469b — no blank-to-inherit control today, same plain-optional shape as companionVoiceEnabled.

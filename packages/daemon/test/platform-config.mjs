@@ -580,14 +580,11 @@ const dbFile = path.join(TMP, "loom.db");
       const g = (await app.inject({ method: "GET", url: "/api/platform/config" })).json();
       check("(14) GET /api/platform/config reflects the persisted integrations override", g.override.integrations?.codescape?.path === process.execPath);
 
-      // CLEAR-BACK (code-review fix): the whole-key shallow-merge means a submitted `integrations` object
-      // REPLACES the persisted one wholesale — so a caller that resends `{ codescape: {} }` (path omitted,
-      // exactly what the fixed Settings form now always sends for a blanked field) actually CLEARS the
-      // previously-set path, rather than the stale path surviving because the key was omitted entirely
-      // (the pre-fix Settings behavior). This is the backend half of the fix; the browser half (Settings.tsx
-      // always emitting `integrations`) is covered end-to-end by e2e/settings.spec.ts.
-      const clear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { codescape: {} } } });
-      check("(14) PATCH integrations.codescape:{} (path omitted) → 200", clear.statusCode === 200);
+      // CLEAR-BACK (card eaf2d79f): `integrations` now deep-merges (a `{codescape:{}}` body no longer
+      // replaces the persisted group — that wiped `path` on a memoryCeilingMb-only PATCH), so the path is
+      // cleared with an explicit per-field `null`. Settings no longer emits `integrations` at all (503a30a0).
+      const clear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { codescape: { path: null } } } });
+      check("(14) PATCH integrations.codescape.path:null → 200", clear.statusCode === 200);
       check("(14) clear-back: the persisted path is actually GONE, not stale", db.getPlatformConfig().integrations?.codescape?.path === undefined);
       const gAfterClear = (await app.inject({ method: "GET", url: "/api/platform/config" })).json();
       check("(14) clear-back: GET reflects no path (resolves to env/none on the next spawn)", gAfterClear.override.integrations?.codescape?.path === undefined);

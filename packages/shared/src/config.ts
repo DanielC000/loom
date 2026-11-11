@@ -1199,9 +1199,13 @@ export function resolveCodescapeIntegrationPath(platformOverride?: unknown): str
   return raw?.integrations?.codescape?.path;
 }
 
-/** Card ba22005b: default ceiling (MB) on the supervised `codescape serve` child's memory when no human
- *  override is set — owner-approved default (8 GiB). */
+/** Card ba22005b: the CAP (MB) on the DERIVED default ceiling for the supervised `codescape serve`
+ *  child's memory when no human override is set — owner-approved 8 GiB. Card eaf2d79f: the default is no
+ *  longer this fixed number but {@link defaultCodescapeMemoryCeilingMb}(host RAM), capped here. */
 export const DEFAULT_CODESCAPE_MEMORY_CEILING_MB = 8192;
+
+/** Card eaf2d79f: fraction of host RAM the derived default ceiling takes. */
+export const CODESCAPE_MEMORY_CEILING_RAM_FRACTION = 0.25;
 
 /** Card ba22005b CR follow-up: the floor {@link resolveCodescapeMemoryCeilingMb} clamps ANY resolved
  *  value to, regardless of what a hand-edited override asks for — mirrors `MEMORY_CONFIG_MAX`'s own
@@ -1220,11 +1224,24 @@ export const CODESCAPE_MEMORY_CEILING_FLOOR_MB = 2048;
  * hand-edited DB row can carry a value that bypassed the write-time zod validator; `Number("")`/`Number`
  * of an object/array is `NaN`/not finite, and must fall back rather than propagate a garbage ceiling).
  */
-export function resolveCodescapeMemoryCeilingMb(platformOverride?: unknown): number {
+export function resolveCodescapeMemoryCeilingMb(platformOverride: unknown, totalMemBytes: number): number {
   const raw = platformOverride as { integrations?: { codescape?: CodescapeIntegrationConfig } } | undefined;
-  const configured = raw?.integrations?.codescape?.memoryCeilingMb ?? DEFAULT_CODESCAPE_MEMORY_CEILING_MB;
-  const resolved = Number.isFinite(Number(configured)) ? Number(configured) : DEFAULT_CODESCAPE_MEMORY_CEILING_MB;
+  const derived = defaultCodescapeMemoryCeilingMb(totalMemBytes);
+  const configured = raw?.integrations?.codescape?.memoryCeilingMb ?? derived;
+  const resolved = Number.isFinite(Number(configured)) ? Number(configured) : derived;
   return Math.max(CODESCAPE_MEMORY_CEILING_FLOOR_MB, resolved);
+}
+
+/**
+ * Card eaf2d79f: the default ceiling (MB) with no human override — `clamp(round(25% of host RAM in MB),
+ * floor 2048, cap 8192)`. Pure: the caller (daemon) supplies `os.totalmem()` so this module takes no
+ * `node:os` import (it is bundled into the web package). A non-finite/non-positive RAM figure falls back
+ * to the cap (the pre-card behaviour). See docs/decisions/eaf2d79f-*.md.
+ */
+export function defaultCodescapeMemoryCeilingMb(totalMemBytes: number): number {
+  if (!Number.isFinite(totalMemBytes) || totalMemBytes <= 0) return DEFAULT_CODESCAPE_MEMORY_CEILING_MB;
+  const quarterMb = Math.round((totalMemBytes / (1024 * 1024)) * CODESCAPE_MEMORY_CEILING_RAM_FRACTION);
+  return Math.min(DEFAULT_CODESCAPE_MEMORY_CEILING_MB, Math.max(CODESCAPE_MEMORY_CEILING_FLOOR_MB, quarterMb));
 }
 
 /**

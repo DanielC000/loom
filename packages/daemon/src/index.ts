@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolveConfig, resolveCodescapeIntegrationPath, resolveCodescapeMemoryCeilingMb } from "@loom/shared";
@@ -809,7 +810,7 @@ async function main(): Promise<void> {
   // without "codescape" — see that kind's own doc in shared/src/types.ts for why) — never throws past
   // the supervisor (a logging/DB fault must not prevent the kill it's reporting on).
   const codescapeSupervisor = new CodescapeSupervisor({
-    getMemoryCeilingMb: () => resolveCodescapeMemoryCeilingMb(db.getPlatformConfig()),
+    getMemoryCeilingMb: () => resolveCodescapeMemoryCeilingMb(db.getPlatformConfig(), os.totalmem()),
     onMemoryCeilingRecycle: (detail) => {
       try {
         db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "code_graph_memory_recycled", detail });

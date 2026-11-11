@@ -6066,6 +6066,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // reintroduce client-side bookkeeping about the group's contents, the exact thing deep-merging
         // server-side was meant to make unnecessary. Whole-group `null` stays fully supported (see the
         // `val === null` branch above); it's just not this form's path to it anymore.
+      } else if (val !== undefined && key === "integrations") {
+        // @decision eaf2d79f — `integrations` merges TWO levels (integration, then field): a one-level
+        // merge would still replace `codescape` wholesale and drop its `path` on a `{memoryCeilingMb}` PATCH.
+        const existing = { ...(merged[key] as Record<string, Record<string, unknown> | undefined> | undefined) };
+        for (const [integ, fields] of Object.entries(val as Record<string, Record<string, unknown> | null | undefined>)) {
+          if (fields === null) delete existing[integ];
+          else if (fields !== undefined) {
+            const group: Record<string, unknown> = { ...existing[integ] };
+            for (const [fk, fv] of Object.entries(fields)) {
+              if (fv === null) delete group[fk];
+              else if (fv !== undefined) group[fk] = fv;
+            }
+            existing[integ] = group;
+          }
+        }
+        merged[key] = existing;
       } else if (val !== undefined) {
         merged[key] = val;
       }

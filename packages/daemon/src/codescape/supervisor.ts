@@ -2,7 +2,8 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import { resolveCodescapeConfig, DEFAULT_CODESCAPE_MEMORY_CEILING_MB, type ProjectConfigOverride } from "@loom/shared";
+import os from "node:os";
+import { resolveCodescapeConfig, defaultCodescapeMemoryCeilingMb, type ProjectConfigOverride } from "@loom/shared";
 import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin, codescapeBinCandidate } from "../paths.js";
 import { resolveCodescapeProjectId } from "./manifest.js";
 import { probeAdvertisedTools } from "./tools-probe.js";
@@ -253,9 +254,10 @@ export interface CodescapeSupervisorOpts {
    * Card ba22005b: resolves the CURRENT memory ceiling (MB) on every sample tick — a FUNCTION, not a
    * frozen number, so a human's live `PATCH /api/platform/config` takes effect on the very next sample,
    * no daemon restart needed (same "live re-answer" posture as `maxConcurrentGates`/`gate_queue.cap`
-   * elsewhere in this project). Defaults to a function returning
-   * `DEFAULT_CODESCAPE_MEMORY_CEILING_MB`; production wires a closure reading the live platform config
-   * through `resolveCodescapeMemoryCeilingMb`.
+   * elsewhere in this project). Defaults to a function returning the RAM-derived default
+   * (`defaultCodescapeMemoryCeilingMb(os.totalmem())`: 25% of host RAM, clamped to 2048..8192); production
+   * wires a closure reading the live platform config through `resolveCodescapeMemoryCeilingMb`, where an
+   * explicit human override wins over that derived default.
    */
   getMemoryCeilingMb?: () => number;
   /**
@@ -1087,7 +1089,7 @@ export class CodescapeSupervisor {
     this.memorySampler = opts?.memorySampler ?? sampleProcessMemoryBytes;
     this.memorySampleTimeoutMs = opts?.memorySampleTimeoutMs ?? DEFAULT_MEMORY_SAMPLE_TIMEOUT_MS;
     this.memorySampleTickInterval = opts?.memorySampleTickInterval ?? DEFAULT_MEMORY_SAMPLE_TICK_INTERVAL;
-    this.getMemoryCeilingMbFn = opts?.getMemoryCeilingMb ?? (() => DEFAULT_CODESCAPE_MEMORY_CEILING_MB);
+    this.getMemoryCeilingMbFn = opts?.getMemoryCeilingMb ?? (() => defaultCodescapeMemoryCeilingMb(os.totalmem()));
     this.onMemoryCeilingRecycleFn = opts?.onMemoryCeilingRecycle ?? (() => { /* no-op default */ });
     this.memoryRecycleSuspendThreshold = opts?.memoryRecycleSuspendThreshold ?? DEFAULT_MEMORY_RECYCLE_SUSPEND_THRESHOLD;
     this.onMemoryRecycleSuspendedFn = opts?.onMemoryRecycleSuspended ?? (() => { /* no-op default */ });
