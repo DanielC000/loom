@@ -77,7 +77,19 @@ try {
   {
     const { mod, y, a, result } = await build({ activeY: true });
     const cos = result.stillBlockedCoOccupants ?? [];
-    check("S1 clear(Y/b) names Y and Y/a as still-blocked co-occupants", cos.some((c) => c.repoPath === y) && cos.some((c) => c.repoPath === a));
+    // 613e4592 round 2: Y/a's own pending entry sits BEHIND the foreign ACTIVE Y at the shared key, so clearing Y/a cannot release it; the claimant
+    // classification (own entries excluded) therefore discloses it as content-kept with Y as the blocker, not as a co-occupant with a releasing route.
+    // Round 4: the oracle says Y/a IS blocked (its own entry), so it stays a LIVE co-occupant with its id-less {repoPath} route AND records Y as the blocker.
+    check("S1 *** round 4 *** clear(Y/b) names BOTH Y and Y/a as still-blocked co-occupants, Y/a with blockedBy Y and NOT content-kept", cos.some((c) => c.repoPath === y) && cos.some((c) => c.repoPath === a && c.route.id === undefined && c.route.repoPath === a) && (result.contentKeptBlockedBy ?? []).some((e) => e.repoPath === a && e.blockedBy.repoPath === y) && !(result.contentKeptRepoPaths ?? []).includes(a));
+    check("S1 *** round 4 *** the first result's reason renders the order: Y first, then Y/a", (() => { const r = result.reason ?? ""; const i = r.indexOf(`clear '${y}' first`); return i >= 0 && r.indexOf(`THEN clear '${a}'`) > i; })());
+    {
+      // FOLLOW every step in the order the result gives it (blocker Y, then Y/a), on a fresh fixture.
+      const fx = await build({ activeY: true });
+      const aCo = fx.result.stillBlockedCoOccupants.find((c) => c.repoPath === fx.a);
+      const bb = fx.result.contentKeptBlockedBy.find((e) => e.repoPath === fx.a).blockedBy;
+      for (const s of [bb, aCo.route]) { if (s.id) fx.mod.clearMergeQuarantineLatchFile(s.id); else fx.mod.clearMergeQuarantine(s.repoPath); }
+      check("S1 *** round 4 *** following every step releases Y/a (oracle undefined, not quarantined)", fx.mod.stillBlockedEntryFor(fx.a) === undefined && fx.mod.assertRepoNotQuarantined(fx.a).ok === true);
+    }
     for (const c of cos) check(`S1 ${path.basename(c.repoPath)} keeps a {repoPath} route`, c.route.repoPath === c.repoPath);
     const yCo = cos.find((c) => c.repoPath === y);
     check("S1 *** the ACTIVE owner Y is not handed a dead {id} route ***", yCo !== undefined && (yCo.route.id === undefined));

@@ -1055,8 +1055,8 @@ function collectPendingIndices(pred: (p: PendingUnresolvedQuarantine) => boolean
  *  `directPathIdentity`-only pending match — ever sees the other as a match. Selects indices ONLY — every
  *  caller must still route the result through {@link consumeMatchedPendingsIntoArmedEntry}, never splice
  *  or union anything here directly. */
-function collectCrossTierSiblingIndices(key: string, excludeIndices: number[]): number[] {
-  return collectPendingIndices((p) => isRepoPathCurrentlyResolvable(p.entry.repoPath) && canonicalRepoLockKey(p.entry.repoPath) === key)
+function collectCrossTierSiblingIndices(key: string, excludeIndices: number[], excludedEntries?: ReadonlySet<MergeQuarantineEntry>): number[] {
+  return collectPendingIndices((p) => !excludedEntries?.has(p.entry) && isRepoPathCurrentlyResolvable(p.entry.repoPath) && canonicalRepoLockKey(p.entry.repoPath) === key)
     .filter((i) => !excludeIndices.includes(i));
 }
 
@@ -3883,29 +3883,60 @@ function blockedCoOccupant(repoPath: string, sourceFile: string): BlockedCoOccup
 }
 
 /**
- * The `{repoPath}` route plus `id` ONLY when {@link clearMergeQuarantineLatchFile} would actually act on
- * it. An id matching an ACTIVE entry AND a pending entry of a DIFFERENT identity is refused there as
- * ambiguous, for every co-occupant alike — so it is omitted, never handed out as a dead route.
+ * THE one rule for whether handing out `ids` (a route id plus any `alsoClear` id) for the claimant `repoPath`
+ * is truthful: following exactly those ids must RELEASE the claimant and touch nobody else. A pure function of
+ * the in-memory entries (no latch file is read or written; identity is {@link directPathIdentity}, the one
+ * every claimant/co-occupant helper here compares with). All four must hold:
+ *  (i)  every entry the ids match (active by key hash, pending by {@link pendingLatchIdFor}) is the claimant's;
+ *  (ii) every active AND pending entry of the claimant is matched (none left behind), unless `repoPathStepFollows`
+ *       (a two-step route whose other step is a {repoPath} clear, which releases every entry of the claimant);
+ *  (iii) the by-id clear would not refuse an id ({@link routeIdWouldBeRefused});
+ *  (iv) nothing else still blocks the claimant afterwards: {@link stillBlockedEntryFor}, with the matched entries
+ *       excluded, names no other identity (a foreign host, or an entry folding the claimant in as a contributor).
+ *
+ * @decision 613e4592 — every producer of a followable id routes through this; never offer an id on "a file with this id exists".
+ */
+function routeIdsReleaseOnlyClaimant(repoPath: string, ids: ReadonlyArray<string | undefined>, repoPathStepFollows = false): boolean {
+  const idSet = new Set(ids.filter((i): i is string => i !== undefined));
+  if (idSet.size === 0) return false;
+  if ([...idSet].some((i) => routeIdWouldBeRefused(i))) return false; // (iii)
+  const wanted = directPathIdentity(repoPath);
+  const hit = new Set<MergeQuarantineEntry>();
+  // Mirrors clearMergeQuarantineLatchFile: an id with an ACTIVE match takes the active branch (its first active match only,
+  // a same-id pending entry is NOT removed by it); only an id with no active match removes every pending entry sharing it.
+  for (const id of idSet) {
+    let activeMatch: MergeQuarantineEntry | undefined;
+    for (const [key, entry] of activeQuarantines) if (quarantineHashForKey(key) === id) { activeMatch = entry; break; }
+    if (activeMatch) { hit.add(activeMatch); continue; }
+    for (const p of pendingUnresolvedQuarantines) if (pendingLatchIdFor(p.sourceFile) === id) hit.add(p.entry);
+  }
+  for (const e of hit) if (directPathIdentity(e.repoPath) !== wanted) return false; // (i)
+  const everyEntry = [...activeQuarantines.values(), ...pendingUnresolvedQuarantines.map((p) => p.entry)];
+  for (const e of everyEntry) {
+    if (!repoPathStepFollows && !hit.has(e) && directPathIdentity(e.repoPath) === wanted) return false; // (ii)
+  }
+  // (iv) the SAME "is it blocked" lookup every route uses, asked of the state AFTER the matched entries are gone: the
+  // claimant's own entry must not hide a foreign blocker (ownIdentityEntryFor returns it first while it exists).
+  const blocker = stillBlockedEntryFor(repoPath, hit);
+  return !blocker || directPathIdentity(blocker.repoPath) === wanted;
+}
+
+/** `id`, only when {@link routeIdsReleaseOnlyClaimant} says following it releases exactly `claimantRepoPath`. */
+function followableIdFor(claimantRepoPath: string, id: string | undefined): string | undefined {
+  return id !== undefined && routeIdsReleaseOnlyClaimant(claimantRepoPath, [id]) ? id : undefined;
+}
+
+/**
+ * The `{repoPath}` route plus `id` ONLY when following it releases exactly `repoPath` ({@link followableIdFor}).
  *
  * @decision b6f573cf — do not hand out an `{id}` route the by-id clear refuses; mirror its active-vs-
  * different-repo-pending check (first active match, `directPathIdentity`) at the one place ids are built.
  */
-/** True when `repoPath` has no active entry and one of its PENDING entries carries an id outside `ids`. */
-function idsLeaveOtherPendingEntries(repoPath: string, ids: ReadonlyArray<string | undefined>): boolean {
-  const wanted = directPathIdentity(repoPath);
-  if ([...activeQuarantines.values()].some((e) => directPathIdentity(e.repoPath) === wanted)) return false;
-  return pendingUnresolvedQuarantines.some((p) => directPathIdentity(p.entry.repoPath) === wanted && !ids.includes(pendingLatchIdFor(p.sourceFile)));
-}
-
-function routeWithFollowableId(repoPath: string, id: string | undefined, alsoHandedOutIds: ReadonlyArray<string | undefined> = []): BlockedCoOccupant {
-  // @decision c4f0d786 — an id that, with every other id handed out for this claimant, still leaves one of its pending entries never releases it; offer {repoPath}.
-  const partial = id !== undefined && idsLeaveOtherPendingEntries(repoPath, [id, ...alsoHandedOutIds]);
-  const followable = partial ? undefined : followableIdOrUndefined(id);
-  return followable === undefined ? { repoPath, route: { repoPath } } : { repoPath, route: { repoPath, id: followable } };
-}
-
-function followableIdOrUndefined(id: string | undefined): string | undefined {
-  return id === undefined || routeIdWouldBeRefused(id) ? undefined : id;
+function routeWithFollowableId(repoPath: string, id: string | undefined): BlockedCoOccupant {
+  const followable = followableIdFor(repoPath, id);
+  const co: BlockedCoOccupant = followable === undefined ? { repoPath, route: { repoPath } } : { repoPath, route: { repoPath, id: followable } };
+  if (id !== undefined) candidateIdOf.set(co, id);
+  return co;
 }
 
 /** What the by-id clear sees for one id: its first ACTIVE match and EVERY pending entry sharing it. */
@@ -3999,6 +4030,40 @@ function blockedCoOccupantForReferencer(repoPath: string, sourceFile: string): B
   return routeWithFollowableId(repoPath, quarantineLatchFileIdsFor(ownEntry)[0]);
 }
 
+function foreignBlockerDisclosure(foreign: MergeQuarantineEntry): ContentKeptBlockedBy {
+  return { repoPath: foreign.repoPath, id: followableIdFor(foreign.repoPath, quarantineLatchFileIdsFor(foreign)[0]) };
+}
+
+/**
+ * The foreign blocker standing behind `repoPath`'s OWN entries (asked with those excluded), or undefined. Used to record
+ * `blockedBy` for a LIVE co-occupant that a sweep classified without it.
+ *
+ * @decision 613e4592 (round 4) — a foreign blocker never demotes an oracle-blocked claimant to content-kept.
+ */
+function foreignBlockerBehindOwnEntries(repoPath: string): ContentKeptBlockedBy | undefined {
+  const wantedIdentity = directPathIdentity(repoPath);
+  const ownEntries = new Set([...activeQuarantines.values(), ...pendingUnresolvedQuarantines.map((p) => p.entry)].filter((e) => directPathIdentity(e.repoPath) === wantedIdentity));
+  if (ownEntries.size === 0) return undefined;
+  const foreign = stillBlockedEntryFor(repoPath, ownEntries);
+  return foreign && directPathIdentity(foreign.repoPath) !== wantedIdentity ? foreignBlockerDisclosure(foreign) : undefined;
+}
+
+/**
+ * The ordered "clear the blocker FIRST, then the claimant" clause for every kept referencer that is BOTH still blocked by its own
+ * entry AND held behind a foreign blocker (`blockedBy` keyed by a repoPath in `liveRefs`). Empty string when none.
+ *
+ * @decision 613e4592 (round 4) — the first result carries every step, in order.
+ */
+function liveForeignBlockedOrderClause(liveRefs: readonly string[], blockedBy?: ReadonlyMap<string, ContentKeptBlockedBy>): string {
+  const clauses = liveRefs.flatMap((rp) => {
+    const b = blockedBy?.get(rp);
+    if (!b) return [];
+    const first = b.id ? `clear '${b.repoPath}' first (POST /internal/merge-quarantine/clear-by-path with {"id":"${b.id}"}, or its repoPath)` : `clear '${b.repoPath}' first (by its repoPath)`;
+    return [`'${rp}' is ALSO blocked behind a DIFFERENT identity's entry ('${b.repoPath}') — to release it, in order: ${first}, THEN clear '${rp}' by its own repoPath (its stillBlockedCoOccupants route).`];
+  });
+  return clauses.join(" ");
+}
+
 /**
  * The ONE shared classification for a kept `{repoPath, sourceFile}` pair, from EITHER
  * {@link protectForeignTmpResidueBeforeSweep}'s own double-fault `kept` array or either sweep function's
@@ -4012,13 +4077,22 @@ function blockedCoOccupantForReferencer(repoPath: string, sourceFile: string): B
  * @decision 25d0d45b (Round 4) — REPLACES `repoPathIsLiveBlockedCoOccupant`, which routed `repoPath` to
  * WHATEVER entry blocked it, even an independent identity's own. Call identically at every kept-pair site.
  */
-function classifyKeptRepoPath(repoPath: string, sourceFile: string): { live: true; coOccupant: BlockedCoOccupant } | { live: false; blockedBy?: ContentKeptBlockedBy } {
+function classifyKeptRepoPath(repoPath: string, sourceFile: string): { live: true; coOccupant: BlockedCoOccupant; blockedBy?: ContentKeptBlockedBy } | { live: false; blockedBy?: ContentKeptBlockedBy } {
   const co = blockedCoOccupantForReferencer(repoPath, sourceFile);
   if (co.route.id !== undefined) return { live: true, coOccupant: co };
   // An id-less route means EITHER "no entry of repoPath's own" OR "its own entry, but the id is ambiguous
   // (routeWithFollowableId)". The `stillBlockedEntryFor` fallback below tells the two apart: an own-entry
   // blocker keeps it LIVE (id-less route), anything else is content-kept.
+  const wantedIdentity = directPathIdentity(repoPath);
+  // @decision 613e4592 — ask the SAME lookup with the claimant's OWN entries excluded: its own entry must not hide a foreign blocker (ownIdentityEntryFor returns it first), and clearing the claimant never releases it from that blocker.
+  const ownEntries = new Set([...activeQuarantines.values(), ...pendingUnresolvedQuarantines.map((p) => p.entry)].filter((e) => directPathIdentity(e.repoPath) === wantedIdentity));
+  const foreign = ownEntries.size > 0 ? stillBlockedEntryFor(repoPath, ownEntries) : undefined;
+  if (foreign && directPathIdentity(foreign.repoPath) !== wantedIdentity) {
+    // @decision 613e4592 (round 4) — the claimant has its OWN live entry, which the un-excluded oracle names, so it IS blocked: it stays a live co-occupant (its id-less {repoPath} route, from `co`) AND records the foreign blocker, both at once. Content-kept is only for a NON-blocked owner.
+    return { live: true, coOccupant: co, blockedBy: foreignBlockerDisclosure(foreign) };
+  }
   const blocker = stillBlockedEntryFor(repoPath);
+  // @decision 613e4592 — a still-blocked list names ONLY what the oracle (stillBlockedEntryFor) says is blocked: a mere physical owner of the kept file is not, so it is content-kept, never given a route.
   if (!blocker) return { live: false };
   // @decision 25d0d45b (Round 5, MINOR) — a spelling/case/separator variant of `repoPath` ITSELF can
   // fail `blockedCoOccupantForReferencer`'s bare string match yet still resolve here. Compare by
@@ -4026,7 +4100,7 @@ function classifyKeptRepoPath(repoPath: string, sourceFile: string): { live: tru
   if (directPathIdentity(blocker.repoPath) === directPathIdentity(repoPath)) {
     return { live: true, coOccupant: routeWithFollowableId(repoPath, quarantineLatchFileIdsFor(blocker)[0]) };
   }
-  return { live: false, blockedBy: { repoPath: blocker.repoPath, id: followableIdOrUndefined(quarantineLatchFileIdsFor(blocker)[0]) } };
+  return { live: false, blockedBy: { repoPath: blocker.repoPath, id: followableIdFor(blocker.repoPath, quarantineLatchFileIdsFor(blocker)[0]) } };
 }
 
 /**
@@ -4056,6 +4130,9 @@ function reclassifyNonLiveReferencing(
       referencing.delete(rp);
       contentKept.set(rp, sf);
       if (classification.blockedBy) contentKeptBlockedBy.set(rp, classification.blockedBy);
+    } else if (classification.blockedBy) {
+      // @decision 613e4592 (round 4) — live AND behind a foreign blocker: stays in `referencing`, blockedBy recorded.
+      contentKeptBlockedBy.set(rp, classification.blockedBy);
     }
   }
 }
@@ -4169,14 +4246,23 @@ function dropDelegatedReferencersNoLongerLive(referencing: Map<string, BlockedCo
  * when the two sourceFiles genuinely differ. See the decision record's "Round 4" section. */
 function blockedCoOccupantBothRoutes(repoPath: string, relocatedSourceFile: string, keptSourceFile: string): BlockedCoOccupant {
   if (relocatedSourceFile === keptSourceFile) return blockedCoOccupant(repoPath, relocatedSourceFile);
-  const keptId = followableIdOrUndefined(pendingLatchIdFor(keptSourceFile));
-  // @decision c4f0d786 — following BOTH ids (route + alsoClear) that still leaves another pending entry of this claimant means no id step releases it: {repoPath} alone does.
-  if (idsLeaveOtherPendingEntries(repoPath, [pendingLatchIdFor(relocatedSourceFile), pendingLatchIdFor(keptSourceFile)])) return { repoPath, route: { repoPath } };
-  // @decision b6f573cf — a dead kept id drops the ID, never the STEP: the OLD file still durably holds this
+  return twoStepRoute(repoPath, pendingLatchIdFor(relocatedSourceFile), pendingLatchIdFor(keptSourceFile));
+}
+
+/** The raw (pre-guard) candidate id a route was built from, so {@link mergeKeptAndRelocatedCoOccupant} can judge the UNION. */
+const candidateIdOf = new WeakMap<BlockedCoOccupant, string>();
+
+/** THE one two-step (route + alsoClear) builder, shared by {@link blockedCoOccupantBothRoutes} and {@link mergeKeptAndRelocatedCoOccupant}. */
+function twoStepRoute(repoPath: string, relocCandidate: string | undefined, keptCandidate: string | undefined): BlockedCoOccupant {
+  // @decision b6f573cf — a dead id (either one) drops the ID, never the STEP: the OLD file still durably holds this
   // identity's record, so `alsoClear` stays (id-less) and the reason text names the second step by repoPath.
+  const [relocId, keptId] = [relocCandidate, keptCandidate].map((i) => (i === undefined || routeIdWouldBeRefused(i) ? undefined : i));
+  const liveIds = [relocId, keptId].filter((i): i is string => i !== undefined);
+  // @decision c4f0d786 — ids (route + alsoClear) that do not TOGETHER release exactly this claimant: no id step is offered, {repoPath} alone is. (613e4592 widened the test to the shared guard.)
+  if (liveIds.length > 0 && !routeIdsReleaseOnlyClaimant(repoPath, liveIds, liveIds.length < 2)) return { repoPath, route: { repoPath } };
   return {
     repoPath,
-    route: routeWithFollowableId(repoPath, pendingLatchIdFor(relocatedSourceFile), [pendingLatchIdFor(keptSourceFile)]).route,
+    route: relocId === undefined ? { repoPath } : { repoPath, id: relocId },
     alsoClear: keptId === undefined ? { repoPath } : { repoPath, id: keptId },
   };
 }
@@ -4191,9 +4277,9 @@ function blockedCoOccupantBothRoutes(repoPath: string, relocatedSourceFile: stri
  * two IDENTICAL route ids collapse to one route, never a nonsensical "clear id X FIRST, THEN id X". */
 function mergeKeptAndRelocatedCoOccupant(relocatedCo: BlockedCoOccupant, keptCo: BlockedCoOccupant): BlockedCoOccupant {
   if (relocatedCo.route.id !== undefined && relocatedCo.route.id === keptCo.route.id) return { repoPath: relocatedCo.repoPath, route: relocatedCo.route };
-  // @decision b6f573cf — an id-less kept route (an ambiguous shared id, or the unreachable no-owner fallback)
-  // keeps the second STEP as an id-less `alsoClear`; only the id is dropped.
-  return { repoPath: relocatedCo.repoPath, route: relocatedCo.route, alsoClear: keptCo.route.id === undefined ? { repoPath: keptCo.route.repoPath } : { repoPath: keptCo.route.repoPath, id: keptCo.route.id } };
+  // @decision 613e4592 — each input route was judged ALONE, so a claimant with two entries had both ids withheld; judge the UNION of the
+  // candidate ids instead (id1 then id2 release it), exactly as blockedCoOccupantBothRoutes does.
+  return twoStepRoute(relocatedCo.repoPath, candidateIdOf.get(relocatedCo) ?? relocatedCo.route.id, candidateIdOf.get(keptCo) ?? keptCo.route.id);
 }
 
 /**
@@ -4258,6 +4344,7 @@ export function relocatedCoOccupantsReasonTestOnly(coOccupants: BlockedCoOccupan
  *  state built through the other `*TestOnly` seams. Never imported by `index.ts` (the `TestOnly` suffix is
  *  load-bearing for `no-src-testonly-import-guard.mjs`). */
 export function routeIdWouldBeRefusedTestOnly(id: string): boolean { return routeIdWouldBeRefused(id); }
+export function routeIdsReleaseOnlyClaimantTestOnly(repoPath: string, ids: Array<string | undefined>): boolean { return routeIdsReleaseOnlyClaimant(repoPath, ids); }
 export function classifyKeptRepoPathTestOnly(repoPath: string, sourceFile: string): ReturnType<typeof classifyKeptRepoPath> { return classifyKeptRepoPath(repoPath, sourceFile); }
 export function blockedCoOccupantBothRoutesTestOnly(repoPath: string, relocatedSourceFile: string, keptSourceFile: string): BlockedCoOccupant { return blockedCoOccupantBothRoutes(repoPath, relocatedSourceFile, keptSourceFile); }
 export function blockedCoOccupantTestOnly(repoPath: string, sourceFile: string): BlockedCoOccupant { return blockedCoOccupant(repoPath, sourceFile); }
@@ -8193,6 +8280,16 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
   };
 }
 
+/** True when `entry` carries `identity` (a {@link directPathIdentity}) as a folded-in contributor.
+ *
+ * @decision 3b1944b6 (Round 6, CR4 finding 3) — keep the `reducedContributorRepoPaths` arm, or a reduced-out identity reads as free.
+ *
+ * Shared by {@link ownIdentityEntryFor} and {@link routeIdsReleaseOnlyClaimant}: one definition of "contributor". */
+function entryNamesIdentityAsContributor(entry: MergeQuarantineEntry, identity: string): boolean {
+  return (entry.contributorRepoPaths?.some((c) => directPathIdentity(c) === identity) ?? false)
+    || (entry.reducedContributorRepoPaths?.includes(identity) ?? false);
+}
+
 /** For a repoPath that is NOT currently resolvable, its OWN recorded entry (active, any key; else
  *  pending) by {@link directPathIdentity} — never the generic key-based lookup, which can surface an
  *  unrelated repo's entry merely occupying the same walked-up key (card 883e29bc, round 2). Also matches
@@ -8208,15 +8305,10 @@ export function clearMergeQuarantineByKey(key: string, identityRepoPath: string,
  *  See the decision record's "Round 2" section for the Y-is-both-things repro this closes.
  *
  *  Returns undefined when repoPath has no entry of its own, and is contributor to none, at all. */
-function ownIdentityEntryFor(repoPath: string): MergeQuarantineEntry | undefined {
+function ownIdentityEntryFor(repoPath: string, excludedEntries?: ReadonlySet<MergeQuarantineEntry>): MergeQuarantineEntry | undefined {
   const identity = directPathIdentity(repoPath);
-  const isOwnIdentity = (entry: MergeQuarantineEntry): boolean => directPathIdentity(entry.repoPath) === identity;
-  // @decision 3b1944b6 (Round 6, CR4 finding 3) — ALSO true via `reducedContributorRepoPaths` (already
-  // normalized, never re-mapped) — else a reduced-out identity reads as "blocked by nothing" once its own
-  // record is gone, over-reporting it as genuinely lifted while its token stays folded in.
-  const isContributor = (entry: MergeQuarantineEntry): boolean =>
-    (entry.contributorRepoPaths?.some((c) => directPathIdentity(c) === identity) ?? false)
-    || (entry.reducedContributorRepoPaths?.includes(identity) ?? false);
+  const isOwnIdentity = (entry: MergeQuarantineEntry): boolean => !excludedEntries?.has(entry) && directPathIdentity(entry.repoPath) === identity;
+  const isContributor = (entry: MergeQuarantineEntry): boolean => !excludedEntries?.has(entry) && entryNamesIdentityAsContributor(entry, identity);
   for (const entry of activeQuarantines.values()) {
     if (isOwnIdentity(entry)) return entry;
   }
@@ -9096,6 +9188,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
           const classification = classifyKeptRepoPath(kc.repoPath, kc.sourceFile);
           if (classification.live) {
             keptReferencingRepoPaths.set(kc.repoPath, classification.coOccupant);
+            if (classification.blockedBy) keptContentBlockedBy.set(kc.repoPath, classification.blockedBy);
           } else {
             keptContentRepoPaths.add(kc.repoPath);
             noteContentKeptFile(contentKeptFiles, kc.repoPath, kc.sourceFile);
@@ -9122,8 +9215,20 @@ function tryClearMergeQuarantineByOwnIdentityBody(
       const sweepResult = sweepOwnLatchFileUnlessOwnedElsewhere(p.sourceFile, p.entry.tokens);
       if (sweepResult.unlinkFailedFile) unlinkFailedFileNames.add(sweepResult.unlinkFailedFile);
       if (sweepResult.kept) {
-        if (sweepResult.referencingRepoPaths.length > 0) for (const rp of sweepResult.referencingRepoPaths) keptReferencingRepoPaths.set(rp, blockedCoOccupant(rp, p.sourceFile));
-        else anyKeptUnattributed = true;
+        if (sweepResult.referencingRepoPaths.length > 0) {
+          // @decision 613e4592 — classify, never the bare blockedCoOccupant: a referencer the oracle says is NOT blocked is content-kept (parity with clearMergeQuarantineByKey's reclassify).
+          for (const rp of sweepResult.referencingRepoPaths) {
+            const classification = classifyKeptRepoPath(rp, p.sourceFile);
+            if (classification.live) {
+              keptReferencingRepoPaths.set(rp, classification.coOccupant);
+              if (classification.blockedBy) keptContentBlockedBy.set(rp, classification.blockedBy);
+            } else {
+              keptContentRepoPaths.add(rp);
+              noteContentKeptFile(contentKeptFiles, rp, p.sourceFile);
+              if (classification.blockedBy) keptContentBlockedBy.set(rp, classification.blockedBy);
+            }
+          }
+        } else anyKeptUnattributed = true;
         if (sweepResult.unlinkFailed) pendingWriteFailed = true;
         // @decision d2592cd5 (Follow-up) — this entry's own sourceFile sweep kept something too.
         pendingAnyKept = true;
@@ -9193,6 +9298,12 @@ function tryClearMergeQuarantineByOwnIdentityBody(
   dropContentKeepsWhoseFilesAreGone(keptContentRepoPaths, keptContentBlockedBy, contentKeptFiles);
   // @decision c4f0d786 (round 6) — the referencer twin of the ghost drop above, decided from MEMORY by classifyKeptRepoPath (the by-key reclassify's own decision), never by route id or disk. Only removes a disclosure.
   dropDelegatedReferencersNoLongerLive(keptReferencingRepoPaths, relocatedCoOccupants, delegatedKept);
+  // @decision 613e4592 (round 4) — a live referencer a sweep classified without its foreign blocker still records it, so the result carries every step.
+  for (const rp of keptReferencingRepoPaths.keys()) {
+    if (keptContentBlockedBy.has(rp) || keptContentRepoPaths.has(rp)) continue;
+    const b = foreignBlockerBehindOwnEntries(rp);
+    if (b) keptContentBlockedBy.set(rp, b);
+  }
   // @decision 4b6c8d24 (round 2) — ONE final re-resolve, after every mutation above, never a
   // pre-computed guess — see resolveReleasedAndLiftedRepoPaths's own doc. `excludeRepoPaths` is every
   // repoPath this clear already knows is still blocked — the explicit never-in-both guard.
@@ -9225,7 +9336,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     // (97516691/6ac1894a: `releasedStillBlockedRepoPaths` needs no queried-identity filter — the helper took `[repoPath]` as addressed.)
     return { matched: true, result: {
       wasQuarantined: true, stillQuarantined: true,
-      reason: withUnlinkFailedClause(composeReasonWithRelocated(stillQuarantinedReason(after, repoPath), combinedRelocated), unlinkFailedFileNames),
+      reason: withUnlinkFailedClause(composeReasonWithRelocated([stillQuarantinedReason(after, repoPath), liveForeignBlockedOrderClause([...keptReferencingRepoPaths.keys()], keptContentBlockedBy)].filter((s) => s !== "").join(" "), combinedRelocated), unlinkFailedFileNames),
       liftedRepoPaths: liftedExcludingQueried, releasedRepoPaths: releasedExcludingQueried, releasedStillBlockedRepoPaths,
       ...(provenanceUnknownLifted ? { provenanceUnknown: true as const } : {}),
       stillBlockedCoOccupants: [...combinedRelocated, ...[...keptReferencingRepoPaths.values()].filter((co) => !relocatedSet.has(co.repoPath))],
@@ -9252,7 +9363,7 @@ function tryClearMergeQuarantineByOwnIdentityBody(
     // latch gets the MAY RE-DIVERT text. Disclosure only: what is lifted and deleted is unchanged.
     // @decision c4f0d786 — no ref can name a file this clear removed (the tmp sweep keeps a residue a sibling's sourceFile names).
     const sharedRefs = new Set<string>([...sharedGraduatedRefs, ...sharedCorruptPendingRefsAmong(refs)]);
-    const keptReason = keptReasonForRefs(refs, sharedRefs);
+    const keptReason = [keptReasonForRefs(refs, sharedRefs), liveForeignBlockedOrderClause(refs, keptContentBlockedBy)].filter((s) => s !== "").join(" ");
     // @decision 182c01cc (round 3, M1) — a repoPath BOTH kept and relocated is named ONCE, with BOTH
     // routes, same fix as clearMergeQuarantineByKey's own dedupe — see the decision record.
     const relocatedSet = new Set(relocated.map((co) => co.repoPath));
@@ -9553,25 +9664,27 @@ export function clearBroadUnion(repoPath: string, confirmPaths: string[], dryRun
  * (card `883e29bc`). Factored out so the `direct`-exists-but-unverified branch (card `d163aef5`) can
  * reuse the EXACT same matcher the no-`direct` branch already uses, rather than inventing a second one.
  */
-function findPendingIndicesFor(repoPath: string, key: string): number[] {
+function findPendingIndicesFor(repoPath: string, key: string, excludedEntries?: ReadonlySet<MergeQuarantineEntry>): number[] {
   const identity = directPathIdentity(repoPath);
+  // @decision 613e4592 — `excludedEntries` removes entries from EVERY tier, so a lower tier can still match once the winning one is gone.
+  const pend = (pred: (p: PendingUnresolvedQuarantine) => boolean): number[] => collectPendingIndices((p) => !excludedEntries?.has(p.entry) && pred(p));
   // @decision 188b145f — collect EVERY identity-matching index at the winning tier, never just the first
   // (mirrors `clearMergeQuarantineLatchFile`'s/`clearMergeQuarantineByRecordedPath`'s own `.filter(...)`
   // pending match loops) — see the decision record for why "first hit" silently orphaned the rest forever.
-  let indices = collectPendingIndices((p) => directPathIdentity(p.entry.repoPath) === identity);
+  let indices = pend((p) => directPathIdentity(p.entry.repoPath) === identity);
   if (indices.length === 0) {
     const ancestorIdentity = ancestorAwarePathIdentity(repoPath);
-    indices = collectPendingIndices((p) => ancestorAwarePathIdentity(p.entry.repoPath) === ancestorIdentity);
+    indices = pend((p) => ancestorAwarePathIdentity(p.entry.repoPath) === ancestorIdentity);
   }
   if (indices.length === 0) {
-    indices = collectPendingIndices((p) => isRepoPathCurrentlyResolvable(p.entry.repoPath) && canonicalRepoLockKey(p.entry.repoPath) === key);
+    indices = pend((p) => isRepoPathCurrentlyResolvable(p.entry.repoPath) && canonicalRepoLockKey(p.entry.repoPath) === key);
   }
   if (indices.length === 0) {
     // @decision 883e29bc — match a STILL-unresolvable entry by key, gated on its OWN resolvedKey (PASS
     // 1/1b's divert); never a bare never-resolved no-resolvedKey latch (abccee85/r7's "nothing to walk").
     // @decision 8db913e2 (Follow-up 43cf3b26, CR 46c5c492) — gate on informativeKeysFor (scalar ∪
     // resolvedKeys), never the scalar alone, or a plural-only pending entry never matches here.
-    indices = collectPendingIndices((p) => !isRepoPathCurrentlyResolvable(p.entry.repoPath) && informativeKeysFor(p.entry).length > 0 && canonicalRepoLockKey(p.entry.repoPath) === key);
+    indices = pend((p) => !isRepoPathCurrentlyResolvable(p.entry.repoPath) && informativeKeysFor(p.entry).length > 0 && canonicalRepoLockKey(p.entry.repoPath) === key);
   }
   return indices;
 }
@@ -9671,14 +9784,15 @@ export function activeMergeQuarantineFor(repoPath: string): MergeQuarantineEntry
  * @decision 2a169469 (round 3) — neither omission changes WHETHER a query resolves to SOME entry; see the
  * paragraph above for what it DOES change and how this function compensates.
  */
-function activeMergeQuarantineForPeek(repoPath: string): MergeQuarantineEntry | undefined {
+function activeMergeQuarantineForPeek(repoPath: string, excludedEntries?: ReadonlySet<MergeQuarantineEntry>): MergeQuarantineEntry | undefined {
   const key = canonicalRepoLockKey(repoPath);
-  const direct = activeQuarantines.get(key);
+  const armed = activeQuarantines.get(key);
+  const direct = armed && !excludedEntries?.has(armed) ? armed : undefined;
   if (pendingUnresolvedQuarantines.length === 0) return direct;
   if (direct) {
     if (!isKeyVerifiedFor(direct.repoPath, key)) {
       if (!isRepoPathCurrentlyResolvable(repoPath) && directPathIdentity(direct.repoPath) !== directPathIdentity(repoPath)) {
-        const matchIndices = findPendingIndicesFor(repoPath, key);
+        const matchIndices = findPendingIndicesFor(repoPath, key, excludedEntries);
         if (matchIndices.length > 0) {
           return (pendingUnresolvedQuarantines[matchIndices[0]!] as PendingUnresolvedQuarantine).entry;
         }
@@ -9689,13 +9803,13 @@ function activeMergeQuarantineForPeek(repoPath: string): MergeQuarantineEntry | 
     // Peek never writes, but must still compute WHICH identity would WIN that union — mirrors
     // `consumeMatchedPendingsIntoArmedEntry(siblingIndices, key, direct)`'s own fold: reduce the siblings
     // together first, then union the result with `direct` as the trailing `extra`.
-    const siblingIndices = collectCrossTierSiblingIndices(key, []);
+    const siblingIndices = collectCrossTierSiblingIndices(key, [], excludedEntries);
     if (siblingIndices.length === 0) return direct;
     const siblingEntries = siblingIndices.map((i) => (pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine).entry);
     const unionedSiblings = siblingEntries.slice(1).reduce((acc, e) => unionQuarantineEntries(acc, e), siblingEntries[0] as MergeQuarantineEntry);
     return unionQuarantineEntries(unionedSiblings, direct);
   }
-  const indices = findPendingIndicesFor(repoPath, key);
+  const indices = findPendingIndicesFor(repoPath, key, excludedEntries);
   if (indices.length === 0) return undefined;
   const matched = indices.map((i) => (pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine).entry);
   const first = matched[0] as MergeQuarantineEntry;
@@ -9707,7 +9821,7 @@ function activeMergeQuarantineForPeek(repoPath: string): MergeQuarantineEntry | 
   // The real function would graduate this match (plus any cross-tier sibling) into `activeQuarantines`
   // here once resolvable — mirrors `consumeMatchedPendingsIntoArmedEntry(allIndices, key)`'s own fold:
   // `indices`' own matches first, then any cross-tier siblings, reduced together with no trailing `extra`.
-  const siblingIndices = collectCrossTierSiblingIndices(key, indices);
+  const siblingIndices = collectCrossTierSiblingIndices(key, indices, excludedEntries);
   const allEntries = siblingIndices.length > 0
     ? [...matched, ...siblingIndices.map((i) => (pendingUnresolvedQuarantines[i] as PendingUnresolvedQuarantine).entry)]
     : matched;
@@ -9727,12 +9841,12 @@ function activeMergeQuarantineForPeek(repoPath: string): MergeQuarantineEntry | 
  * directly assert the mirror-of-enforcement invariant this card's own Code Review required: for every
  * probed shape, `!!stillBlockedEntryFor(identity) === !assertRepoNotQuarantined(identity).ok`.
  */
-export function stillBlockedEntryFor(repoPath: string): MergeQuarantineEntry | undefined {
+export function stillBlockedEntryFor(repoPath: string, excludedEntries?: ReadonlySet<MergeQuarantineEntry>): MergeQuarantineEntry | undefined {
   if (!isRepoPathCurrentlyResolvable(repoPath)) {
-    const own = ownIdentityEntryFor(repoPath);
+    const own = ownIdentityEntryFor(repoPath, excludedEntries);
     if (own) return own;
   }
-  return activeMergeQuarantineForPeek(repoPath);
+  return activeMergeQuarantineForPeek(repoPath, excludedEntries);
 }
 
 /** Diagnostic snapshot only (e.g. a status endpoint) — never used to decide anything itself. Includes
@@ -9949,7 +10063,8 @@ function stillQuarantinedReason(after: MergeQuarantineEntry, queriedRepoPath: st
     return `${reason} — clearing by ${JSON.stringify({ repoPath: after.repoPath })} directly would itself refuse right now (a separately-raised contributor is still folded in): ${remediationTextFor([after.repoPath], ambiguousIdentities, false, entryGenuinelyOwnsALiveArmedKeyOfItsOwn(after), broadUnionTargetFor(after.repoPath).accepts)}.`;
   }
   // @decision 8e8bc0be — name `{id}` only when the by-id clear would follow it (the shared core), never on the ambiguity count alone.
-  const clearByIdSuggestion = totalAmbiguousCount(ambiguousIdentities) > 0 || latchId === undefined || routeIdWouldBeRefused(latchId) ? "" : ` or ${JSON.stringify({ id: latchId })}`;
+  // @decision 613e4592 — and only when that id releases exactly `after`'s identity (the shared guard); the descriptive "latch id" text above is unaffected.
+  const clearByIdSuggestion = totalAmbiguousCount(ambiguousIdentities) > 0 || followableIdFor(after.repoPath, latchId) === undefined ? "" : ` or ${JSON.stringify({ id: latchId })}`;
   return `${reason} — use POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: after.repoPath })}${clearByIdSuggestion} to clear it directly.`;
 }
 
@@ -10057,7 +10172,9 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
     // clearMergeQuarantineLatchFile's own still-quarantined branch — this used to drop it silently.
     return {
       wasQuarantined: true,
-      reason: withUnlinkFailedClause(composeReasonWithRelocated(stillQuarantinedReason(after, repoPath), splitCoOccupants(stillBlocked, clearResult?.referencingRepoPaths).relocated), clearResult?.unlinkFailedFiles ?? []),
+      reason: withUnlinkFailedClause(composeReasonWithRelocated([stillQuarantinedReason(after, repoPath), liveForeignBlockedOrderClause(clearResult?.referencingRepoPaths ?? [], new Map(clearResult?.contentKeptBlockedBy?.map((e) => [e.repoPath, e.blockedBy])))].filter((s) => s !== "").join(" "), splitCoOccupants(stillBlocked, clearResult?.referencingRepoPaths).relocated), clearResult?.unlinkFailedFiles ?? []),
+      ...(clearResult?.referencingRepoPaths?.length ? { referencingRepoPaths: clearResult.referencingRepoPaths } : {}),
+      ...(clearResult?.contentKeptBlockedBy?.length ? { contentKeptBlockedBy: clearResult.contentKeptBlockedBy } : {}),
       liftedRepoPaths, ...provenanceUnknownFields,
       stillBlockedCoOccupants: stillBlocked,
     };
@@ -10090,7 +10207,7 @@ export function clearMergeQuarantineReporting(repoPath: string): { wasQuarantine
         ? clearResult.reason
         : withUnlinkFailedClause(composeReasonWithRelocated(
             (clearResult.referencingRepoPaths?.length ?? 0) > 0
-              ? keptReasonForRefs(clearResult.referencingRepoPaths ?? [], sharedCorruptPendingRefsAmong(clearResult.referencingRepoPaths ?? []))
+              ? [keptReasonForRefs(clearResult.referencingRepoPaths ?? [], sharedCorruptPendingRefsAmong(clearResult.referencingRepoPaths ?? [])), liveForeignBlockedOrderClause(clearResult.referencingRepoPaths ?? [], new Map(clearResult.contentKeptBlockedBy?.map((e) => [e.repoPath, e.blockedBy])))].filter((s) => s !== "").join(" ")
               : (clearResult.contentKeptRepoPaths?.length ?? 0) > 0
                 // @decision 25d0d45b (Round 5) — rebuild the repoPath-keyed Map `contentKeptOnlyReasonFor`
                 // wants from the array-shaped `contentKeptBlockedBy` this result actually carries.
@@ -10621,7 +10738,8 @@ export function assertRepoNotQuarantined(repoPath: string): { ok: true } | { ok:
       return `a human clears it: this latch id is ambiguous right now (${collisionClause}), so ${remediationTextFor([q.repoPath], ambiguousIdentities, ownPathViable, ownKeyOwnership, broadUnionTargetFor(q.repoPath).accepts)}`;
     })()
     // @decision 8e8bc0be — `{id}` only when the by-id clear would follow it (the shared core).
-    : `a human clears it: POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })}${latchId === undefined || routeIdWouldBeRefused(latchId) ? "" : ` or ${JSON.stringify({ id: latchId })}`} ` +
+    // @decision 613e4592 — `{id}` is an OFFER only when it releases exactly `q`'s identity (the shared guard).
+    : `a human clears it: POST /internal/merge-quarantine/clear-by-path with ${JSON.stringify({ repoPath: q.repoPath })}${followableIdFor(q.repoPath, latchId) === undefined ? "" : ` or ${JSON.stringify({ id: latchId })}`} ` +
       `(the project-resolved POST /internal/merge-quarantine/clear works only if a registered project's repo resolves to this entry)`;
   // Round 5 MAJOR (blocking) — q.reason is embedded verbatim below, and every real unconfirmed-kill raise
   // builds it via unconfirmedKillReason(), which unconditionally names the single-identity `/clear` route.

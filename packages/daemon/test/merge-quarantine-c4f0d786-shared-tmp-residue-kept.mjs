@@ -294,9 +294,11 @@ try {
       check(`${label} *** c4f0d786 round 4 *** no false disclosure: no latchKept, no referencingRepoPaths, no co-occupant naming y`, res.latchKept !== true && (res.referencingRepoPaths ?? []).length === 0 && !cos.some((c) => mq.directPathIdentity(c.repoPath) === id));
     } else {
       check(`${label} *** c4f0d786 *** the surviving pending entry keeps its tmp on disk`, pendingAfter === 1 && tmpAfter);
-      check(`${label} the disclosure is concrete: latchKept, exactly one co-occupant (y)`, res.latchKept === true && cos.length === 1 && mq.directPathIdentity(cos[0].repoPath) === id);
+      // 613e4592 round 4: the foreign host at y's fresh key still blocks y after ANY clear of y's own entry, so no id is offered for y; y is oracle-blocked by its
+      // own entry, so it stays a LIVE co-occupant with its id-less {repoPath} route AND names the host as its blocker (was: y named with the shared bare-hash id).
+      check(`${label} the disclosure is concrete: latchKept, y a live co-occupant (id-less {repoPath} route) with the foreign host as its blocker, not content-kept`, res.latchKept === true && !(res.contentKeptRepoPaths ?? []).includes(y) && (res.contentKeptBlockedBy ?? []).some((e) => e.repoPath === y && e.blockedBy.repoPath === other) && cos.some((c) => mq.directPathIdentity(c.repoPath) === id && c.route.id === undefined && c.alsoClear?.id === undefined));
       const livePending = mq.listPendingMergeQuarantinesTestOnly();
-      check(`${label} the disclosure is truthful: the offered route.id is backed IN MEMORY by a pending entry of y under that very id, and a file exists`, cos[0].route.id === hId && livePending.some((p) => mq.directPathIdentity(p.repoPath) === id && p.sourceFile === tmpName) && listDir().some((f) => f.startsWith(cos[0].route.id)));
+      check(`${label} the disclosure is truthful: y's surviving pending entry is still held IN MEMORY under the tmp, and the file exists`, livePending.some((p) => mq.directPathIdentity(p.repoPath) === id && p.sourceFile === tmpName) && listDir().includes(tmpName));
       check(`${label} a fresh boot re-arms y from the surviving tmp`, (await bootArmed([y])).length === 1);
     }
   }
@@ -345,7 +347,8 @@ try {
   // ---- H (round 6): a live owner whose file is on disk is kept by BOTH routes, which agree on one state ---------------
   // Active E is armed at a FAKE key K1, but its fresh write target `<hash(K2)>.json` is Y's pending sourceFile holding Y's
   // content, so physicalOwnerRepoPaths counts E as that file's owner. clearing Y (ByRecordedPath and clearMergeQuarantine,
-  // each on its own fresh state) must name E as kept (latchKept, "stays on disk ... WILL RE-DIVERT"), leave the file, and
+  // each on its own fresh state) must disclose E as the kept file's owner (latchKept + contentKeptRepoPaths; E is NOT blocked
+  // per the in-memory oracle, so it is not a blocked co-occupant, 613e4592), leave the file, and
   // a boot re-arms Y. An id-keyed re-check (E's armed-key ids never contain this file's id) used to drop E.
   // HONEST SCOPE: H pins parity between the two routes and guards against the round-5 id predicate. It does NOT discriminate
   // the round-6 delegated-keep branch, because E is re-kept by the body's own pending pass after the removals. The test that
@@ -367,11 +370,14 @@ try {
       const res = mq[route](Y);
       const cos = res.stillBlockedCoOccupants ?? [];
       const nm = (p) => (p === E ? "E" : p === Y ? "Y" : path.basename(p));
-      outcomes[route] = { latchKept: res.latchKept === true, refs: (res.referencingRepoPaths ?? []).map(nm).sort().join(","), named: cos.map((c) => nm(c.repoPath)).sort().join(",") };
+      outcomes[route] = { latchKept: res.latchKept === true, refs: (res.referencingRepoPaths ?? []).map(nm).sort().join(","), kept: (res.contentKeptRepoPaths ?? []).map(nm).sort().join(","), named: cos.map((c) => nm(c.repoPath)).sort().join(",") };
       console.log(`INFO  ${label} ${JSON.stringify(outcomes[route])}`);
-      check(`${label} *** c4f0d786 round 6 *** E (a live owner of the file) is kept: latchKept, referencingRepoPaths and a co-occupant name E`, res.latchKept === true && (res.referencingRepoPaths ?? []).includes(E) && cos.some((c) => c.repoPath === E));
+      // 613e4592: a "still blocked" list names ONLY what the in-memory oracle (stillBlockedEntryFor / assertRepoNotQuarantined) says is blocked. E's active entry sits at a
+      // stale key, so the oracle says E is NOT blocked (asserted below): E is disclosed as the kept file's owner (latchKept + contentKeptRepoPaths), never as a blocked co-occupant with a route.
+      check(`${label} E is NOT blocked per the in-memory oracle`, !mq.stillBlockedEntryFor(E) && mq.assertRepoNotQuarantined(E).ok === true);
+      check(`${label} *** 613e4592 *** E (the kept file's owner) is disclosed as content-kept (latchKept) and is NOT in stillBlockedCoOccupants or referencingRepoPaths`, res.latchKept === true && (res.contentKeptRepoPaths ?? []).includes(E) && !(res.referencingRepoPaths ?? []).includes(E) && !cos.some((c) => c.repoPath === E));
       check(`${label} the file stays on disk and Y was lifted`, listDir().includes(f) && (res.liftedRepoPaths ?? []).includes(Y));
-      if (route === "clearMergeQuarantineByRecordedPath") check(`${label} the reason says it stays on disk and WILL RE-DIVERT`, /stays on disk/.test(res.reason ?? "") && /WILL RE-DIVERT/.test(res.reason ?? ""));
+      if (route === "clearMergeQuarantineByRecordedPath") check(`${label} the reason says the file was kept rather than destroyed and will re-divert`, /kept rather than destroyed/.test(res.reason ?? "") && /re-divert/.test(res.reason ?? ""));
       check(`${label} a fresh boot re-arms Y from the file`, (await bootArmed([Y])).length === 1);
     }
     check("[H] PARITY: both routes report the same kept state for the same shape (latchKept, referencers, named co-occupants)", JSON.stringify(outcomes.clearMergeQuarantineByRecordedPath) === JSON.stringify(outcomes.clearMergeQuarantine));

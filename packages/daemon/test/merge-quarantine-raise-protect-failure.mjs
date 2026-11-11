@@ -2101,12 +2101,29 @@ try {
   // vacuously proves "coverage" for an empty on-disk token array, so provenCoverage alone would otherwise
   // have licensed the unlink) — never the generic, unattributed "could not be confirmed covered" bucket.
   // Pre-existing behavior (95ea8d3f) — passes identically on the parent, unaffected by this card.
-  check("(crnit2) the sweep-path veto itself (not the generic unattributed-kept bucket) names d2",
-    clearResultNit2?.latchKept === true && (clearResultNit2?.referencingRepoPaths ?? []).includes(d2));
+  // 613e4592 round 4: d2's pending entry sits BEHIND r's active raise at the shared key, and the oracle says d2 IS blocked (its own entry), so the veto
+  // names d2 as a LIVE co-occupant with its id-less {repoPath} route AND records r as the blocker, in the same first result (never content-kept).
+  check("(crnit2) the sweep-path veto itself (not the generic unattributed-kept bucket) names d2: latchKept, d2 a live referencer with blockedBy r, NOT content-kept",
+    clearResultNit2?.latchKept === true && (clearResultNit2?.referencingRepoPaths ?? []).includes(d2) && !(clearResultNit2?.contentKeptRepoPaths ?? []).includes(d2)
+    && (clearResultNit2?.contentKeptBlockedBy ?? []).some((e) => e.repoPath === d2 && e.blockedBy.repoPath === r));
+  const d2Co = (clearResultNit2?.stillBlockedCoOccupants ?? []).find((c) => c.repoPath === d2);
+  check("(crnit2) the first result offers d2's own id-less {repoPath} step", d2Co !== undefined && d2Co.route.id === undefined && d2Co.route.repoPath === d2);
+  check("(crnit2) the first result's reason renders the order: r first, then d2", (() => { const t = clearResultNit2?.reason ?? ""; const i = t.indexOf(`clear '${r}' first`); return i >= 0 && t.indexOf(`THEN clear '${d2}'`) > i; })());
 
   const freshNit2 = await freshBootModule();
   freshNit2.reenterMergeQuarantinesAtBoot([d1, d2]);
   check("(crnit2, reboot) d2 SURVIVES the reboot (never destroyed as collateral)", freshNit2.listActiveMergeQuarantines().some((q) => q.repoPath === d2));
+
+  // FOLLOW every step in the order the result gives it (blocker r, then d2): d2 ends released, and nothing else was released.
+  {
+    const bbNit2 = clearResultNit2.contentKeptBlockedBy.find((e) => e.repoPath === d2).blockedBy;
+    const before = listActiveMergeQuarantines().map((q) => q.repoPath);
+    for (const s of [bbNit2, d2Co.route]) { if (s.id) clearMergeQuarantineLatchFile(s.id); else clearMergeQuarantine(s.repoPath); }
+    const after = listActiveMergeQuarantines().map((q) => q.repoPath);
+    check("(crnit2, follow) following every step releases d2 (not quarantined)", assertRepoNotQuarantined(d2).ok === true && !after.includes(d2));
+    console.log(`INFO  crnit2 follow: removed=${JSON.stringify(before.filter((p) => !after.includes(p)).map((p) => path.basename(p)))} added=${JSON.stringify(after.filter((p) => !before.includes(p)).map((p) => path.basename(p)))}`);
+    check("(crnit2, follow) nothing else was released (only r and d2 left the active set; d1, a pending placeholder, merely graduating into the active list is not a release)", before.filter((p) => !after.includes(p)).every((p) => p === r || p === d2));
+  }
   }
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════════
