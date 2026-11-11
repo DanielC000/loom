@@ -4876,6 +4876,38 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
 }
 
 /**
+ * Unlink a pending file whose entry {@link mergeTokenIntoPendingEntries} just absorbed into `merged`
+ * (already durably written). Never a bare unlink: the content precondition (readable record, same
+ * identity, every on-disk token in `merged.tokens`) runs first and anything unprovable keeps the file;
+ * ownership is then decided by {@link sweepOwnLatchFileUnlessOwnedElsewhere} with NO `candidateTokens`, so
+ * an active entry's own armed-key file is never settled by coverage. A real failed unlink is warned.
+ *
+ * @decision 5fa6069e — absorbed-file cleanup stays on this ownership-gated path; do not widen to a bare unlink.
+ */
+function sweepAbsorbedPendingFile(filename: string, merged: MergeQuarantineEntry, freshToken: string): void {
+  const full = path.join(MERGE_QUARANTINE_DIR, filename);
+  let parsed: unknown;
+  try { parsed = JSON.parse(fs.readFileSync(full, "utf8")); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // already gone: nothing stale left
+    // A non-ENOENT read failure (EACCES/EBUSY) or corrupt JSON proves nothing about the content: keep it.
+    // eslint-disable-next-line no-console
+    console.warn(`[merge-quarantine] kept ${merged.repoPath}'s absorbed pending latch ${filename}: its content could not be read to prove it is covered.`);
+    return;
+  }
+  if (!isReadableLatchRecord(parsed) || typeof parsed.repoPath !== "string") return;
+  if (directPathIdentity(parsed.repoPath) !== directPathIdentity(merged.repoPath)) return; // a foreign occupant's record
+  // Only the merged record can hold the FRESH raise's token: a file carrying it IS (a copy of) the merged
+  // record, never a stale absorbed one.
+  if ((Array.isArray(parsed.tokens) && parsed.tokens.includes(freshToken)) || parsed.token === freshToken) return;
+  if (!markedFinalFullyCoveredByClear(full, merged.tokens)) return;
+  const result = sweepOwnLatchFileUnlessOwnedElsewhere(filename);
+  if (result.unlinkFailed) {
+    // eslint-disable-next-line no-console
+    console.warn(`[merge-quarantine] could not unlink ${merged.repoPath}'s absorbed pending latch ${filename} — a reboot may re-read it as a second, overlapping record.`);
+  }
+}
+
+/**
  * Merge a FRESH `token` into the pending entry/entries at `indices` — all already matched, by the caller,
  * against the SAME still-unresolvable `repoPath` — WITHOUT arming anything. Unlike {@link
  * consumeMatchedPendingsIntoArmedEntry}, this never touches `activeQuarantines` and never derives a write
@@ -4891,9 +4923,11 @@ function protectOccupantContentBeforeDelete(final: string, occupantRepoPath: str
  * uses, never hand-rolled a second time.
  * Keeps (and durably rewrites) the EARLIEST-`enteredAt` matched entry's own `sourceFile` — mirrors
  * `enterMergeQuarantine`'s own "existing" branch's "longest-outstanding raise wins the identity" rule —
- * folding every OTHER matched entry's own `sourceFile` into `orphanLatchFiles` (defensive: in production
- * this is expected to always be a single match, since the caller's own `siblingIndices` is always empty
- * while `repoPath` is unresolvable).
+ * folding every OTHER matched entry's own `sourceFile` into `orphanLatchFiles`. More than one match IS a
+ * real shape (64283e06: a boot-diverted twin plus an independent same-identity pending). Once the merged
+ * record is durably written, each absorbed file is unlinked via {@link sweepAbsorbedPendingFile} unless a
+ * surviving entry owns it (e.g. the twin's own armed-key latch, which stays as a stale subset that fails
+ * closed and re-unions at the next boot) or its content cannot be proven covered.
  *
  * @decision 64283e06 — a matched entry can be an 883e29bc boot-diverted TWIN (same reference ALSO armed
  * in `activeQuarantines`) — never rewrite only the pending side; route each through {@link
@@ -4969,6 +5003,15 @@ function mergeTokenIntoPendingEntries(indices: number[], token: string): string 
   if (written.ok) {
     if (written.entry !== merged) replaceEntryEverywhere(activeQuarantines, merged, written.entry);
     pendingUnresolvedQuarantines.push({ entry: written.entry, sourceFile: written.filename });
+    // @decision 5fa6069e — `written` now durably carries EVERY matched entry's tokens, so an absorbed
+    // `others` file is a stale, overlapping second record a reboot would re-read as its own object. Unlink
+    // it, but only when ownership AND content allow; a kept file fails closed and converges at reboot.
+    // win32 filenames are case-insensitive: a case-variant of the merged record's own file is that file.
+    const sameFile = (a: string, b: string): boolean => (process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+    for (const o of others) {
+      if (sameFile(o.sourceFile, written.filename) || sameFile(o.sourceFile, base.sourceFile)) continue;
+      sweepAbsorbedPendingFile(o.sourceFile, written.entry, token);
+    }
   } else {
     // eslint-disable-next-line no-console
     console.error(`[merge-quarantine] canonical repo ${merged.repoPath} is quarantined IN THIS PROCESS ONLY right now (merged into its own still-unresolvable pending latch) — the durable pending-divert latch ALSO failed to re-write; investigate immediately.`);

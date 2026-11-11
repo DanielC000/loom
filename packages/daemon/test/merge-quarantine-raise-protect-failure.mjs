@@ -5777,11 +5777,12 @@ try {
   clearMergeQuarantineByToken(d7, "00fd29d7-m1-token");
   const m1After7 = JSON.parse(fs.readFileSync(m1Path7, "utf8"));
   check("(00fd29d7) M1's own token is genuinely gone after the partial clear", !(m1After7.tokens ?? []).includes("00fd29d7-m1-token"));
-  const m2After7 = JSON.parse(fs.readFileSync(m2Path7, "utf8"));
-  check("(00fd29d7 precondition) the partial clear actually rewrote M2's own orphan file with the SAME reduced content (never left stale) — the mechanism this card's own durability hazard depends on",
-    JSON.stringify((m2After7.tokens ?? []).slice().sort()) === JSON.stringify((m1After7.tokens ?? []).slice().sort()));
-  check("*** CARD 00fd29d7 *** the partially-cleared record (both M1's own file AND M2's own rewritten orphan copy) STILL carries Z7 forward after the clear",
-    (m1After7.resolvedKeys ?? []).includes(Z7) && (m2After7.resolvedKeys ?? []).includes(Z7));
+  // Card 5fa6069e: the merge now UNLINKS M2's absorbed file (its whole content is carried by the merged M1 record and
+  // no surviving entry owns it), so there is no M2 orphan copy left for the partial clear to rewrite — the merged M1
+  // record ALONE must carry Z7 through the partial clear.
+  check("(5fa6069e) M2's absorbed file was unlinked by the merge (one durable record), not left as a second overlapping copy", !fs.existsSync(m2Path7));
+  check("*** CARD 00fd29d7 *** the partially-cleared merged record (M1's own file, now the ONLY durable record) STILL carries Z7 forward after the clear",
+    (m1After7.resolvedKeys ?? []).includes(Z7));
 
   const fresh00fd = await freshBootModule();
   fresh00fd.reenterMergeQuarantinesAtBoot([]);
