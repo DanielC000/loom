@@ -26,6 +26,11 @@ const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
  *  additive (a wrong guess no-ops). Do not treat as a replacement for the gate-free boot recipe. */
 const AUTO_MODE_ENTRY_WARNING_OVERRIDE = { skipAutoPermissionPrompt: true } as const;
 
+/** @decision 462c4ae8 — the DOCUMENTED key that turns off `/auto-mode-setup` and its "Teach auto mode about
+ *  your environment?" consent offer (Enter on it = a scan + a write to ~/.claude/settings.json). Written per
+ *  session here ONLY, never to the user's real settings; whether `--settings` honors it is UNVERIFIED. */
+const AUTO_MODE_SETUP_OFFER_OVERRIDE = { skillOverrides: { "auto-mode-setup": "off" } } as const;
+
 /** @decision ea2fbcca — validates settings.hooks shape in-process; do not shell out to `claude doctor`
  *  instead (measured to exit 0 on an invalid file, 3 CLI versions × 2 arms). Models only the ONE
  *  nesting-depth invariant the 2026-08-25 incident violated — do not widen to chase the CLI's full schema. */
@@ -298,6 +303,7 @@ export function writeSessionSettings(
     includeCoAuthoredBy: false,
     env: RESUME_GATE_ENV_OVERRIDE,
     ...AUTO_MODE_ENTRY_WARNING_OVERRIDE,
+    ...AUTO_MODE_SETUP_OFFER_OVERRIDE,
     ...(disableSkillShellExecution ? { disableSkillShellExecution: true } : {}),
   };
   // Card ea2fbcca DoD item 1: validate BEFORE this reaches disk. See assertValidHooksShape's own doc for

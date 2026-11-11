@@ -610,6 +610,8 @@ export function ensureTrusted(dir: string): EnsureTrustedResult {
       merged.enabledMcpjsonServers = Array.isArray(entry.enabledMcpjsonServers) ? entry.enabledMcpjsonServers : [];
       merged.enableAllProjectMcpServers = false;
     }
+    // @decision 462c4ae8 — the "Teach auto mode about your environment?" offer is suppressed via the per-session
+    // --settings file (claude-settings.ts), NEVER here and never by writing ~/.claude.json's autoModeEnvSetup (undocumented).
     cfg.projects[key] = merged;
 
     // External-import decline, keyed at `canonicalKey` — the CLI's OWN read key for this dialog, which
