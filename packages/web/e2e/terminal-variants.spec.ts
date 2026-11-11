@@ -75,7 +75,8 @@ test.describe("CompanionTerminal (read-only)", () => {
     await page.getByRole("tab", { name: "Terminal" }).click();
 
     // The read-only window: its "read-only" status pill + the disabled-typing hint, with Maximize present…
-    await expect(page.getByText("read-only", { exact: true })).toBeVisible();
+    // Scoped to the Terminal panel: the companion's capability levers (Manage) carry "read-only" chips too.
+    await expect(page.getByTestId("companion-mode-panel-terminal").getByText("read-only", { exact: true })).toBeVisible();
     await expect(page.getByText(/typing here is disabled/i)).toBeVisible();
     await expect(page.getByTitle("Maximize terminal")).toBeVisible();
     // …and NONE of the interactive session controls (readOnly withholds the composer; a companion is driven

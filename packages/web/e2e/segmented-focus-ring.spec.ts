@@ -3,7 +3,7 @@
 // rules in global.css reached it. The fix gives each segment `.loom-segment` and a rule carrying the
 // same ring as every other control — at a NEGATIVE outline-offset, because the segments sit flush
 // inside a track (rounded, and `overflow: hidden` before Graphite) that clipped anything painted
-// outside their border box. The Companion mode toggle below still sits in such a clipping track.
+// outside their border box.
 //
 // Card 3f28f1c3 later moved Segmented from role="tablist"/"tab" to "radiogroup"/"radio" with a roving
 // tabindex (one segment is ever a Tab stop); this spec's `tabOnto` helper below moves onto the sibling
@@ -23,12 +23,9 @@
 // so a full revert of the fix still reaches the discriminating assertion instead of dying earlier on a
 // missing selector (see the project-memory note on weak negative controls for new testids).
 //
-// Card 95453b80 adds the Companion mode toggle (pages/Companion.tsx `ModeToggle`) to this file. It is NOT
-// the kit `Segmented` — it keeps role="tablist"/"tab" because its three modes drive real `role="tabpanel"`
-// bodies — but it is the same control SHAPE (flush segments inside a rounded `overflow: hidden` track) and
-// so had the same clipped ring, for the same reason. The helpers above are the whole reason it lives here
-// rather than in a file of its own: the discriminating claim ("the ring paints inside the border box") is
-// worth stating once.
+// Card 95453b80 added the classic Companion mode toggle (`ModeToggle`) here; it was deleted with the classic
+// shell by card acbb6df6 — the Atlas companion node's modes are the node's own link tab row, not a segmented
+// track — so its leg went with it.
 import { expect, test } from "./fixtures/daemon";
 import type { Locator, Page } from "@playwright/test";
 import { cssColor } from "./helpers/themeToken";
@@ -67,19 +64,11 @@ function readRing(el: Locator): Promise<Ring> {
  * depend on how many focusables precede the control.
  *
  * `key` defaults to ArrowRight (move onto the NEXT segment); pass "ArrowLeft" to move onto the PREVIOUS
- * one instead — needed for the Settings switch below, where arrowing onto the segment that is not
- * already active also SELECTS it, and for that one call site selecting "atlas" swaps the whole shell
- * (LegacyShell ⇄ AtlasShell at the App root) out from under the still-in-flight focus call. Arrowing
- * BACKWARD onto the segment that is ALREADY active re-selects the same value — a no-op for `onChange`'s
- * caller, so nothing unmounts — which is what lets this prove the ring on a real keyboard focus without
- * racing a remount.
- *
- * Pass "Tab" for a plain tablist like the Companion mode toggle (card 95453b80): it has no roving
- * tabindex, so every tab IS a Tab stop and Tab is the key a real user presses to reach the next one —
- * and, unlike an arrow key in a radiogroup, it moves focus WITHOUT selecting, so no panel swaps under
- * the in-flight focus call.
+ * one instead. Arrowing onto a segment also SELECTS it, so a call site that must not change state arrows
+ * onto the segment that is ALREADY active — re-selecting the same value is a no-op for `onChange`'s caller —
+ * which proves the ring on a real keyboard focus with nothing re-rendering underneath.
  */
-async function tabOnto(page: Page, from: Locator, target: Locator, key: "ArrowRight" | "ArrowLeft" | "Tab" = "ArrowRight"): Promise<Ring> {
+async function tabOnto(page: Page, from: Locator, target: Locator, key: "ArrowRight" | "ArrowLeft" = "ArrowRight"): Promise<Ring> {
   await from.evaluate((n: HTMLElement) => n.focus());
   await page.keyboard.press(key);
   await expect(target).toBeFocused();
@@ -110,32 +99,30 @@ async function expectNoRingOnMouseClick(active: Locator, where: string) {
   expect(ring.style, `${where}: a mouse click must draw no ring`).toBe("none");
 }
 
-test("Settings' Interface switch rings on keyboard focus and stays clean on click", async ({ page, loomDaemon }) => {
+// The Settings leg was the Interface (Atlas/classic) switch until card acbb6df6 deleted it with the classic
+// shell; the theme switch is the same Segmented kit control on the same Settings surface (the Workspace
+// node's tab), so the claim moves to it rather than being dropped.
+test("Settings' theme switch rings on keyboard focus and stays clean on click", async ({ page, loomDaemon }) => {
   test.setTimeout(120_000);
-  const project = await loomDaemon.createProject(`seg-focus-settings-${Date.now()}`);
-  await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-  await page.goto(loomDaemon.baseURL + "/settings");
+  // Pinned to Dark, so the ACTIVE segment is known (the last of System | Light | Dark) and every move below
+  // can land on it: re-selecting the active segment is a no-op, so nothing re-renders under a focus call.
+  await page.addInitScript(() => localStorage.setItem("loom.theme", "dark"));
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
 
-  const tabs = page.locator('[data-testid="atlas-ui-switch"] button[role="radio"]');
-  await expect(tabs).toHaveCount(2);
-  const classic = tabs.nth(0);
-  const atlas = tabs.nth(1);
+  const tabs = page.locator('[data-testid="theme-switch"] button[role="radio"]');
+  await expect(tabs).toHaveCount(3);
+  const light = tabs.nth(1);
+  const dark = tabs.nth(2);
+  await expect(dark).toHaveAttribute("aria-checked", "true");
 
-  // Mouse check FIRST, while nothing in the group is focused yet: clicking "classic" is a genuine
-  // focus TRANSITION (none → classic), so this is the ordinary case for reading no ring — reordered
-  // relative to the Runs/Actors test below, where the mouse check instead clicks the segment the
-  // keyboard check left UNfocused. Doing the mouse click after the keyboard check here would click the
-  // SAME button the keyboard check just focused, which is not a transition at all — Chromium's
-  // `:focus-visible` has nothing to re-evaluate on a click that doesn't move focus, so it would stay
-  // true from the prior keyboard focus and this check would wrongly fail.
-  await expectNoRingOnMouseClick(classic, "settings/atlas-ui-switch");
+  // Mouse check FIRST, while nothing in the group is focused yet: clicking the active "Dark" is a genuine
+  // focus TRANSITION (none → dark) that changes nothing. Doing it after the keyboard check would click the
+  // segment the keyboard just focused — not a transition, so `:focus-visible` would stay true from the
+  // keyboard and this check would wrongly fail.
+  await expectNoRingOnMouseClick(dark, "settings/theme-switch");
 
-  // Arrowing from "atlas" (focused programmatically, never selected) BACK onto "classic" (ArrowLeft)
-  // rather than the other direction: "classic" is already the active segment, so re-selecting it is a
-  // no-op and the shell never swaps mid-focus-call — see tabOnto's own doc for why the other direction
-  // would race a remount here specifically. This is a real atlas→classic focus transition via a genuine
-  // keyboard event, so the ring is expected.
-  await expectFocusRing(page, await tabOnto(page, atlas, classic, "ArrowLeft"), "settings/atlas-ui-switch");
+  // Arrow from "Light" (focused programmatically, never selected) onto the already-active "Dark".
+  await expectFocusRing(page, await tabOnto(page, light, dark, "ArrowRight"), "settings/theme-switch");
 });
 
 test("the Runs and Actors switches ring on keyboard focus and stay clean on click", async ({ page, loomDaemon }) => {
@@ -156,31 +143,4 @@ test("the Runs and Actors switches ring on keyboard focus and stay clean on clic
   await expect(actorsTabs).toHaveCount(2);
   await expectFocusRing(page, await tabOnto(page, actorsTabs.nth(0), actorsTabs.nth(1)), "actors");
   await expectNoRingOnMouseClick(actorsTabs.nth(0), "actors");
-});
-
-test("the Companion mode toggle rings on keyboard focus and stays clean on click", async ({ page, loomDaemon }) => {
-  test.setTimeout(120_000);
-  // One seeded companion so the page renders a CompanionDetail (and therefore the mode toggle) rather
-  // than the empty create-box. WHICH companion is focused is deliberately NOT pinned: the claim here is
-  // about the CONTROL's ring, which is identical for every companion, so clicking the picker to pin one
-  // would buy nothing and import that picker's own auto-focus race for free.
-  await loomDaemon.seedCompanion();
-  await page.goto(loomDaemon.baseURL + "/companion");
-
-  const tabs = page.getByRole("tablist", { name: "Companion view" }).locator('button[role="tab"]');
-  await expect(tabs).toHaveCount(3);
-  const chat = tabs.nth(0);
-  const manage = tabs.nth(1);
-  // The detail pane has settled on a companion (the tablist only renders inside it) and Chat is its
-  // default mode — so the click below lands on the ALREADY-active tab and swaps no panel.
-  await expect(chat).toHaveAttribute("aria-selected", "true");
-
-  // Mouse check first, while nothing in the toggle is focused yet — the same ordering reason as the
-  // Settings switch above: a click that does not MOVE focus gives `:focus-visible` nothing to
-  // re-evaluate, so doing this after the keyboard check would read the keyboard ring back.
-  await expectNoRingOnMouseClick(chat, "companion/mode-toggle");
-
-  // Tab (not an arrow key) from Chat onto Manage: a plain tablist with no roving tabindex. Tab moves
-  // focus without selecting, so the Manage panel never mounts mid-focus-call.
-  await expectFocusRing(page, await tabOnto(page, chat, manage, "Tab"), "companion/mode-toggle");
 });

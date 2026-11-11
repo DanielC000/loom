@@ -23,7 +23,7 @@ interface ConnRow { id: string; name: string; host: string; authScheme: string; 
 const listConns = (base: string) => apiJson<ConnRow[]>(`${base}/api/connections`);
 
 async function openSettings(page: Page, base: string) {
-  await page.goto(`${base}/settings`);
+  await page.goto(`${base}/home?tab=settings`);
 }
 
 test("edit a bearer connection: rename, move host, rotate the secret — all visible after reload, secret never shown", async ({ page, loomDaemon }) => {

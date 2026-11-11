@@ -2,9 +2,11 @@
 
 Card `fd99b2d7` — Atlas build plan P2-1 (`docs/plans/atlas-ui/03-decomposition.md`). Two decisions, both made while adding the Workspace root node and the project node.
 
-## 1 · `ATLAS_HOMES` is mounted by `AtlasShell` only, never by `LegacyShell`
+> **Superseded in part by card `acbb6df6` (2026-11-11).** The owner's chat directive of 2026-11-11 ("before the push I want to remove the old UI") is the sign-off this record deferred to P3-switch-over. The classic shell, `LegacyShell` and the switch are deleted; Atlas is the only shell. `/` now redirects to `/home` and `/overview` to `/project` (plain `LEGACY_REDIRECTS` rows). Section 1's first two prohibitions are void with the shell they protected; the third, and all of section 2's reasoning about parsing declarations rather than hand-listing, still stand.
 
-`src/nav.tsx` holds four declarations. Three of them — `NAV_PAGES`, `PARAM_PAGES`, `LEGACY_REDIRECTS` — exist precisely *because* both shells mount them: a path/element pair copied into two route tables drifts the moment one is edited, and the drift is silent, since each shell only renders under its own switch state so a test exercising one can never see the other go stale.
+## 1 · `ATLAS_HOMES` was mounted by `AtlasShell` only, never by `LegacyShell`
+
+`src/nav.tsx` holds four declarations. Three of them — `NAV_PAGES`, `PARAM_PAGES`, `LEGACY_REDIRECTS` — existed *because* both shells mounted them: a path/element pair copied into two route tables drifts the moment one is edited, and the drift is silent, since each shell only rendered under its own switch state so a test exercising one could never see the other go stale.
 
 `ATLAS_HOMES` is the opposite case and is declared beside them anyway, so a reader looking for "what addresses does this app have" finds all four in one file.
 
@@ -12,8 +14,7 @@ Card `fd99b2d7` — Atlas build plan P2-1 (`docs/plans/atlas-ui/03-decomposition
 
 ### Do not
 
-- **Do not add `ATLAS_HOMES` to `LegacyShell`'s route table.** Mounting them there puts a half-built phase-2 surface in front of a user who never opted into the preview — the one thing the switch exists to prevent. With the switch off, `/home` and `/project` correctly fall through to the classic shell's own unmatched-route behaviour.
-- **Do not re-point `/` or `/overview` at these components inside `AtlasShell`.** That breaks phase 1's content-identity contract for those two destinations, which is a regression, not a migration. The migration is P3-switch-over, with the owner's sign-off in front of it.
+- **Do not bring a page back at `/` or `/overview`.** Card `acbb6df6` made both plain redirects to these nodes on the owner's sign-off; a page at either address would be a second, unmaintained home for surfaces the nodes already carry.
 - **Do not promote a node's `?tab=` to a route.** The frame's crumbs and `<h1>` derive from the NODE; a tab is a view of that node, and making it a route would put the tab in the address trail where the mockup puts only the node.
 
 ## 2 · The tree's node-set parity check is now "superset, by declaration"

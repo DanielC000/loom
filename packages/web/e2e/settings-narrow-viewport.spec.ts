@@ -81,14 +81,20 @@ async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
-// Both the daemon-global ("Rate Limits") and project-scoped ("Orchestration Caps") field grids must be
-// on screen before measuring — the project section renders only once its config query resolves, and
-// those grids are exactly what is being measured.
-async function openSettings(page: Page, baseURL: string, projectId: string) {
+// Settings is TWO pages since card acbb6df6 made Atlas the only shell: the project-scoped sections (the
+// "Orchestration Caps" grid) on the project node's Settings tab, `/settings`, and the daemon-global ones
+// (the "Rate Limits" grid) on the Workspace node's, `/home?tab=settings`. Each page's own field grid must be
+// on screen before measuring — a section renders only once its config query resolves, and those grids are
+// exactly what is being measured.
+const SETTINGS_PAGES = [
+  { path: "/settings", witness: "Orchestration Caps" },
+  { path: "/home?tab=settings", witness: "Rate Limits" },
+] as const;
+
+async function openSettings(page: Page, baseURL: string, projectId: string, which: (typeof SETTINGS_PAGES)[number] = SETTINGS_PAGES[0]) {
   await pinActiveProject(page, projectId);
-  await page.goto(`${baseURL}/settings`);
-  await expect(page.getByText("Orchestration Caps", { exact: true })).toBeVisible();
-  await expect(page.getByText("Rate Limits", { exact: true })).toBeVisible();
+  await page.goto(`${baseURL}${which.path}`);
+  await expect(page.getByText(which.witness, { exact: true })).toBeVisible();
 }
 
 test.describe("Settings responsive layout (card d2d5ce3f)", () => {
@@ -96,14 +102,16 @@ test.describe("Settings responsive layout (card d2d5ce3f)", () => {
 
   test("does not overflow the page horizontally at 420px", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`settings-narrow-${Date.now()}`);
-    await openSettings(page, loomDaemon.baseURL, project.id);
+    for (const which of SETTINGS_PAGES) {
+      await openSettings(page, loomDaemon.baseURL, project.id, which);
 
-    await assertInstrumentFires(page);
+      await assertInstrumentFires(page);
 
-    const measured = await measureOverflow(page);
-    expect(measured.viewport).toBe(PHONE.width);
-    expect(measured.offenderCount, report("/settings", measured)).toBe(0);
-    expect(measured.overflow, report("/settings", measured)).toBeLessThanOrEqual(TOLERANCE_PX);
+      const measured = await measureOverflow(page);
+      expect(measured.viewport).toBe(PHONE.width);
+      expect(measured.offenderCount, report(which.path, measured)).toBe(0);
+      expect(measured.overflow, report(which.path, measured)).toBeLessThanOrEqual(TOLERANCE_PX);
+    }
   });
 
   // Not overflowing is only half of it: the collapsed single-column field must still be USABLE. A

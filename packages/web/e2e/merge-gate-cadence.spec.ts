@@ -1,11 +1,13 @@
-// Merge-gate CADENCE e2e (card 00664e74) — the Overview gate strip and the Settings cadence panel.
+// Merge-gate CADENCE e2e (card 00664e74) — the gate strip and the cadence panel on the project Settings
+// tab, and the failed-gate Attention row on the project Home tab. Both components lived on the classic
+// Overview until card acbb6df6 deleted it and re-homed them unchanged (docs/decisions/acbb6df6-*).
 //
 // WHICH HALF IS SEEDABLE, AND WHICH IS NOT (the discipline from the `gates-active-lane-has-no-e2e-seed-path`
 // and `harness-drain-blocked-has-no-e2e-seed-path` project-memory notes: ask which SOURCE a panel reads
 // before assuming it is testable):
 //   • The Settings CADENCE CONTROL and its persistence read/write the project config override through the
 //     ordinary human PATCH, so they are driven FOR REAL here — no mocking at all.
-//   • The Overview STRIP reads GET /api/projects/:id/merge-gate/status, whose interesting states (a mid-count
+//   • The gate STRIP (and the Home tab's alert) reads GET /api/projects/:id/merge-gate/status, whose interesting states (a mid-count
 //     interval, a reached interval, a FAILED periodic gate, a verdict history) are produced only by real
 //     merges landing and real gate commands failing. There is no seed path for any of that, and the fixture's
 //     no-spawn guard forbids manufacturing one. So those states are driven by `page.route` fulfilment of the
@@ -65,7 +67,7 @@ async function routeStatus(page: Page, projectId: string, body: () => Status | n
 
 const strip = (page: Page) => page.getByTestId("merge-gate-strip");
 
-test.describe("Overview merge-gate strip (card 00664e74)", () => {
+test.describe("merge-gate strip on the Settings tab + failed-gate alert on the Home tab (cards 00664e74, acbb6df6)", () => {
   test("an older daemon's 404 HIDES the strip instead of erroring", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`mg-404-${Date.now()}`);
     await routeStatus(page, project.id, () => null);
@@ -74,10 +76,10 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     const errors: string[] = [];
     page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
 
-    await page.goto(`${loomDaemon.baseURL}/overview`);
-    // The page itself renders (identity assertion — we are looking at THIS project's Overview, not a
+    await page.goto(`${loomDaemon.baseURL}/settings`);
+    // The page itself renders (identity assertion — we are looking at THIS project's Settings tab, not a
     // blank/errored shell), and the strip is simply absent.
-    await expect(page.locator("main").getByText(/^Board$/)).toBeVisible();
+    await expect(page.getByTestId("settings-section-project-settings")).toBeVisible();
     await expect(strip(page)).toHaveCount(0);
     // A 404 is an expected outcome for this route, not a failure to report.
     expect(errors.filter((e) => e.includes("merge-gate"))).toEqual([]);
@@ -94,7 +96,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
 
     await routeStatus(page, project.id, () => status({ cadence: "every" }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     await expect(strip(page).getByTestId("merge-gate-badge")).toHaveText("Every merge");
     await expect(strip(page).getByTestId("merge-gate-sentence")).toContainText("Every merge runs the gate command");
@@ -107,7 +109,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     const project = await loomDaemon.createProject(`mg-count-${Date.now()}`);
     await routeStatus(page, project.id, () => status({ cadence: "interval", interval: 5, ungatedSinceLastPass: 3 }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     await expect(strip(page).getByTestId("merge-gate-badge")).toHaveText("Every 6th merge");
     await expect(strip(page).getByTestId("merge-gate-counter")).toContainText("3");
@@ -124,7 +126,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     const project = await loomDaemon.createProject(`mg-big-${Date.now()}`);
     await routeStatus(page, project.id, () => status({ cadence: "interval", interval: 20, ungatedSinceLastPass: 13 }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     await expect(strip(page).getByTestId("merge-gate-badge")).toHaveText("Every 21st merge");
     await expect(strip(page).getByTestId("merge-gate-counter")).toContainText("/ 20 ungated");
@@ -135,7 +137,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     const project = await loomDaemon.createProject(`mg-due-${Date.now()}`);
     await routeStatus(page, project.id, () => status({ cadence: "interval", interval: 5, ungatedSinceLastPass: 5, nextLandingGated: true }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     await expect(strip(page).getByTestId("merge-gate-sentence")).toContainText("The next merge runs the gate");
     // "Gate the next merge" is meaningless when it is already gated, so it is not offered.
@@ -146,7 +148,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     const project = await loomDaemon.createProject(`mg-never-${Date.now()}`);
     await routeStatus(page, project.id, () => status({ cadence: "never", ungatedSinceLastPass: 17 }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     await expect(strip(page).getByTestId("merge-gate-badge")).toHaveText("Never gated");
     await expect(strip(page).getByTestId("merge-gate-sentence")).toContainText("17 merges have landed unverified");
@@ -163,7 +165,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
       ],
     }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     await expect(strip(page).getByTestId("merge-gate-badge")).toContainText("Gate failed");
     await expect(strip(page).getByText("1111111..2222222")).toBeVisible();
@@ -174,13 +176,51 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     // that matters, and showing it beside "gate failed" would imply the cycle is still running.
     await expect(strip(page).getByTestId("merge-gate-counter")).toHaveCount(0);
 
-    // Direction B's borrowing: the failure ALSO raises an ordinary Attention row, and the section heading's
-    // count includes it — a row that is not counted reads as a rendering bug.
-    const row = page.getByTestId("merge-gate-attention");
+    // The Settings tab carries the strip ONLY — the alert is the Home tab's (docs/decisions/acbb6df6-*).
+    await expect(page.getByTestId("merge-gate-attention")).toHaveCount(0);
+
+    // Direction B's borrowing: the failure ALSO raises an ordinary Attention row — on the project Home
+    // tab's "Needs you" card — and the card's count includes it: a row that is not counted reads as a
+    // rendering bug. The card's own "nothing needs you" empty state must not sit beside the alert.
+    await page.goto(`${loomDaemon.baseURL}/project`);
+    const needs = page.getByTestId("atlas-band-needs");
+    const row = needs.getByTestId("merge-gate-attention");
     await expect(row).toBeVisible();
     await expect(row).toContainText("Periodic gate failed on loom/4e762baf");
     await expect(row).toContainText("Every merge stays gated until one passes");
-    await expect(page.locator("main").getByText(/^Attention \(1\)$/)).toBeVisible();
+    await expect(needs.locator(".loom-bandcount")).toHaveText("1");
+    await expect(needs.getByText("Nothing needs you right now.")).toHaveCount(0);
+  });
+
+  test("the project Home tab shows the MERGE GATE alert only while a periodic gate is owed (card acbb6df6)", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`mg-home-${Date.now()}`);
+    // One route, flipped mid-test, so both polarities are read off the SAME page and fixture.
+    let failed = false;
+    await routeStatus(page, project.id, () => failed
+      ? status({
+        cadence: "interval", interval: 3, ungatedSinceLastPass: 3, gateOwed: true, lastPassAt: iso(120),
+        lastFailure: { at: iso(5), opId: "op-h", fromSha: "5555555aaa", toSha: "6666666bbb", branchTip: "77777777cc", branch: "loom/home-sentinel" },
+      })
+      : status({ cadence: "interval", interval: 3, ungatedSinceLastPass: 1 }));
+    await pinActiveProject(page, project.id);
+
+    // HEALTHY: no alert, the card reads its ordinary empty state, and the count does not include a gate.
+    await page.goto(`${loomDaemon.baseURL}/project`);
+    const needs = page.getByTestId("atlas-band-needs");
+    await expect(needs).toBeVisible();
+    await expect(needs.getByText("Nothing needs you right now.")).toBeVisible();
+    await expect(page.getByTestId("merge-gate-attention")).toHaveCount(0);
+    await expect(needs.locator(".loom-bandcount")).toHaveText("0");
+
+    // FAILED (gateOwed): the alert appears in the same card, counted, naming THIS fixture's branch.
+    failed = true;
+    await page.reload();
+    const row = page.getByTestId("atlas-band-needs").getByTestId("merge-gate-attention");
+    await expect(row).toBeVisible();
+    await expect(row).toContainText("loom/home-sentinel");
+    await expect(page.getByTestId("atlas-band-needs").locator(".loom-bandcount")).toHaveText("1");
+    // The kind label the alert row carries — the owner-facing name of this signal.
+    await expect(row).toContainText(/merge gate/i);
   });
 
   test("a batch failure names the candidate count, and a first-ever failure says 'since tracking began'", async ({ page, loomDaemon }) => {
@@ -192,10 +232,11 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
       recent: [],
     }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     await expect(strip(page).getByText("4 branches")).toBeVisible();
     await expect(strip(page).getByText("since tracking began")).toBeVisible();
+    await page.goto(`${loomDaemon.baseURL}/project`);
     await expect(page.getByTestId("merge-gate-attention")).toContainText("since tracking began");
   });
 
@@ -207,7 +248,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
       lastFailure: { at: iso(9), opId: "op-t", fromSha: "3333333aaa", toSha: "4444444bbb", branchTip: "abcdef123456" },
     }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await expect(strip(page).getByText("abcdef1")).toBeVisible();
   });
 
@@ -222,7 +263,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
       ],
     }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     // BEFORE: no editor.
     await expect(page.getByTestId("merge-gate-editor")).toHaveCount(0);
@@ -267,7 +308,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     const project = await loomDaemon.createProject(`mg-style-${Date.now()}`);
     await routeStatus(page, project.id, () => status({ cadence: "interval", interval: 5, ungatedSinceLastPass: 2 }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     // The strip row is the section's FIRST child div; once the editor opens the section holds two, and an
     // unscoped locator is a strict-mode violation that would fail for a reason unrelated to this assertion.
@@ -293,7 +334,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     const project = await loomDaemon.createProject(`mg-warn-${Date.now()}`);
     await routeStatus(page, project.id, () => status({ cadence: "interval", interval: 5, ungatedSinceLastPass: 1 }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await page.getByTestId("merge-gate-edit").click();
     const editor = page.getByTestId("merge-gate-editor");
 
@@ -328,7 +369,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     });
 
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     // BEFORE: counting, and the arm button is offered.
     await expect(strip(page).getByTestId("merge-gate-sentence")).toContainText("3 more merges land ungated");
@@ -356,10 +397,10 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
       ],
     }));
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await page.getByTestId("merge-gate-edit").click();
 
-    const marks = page.getByTestId("merge-gate-verdicts").locator("> b");
+    const marks = strip(page).getByTestId("merge-gate-verdicts").locator("> b");
     await expect(marks).toHaveCount(3);
     // The three kinds are distinguishable, and the cleared one is NEITHER verdict — a cleared entry
     // rendered by a pass/fail branch would assert a red run that never happened.
@@ -377,7 +418,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     const solo = await loomDaemon.createProject(`mg-solo-repo-${Date.now()}`);
     await routeStatus(page, solo.id, () => status({ cadence: "interval", interval: 5, ungatedSinceLastPass: 1, repoKey: null }));
     await pinActiveProject(page, solo.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await expect(strip(page)).toBeVisible();
     await expect(strip(page).getByText("repo", { exact: true })).toHaveCount(0);
 
@@ -395,7 +436,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
 
     await routeStatus(page, multi.id, () => status({ cadence: "interval", interval: 5, ungatedSinceLastPass: 1, repoKey: "primary" }));
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), multi.id);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     // The strip NAMES its repo, so a counter describing one of several repos never reads as project-wide.
     await expect(strip(page).getByText("primary", { exact: true })).toBeVisible();
@@ -406,7 +447,7 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     await routeStatus(page, project.id, () => status({ cadence: "interval", interval: 5, ungatedSinceLastPass: 3 }));
     await pinActiveProject(page, project.id);
     await page.setViewportSize({ width: 760, height: 900 });
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
 
     await expect(strip(page)).toBeVisible();
     // No horizontal page scroll, and the strip stays inside the viewport.
@@ -414,6 +455,33 @@ test.describe("Overview merge-gate strip (card 00664e74)", () => {
     expect(overflow, "no horizontal page overflow at 760px").toBeLessThanOrEqual(0);
     const box = await strip(page).boundingBox();
     expect(box!.x + box!.width).toBeLessThanOrEqual(760);
+  });
+
+  // Card acbb6df6: the strip moved from the full-width Overview into the ~800px Settings column. Its wrap
+  // breakpoint was a VIEWPORT media query, so at a 1440 window it kept the one-row layout in a column too
+  // narrow for it: the sentence shrank to 0px and the buttons ran past the panel's right edge. The section's
+  // own box stayed in bounds (its children overflow it, unclipped), which is why the 760px leg above could
+  // not see it. This measures the CONTROLS against the strip, in the failed state that carries the most chips.
+  test("at a 1440 window every control stays inside the strip and the sentence is readable", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`mg-wide-${Date.now()}`);
+    await routeStatus(page, project.id, () => status({
+      cadence: "interval", interval: 3, ungatedSinceLastPass: 3, gateOwed: true, lastPassAt: iso(120),
+      lastFailure: { at: iso(5), opId: "op-w", fromSha: "1111111aaa", toSha: "2222222bbb", branchTip: "33333333cc", branch: "loom/wide-sentinel", candidates: 3 },
+    }));
+    await pinActiveProject(page, project.id);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${loomDaemon.baseURL}/settings`);
+
+    await expect(strip(page)).toBeVisible();
+    // Identity: THIS fixture's failure is what the strip is drawing.
+    await expect(strip(page)).toContainText("1111111..2222222");
+    const right = (await strip(page).boundingBox())!;
+    for (const id of ["merge-gate-open-log", "merge-gate-edit", "merge-gate-badge"]) {
+      const b = (await strip(page).getByTestId(id).boundingBox())!;
+      expect(b.x + b.width, `${id} right edge inside the strip`).toBeLessThanOrEqual(right.x + right.width + 0.5);
+    }
+    const sentence = (await strip(page).getByTestId("merge-gate-sentence").boundingBox())!;
+    expect(sentence.width, "the sentence is not squeezed to nothing").toBeGreaterThan(200);
   });
 });
 

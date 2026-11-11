@@ -169,39 +169,4 @@ test.describe("Atlas KPI deck row (card 14e48890)", () => {
     expect(folded.lefts, "…three columns, so the fold is 3+3 and never an orphaned tail").toHaveLength(3);
     expect(folded.deckHeight, "and the deck really is taller than one tile here").toBeGreaterThan(folded.tallestTile);
   });
-
-  test("switch OFF: the classic Overview renders its own layout and no KPI deck exists at all", async ({ page, loomDaemon }) => {
-    const seeded = await seedProject(loomDaemon, WARM_PCT);
-    // Deliberately NO seedAtlasOn — off is the default, and seeding it off would re-clear the key on
-    // every navigation for a reason unrelated to the app (measured on P1-0).
-    await pinProject(page, seeded.project.id);
-    await page.setViewportSize(WIDE);
-    await page.goto(loomDaemon.baseURL + "/overview");
-
-    // PRESENCE first: the classic shell and the classic Overview's own board really are here, at the
-    // same 1440 the Atlas legs ran at.
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByText(seeded.sentinel, { exact: true })).toBeVisible();
-    await expect(page.locator(".loom-board-grid > .loom-grid")).toHaveCount(7);
-
-    // …and the element every rule this card touched is scoped to does not exist in this document, so
-    // none of them can reach the classic page. (`.loom-kpi` covers the tile chrome, `.loom-kpi-track`
-    // the meter — the deck is the only thing that mounts any of them.)
-    await expect(page.locator(".loom-kpideck")).toHaveCount(0);
-    await expect(page.locator(".loom-kpi, .loom-kpi-track")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
-
-    // POSITIVE CONTROL for that absence: the same locators are non-zero with the switch on, so a
-    // zero above is the classic page's real shape and not a selector that matches nothing anywhere.
-    // On `/home`, the deck's one remaining mount since card 269f46ef — `/project` would now report
-    // zero for the opposite reason and could not discriminate anything.
-    await seedAtlasOn(page);
-    await page.goto(loomDaemon.baseURL + "/home");
-    await expect(page.locator(".loom-kpideck")).toHaveCount(1);
-    await expect(page.locator(".loom-kpi")).toHaveCount(6);
-    // The `plan` tile is the Workspace deck's one meter. It renders a track only once the usage
-    // payload resolves AVAILABLE, which this hermetic daemon never does (no OAuth credentials), so
-    // the count here is 0 — the live-payload case is workspace-plan-window.spec.ts's.
-    await expect(page.locator(".loom-kpi-track")).toHaveCount(0);
-  });
 });

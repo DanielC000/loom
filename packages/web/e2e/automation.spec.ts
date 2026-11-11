@@ -5,7 +5,9 @@
 //   2. Switching to the Events tab is an OBSERVABLE state change — the Time body unmounts, the Events body
 //      mounts (each keyed on distinctive body copy, so this proves the RIGHT body swapped, not just that a
 //      tab highlighted) + the tab is pinned in the URL.
-//   3. The old routes redirect: /schedules → /automation (Time tab), /event-triggers → /automation?tab=events.
+//   3. The old routes redirect: /schedules → the Time tab, /event-triggers → the Events tab. Since card acbb6df6
+//      (Atlas is the only shell) /automation is itself the Workspace node's `automation` tab, so both land on
+//      `/home?tab=automation`, with the Events segment riding `sub=events` (lib/nodeTabHost.tsx).
 //   4. Each tab's builder modal opens (an observable — the create/edit dialog mounts on demand).
 //   5. PRESERVED gating: the scheduler-off warning still shows on the Time tab. This fixture boots
 //      LOOM_SCHEDULER_ENABLED=0 (see fixtures/daemon.ts + schedules.spec.ts), so the honest "will not fire"
@@ -53,19 +55,19 @@ test.describe("automation (Schedules + Event Triggers consolidation)", () => {
     await expect(page.getByText(TIME_BODY)).toHaveCount(0);
     // AFTER (observable #2 — selection + URL): the Events segment reads checked and the tab is pinned in the URL.
     await expect(page.getByRole("radio", { name: "Events" })).toHaveAttribute("aria-checked", "true");
-    await expect(page).toHaveURL(/\/automation\?tab=events/);
+    await expect(page).toHaveURL(/\/home\?tab=automation&sub=events$/);
   });
 
   test("the old /schedules and /event-triggers routes redirect to the consolidated Automation page", async ({ page, loomDaemon }) => {
     // /schedules → /automation (Time tab).
     await page.goto(`${loomDaemon.baseURL}/schedules`);
     await expect(page.getByText(TIME_BODY)).toBeVisible();
-    await expect(page).toHaveURL(/\/automation$/);
+    await expect(page).toHaveURL(/\/home\?tab=automation$/);
 
-    // /event-triggers → /automation?tab=events (Events tab).
+    // /event-triggers → the Events tab.
     await page.goto(`${loomDaemon.baseURL}/event-triggers`);
     await expect(page.getByText(EVENTS_BODY)).toBeVisible();
-    await expect(page).toHaveURL(/\/automation\?tab=events/);
+    await expect(page).toHaveURL(/\/home\?tab=automation&sub=events$/);
   });
 
   test("each tab's builder modal opens on demand", async ({ page, loomDaemon }) => {

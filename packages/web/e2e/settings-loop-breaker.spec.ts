@@ -69,7 +69,7 @@ const MAX_RECAPS = { label: "Max consecutive re-caps", typed: "5", value: 5 };
 test("the loop-breaker controls render with their shared bounds, and a save persists all four (card 826483a7)", async ({ page, loomDaemon }) => {
   const project = await loomDaemon.createProject(`settings-loop-breaker-save-${Date.now()}`);
   await pinActiveProject(page, project.id);
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
   // The loop breaker gets its OWN section label, not four more cells under "Rate Limits": those fields
   // tune how long one ordinary park waits, these decide whether to stop retrying at all.
@@ -154,7 +154,7 @@ test("an out-of-range loop-breaker entry blocks Save, stated in the field's own 
   expect(overPatch.status).toBe(400);
   expect(await overPatch.text()).toMatch(/86400000/);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
   const ceilingBox = box(page, BACKOFF_CEILING.label);
   const ceiling = field(page, BACKOFF_CEILING.label);
 
@@ -222,7 +222,7 @@ test("backoff base above its ceiling is accepted and CLAMPED, never rejected (ca
   expect(resolved.loopBreakerBackoffCeilingMs).toBe(1_800_000);
   expect(resolved.loopBreakerBackoffBaseMs).toBe(1_800_000);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
   // The page does not hide the disagreement: the input shows what was entered, while the `effective:`
   // hint beneath it shows the clamped value the daemon will really use.

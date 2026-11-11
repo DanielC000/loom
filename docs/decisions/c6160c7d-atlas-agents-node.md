@@ -1,5 +1,7 @@
 # The Atlas Agents surfaces (card `c6160c7d`, Atlas P2-2)
 
+> **Superseded in part by card `acbb6df6` (2026-11-11).** The classic shell, `LegacyShell` and the classic rail are deleted, so the reasoning below about keeping the Agents node out of `NAV_PAGES` "because both shells mount it" no longer applies; `ATLAS_HOMES` stays where it is because its rows are nodes rather than destinations. The first two prohibitions are void (`/` and `/overview` now redirect to the home nodes on the owner's sign-off); the third, and the `tierHead` reasoning, stand.
+
 Round 4 of the UI overhaul exists because the owner asked one question of round 3's mockups: *"how are the spawnable agents spawned for projects? I dont see a UI element for that?"* (card `939922ee`). The diagnosis was that round 2's inventory enumerated **destinations** and never enumerated **actions** — every page had a home, the controls on those pages did not. This card builds the answer: a roster on the page you land on, a node that holds the whole thing at full size, and a quick-spawn that needs no navigation at all.
 
 What follows is the handful of decisions that are not obvious from the code, and the things a later card must not undo.

@@ -68,7 +68,7 @@ async function setParent(baseURL: string, secret: string, taskId: string, parent
   if (!res.ok) throw new Error(`POST /api/tasks/${taskId} -> ${res.status} ${await res.text()}`);
 }
 
-for (const surface of ["/overview", "/board"] as const) {
+for (const surface of ["/board"] as const) {
   test.describe(`board keyboard navigation on ${surface}`, () => {
     test("one Tab stop; arrows across cards and lanes, Home/End, empty and collapsed lanes", async ({ page, loomDaemon }) => {
       const project = await loomDaemon.createProject(uniq("kbd-nav"));

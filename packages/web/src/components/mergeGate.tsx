@@ -1,4 +1,5 @@
-// Merge-gate cadence UI — the Overview GATE STRIP and the cadence editor Settings shares with it.
+// Merge-gate cadence UI — the GATE STRIP and the cadence editor, both on the project Settings tab, and the
+// failed-gate Attention row on the project Home tab (placement: card acbb6df6, docs/decisions/acbb6df6-*).
 //
 // Owner decision (request cb3ebeea, card 00664e74): Direction A · Gate Strip, plus two borrowings —
 // direction B's Attention-row escalation on a failed periodic gate, and direction C's recent-gates verdict
@@ -300,7 +301,7 @@ export function CommitMessageWeakening({ k, value }: { k: CommitMessageKey; valu
   );
 }
 
-// ── The Overview gate strip ──────────────────────────────────────────────────────────────────────────
+// ── The gate strip (project Settings tab) ──────────────────────────────────────────────────────────────────────────
 
 export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: {
   projectId: string | null;
@@ -377,7 +378,7 @@ export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: 
     || (draft.cadence === "interval" && draft.intervalRaw.trim() !== (s.interval === null ? "" : String(s.interval)));
 
   return (
-    <section data-testid="merge-gate-strip" aria-label="Merge gate cadence">
+    <section className="loom-gate-host" data-testid="merge-gate-strip" aria-label="Merge gate cadence">
       <div className="loom-gate-strip" style={{
         background: color.surface, padding: "7px 12px",
         borderStyle: "solid", borderWidth: "1px 1px 1px 3px",
@@ -464,7 +465,8 @@ export function MergeGateStrip({ projectId, override, gateCommand, multiRepo }: 
 }
 
 // ── The Attention escalation (direction B's borrowing) ───────────────────────────────────────────────
-// The strip is enough to notice a failure while you are looking at Overview; the Attention row is what
+// The strip is enough to notice a failure while you are looking at Settings; the Attention row (on the
+// project Home tab's "Needs you" card) is what
 // makes it survive you NOT looking. Rendered as the ordinary AttentionRow shape, so it reads as one of
 // Loom's existing escalations rather than new alarm chrome.
 //
@@ -497,7 +499,7 @@ export function MergeGateAttention({ status }: { status: MergeGateStatus | null 
   );
 }
 
-/** Whether a status contributes an Attention row — so Overview's "Attention (N)" count stays truthful. */
+/** Whether a status contributes an Attention row — so the Home tab's "Needs you" count stays truthful. */
 export function mergeGateAttentionCount(status: MergeGateStatus | null | undefined): number {
   return status && gateFailureAttentionText(status) ? 1 : 0;
 }
@@ -505,7 +507,7 @@ export function mergeGateAttentionCount(status: MergeGateStatus | null | undefin
 // ── The Settings cadence panel ───────────────────────────────────────────────────────────────────────
 // Replaces the single "Merge gate off" checkbox. A checkbox can only express on or off; with an interval
 // there are three cadences. The panel also shows the LIVE counter — the same numbers the strip shows — so
-// Settings and Overview can never disagree about where the project stands.
+// the panel and the strip beside it can never disagree about where the project stands.
 
 export function MergeGateCadencePanel({ projectId, draft, onChange }: {
   projectId: string | null;
@@ -535,7 +537,7 @@ export function MergeGateCadencePanel({ projectId, draft, onChange }: {
   );
 }
 
-/** The live status line in Settings — the SAME numbers the Overview strip reads, never a second source. */
+/** The live status line in Settings — the SAME numbers the gate strip reads, never a second source. */
 function LiveCounterRow({ status: s }: { status: MergeGateStatus }) {
   const read = readMergeGate(s);
   const showTrack = s.cadence === "interval" && !isEscalatedFailure(s);
@@ -553,7 +555,7 @@ function LiveCounterRow({ status: s }: { status: MergeGateStatus }) {
       <Hint>last pass {ago(s.lastPassAt)}</Hint>
       {/* There is deliberately no "reset counter" control: this number is how much unverified work is
           sitting on the default branch, so zeroing it by hand without a gate would make it lie. Only a
-          passing gate clears it, and "Gate the next merge" on the Overview strip is how you ask for one. */}
+          passing gate clears it, and "Gate the next merge" on the gate strip is how you ask for one. */}
       <Hint>resets on the next passing gate</Hint>
     </div>
   );

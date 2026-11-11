@@ -103,17 +103,13 @@ const vaultWriteToggle = (page: import("@playwright/test").Page) =>
 const roleCard = (page: import("@playwright/test").Page, roleKey: string) =>
   page.getByTestId(`role-card-${roleKey}`);
 
-/** Navigate IN-APP via the rail — a page.goto would build a fresh QueryClient and drop the very cache
- *  these tests exist to exercise.
- *
- *  Then COLLAPSE the rail. It expands on `:hover` AND `:focus-within` (styles/global.css), so clicking
- *  a nav link leaves it open on BOTH counts, overlaying the main column and intercepting the next
- *  click — which surfaces as a timeout on an unrelated locator, nothing like a cache bug. Moving the
- *  pointer alone is not enough: the clicked link still holds focus. */
-async function railTo(page: import("@playwright/test").Page, label: string) {
-  await page.getByRole("link", { name: label, exact: true }).click();
-  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-  await page.mouse.move(900, 400);
+/** Navigate IN-APP — a page.goto would build a fresh QueryClient and drop the very cache these tests exist
+ *  to exercise. Via the Workspace node's own tab link (Actors and Automation are tabs there since card
+ *  41eab0eb; the classic rail these tests used to click went with that shell, card acbb6df6), so the
+ *  page must already be ON the Workspace node — `/actors` and `/automation` both land there. */
+async function railTo(page: import("@playwright/test").Page, tabKey: "actors" | "automation") {
+  await page.getByTestId(`atlas-tab-${tabKey}`).click();
+  await expect(page).toHaveURL(new RegExp(`/home\\?tab=${tabKey}`));
 }
 
 test.describe("profile grant blast radius", () => {
@@ -447,7 +443,7 @@ test.describe("profile grant blast radius", () => {
 
     // STEP 2: navigate IN-APP (the rail link, never page.goto) — a full reload builds a fresh
     // QueryClient and throws away the very cache entry this test is about.
-    await railTo(page, "Actors");
+    await railTo(page, "actors");
     await page.getByRole("button").filter({ hasText: profile.name }).first().click();
 
     // STEP 3: add a grant and save. The confirm must appear — and specifically the COUNTED variant, not
@@ -530,7 +526,7 @@ test.describe("profile grant blast radius", () => {
     const warmed = page.waitForResponse((r) => r.url().includes("/api/agents") && r.status() === 200);
     await page.getByRole("button").filter({ hasText: profile.name }).first().click();
     await warmed;
-    await railTo(page, "Automation");
+    await railTo(page, "automation");
     // The Time|Events switch is a Segmented control: role="radio", not a plain button.
     await page.getByRole("radio", { name: "Events", exact: true }).click();
 

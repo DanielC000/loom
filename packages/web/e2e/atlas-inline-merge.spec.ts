@@ -224,35 +224,4 @@ test.describe("Atlas inline merge actions (card c2968651)", () => {
     // the same span and is not what this asserts, hence the partial match.
     await expect(pop.locator(".loom-meterrow-v").filter({ hasText: "20%" })).toBeVisible();
   });
-
-  test("switch OFF: the classic Overview keeps its own rich card, and the compact action is nowhere", async ({ page, loomDaemon }) => {
-    const seeded = await seedPendingReview(loomDaemon);
-    // Deliberately NO seedAtlasOn — off is the default, and seeding it off would re-clear the key on
-    // every navigation for a reason unrelated to the app (measured on P1-0).
-    await pinProject(page, seeded.projectId);
-    await page.goto(loomDaemon.baseURL + "/overview");
-
-    // ── PRESENCE: classic renders THIS worker as the rich Review-queue card it always did. The
-    //    `w:<short>` label is this worker's own (the seeded id's first 8 chars), so the card the
-    //    rest of this leg talks about is unambiguously ours on a shared daemon.
-    await expect(page.locator("main").getByText(`w:${seeded.short}`, { exact: true })).toBeVisible();
-    // The card is the deepest element holding BOTH this worker's id label and a merge button: inside
-    // the Panel, the identity row has the id without the buttons and the action row has the buttons
-    // without the id, so nothing smaller satisfies both. Locators come back in DOCUMENT order and an
-    // ancestor precedes its descendants, so `.last()` is that deepest match — `.first()` would be
-    // `main`, which on a shared daemon could pair my id with a sibling spec's button.
-    const classicCard = page.locator("main div")
-      .filter({ hasText: `w:${seeded.short}` }).filter({ hasText: "Approve & merge" }).last();
-    await expect(classicCard.getByRole("button", { name: "Approve & merge" })).toBeVisible();
-    await expect(classicCard.getByRole("button", { name: "Review →" })).toBeVisible();
-
-    // ── ABSENCE, scoped to what this card BUILT. Not "no merge button in classic" — classic has had
-    //    one all along, on the card asserted above; this is the compact band action's own test id.
-    await expect(page.getByTestId(`atlas-band-merge-${seeded.wkr.sessionId}`)).toHaveCount(0);
-    await expect(page.getByTestId(`atlas-band-merge-go-${seeded.wkr.sessionId}`)).toHaveCount(0);
-    // And classic still routes a merge request to that card rather than to an attention row at all,
-    // so the footer-bearing row shape cannot appear here even in principle.
-    await expect(page.locator(`[data-testid="attention-row"][data-session-id="${seeded.wkr.sessionId}"]`)).toHaveCount(0);
-    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
-  });
 });

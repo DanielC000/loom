@@ -1,18 +1,19 @@
 // Hermetic unit tests for the pure derivations behind the god-eye fleet feeds (src/lib/fleet.ts) — the
-// fully-archived-project tier, and, since card ff6123de, the three rules Mission Control now SHARES with
-// the Atlas Workspace node's Replay tab (`fleetProjectNames`, `replayRoots`, `GLOBAL_ACTIVITY_CAP`).
+// fully-archived-project tier and the rules the Workspace node's Replay tab and Pulse band read
+// (`fleetProjectNames`, `replayRoots`, `GLOBAL_ACTIVITY_CAP`, card ff6123de). First written for the classic
+// Mission Control page, which card acbb6df6 deleted; every rule here is still read by the Workspace node.
 //
-// MC builds its fleet from the RUNNING session set, so a project whose sessions have all
-// exited (auto-archived) would drop off the god-eye. This asserts the pure derivation behind the muted cards:
-//  - a project present ONLY in the archived set yields an archived-only entry (→ a muted card on MC);
-//  - a project that still has ANY live session is EXCLUDED (it stays in the live grid, which MC renders FIRST,
+// The fleet is built from the RUNNING session set, so a project whose sessions have all exited
+// (auto-archived) would drop off the god-eye. This asserts the pure derivation behind the muted cards:
+//  - a project present ONLY in the archived set yields an archived-only entry (→ a muted card);
+//  - a project that still has ANY live session is EXCLUDED (it stays in the live grid, which renders FIRST,
 //    so live projects always rank ahead of archived-only ones);
 //  - the derivation is O(n) via a live-name Set (no per-archived-row scan of the live list);
 //  - the rendered count is CAPPED by ARCHIVED_ONLY_CAP so a deep archive can't crowd the active fleet;
 //  - archived-only projects order freshest-finished-wave first.
 //
 // Like fleet.mjs, this imports the TS source directly via Node type stripping — no daemon, no React. Run with:
-//   node --experimental-strip-types packages/web/test/mission-control-archived.mjs
+//   node --experimental-strip-types packages/web/test/fleet-archived-tier.mjs
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
@@ -111,7 +112,7 @@ check("ARCHIVED_ONLY_CAP is a small, sane bound and caps the rendered card count
   const result = archivedOnlyProjects([], archived);
   assert.equal(result.length, 10, "derivation returns every archived-only project (the true total)");
   const rendered = result.slice(0, ARCHIVED_ONLY_CAP);
-  assert.equal(rendered.length, ARCHIVED_ONLY_CAP, "MC renders at most ARCHIVED_ONLY_CAP muted cards");
+  assert.equal(rendered.length, ARCHIVED_ONLY_CAP, "the tier renders at most ARCHIVED_ONLY_CAP muted cards");
   assert.ok(rendered.length < result.length, "the cap actually holds back the deep archive");
 });
 
@@ -166,7 +167,6 @@ check("GLOBAL_ACTIVITY_CAP is ONE number, and every activity feed reads it inste
   // exactly the split, living on at the project tier — and classic /overview's own 100 was the parity
   // the Atlas node was missing. Both now read the constant, so there are no two numbers left to drift.
   const CAPPED_FEEDS = [
-    "../src/pages/MissionControl.tsx",
     "../src/pages/WorkspaceHome.tsx",
     "../src/pages/ProjectHome.tsx",
   ];

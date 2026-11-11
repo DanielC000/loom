@@ -273,22 +273,4 @@ test.describe("Atlas Sessions tab — inline quick-start", () => {
     // off real state rather than off an empty roster.
     await expect(page.getByTestId("atlas-tabpanel-sessions")).toContainText(held.sessionId.slice(0, 8));
   });
-
-  test("switch OFF: the classic /terminals keeps its filter and has no quick-start", async ({ page, loomDaemon }) => {
-    const f = await seedRoster(loomDaemon);
-    // No seedAtlasOn — off is the default — and no project pin: the classic page is god-eye, which is
-    // exactly the mount that passes no `projectId` and must therefore offer no start control.
-    await page.goto(loomDaemon.baseURL + SESSIONS_PATH);
-
-    // Presence first: the classic shell really rendered this page, so the absence below is measured.
-    await expect(page.locator("main")).toBeVisible();
-    await expect(bar(page)).toBeVisible();
-    await expect(bar(page)).toContainText("Project");
-    await expect(bar(page)).not.toContainText("Start a session");
-    await expect(quickStart(page)).toHaveCount(0);
-    await expect(picker(page)).toHaveCount(0);
-    // The project this spec seeded exists; the page just offers no way to start a session in it.
-    await expect(page.getByTestId("atlas-node-tabs")).toHaveCount(0);
-    expect(f.project.id).toBeTruthy();
-  });
 });

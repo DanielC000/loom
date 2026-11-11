@@ -38,10 +38,13 @@ const SENTINEL = "__loomComposerDraftSpec";
 const composerBox = (page: Page) => page.getByPlaceholder("Send a turn to this session", { exact: false });
 const sendButton = (page: Page) => page.getByRole("button", { name: "Send turn" });
 
-/** The TILE's own identity node (`<agent> · <short id>`) — scoped, so the SessionView PAGE header's twin
- *  of the same string can never satisfy an assertion about which session the COMPOSER belongs to. */
+/** Which session the node's terminal is attached to, read off the terminal ITSELF: each seeded session
+ *  replays its own canned pty bytes (LOOM-DRAFT-A / -B), surfaced through xterm's accessibility rows (the
+ *  fixture's e2e screen-reader mode). The classic tile's `<agent> · <short id>` identity line is not drawn
+ *  on the Atlas session node — its head carries the state instead (card acbb6df6 made that the only page) —
+ *  and the terminal's content is the stronger witness anyway: it is the pane the composer types into. */
 const tileIdentity = (page: Page, shortId: string) =>
-  page.getByTestId("tile-identity").filter({ hasText: shortId });
+  page.locator(".xterm-accessibility-tree > div").filter({ hasText: shortId === SHORT_A ? "LOOM-DRAFT-A" : "LOOM-DRAFT-B" });
 
 /** Route to another /session/:id WITHOUT reloading the document, the way an in-app deep-link does.
  *  Mirrors react-router's own history-state shape (`{ usr, key, idx }`) so its pop handler sees a

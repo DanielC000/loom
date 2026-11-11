@@ -402,41 +402,6 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     expect(mentions[0]).toMatch(/maxConcurrentGates|lanes? busy/i);
   });
 
-  test("switch OFF: no node-head pill or spawn cluster, and the classic Gates head is intact", async ({ page, loomDaemon }) => {
-    test.setTimeout(180_000);
-    const proj = await seedProjectWithRepo(loomDaemon.baseURL);
-    await seedFleet(loomDaemon, { id: proj.id, name: proj.name });
-    // Deliberately NOT seedAtlasOn — off is the default. The project is still pinned so the classic
-    // project-scoped pages render their real content rather than a pick-a-project empty state.
-    await pinProject(page, proj.id);
-    await page.setViewportSize({ width: 1440, height: 1000 });
-
-    const addresses = ["/project", "/home", "/board", "/memory", "/runs", "/archive", "/agents", "/gates"];
-    const offenders: string[] = [];
-    for (const addr of addresses) {
-      await page.goto(loomDaemon.baseURL + addr);
-      // Presence first: the classic shell's own rail must be up before any absence here means
-      // anything — a page still loading has no pills either.
-      await expect(page.locator(".loom-rail")).toBeVisible();
-      // Both the testid and the class, because a pill rendered without its testid would still be
-      // the regression this leg exists to catch.
-      const byTestId = await page.locator('[data-testid^="atlas-nodehead-"]').count();
-      const byClass = await page.locator(".loom-atlas-headpill, .loom-atlas-headpills, .loom-atlas-headactions").count();
-      if (byTestId !== 0 || byClass !== 0) offenders.push(`${addr}: testid=${byTestId} class=${byClass}`);
-    }
-    expect(offenders, "the classic shell renders no node-head pill or spawn cluster anywhere").toEqual([]);
-    // And nothing Atlas at all, so the absence above is the switch being off rather than a head that
-    // merely failed to render inside a mounted frame.
-    await expect(page.locator("[class^='loom-atlas-'], [class*=' loom-atlas-']")).toHaveCount(0);
-
-    // THE OTHER POLARITY of the Gates change: outside the frame the page keeps its own head AND its
-    // two occupancy lamps, so this card suppressed them inside the frame rather than deleting them.
-    await page.goto(loomDaemon.baseURL + "/gates");
-    await expect(page.getByTestId("page-identity")).toBeVisible();
-    const classicMentions = await laneOccupancyMentions(page);
-    expect(classicMentions, `the classic Gates page keeps its lamp: ${JSON.stringify(classicMentions)}`).toHaveLength(2);
-  });
-
   test("switch ON at 420px: the head wraps and nothing escapes the viewport", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const proj = await seedProjectWithRepo(loomDaemon.baseURL);

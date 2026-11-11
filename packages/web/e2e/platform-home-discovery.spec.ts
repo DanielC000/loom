@@ -73,11 +73,13 @@ test.describe("GET /api/platform/home discovery (card 8d82be67)", () => {
       "the detector should have caught the simulated 404 but didn't — it cannot be trusted").toBeGreaterThan(0);
   });
 
-  // MissionControl parity — the SAME exclusion logic (`reservedProjectIds` → archivedOnlyProjects, see
+  // Inactive-projects parity — the SAME exclusion logic (`reservedProjectIds` → archivedOnlyProjects, see
   // lib/fleet.ts) exercised under BOTH values the response's `project` field can now take, with a real
   // archived-only project as the thing being excluded-or-not, so this is a genuine before/after contrast
-  // rather than a render-only smoke check.
-  test("MissionControl excludes the platform-tier home from inactive projects only when one actually exists — unchanged in both editions", async ({ page, loomDaemon }) => {
+  // rather than a render-only smoke check. Read on the Workspace node's Replay tab, the inactive tier's
+  // home since Mission Control was deleted with the classic shell (card acbb6df6) — it runs the same
+  // `archivedOnlyProjects(…, reservedProjectIds)` call (components/workspaceReplay.tsx).
+  test("the inactive tier excludes the platform-tier home only when one actually exists — unchanged in both editions", async ({ page, loomDaemon }) => {
     const seeded = await loomDaemon.seedLiveSession({ role: "manager" });
     // Archive THIS session only (never the worker-shared `archiveSeededSessions()`, which sweeps every
     // session tracked so far on this shared daemon and could reach into a sibling spec's still-live
@@ -87,37 +89,28 @@ test.describe("GET /api/platform/home discovery (card 8d82be67)", () => {
       body: JSON.stringify({ archiveSessions: [seeded.sessionId] }),
     });
 
-    // Scoped to <main> (App.tsx) — the sidebar's own project switcher can independently show this
-    // SAME freshly-seeded project's name as the active-project selector, which would otherwise collide
-    // with the inactive-strip's card under a page-wide text locator.
-    const main = page.locator("main");
-    const inactiveToggle = main.getByRole("button", { name: /inactive project/i });
-    const projectCard = main.getByText(seeded.projectName, { exact: true });
+    // Scoped to the tier itself: the tree's own project rows carry this SAME project's name.
+    const tier = page.getByTestId("atlas-replay-inactive");
+    const projectCard = tier.getByText(seeded.projectName, { exact: true });
 
     // Shipping edition (no mock — the real daemon's real 200+project:null response): an ordinary
-    // archived-only project is NOT reserved, so it shows in the inactive strip as before this card.
-    await page.goto(loomDaemon.baseURL + "/");
-    await expect(inactiveToggle).toBeVisible();
-    await inactiveToggle.click();
+    // archived-only project is NOT reserved, so it shows in the inactive tier (open by default there).
+    await page.goto(loomDaemon.baseURL + "/home?tab=replay");
     await expect(projectCard).toBeVisible();
 
     // Dev edition (mocked 200 + a REAL project — this project itself, standing in for a genuine
-    // platform-tier home): MissionControl.tsx only ever reads `.project?.id`, so reusing this project's
-    // own id is enough to exercise the "a real project came back" branch without needing the actual
-    // reserved Loom Platform home. The SAME project must now be excluded.
+    // platform-tier home): the tier only ever reads `.project?.id`, so reusing this project's own id is
+    // enough to exercise the "a real project came back" branch without needing the actual reserved Loom
+    // Platform home. The SAME project must now be excluded.
     await page.route(`**${PLATFORM_HOME_PATH}`, (route) => route.fulfill({
       status: 200, contentType: "application/json",
       body: JSON.stringify({ project: { id: seeded.projectId, name: seeded.projectName, reserved: true }, agents: [], liveSessions: [] }),
     }));
-    await page.goto(loomDaemon.baseURL + "/");
-    // Either the toggle itself is gone (zero OTHER inactive projects on this shared worker daemon) or it
-    // is present and, once opened, no longer lists this project — assert whichever applies rather than
-    // assuming one.
-    if (await inactiveToggle.count() > 0) {
-      await inactiveToggle.click();
-      await expect(projectCard).toHaveCount(0);
-    } else {
-      await expect(projectCard).toHaveCount(0);
-    }
+    await page.goto(loomDaemon.baseURL + "/home?tab=replay");
+    // The tier itself rendered its resolved content, list or empty state (positive control: a mis-scoped
+    // locator, or a still-loading tier, reads zero just as well) …
+    await expect(tier.getByText(/No inactive projects yet|Finished waves/)).toBeVisible();
+    // … and no longer lists this project.
+    await expect(projectCard).toHaveCount(0);
   });
 });

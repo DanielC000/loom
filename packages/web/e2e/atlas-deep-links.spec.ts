@@ -494,7 +494,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
   });
 
   // ── 6. The legacy redirect — a WORKING deep link since card 260fb29a ─────────────────────────────
-  test("both shells: a legacy redirect carries the deep-link query through identically", async ({ page, loomDaemon }) => {
+  test("a legacy redirect carries the deep-link query through", async ({ page, loomDaemon }) => {
     // Asserted against the REAL declaration so this leg can never quietly test a dead URL: if
     // /profiles stops redirecting to /actors, this fails here rather than passing on a 404 page.
     const src = readFileSync(NAV_SOURCE, "utf8");
@@ -528,16 +528,12 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     // The row's own `?tab=` still wins any key collision; `/profiles` pins none, so there is nothing
     // here for the carried query to collide with.
     //
-    // Card 41eab0eb added a SECOND hop under Atlas alone: /actors is now the Workspace node's
-    // `actors` tab, so the Atlas landing is that tab's address while the classic one is unchanged.
-    // That hop has to carry the query too, which is what these two legs together measure — the
-    // per-shell constants are what record the path divergence as deliberate rather than a drift.
+    // Card 41eab0eb added a SECOND hop: /actors is the Workspace node's `actors` tab, so the landing is
+    // that tab's address, and that hop has to carry the query too.
     const ATLAS_URL = /\/home\?tab=actors&/;
-    const CLASSIC_URL = /\/actors\?/;
     const PLACEHOLDER = "Select a profile to edit it";
 
     try {
-      // Switch ON.
       await seedAtlasOn(page);
       await page.setViewportSize(VIEWPORT);
 
@@ -574,22 +570,6 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
       expect(page.url(), "the redirect carried ?profile= through").toContain("profile=");
       expect(page.url(), "…and ?grant= with it").toContain("grant=");
 
-      // Switch OFF — a second context, so the seeded flag cannot carry over.
-      const classic = await page.context().browser()!.newPage();
-      try {
-        await classic.setViewportSize(VIEWPORT);
-        await gotoActorsReady(classic, loomDaemon.baseURL, legacyLink);
-        await expect(classic.locator(".loom-rail"), "the classic shell really mounted").toBeVisible();
-        await expect(classic.getByTestId("atlas-shell")).toHaveCount(0);
-        await expect(classic.getByLabel("Name", { exact: true })).toHaveValue(profile.name);
-        await expect(classic.getByText(PLACEHOLDER, { exact: false })).toHaveCount(0);
-        await expect(classic).toHaveURL(CLASSIC_URL);
-        expect(classic.url()).toContain("profile=");
-        expect(classic.url()).toContain("grant=");
-      } finally {
-        await classic.close();
-      }
-
       // Arriving on the deep link still GRANTS nothing — read back over REST, not inferred from the
       // UI. Making the link work must not have made it write (card 12dc7fc9's own rule).
       const atRest = await apiJson<{ connections?: string[] }>(`${loomDaemon.baseURL}/api/profiles/${profile.id}`);
@@ -598,45 +578,6 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
       await fetch(`${loomDaemon.baseURL}/api/profiles/${profile.id}`, { method: "DELETE" }).catch(() => {});
       await fetch(`${loomDaemon.baseURL}/api/profiles/${decoyProfile.id}`, { method: "DELETE" }).catch(() => {});
       await fetch(`${loomDaemon.baseURL}/api/connections/${connection.id}`, { method: "DELETE" }).catch(() => {});
-    }
-  });
-
-  // ── The other polarity: the classic shell is untouched ──────────────────────────────────────────
-  test("switch OFF: both deep links behave exactly as they did on the classic shell", async ({ page, loomDaemon }) => {
-    const base = loomDaemon.baseURL;
-    const project = await loomDaemon.createProject(uniq("atlasdeep-classic"));
-    const { decoy, target } = await seedDecoyAndTarget(loomDaemon, project.id);
-
-    await pinProject(page, project.id); // no seedAtlasOn — OFF is the default
-    await page.setViewportSize(VIEWPORT);
-
-    // ── `?task=` on the classic Board page ──
-    await page.goto(`${base}/board?task=${encodeURIComponent(target.id)}`);
-    await expect(page.locator(".loom-rail"), "the classic shell really mounted").toBeVisible();
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    await assertDialogIsCard(page, target, decoy);
-    await expect(page).toHaveURL(/\/board$/);
-    expect(page.url()).not.toContain("task=");
-
-    // ── `?profile=&grant=` on the classic Actors page ──
-    const connection = await apiJson<{ id: string; name: string }>(`${base}/api/connections`, {
-      method: "POST",
-      body: JSON.stringify({ name: uniq("E2E Classic Conn"), host: "api.example-classic.test", authScheme: "api-key", secret: `sk_${Date.now()}` }),
-    });
-    const profile = await apiJson<{ id: string; name: string }>(`${base}/api/profiles`, {
-      method: "POST", body: JSON.stringify({ name: uniq("Classic Target Rig") }),
-    });
-    try {
-      await gotoActorsReady(page, base, `/actors?tab=profiles&profile=${encodeURIComponent(profile.id)}&grant=${encodeURIComponent(connection.id)}`);
-      await expect(page.locator(".loom-rail")).toBeVisible();
-      await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-      await expect(page.getByLabel("Name", { exact: true })).toHaveValue(profile.name);
-      await expect(page.getByText(/is pre-selected below/)).toHaveCount(0);
-      const atRest = await apiJson<{ connections?: string[] }>(`${base}/api/profiles/${profile.id}`);
-      expect(atRest.connections ?? []).not.toContain(connection.id);
-    } finally {
-      await fetch(`${base}/api/profiles/${profile.id}`, { method: "DELETE" }).catch(() => {});
-      await fetch(`${base}/api/connections/${connection.id}`, { method: "DELETE" }).catch(() => {});
     }
   });
 });

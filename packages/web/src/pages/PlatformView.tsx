@@ -13,7 +13,6 @@ import { AtlasNodeHead, NodeTabs, type NodeHeadPill } from "../components/atlasH
 import { SetupWizard } from "../components/SetupWizard";
 import { LogoMark } from "../components/Logo";
 import { looksLikeCron } from "./Schedules";
-import { useAtlasUi } from "../lib/atlasUi";
 import { PlatformFindings } from "./PlatformFindings";
 import { color, font, fs, radius } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
@@ -44,16 +43,12 @@ import {
 // Everything reuses EXISTING REST: discovery is read-only (api.platformHome / api.setupHome); spawn =
 // startSession(edition role), stop = stopSession, cadence = createSchedule. No new write/elevated surface.
 //
-// TWO LAYOUTS, ONE SHELL (card c07ff42a, Atlas build plan P2-4). The five sections above are rendered by
-// whichever layout the Atlas-UI switch selects: `ClassicPlatformLayout` stacks all five down one column
-// (today's page, unchanged), `AtlasPlatformLayout` places them on the approved round-4 node tabs
-// (Home / Cadence / History / Board / Findings). The split is DELIBERATELY the last step: the edition
-// resolution, the agent/session/role derivation and every leaf component above it are shared, so a layout
-// receives values that are ALREADY resolved and cannot re-derive what an edition may show. Adding a
-// third layout, or changing what one shows, must not mean re-deriving any of that.
+// ONE LAYOUT, RESOLVED VALUES (card c07ff42a, Atlas build plan P2-4). `AtlasPlatformLayout` places the
+// five sections above on the approved round-4 node tabs (Home / Cadence / History / Board / Findings).
+// The edition resolution and the agent/session/role derivation happen HERE, in the shell, so the layout
+// receives values that are ALREADY resolved and cannot re-derive what an edition may show.
 //
-// ⛔ Do not let a layout read the Atlas switch, the edition-preview toggle, or the home query itself. The
-// switch is read HERE, once, for the sole purpose of choosing a layout; everything either layout needs
+// ⛔ Do not let the layout read the edition-preview toggle or the home query itself; everything it needs
 // arrives as a prop.
 //
 // @decision b472645a — in the dev End-user PREVIEW (`previewOnly`) every control THIS file owns must send
@@ -76,12 +71,6 @@ const PREVIEW_DISABLED_TITLE = "Preview only on a dev install — acting here is
 const PREVIEW_DISABLED_NOTE = "Preview only on a dev install — acting here is disabled.";
 
 export function PlatformView({ edition, previewOnly = false }: { edition: PlatformEdition; previewOnly?: boolean }) {
-  // Which LAYOUT renders the resolved sections — nothing else. Read before any early return so the hook
-  // order is identical in both, and read here rather than in a layout so the two layouts stay pure
-  // presentation (see the TWO LAYOUTS note above). This is the Atlas display switch (lib/atlasUi.ts), a
-  // different thing entirely from the edition-preview toggle in Platform.tsx: it cannot influence which
-  // EDITION mounts, and the edition — which does decide roles and endpoints — never reaches it.
-  const [atlasOn] = useAtlasUi();
   // Map the edition's home key → the real (api-free config stays clean) read-only discovery fn. Same query
   // key as useVisibleNavPages / Platform.tsx → one shared, cached fetch.
   const load = (signal: AbortSignal) => (edition.homeQueryKey === "platformHome" ? api.platformHome(signal) : api.setupHome(signal));
@@ -151,13 +140,12 @@ export function PlatformView({ edition, previewOnly = false }: { edition: Platfo
   const operatorLive = liveFor(operator?.id);
   const auditorLive = liveFor(auditor?.id);
 
-  // Everything either layout renders, resolved once here and spread into whichever one the switch
-  // selected — so the two can never disagree about what this edition resolved to.
+  // Everything the layout renders, resolved once here.
   const surface: PlatformSurface = {
     edition, previewOnly, project, operator, auditor, operatorSpawnRole, operatorRoleUnknown,
     homeSessions, operatorLive, auditorLive, liveCountFor, wizardOpen, setWizardOpen,
   };
-  return atlasOn ? <AtlasPlatformLayout {...surface} /> : <ClassicPlatformLayout {...surface} />;
+  return <AtlasPlatformLayout {...surface} />;
 }
 
 /** Everything a layout renders, resolved by the shell above. A layout derives nothing of its own. */
@@ -177,68 +165,10 @@ interface PlatformSurface {
   setWizardOpen: (open: boolean) => void;
 }
 
-// ── LAYOUT A — today's page. All five sections stacked down one column, in this order. The sections are
-// the shared components below, so this layout and the Atlas one can only differ in PLACEMENT. ──
-function ClassicPlatformLayout({
-  edition, previewOnly, project, operator, auditor, operatorSpawnRole, operatorRoleUnknown,
-  homeSessions, operatorLive, auditorLive, liveCountFor, wizardOpen, setWizardOpen,
-}: PlatformSurface) {
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div>
-        <SectionLabel style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          Platform
-          <Badge tone="muted">{project.name}</Badge>
-          <span style={{ color: color.text3, fontWeight: 400, fontSize: fs.sm }}>
-            {edition.copy.header.mutedSpan}
-          </span>
-        </SectionLabel>
-        <p style={{ color: color.text3, fontSize: fs.sm, margin: "4px 0 0", lineHeight: 1.5, maxWidth: 760 }}>
-          {edition.copy.header.paragraph}
-        </p>
-      </div>
-
-      <GuidedSetupLauncher onStart={() => setWizardOpen(true)} />
-      <SetupWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
-
-      {/* --- 1. Agent go-live controls (operator + auditor) --- */}
-      <PlatformAgentsSection edition={edition} previewOnly={previewOnly} operator={operator} auditor={auditor}
-        operatorSpawnRole={operatorSpawnRole} operatorRoleUnknown={operatorRoleUnknown}
-        operatorLive={operatorLive} auditorLive={auditorLive} liveCountFor={liveCountFor}
-        // CLASSIC PLACEMENT: the end-user single-cadence form rides in the auditor card's footer. The
-        // Atlas layout puts it on its own Cadence tab instead (the approved round-4 placement), which is
-        // why the footer is a prop rather than something the section decides for itself.
-        auditorFooter={edition.auditorScheduleVariant === "single-form" && auditor ? <AuditorScheduleInline agent={auditor} previewOnly={previewOnly} /> : undefined} />
-
-      {/* --- 2. Live sessions — the dev GRID of all live, or the end-user's two SINGLE-session wrappers --- */}
-      <PlatformSessionsSection edition={edition} previewOnly={previewOnly} homeSessions={homeSessions}
-        operatorLive={operatorLive} auditorLive={auditorLive} />
-
-      {/* --- 3. Auditor cadence — the DEV multi-row LIST variant (a separate section). The end-user
-              single-form variant lives INSIDE the auditor card (footer, above). --- */}
-      {edition.auditorScheduleVariant === "list" && (
-        <AuditorCadenceListSection edition={edition} auditor={auditor} />
-      )}
-
-      {/* --- 4. Run history for each role — dev collapses (CollapsibleHistory), end-user expands. --- */}
-      <PlatformHistorySections edition={edition} previewOnly={previewOnly} project={project} homeSessions={homeSessions} />
-
-      {/* --- 5. The reserved-home board (reused Board component) --- */}
-      <PlatformBoardSection edition={edition} project={project} />
-    </div>
-  );
-}
-
-// ── LAYOUT B — the Atlas Platform node (card c07ff42a). The SAME five sections, placed on the approved
-// round-4 tabs instead of stacked. Nothing is rebuilt: each tab renders the shared section components
-// above, so a section's behavior is identical to the classic page by construction.
-//
-// Two placements genuinely move, both per the approved design:
-//   • The end-user single-cadence form leaves the auditor card's footer for the Cadence tab, so BOTH
-//     cadence variants live in the same place and the tab is never empty in one edition.
-//   • Findings become a tab of their own (PlatformFindings) — in the classic page the auditor's findings
-//     are reachable only as chips on an individual expanded run row, and its pending preset suggestions
-//     only through a live session's composer popover.
+// ── The Platform node (card c07ff42a). The five sections, placed on the approved round-4 tabs:
+//   • BOTH cadence variants live on the Cadence tab, so the tab is never empty in one edition.
+//   • Findings are a tab of their own (PlatformFindings), next to the run history whose rows also carry
+//     them as chips.
 //
 // The "View as" edition toggle is NOT here: it lives one level up in Platform.tsx, above whichever layout
 // mounts, which is exactly the "segmented control at the top of the node" the design calls for — and
@@ -307,7 +237,7 @@ function AtlasPlatformLayout({
     ...(homeRepeatsHeading ? [] : [
       { key: "home", text: project.name, tone: "muted", title: "The reserved home this node resolved to" } as NodeHeadPill,
     ]),
-    // The PILL phrasing, never the classic page's full caption: MEASURED at 420px the full span is
+    // The PILL phrasing, never the full caption: MEASURED at 420px the full span is
     // 462px of text in a 388px box. A pill that wide now ellipsises (card 359bcdaa), but an ellipsised
     // clause is still a clause the reader cannot read, so the short phrasing stays. The caption rides
     // on the title instead, where what the pill drops stays reachable.
@@ -343,9 +273,8 @@ function AtlasPlatformLayout({
           accessibility tree and the tab order, so a keyboard or screen-reader user never reaches a
           control on a panel they are not looking at. ⛔ Don't give these wrappers an inline `display` —
           an author `display` out-specifies the UA's `[hidden]` rule and would silently un-hide them.
-          Cost, stated: all five panels' queries poll at once. That is exactly what the CLASSIC layout
-          already does (it renders all five sections in one column), so this is the status quo, not a
-          new cost — and it is the reason the classic page never had this bug to begin with. */}
+          Cost, stated: all five panels' queries poll at once, the price of never discarding input on a
+          tab switch. */}
       <Panels tab={tab}>
         {{
           home: (
@@ -364,8 +293,7 @@ function AtlasPlatformLayout({
               <SetupWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
               <PlatformAgentsSection edition={edition} previewOnly={previewOnly} operator={operator} auditor={auditor}
                 operatorSpawnRole={operatorSpawnRole} operatorRoleUnknown={operatorRoleUnknown}
-                operatorLive={operatorLive} auditorLive={auditorLive} liveCountFor={liveCountFor}
-                auditorFooter={undefined} />
+                operatorLive={operatorLive} auditorLive={auditorLive} liveCountFor={liveCountFor} />
               <PlatformSessionsSection edition={edition} previewOnly={previewOnly} homeSessions={homeSessions}
                 operatorLive={operatorLive} auditorLive={auditorLive} />
             </div>
@@ -407,9 +335,8 @@ function Panels({ tab, children }: { tab: PlatformTab; children: Record<Platform
   );
 }
 
-// ── The shared sections. Each is rendered by BOTH layouts, so a change here lands on the classic page
-// and the Atlas node together and the two cannot drift. None of them reads a query of its own beyond the
-// leaf components they already wrap; every value they render arrives as a prop. ──
+// ── The sections. None of them reads a query of its own beyond the leaf components they already wrap;
+// every value they render arrives as a prop. ──
 
 // Guided setup launcher (onboarding Entry A): stand up a NEW project + a templated team in a few guided
 // steps. A peer to handing the operator agent the reins — this is the do-it-yourself fast path. The
@@ -442,9 +369,9 @@ function GuidedSetupLauncher({ onStart }: { onStart: () => void }) {
 // the section itself decides nothing about who may spawn what.
 function PlatformAgentsSection({
   edition, previewOnly, operator, auditor, operatorSpawnRole, operatorRoleUnknown,
-  operatorLive, auditorLive, liveCountFor, auditorFooter,
+  operatorLive, auditorLive, liveCountFor,
 }: Pick<PlatformSurface, "edition" | "previewOnly" | "operator" | "auditor" | "operatorSpawnRole"
-  | "operatorRoleUnknown" | "operatorLive" | "auditorLive" | "liveCountFor"> & { auditorFooter?: ReactNode }) {
+  | "operatorRoleUnknown" | "operatorLive" | "auditorLive" | "liveCountFor">) {
   return (
     <section>
       <SectionLabel>{edition.copy.agentsLabel}</SectionLabel>
@@ -457,7 +384,7 @@ function PlatformAgentsSection({
             workspace" was enabled unconditionally and really spawned against the previewed home's auditor. */}
         <AgentControl edition={edition} agent={auditor} role={edition.auditorRole} card={edition.copy.auditorCard}
           session={auditorLive} liveCount={liveCountFor(auditor?.id)} showLiveCount={false}
-          gate={auditorSpawnDisabled} previewDisabled={previewOnly} footer={auditorFooter} />
+          gate={auditorSpawnDisabled} previewDisabled={previewOnly} />
       </div>
     </section>
   );
@@ -498,7 +425,7 @@ function PlatformSessionsSection({ edition, previewOnly, homeSessions, operatorL
   );
 }
 
-// Auditor cadence, VARIANT LIST (dev) as its own section — both layouts render it in this shape.
+// Auditor cadence, VARIANT LIST (dev) as its own section.
 //
 // Takes NO previewOnly, deliberately: `previewOnly` is passed on the END-USER mount only (pinned by
 // test/platform-edition.mjs), and that edition's variant is "single-form" — so this leaf is unreachable
@@ -512,10 +439,8 @@ function AuditorCadenceListSection({ edition, auditor }: Pick<PlatformSurface, "
   );
 }
 
-// Auditor cadence, VARIANT SINGLE-FORM (end-user) as its own section — the Atlas Cadence tab only. The
-// classic layout renders the same form inside the auditor card's footer instead, so this wrapper exists
-// purely to give that variant a section heading of its own once it is no longer inside a card. The
-// missing-agent state mirrors AuditorScheduleList's, so an unseeded auditor reads the same either way.
+// Auditor cadence, VARIANT SINGLE-FORM (end-user) as its own section on the Cadence tab, with a section
+// heading of its own. The missing-agent state mirrors AuditorScheduleList's, so an unseeded auditor reads the same either way.
 function AuditorCadenceFormSection({ edition, previewOnly, auditor }:
   Pick<PlatformSurface, "edition" | "previewOnly" | "auditor">) {
   return (
@@ -585,13 +510,11 @@ function PlatformBoardSection({ edition, project, deepLinks }:
 // (operatorSpawnDisabled / auditorSpawnDisabled) so the singleton-vs-multi + create-only gating stays
 // exactly as each edition intends. Badge TONE reads from the ONE role display map (roleDisplay(role).tone)
 // so it agrees with the picker + every badge; the badge LABEL + button copy come from the edition's copy
-// pack. `footer` carries the end-user auditor's inline schedule form (dev has none — it uses the list
-// section). Spawn/stop are HUMAN-only REST (startSession / stopSession) — no agent MCP path mints these.
-function AgentControl({ edition, agent, role, card, session, liveCount, showLiveCount, gate, footer, previewDisabled, roleUnknown }: {
+// pack. Spawn/stop are HUMAN-only REST (startSession / stopSession) — no agent MCP path mints these.
+function AgentControl({ edition, agent, role, card, session, liveCount, showLiveCount, gate, previewDisabled, roleUnknown }: {
   edition: PlatformEdition; agent?: Agent; role: PlatformSpawnRole; card: AgentCardCopy;
   session?: SessionListItem; liveCount: number; showLiveCount: boolean;
   gate: (edition: PlatformEdition, s: { live: boolean; pending: boolean }) => boolean;
-  footer?: ReactNode;
   // f437d4e9 C5: true only for a DEV install's "View as: End-user" preview (Platform.tsx) — the
   // underlying agent there is never upgraded to the Lead (§1c), so the spawn button is disabled rather
   // than minting a stray role:"platform" session against it.
@@ -658,7 +581,6 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
           never writable — the editor's own Ctrl/Cmd+Enter is a save trigger the buttons don't cover. */}
       <AgentPromptEditor key={`prompt-${agent.id}`} agent={agent} homeKey={[edition.homeQueryKey]}
         readOnly={!!previewDisabled} />
-      {footer}
     </Panel>
   );
 }

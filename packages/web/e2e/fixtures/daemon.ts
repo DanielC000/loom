@@ -831,8 +831,18 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
     const seedLiveSession: LoomDaemon["seedLiveSession"] = async (opts = {}) => {
       const project = opts.project ?? await createProject(`live-${randomUUID().slice(0, 8)}`);
       const agentName = opts.agentName ?? "Seeded Agent";
-      const agentId = opts.agentId
-        ?? (await apiPost<{ id: string }>(baseURL, `/api/projects/${project.id}/agents`, { name: agentName })).id;
+      // A second session under the same name in one project is a second session OF THAT AGENT — two
+      // workers of one "Dev" is exactly what a real fleet produces, and what some specs seed on purpose.
+      // Reuse the project's existing agent of that name rather than minting another: the daemon refuses
+      // a duplicate agent name per project (commit 4d5821f1), and a renamed copy ("Dev 2") would quietly
+      // change what such a spec is about.
+      const agentId = opts.agentId ?? await (async () => {
+        const res = await fetch(`${baseURL}/api/projects/${project.id}/agents`);
+        if (!res.ok) throw new Error(`GET /api/projects/${project.id}/agents -> ${res.status}: ${await res.text()}`);
+        const existing = ((await res.json()) as { id: string; name: string }[]).find((a) => a.name === agentName);
+        return existing?.id
+          ?? (await apiPost<{ id: string }>(baseURL, `/api/projects/${project.id}/agents`, { name: agentName })).id;
+      })();
       const role = opts.role ?? "plain";
 
       let taskId: string | undefined;

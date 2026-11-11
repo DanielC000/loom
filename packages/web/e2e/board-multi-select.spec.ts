@@ -38,7 +38,7 @@ const activeItem = (page: Page) => page.evaluate(() => {
 });
 const MOD = process.platform === "darwin" ? "Meta" : "Control";
 
-for (const surface of ["/overview", "/board"] as const) {
+for (const surface of ["/board"] as const) {
   test.describe(`board multi-select on ${surface}`, () => {
     test("ctrl-click, shift-range and keyboard select; Escape clears; a plain click still opens; arrows still move", async ({ page, loomDaemon }) => {
       const project = await loomDaemon.createProject(uniq("sel"));

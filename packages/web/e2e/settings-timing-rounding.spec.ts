@@ -60,7 +60,7 @@ test("a fractional daemon-global timing entry saves as a WHOLE millisecond integ
   const beforeFloat = JSON.stringify(await platformOverride(loomDaemon.baseURL));
   expect(JSON.stringify(await platformOverride(loomDaemon.baseURL))).toBe(beforeFloat);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
   // Three fields, three different display units — each entered with a value whose raw product is a float:
   //   16.1 s  -> 16100.000000000002
@@ -73,7 +73,7 @@ test("a fractional daemon-global timing entry saves as a WHOLE millisecond integ
 
   // BEFORE: the global form is clean (its Save is disabled, and it claims no "saved" because nothing has
   // been saved yet, card f58b1250) and no range error is showing anywhere.
-  await expect(page.getByRole("button", { name: "Save", exact: true }).last()).toBeDisabled();
+  await expect(page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true })).toBeDisabled();
   await expect(page.getByTestId("platform-config-saved")).toHaveCount(0);
   await expect(box(page, "Git push (s)").getByRole("alert")).toHaveCount(0);
 
@@ -83,7 +83,7 @@ test("a fractional daemon-global timing entry saves as a WHOLE millisecond integ
 
   // AFTER (form state): the entries are in range, so no inline error and Save is reachable.
   await expect(box(page, "Git push (s)").getByRole("alert")).toHaveCount(0);
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
   await expect(globalSave).toBeEnabled();
   await globalSave.click();
 
@@ -147,7 +147,7 @@ test("daemon-global timing fields state their bound in the DISPLAYED unit and bl
   expect(overPatch.status).toBe(400);
   expect(await overPatch.text()).toMatch(/600000/);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
   // DoD — the permitted range is visible in the field's OWN unit before anything goes wrong. Three units,
   // three different shared bounds, so the hint is provably driven per-field rather than one reused pair.
@@ -157,7 +157,7 @@ test("daemon-global timing fields state their bound in the DISPLAYED unit and bl
   await expect(box(page, "Context watch (s)").getByText("min 5s · max 3600s")).toBeVisible();
   await expect(box(page, "Update-check cadence (h) · restart required").getByText("min 1h · max 24h")).toBeVisible();
 
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
   const gitPush = field(page, "Git push (s)");
 
   // BEFORE: no error, Save merely not-dirty.

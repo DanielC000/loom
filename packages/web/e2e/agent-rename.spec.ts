@@ -263,18 +263,4 @@ test.describe("agent rename from the editor (card b0495d0b)", () => {
     await expect(input).toHaveCount(0);
     expect(await serverName(loomDaemon.baseURL, project.id, subject.id)).toBe(next);
   });
-
-  test("switch OFF: the Projects page hosts the same rename", async ({ page, loomDaemon }) => {
-    const { project, subject } = await seed(loomDaemon);
-    await pinProject(page, project.id);
-    await page.goto(loomDaemon.baseURL + "/projects");
-    await page.getByText(subject.name, { exact: true }).click();
-    await expect(page.getByTestId(`agent-editor-${subject.id}`)).toBeVisible();
-    await page.getByTestId(`agent-rename-${subject.id}`).click();
-    const next = uniq("Gatewarden");
-    await page.getByTestId(`agent-name-input-${subject.id}`).fill(next);
-    await page.getByTestId(`agent-name-save-${subject.id}`).click();
-    await expect(page.getByTestId(`agent-name-${subject.id}`)).toHaveText(next);
-    expect(await serverName(loomDaemon.baseURL, project.id, subject.id)).toBe(next);
-  });
 });

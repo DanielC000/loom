@@ -98,17 +98,20 @@ test.describe("orchestration status feed over /ws/fleet (C6)", () => {
       await route.fallback();
     });
 
-    // MissionControl is the index route ("/" — see nav.tsx), and the Sidebar rail renders on every page,
-    // so both consumers of the `["orchStatus"]` cache are mounted on this one screen.
+    // "/" lands on the Workspace node (Mission Control and its rail went with the classic shell, card
+    // acbb6df6). Two consumers of the `["orchStatus"]` cache are mounted on this one screen: the shell
+    // header's orchestration chip and the node's own fleet-controls bar.
     await page.goto(`${loomDaemon.baseURL}/`);
 
-    const railPill = page.locator(".loom-rail-runpill");
+    const headerChip = page.getByTestId("atlas-orch-chip");
     const mcBadge = page.locator("main").getByText(/^orchestration: (running|paused)$/);
 
-    // COLD LOAD. Both consumers render only once status data exists (the rail pill is `{status.data && …}`
-    // gated), so seeing them at all is the witness that the HTTP seed path survived — DoD-3.
-    await expect(railPill).toHaveText("running");
+    // COLD LOAD. Unlike the classic rail pill, neither consumer is gated on status data — both read a
+    // missing status as "running" — so their text alone cannot witness that the HTTP seed path survived
+    // (DoD-3). The interceptor's own count does: at least one seed request reached the real daemon.
+    await expect(headerChip).toHaveText("running");
     await expect(mcBadge).toHaveText("orchestration: running");
+    await expect.poll(() => statusRequests, { message: "the HTTP status seed never fired" }).toBeGreaterThan(0);
     const atSeed = statusRequests;
 
     // ── ASSERTION 2's WINDOW: dwell, connected, touching nothing. ────────────────────────────────────
@@ -124,13 +127,13 @@ test.describe("orchestration status feed over /ws/fleet (C6)", () => {
     await mutate(loomDaemon.baseURL, "pause");
 
     // THE OBSERVABLE STATE CHANGE (DoD-4) — in BOTH consumers, from a mutation this page never issued.
-    await expect(railPill).toHaveText("paused");
+    await expect(headerChip).toHaveText("paused");
     await expect(mcBadge).toHaveText("orchestration: paused");
     const afterPause = statusRequests;
 
     // And back — a second mutation, proving the feed keeps working rather than delivering once.
     await mutate(loomDaemon.baseURL, "resume");
-    await expect(railPill).toHaveText("running");
+    await expect(headerChip).toHaveText("running");
     await expect(mcBadge).toHaveText("orchestration: running");
     const afterResume = statusRequests;
 
@@ -157,13 +160,13 @@ test.describe("orchestration status feed over /ws/fleet (C6)", () => {
     await mutate(loomDaemon.baseURL, "pause");
 
     // Converged on the LAST frame — unreachable by keeping any earlier one.
-    await expect(railPill).toHaveText("paused");
+    await expect(headerChip).toHaveText("paused");
     await expect(mcBadge).toHaveText("orchestration: paused");
     const afterBurst = statusRequests;
 
     // Leave the shared daemon as we found it (afterEach is the backstop, not the plan).
     await mutate(loomDaemon.baseURL, "resume");
-    await expect(railPill).toHaveText("running");
+    await expect(headerChip).toHaveText("running");
 
     const dwellPolls = afterDwell - atSeed;
     const pollsPerMin = (dwellPolls / (dwellElapsedMs / 60_000)).toFixed(1);

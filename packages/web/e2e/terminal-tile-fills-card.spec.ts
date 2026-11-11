@@ -30,8 +30,11 @@ test("53dfa70c: in the 1-column band the terminal grid fills the card's width", 
     ptyGeometry: GEOMETRY, ptyBytes: `${sentinel}\r\n` + FULL_SCREEN,
   });
 
-  await page.setViewportSize({ width: 1100, height: 1000 });
-  await page.goto(`${loomDaemon.baseURL}/terminals`);
+  // The Workspace node's Terminals grid (the classic /terminals page until card acbb6df6). Its content
+  // column sits beside the 244px entity tree, so the classic 1100px window becomes 1300 here: the same
+  // ~1000px, one-column card the precondition below checks for (rather than trusting this number).
+  await page.setViewportSize({ width: 1300, height: 1000 });
+  await page.goto(`${loomDaemon.baseURL}/workspace-terminals`);
   // Fixture identity: the pane we measure is THIS seeded session's, not a sibling's.
   await expect(page.locator(".xterm-rows").first()).toContainText(sentinel, { timeout: 20_000 });
 
@@ -52,7 +55,7 @@ test("53dfa70c: in the 1-column band the terminal grid fills the card's width", 
   // The precondition that makes this the reported band: ONE column, and a card well past the ~790px
   // where the old cap's height bound took over. Without it a layout change could pass this leg vacuously.
   const before = await measure();
-  expect(before.tracks, "1100px must still be the 1-column band").toBe(1);
+  expect(before.tracks, "the window must still be the 1-column band").toBe(1);
   expect(before.cardW, "the card must be wide enough to have stalled under the old cap").toBeGreaterThan(900);
 
   await expect.poll(async () => { const m = await measure(); return m.paneW - m.screenW; }, {

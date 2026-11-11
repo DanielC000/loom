@@ -80,7 +80,7 @@ type TaskEditPatch = {
 // @decision a483cbec — while NO filter is active this page size is also the server's `?doneLimit=`
 // window, so the lane's unrendered cards are never fetched at all; the instant a filter IS active the
 // client must drop the param and fetch the whole set, or a search can only ever see the newest page.
-const DONE_LANE_PAGE = 50;
+export const DONE_LANE_PAGE = 50;
 const NO_POLICY_STATUS: Record<string, CardPolicyCardStatus> = {};
 
 // The outcome of one bulk action (card 19074e42). `verb` is the past-tense phrase ("moved to Review").
@@ -165,7 +165,7 @@ export default function Board({ projectId: propProjectId, deepLinks = true }:
   // empty lane. Matches the Platform board's polling.
   //
   // The key EXTENDS `["board", projectId]` rather than replacing it: that exact entry stays the full,
-  // unwindowed set its four other consumers read, while `invalidateQueries(["board", projectId])` below
+  // unwindowed set its other consumers read (the project node shares THIS windowed entry instead, card acbb6df6), while `invalidateQueries(["board", projectId])` below
   // still reaches every windowed entry too, because react-query matches a key by prefix.
   // A within-lane card reorder (card 139cfc3d) can be several sequential writes; the poll is paused until
   // they settle, so a refetch landing mid-sequence never paints a half-renumbered band.

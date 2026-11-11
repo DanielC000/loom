@@ -4,7 +4,8 @@
 //   2. Switching to the Skills tab is an OBSERVABLE state change — the profiles body unmounts, the skills
 //      body mounts (each keyed on distinctive body copy, so this proves the RIGHT body swapped, not just
 //      that a tab highlighted).
-//   3. The old routes redirect: /profiles → /actors (Profiles tab), /skills → /actors?tab=skills (Skills tab).
+//   3. The old routes redirect: /profiles and /skills land on the Workspace node's Actors tab
+//      (/home?tab=actors, and &sub=skills for the Skills sub-tab).
 //   4. PRESERVED gating: Skills' dev-only "Publish to repo" affordance stays gated. This fixture boots
 //      LOOM_DEV=0 (see fixtures/daemon.ts), so /api/platform/home returns `project: null` (card 8d82be67 —
 //      the route is always 200) → isDev=false → the Publish button is
@@ -54,7 +55,8 @@ test.describe("actors (Profiles + Skills consolidation)", () => {
     await expect(page.getByText(PROFILES_BODY)).toHaveCount(0);
     // AFTER (observable #2 — selection + URL): the Skills segment reads checked and the tab is pinned in the URL.
     await expect(page.getByRole("radio", { name: "Skills" })).toHaveAttribute("aria-checked", "true");
-    await expect(page).toHaveURL(/\/actors\?tab=skills/);
+    // The Actors page is the Workspace node's Actors tab; its own Profiles|Skills sub-tab rides `sub=`.
+    await expect(page).toHaveURL(/\/home\?tab=actors&sub=skills/);
   });
 
   test("the Profiles|Skills switch is one Tab stop, and arrow keys move AND select (card 3f28f1c3)", async ({ page, loomDaemon }) => {
@@ -105,15 +107,15 @@ test.describe("actors (Profiles + Skills consolidation)", () => {
   });
 
   test("the old /profiles and /skills routes redirect to the consolidated Actors page", async ({ page, loomDaemon }) => {
-    // /profiles → /actors (Profiles tab).
+    // /profiles → /actors → the Workspace node's Actors tab (Profiles sub-tab, the default).
     await page.goto(`${loomDaemon.baseURL}/profiles`);
     await expect(page.getByText(PROFILES_BODY)).toBeVisible();
-    await expect(page).toHaveURL(/\/actors$/);
+    await expect(page).toHaveURL(/\/home\?tab=actors$/);
 
-    // /skills → /actors?tab=skills (Skills tab).
+    // /skills → /actors?tab=skills → the Actors tab with its Skills sub-tab (`sub=` on the host node).
     await page.goto(`${loomDaemon.baseURL}/skills`);
     await expect(page.getByText(SKILLS_BODY)).toBeVisible();
-    await expect(page).toHaveURL(/\/actors\?tab=skills/);
+    await expect(page).toHaveURL(/\/home\?tab=actors&sub=skills/);
   });
 
   // Card 4d3418cb (audit A-09 + A-16). A selected list row used the primary CTA fill, which inverted the row

@@ -62,7 +62,7 @@ const INSTRUMENT = () => {
 async function openConnectedChat(page: import("@playwright/test").Page, baseURL: string) {
   await page.addInitScript(INSTRUMENT);
   await page.goto(`${baseURL}/companion`);
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   // The REAL socket must be open first: the pill only reads "connected" once `ws.onopen` fired, so this is
   // the precondition that makes a later state change a change rather than an initial render.
   await expect(chat.getByText("connected", { exact: true })).toBeVisible();

@@ -187,7 +187,7 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     await expectClosedAndRefocused("the scrim");
   });
 
-  test("switch ON at 420px: the deepest crumb is not truncated and the leave button yields the room", async ({ page, loomDaemon }) => {
+  test("switch ON at 420px: the deepest crumb is not truncated", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const project = await seedNarrowProject(loomDaemon);
     await seedAtlasOn(page);
@@ -232,25 +232,8 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     const squeezed = crumbs.filter((c) => c.scrollWidth > c.clientWidth);
     expect(squeezed, "every segment of the project node's own 2-crumb trail fits at 420px").toEqual([]);
 
-    // WHY the room exists — the crumb half of superseded card 9477a5ed. The full wording is ~110px of
-    // this row; this card took it down to "Classic", and card 9477a5ed then took the remaining ~83px
-    // by dropping the word entirely below the breakpoint — a four-segment session address needs it
-    // (see e2e/atlas-crumb-collapse.spec.ts). The accessible name is the SAME at every width either
-    // way, which is the half of the claim that matters and the half neither card moved.
-    const leave = page.getByTestId("atlas-leave");
-    await expect(leave).toBeVisible();
-    await expect(leave).toHaveAccessibleName("Switch to the classic UI");
-    const labels = await leave.evaluate((el) => ({
-      full: getComputedStyle(el.querySelector(".loom-atlas-leave-full")!).display,
-      short: getComputedStyle(el.querySelector(".loom-atlas-leave-short")!).display,
-      icon: getComputedStyle(el.querySelector(".loom-atlas-leave-icon")!).display,
-    }));
-    expect(labels, "at 420px the leave button renders neither wording, only its icon")
-      .toEqual({ full: "none", short: "none", icon: "block" });
-    // And the room is real, not just the absence of a label: a 34px square, the same as the drawer
-    // toggle at the other end of the row, against the ~155px the full wording takes.
-    expect(Math.round((await leave.boundingBox())!.width),
-      "the narrow leave button is the drawer toggle's own 34px square").toBe(34);
+    // (A leave-to-classic button used to share this row and was asserted down to its 34px icon here; it
+    // was deleted with the classic shell by card acbb6df6, so the row's only other occupant is the toggle.)
   });
 
   test("switch ON at 420px: a tree row navigates and closes the drawer, and a typed draft survives", async ({ page, loomDaemon }) => {
@@ -340,15 +323,13 @@ test.describe("Atlas tree drawer at narrow widths", () => {
       await expect(current, "the current project is on screen once the drawer is open").toBeInViewport({ ratio: 1 });
 
       // The crumb row's phone compaction stays at ≤720: at this width the full row fits BESIDE the
-      // toggle, so the leave button keeps its full wording and no segment of the trail is squeezed.
+      // toggle, so no segment of the trail is squeezed.
       const fit = await page.getByTestId("atlas-breadcrumb").evaluate((nav) =>
         [...nav.querySelectorAll("li")].map((li) => {
           const span = li.querySelector("span:last-child") as HTMLElement;
           return { text: (span.textContent ?? "").trim(), squeezed: span.scrollWidth > span.clientWidth };
         }).filter((c) => c.squeezed));
       expect(fit, `every crumb fits at ${width}px with the toggle in the row`).toEqual([]);
-      expect(await page.getByTestId("atlas-leave").evaluate((el) =>
-        getComputedStyle(el.querySelector(".loom-atlas-leave-full")!).display)).toBe("inline");
     });
   }
 
@@ -429,51 +410,5 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     await expect(page.getByTestId("atlas-tree-toggle")).toBeAttached();
     await expect(page.getByTestId("atlas-tree-toggle")).toBeHidden();
     await expect(page.getByTestId("atlas-tree-scrim")).toHaveCount(0);
-    // And the leave button is back to its full wording.
-    const labels = await page.getByTestId("atlas-leave").evaluate((el) => ({
-      full: getComputedStyle(el.querySelector(".loom-atlas-leave-full")!).display,
-      short: getComputedStyle(el.querySelector(".loom-atlas-leave-short")!).display,
-    }));
-    expect(labels, "at 1440px the leave button renders its full wording").toEqual({ full: "inline", short: "none" });
-  });
-
-  test("switch OFF at 420px: the classic Instrument Rail's own narrow behaviour is unchanged", async ({ page, loomDaemon }) => {
-    test.setTimeout(180_000);
-    const project = await seedNarrowProject(loomDaemon);
-    await pinProject(page, project.id);
-    await page.setViewportSize(NARROW);
-    await page.goto(loomDaemon.baseURL + "/board");
-
-    // POSITIVE ANCHOR FIRST — an absence read inside a shell that never mounted passes for the wrong
-    // reason and reads identically to a real absence.
-    const rail = page.locator(".loom-rail");
-    await expect(rail).toBeVisible();
-
-    // The rail is what it has always been at every width: a fixed 60px gutter that expands on hover.
-    // There is no narrow-specific rail rule in global.css, and this card added none — both widths are
-    // read off the SAME `--loom-rail-w` token the stylesheet declares, never a number typed here.
-    const railGeom = await rail.evaluate((el) => {
-      const cs = getComputedStyle(el);
-      return { position: cs.position, left: el.getBoundingClientRect().left, width: Math.round(el.getBoundingClientRect().width) };
-    });
-    const railToken = await page.evaluate(() =>
-      getComputedStyle(document.documentElement).getPropertyValue("--loom-rail-w").trim());
-    expect(railGeom.position, "the classic rail is still fixed at 420px").toBe("fixed");
-    expect(railGeom.left, "the classic rail is still flush left").toBe(0);
-    expect(`${railGeom.width}px`, "the classic rail is still the collapsed gutter width").toBe(railToken);
-    expect(await page.locator(".loom-railgutter").evaluate((el) => Math.round(el.getBoundingClientRect().width)))
-      .toBe(parseInt(railToken, 10));
-
-    // And none of this card's machinery exists in the classic shell at all. Here `toHaveCount(0)` IS
-    // the right assertion — unlike under Atlas, where the tree is always in the document.
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    await expect(page.locator(".loom-atlas-tree")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-tree-toggle")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-tree-scrim")).toHaveCount(0);
-    await expect(page.locator(".loom-atlas-leave-short")).toHaveCount(0);
-
-    // The classic board still works at this width — the shell this card did not touch still renders
-    // its own page, draft box and all.
-    await expect(page.getByLabel(BOARD_SEARCH, { exact: true })).toBeVisible();
   });
 });

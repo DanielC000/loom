@@ -96,7 +96,10 @@ test("Overview, Board, a session and Settings do not overflow at 1440 and 900, d
   });
   await page.addInitScript((id) => { try { localStorage.setItem("loom.projectId", id); } catch { /* storage blocked */ } }, seeded.projectId);
   const routes: Array<[string, string]> = [
-    ["overview", "/overview"], ["board", "/board"], ["session", `/session/${seeded.sessionId}`], ["settings", "/settings"],
+    ["project", "/project"], ["board", "/board"], ["session", `/session/${seeded.sessionId}`], ["settings", "/settings"],
+    // Settings is two pages since card acbb6df6 split it by scope: the project tab above, and the
+    // Workspace node's tab, which holds the theme control.
+    ["workspace-settings", "/home?tab=settings"],
   ];
   await page.goto(loomDaemon.baseURL + "/settings");
   for (const theme of ["dark", "light"] as const) {
@@ -107,10 +110,12 @@ test("Overview, Board, a session and Settings do not overflow at 1440 and 900, d
         await page.goto(loomDaemon.baseURL + route);
         expect(await page.evaluate(() => document.documentElement.getAttribute("data-theme"))).toBe(theme);
         // Fixture identity: the seeded task (or, on the session page, its pty output; on Settings, the
-        // theme control) proves this is the seeded daemon's page and not an empty fallback.
+        // project section; on the Workspace Settings tab, the theme control) proves this is the seeded daemon's page and not an empty fallback.
         if (name === "session") {
           await expect(page.locator(".xterm-accessibility-tree > div").filter({ hasText: "GRAPHITE-FONTS-SWEEP" })).toBeVisible();
         } else if (name === "settings") {
+          await expect(page.getByTestId("settings-section-project-settings")).toBeVisible();
+        } else if (name === "workspace-settings") {
           await expect(page.getByTestId("theme-switch").getByRole("radio", { name: theme === "light" ? "Light" : "Dark", exact: true }))
             .toHaveAttribute("aria-checked", "true");
         } else {

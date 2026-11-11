@@ -569,87 +569,6 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     }
   });
 
-  // ── 6. Switch OFF: the classic Platform page is untouched ─────────────────────────────────────────
-  test("switch OFF: the classic Platform page keeps its single-column stack and grows no tabs", async ({ page, loomDaemon }) => {
-    await page.goto(`${loomDaemon.baseURL}/platform`);
-
-    // The classic shell, provably — otherwise this test could pass while measuring the frame it exists
-    // to prove was left alone.
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    await expect(tabs(page)).toHaveCount(0);
-
-    // Its own heading — the word "Platform", then the resolved home's name badge, then the edition's
-    // muted span, all in one label. The Atlas layout deliberately drops that leading word (the node head
-    // already owns the page's one <h1>), so a label leading with "Platform" twice is classic-only. The
-    // first test asserts the complement under Atlas. `.first()` because the wrapper around this label
-    // and its paragraph matches the same leading text.
-    const classicHeading = /^Platform\s*Platform\s*your cross-project workspace agent/;
-    await expect(content(page).getByText(classicHeading).first()).toBeVisible();
-
-    // Card f76b89b9 folded that label into the Atlas node head and dropped the explainer paragraph with
-    // it. Neither move may leak here: the classic shell renders no node head at all (so there is nothing
-    // to portal pills into), and its paragraph is still the only place this edition explains itself.
-    await expect(page.getByTestId("atlas-nodehead-extras")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-nodehead-pill-scope")).toHaveCount(0);
-    await expect(content(page).getByText(/Platform is your friendly, cross-project workspace agent/i)).toBeVisible();
-
-    // The distinguishing property of the single-column stack: sections that Atlas puts on SEPARATE tabs
-    // are all on screen AT ONCE here. Checking them together is what makes this a stack assertion rather
-    // than five independent "a section exists" ones.
-    //
-    // Scoped to `content()` for the same reason the Atlas legs are scoped, in the other shell: the
-    // classic `Sidebar` rail draws the SAME `NAV_PAGES` labels as exact text, so an unscoped presence
-    // check here is one label rename away from the strict-mode violation that broke this spec.
-    await expect(content(page).getByText("Assistants", { exact: true })).toBeVisible();
-    await expect(content(page).getByText("Operator session", { exact: true })).toBeVisible();
-    await expect(content(page).getByText("Auditor session", { exact: true })).toBeVisible();
-    await expect(content(page).getByText(/your setup checklist \+ Auditor suggestions/i)).toBeVisible();
-    // The end-user cadence form still rides in the auditor card — the classic placement, which the Atlas
-    // layout moves to its own tab. Visible here means that move did not leak back into this page. (There
-    // is deliberately no "Auditor schedule" SECTION on this edition: that heading belongs to the dev
-    // list variant, and in Atlas to the Cadence tab that now hosts both.)
-    await expect(content(page).getByText(/^Run automatically$/)).toBeVisible();
-
-    // And the REAL end-user edition leaves the operator spawnable — the contrast case for the first
-    // test's `previewOnly` disabled reading. Asserted, never clicked (the fixture forbids a real spawn).
-    await expect(page.getByRole("button", { name: /^start platform$/i })).toBeEnabled();
-    await expect(page.getByText(/Preview only on a dev install/i)).toHaveCount(0);
-    // No dev-only surface on this LOOM_DEV=0 boot, under either shell.
-    await expect(page.getByRole("group", { name: "Preview edition" })).toHaveCount(0);
-  });
-
-  // ── 7. The SAME trust boundary, under the CLASSIC layout ──────────────────────────────────────────
-  // `previewOnly` is handed to the shared agents section once PER LAYOUT, so the thread is only as
-  // strong as its weakest mount: regressing the CLASSIC mount to `previewOnly={false}` would re-enable
-  // "Start Platform" in a dev install's End-user preview — minting a stray role:"platform" session on a
-  // Getting-Started agent that §1c says is never upgraded to the Lead — while every Atlas-side assertion
-  // in this file stayed green, because they only ever walk the OTHER layout.
-  //
-  // This mirrors the Atlas-side reading in test 1 exactly, with the switch OFF. platform-edition.mjs
-  // pins the same property structurally (mount count == previewOnly hop count); this is its behavioural
-  // twin, and the pair is what makes a one-sided regression impossible to land quietly.
-  test("switch OFF: the classic dev End-user preview also holds the operator's go-live", async ({ page, loomDaemon }) => {
-    await serveDevPlatformHome(page, loomDaemon);
-    await page.goto(`${loomDaemon.baseURL}/platform`);
-
-    // The classic shell, provably — this test is worthless if it is reading the Atlas layout.
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    await expect(tabs(page)).toHaveCount(0);
-
-    // Developer view first: the dev operator IS spawnable, so the disabled reading below is a change of
-    // state and not simply how this page always renders.
-    await expect(page.getByRole("button", { name: /^spawn lead$/i })).toBeEnabled();
-
-    await viewAs(page, "End-user").click();
-    await expect(viewAs(page, "End-user")).toHaveAttribute("aria-pressed", "true");
-
-    await expect(page.getByRole("button", { name: /^start platform$/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^start platform$/i })).toBeDisabled();
-    await expect(page.getByText(/Preview only on a dev install/i).first()).toBeVisible();
-  });
-
   // ── 8. card b472645a — the preview sends NO request, from ANY control, under BOTH shells ───────────
   //
   // Tests 1 and 7 read the operator spawn's DISABLED attribute. That is necessary and not sufficient:
@@ -662,7 +581,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   // ⚠️ The aborting route is what makes this safe to run on the fixture at all — the no-spawn guard
   // forbids a real claude spawn, so a control that DOES fire must never reach the daemon. It also means
   // a FAILURE here is observed as a recorded request, never as a side effect.
-  for (const atlas of [true, false]) {
+  for (const atlas of [true]) {
     const shell = atlas ? "switch ON" : "switch OFF";
 
     test(`${shell}: no control in the dev End-user preview sends a request`, async ({ page, loomDaemon }) => {
@@ -807,7 +726,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   // a mount that passed `previewOnly` unconditionally would disable the SHIPPING end-user surface on
   // that one layout, and a classic-only contrast test would never see it. The preview legs above already
   // run per shell; this is their missing twin on the other side of the contrast.
-  for (const atlas of [false, true]) {
+  for (const atlas of [true]) {
   const shellLabel = atlas ? "switch ON" : "switch OFF";
   test(`${shellLabel}: the same controls on a REAL end-user install DO send their requests`, async ({ page, loomDaemon }) => {
     const home = await readSetupHome(loomDaemon);
@@ -917,7 +836,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   // (a broken route handler produces the same empty array as a perfect gate), and it establishes that the
   // held click's own window has elapsed, since `page.route` sees requests in the order they are issued.
   // It is also DoD-2 — card CRUD in the preview stays ungated — asserted rather than assumed.
-  for (const atlas of [true, false]) {
+  for (const atlas of [true]) {
     const shell = atlas ? "switch ON" : "switch OFF";
 
     test(`${shell}: the preview's board rail cannot open or answer a request`, async ({ page, loomDaemon }) => {
@@ -1001,54 +920,6 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       expect(sent, "the preview sent a write beyond the ruled card-CRUD exemption").toEqual([createPath]);
     });
   }
-
-  // THE CONTRAST CASE for 9b — the same rail, the same card, the same request row, on a REAL end-user
-  // install, where both writes MUST fire. Without it, "zero requests" is also what a gate that disabled
-  // the shipping UI would produce.
-  //
-  // ONE shell, deliberately, where test 9 runs two: that pair exists because `previewOnly` is threaded
-  // once PER LAYOUT, so an over-gate there is per-layout too. This gate is not threaded at all — it is a
-  // single `<PreviewOnlyProvider>` in Platform.tsx, ABOVE both layouts, and the rail reads it directly —
-  // so a layout cannot differ from the other on it. That provider being mounted in exactly one place,
-  // around exactly the preview mount, is pinned structurally in test/platform-edition.mjs section 8;
-  // a second leg here would re-measure the same boolean rather than cover a second way to get it wrong.
-  test("switch OFF: the same board rail on a REAL end-user install DOES open and answer", async ({ page, loomDaemon }) => {
-    const home = await readSetupHome(loomDaemon);
-    const seed = await seedReservedHomeRequest(loomDaemon, home);
-    const sent = await blockMutations(page);
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await page.goto(`${loomDaemon.baseURL}/platform?task=${encodeURIComponent(seed.task.id)}`);
-
-    // No mock ⇒ the shipping end-user edition, with no preview toggle at all — and it resolves the SAME
-    // reserved home, so this is the same board, the same card and the same request row as the legs above.
-    await expect(page.getByRole("group", { name: "Preview edition" })).toHaveCount(0);
-    await expect(page.getByText(/your cross-project workspace agent/i).first()).toBeVisible();
-
-    const rail = page.getByTestId("task-requests-rail");
-    await expect(rail).toBeVisible();
-    await expect(rail.getByText(seed.askTitle, { exact: true })).toBeVisible();
-    await rail.getByText(seed.askTitle, { exact: true }).click();
-    const opener = rail.getByRole("button", { name: /open request/i });
-    await expect(opener).toBeEnabled();
-    await opener.click();
-
-    // (a) The modal opens, and the provider's mark-read-on-open fires — the first of the two writes the
-    // preview legs assert silent, and one no per-control `disabled` would ever have covered.
-    const modal = page.getByRole("dialog")
-      .filter({ has: page.getByText(`Request · ${seed.questionId.slice(0, 8)}`) });
-    await expect(modal).toBeVisible();
-    await expect.poll(() => sent.includes("POST /api/questions/mark-read"),
-      { message: `opening a request should mark it read — got ${JSON.stringify(sent)}` }).toBe(true);
-
-    // (b) The answer control itself — the write that acts on the asking session, which is what put these
-    // controls inside the gate's criterion in the first place.
-    await modal.getByPlaceholder("type your answer…").fill("contrast-case-answer");
-    await modal.getByRole("button", { name: /^submit answer$/i }).click();
-    const answerPath = `POST /api/questions/${seed.questionId}/answer`;
-    await expect.poll(() => sent.includes(answerPath),
-      { message: `the shipping rail must be able to answer — expected ${answerPath} in ${JSON.stringify(sent)}` })
-      .toBe(true);
-  });
 
   // ── 10. card f76b89b9 — ONE tab affordance across the nodes ───────────────────────────────────────
   //

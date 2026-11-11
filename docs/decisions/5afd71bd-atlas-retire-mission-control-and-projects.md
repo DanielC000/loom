@@ -4,7 +4,9 @@ Card `5afd71bd` — Atlas restructure 11 of 11, epic `9fe8cd4e`. Spec: item 11 o
 
 The approved round-4 V2 design dissolves two of the classic shell's destinations rather than re-homing them. Both were class **D** in the gap audit — present in Atlas, absent from the mockup — and both were still a tree row and a full page. This card removes them from the Atlas shell only: with the switch OFF, each renders exactly as it did before, which is the condition the owner's sign-off was given under.
 
-## The mechanism
+> **Superseded in part by card `acbb6df6` (2026-11-11).** With the owner's chat directive of 2026-11-11 to remove the old UI, the classic shell and the switch are deleted, and so are the Mission Control and Projects pages. `ATLAS_RETIREMENTS` and `atlasRetirementFor` are gone: `/` and `/projects` are now plain `LEGACY_REDIRECTS` rows to `/home` (and `/workspace`, which used to chain through `/projects`, goes straight to `/home`). Everything below about WHERE each surface lives, and why both land on `/home`, still holds; the mechanism section describes the pre-`acbb6df6` shape.
+
+## The mechanism (as built by this card, before `acbb6df6`)
 
 `ATLAS_RETIREMENTS` in `packages/web/src/nav.tsx` is a list of `{from, to}` pairs. `AtlasShell` reads it twice: once to swap each retired address's route element for a `<Navigate to={to} replace/>`, and once to drop the address from `BY_SPECIFICITY`, the frame's own `currentPage` lookup. `AtlasTree` reads it not at all — it simply no longer has anything that would render a retired destination, because the escape hatch is gone (below).
 
@@ -22,8 +24,8 @@ Mission Control's surfaces are all on the Workspace node or a tab of it. The Pro
 
 ## Do not
 
-- **Do not move a retirement into `LEGACY_REDIRECTS`, and do not drop its `from` from `NAV_PAGES`.** Either one deletes the destination from the CLASSIC shell, for a user who never opted into Atlas. A retirement is Atlas-only by construction, and that is the whole scope boundary of this card.
-- **Do not re-add a tree escape hatch.** An unscoped `NAV_PAGES` destination named in none of `WORKSPACE_TIER_NODES`, `WORKSPACE_NODE_TABS` or `ATLAS_RETIREMENTS` is now simply ABSENT from the tree. Decide its placement in one of the three instead. `atlas-tree.spec.ts`'s four-way partition fails on a destination that lands in none of them, which is the structural guard that replaced the hatch.
+- **Do not bring a page back at `/` or `/projects`.** Both are ordinary `LEGACY_REDIRECTS` rows since card `acbb6df6`; every surface they held lives on a node (below).
+- **Do not re-add a tree escape hatch.** An unscoped `NAV_PAGES` destination named in neither `WORKSPACE_TIER_NODES` nor `WORKSPACE_NODE_TABS` is simply ABSENT from the tree. Decide its placement in one of them instead. `atlas-tree.spec.ts`'s partition fails on a destination that lands in none of them, which is the structural guard that replaced the hatch.
 - **Do not give the Workspace node's Pulse band an `action`.** It is the deepest cross-project view of the orchestration event stream the app has. The Replay tab is wave replay (a different corpus), `/runs` is a project tab (the wrong tier), and a session's Timeline is one slice of it — each would be the affordance lying about where "all of this" is.
 - **Do not point a "new project" affordance back at `/projects`.** Project creation's Atlas home is the Platform node's guided setup wizard.
 

@@ -1,5 +1,5 @@
 // Card policies e2e (card 61d32daf, epic 8b6c750a): author a rule in Settings, see the unmet badge on a matching card
-// (on /board AND in the board embedded in Overview, the owner's primary board), open the card, waive the requirement
+// (on /board, the project node's Board tab), open the card, waive the requirement
 // with a reason, see it waived, then remove the waiver.
 //
 // WHAT IS DRIVEN FOR REAL: everything. The rule is written by clicking Save (the human config PATCH), the badge and the
@@ -87,15 +87,12 @@ test.describe("Card policies (card 61d32daf)", () => {
     await expect(cardByTitle(page, otherTitle).getByTestId("card-policy-badge")).toHaveCount(0);
     await shoot(card, "card-policies-board-badge.png");
 
-    // ── Badge in the Overview-embedded board ──
-    await page.goto(`${loomDaemon.baseURL}/overview`);
-    const embedded = cardByTitle(page, matchTitle);
-    await expect(embedded).toHaveCount(1);
-    await expect(embedded.getByTestId("card-policy-badge")).toHaveText("1 unmet");
+    // (The classic Overview's embedded board was this badge's second surface until card acbb6df6 deleted
+    // that page; the project node's Board tab above is the one board left.)
     await expect(page.getByTestId("card-policy-badge")).toHaveCount(1);
 
     // ── Drawer: unmet → waive with a reason → waived ──
-    await embedded.getByTestId("card-title").click();
+    await card.getByTestId("card-title").click();
     const dialog = page.getByRole("dialog");
     const block = dialog.getByTestId("card-policy-block");
     await expect(block).toBeVisible();
@@ -118,10 +115,10 @@ test.describe("Card policies (card 61d32daf)", () => {
     // The badge clears without waiting for the poll: the waiver invalidates the status read.
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
-    await expect(embedded.getByTestId("card-policy-badge")).toHaveCount(0);
+    await expect(card.getByTestId("card-policy-badge")).toHaveCount(0);
 
     // ── Un-waive: the requirement is unmet again and the badge returns ──
-    await embedded.getByTestId("card-title").click();
+    await card.getByTestId("card-title").click();
     await page.getByRole("dialog").getByTestId("card-policy-req-approved-web-features-approved-request").getByRole("button", { name: "Remove waiver" }).click();
     await expect(page.getByRole("dialog").getByTestId("card-policy-req-approved-web-features-approved-request")).toHaveAttribute("data-status", "unmet");
     expect(await policyStatusOf(loomDaemon.baseURL, target.id)).toBe("unmet");

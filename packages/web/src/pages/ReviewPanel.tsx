@@ -1,15 +1,11 @@
 import { useParams } from "react-router-dom";
-import { useAtlasUi } from "../lib/atlasUi";
 import { useLatchedSession } from "../lib/useLatchedSession";
-import { ReviewSurface } from "../components/ReviewSurface";
 import { SessionNode } from "../components/SessionNode";
 
 // `/review/:workerId` — the human-in-the-loop review & merge gate. The surface itself lives in
-// components/ReviewSurface.tsx; this file only decides which SHELL's shape it takes.
+// components/ReviewSurface.tsx, mounted as the session node's Diff tab.
 //
-// CLASSIC: the standalone page it has always been, header row and all.
-//
-// ATLAS: `nav.tsx`'s PARAM_PAGES declares this URL to BE the worker node's Diff tab, so the address
+// `nav.tsx`'s PARAM_PAGES declares this URL to BE the worker node's Diff tab, so the address
 // renders the whole session node with Diff selected — the terminal's tab row above it, the bound task,
 // wakes, queue and composer inline below. Rendering the review surface alone here would leave the Diff
 // tab and this URL as two different pages wearing the same crumb trail (card 525c8ad9).
@@ -26,11 +22,7 @@ import { SessionNode } from "../components/SessionNode";
 // `/session/:id`, where that gate is the thing that answers.
 export default function ReviewPanel() {
   const { workerId = "" } = useParams();
-  const [atlasOn] = useAtlasUi();
-  const worker = useLatchedSession(atlasOn ? workerId : "");
-
-  if (!atlasOn) return <ReviewSurface key={workerId} workerId={workerId} />;
-
+  const worker = useLatchedSession(workerId);
   return (
     <SessionNode
       key={workerId}

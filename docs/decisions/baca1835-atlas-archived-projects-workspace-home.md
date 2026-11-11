@@ -1,5 +1,7 @@
 # baca1835 — the archived-projects tier gets a Workspace-tier home in Atlas
 
+> **Superseded in part by card `acbb6df6` (2026-11-11).** The owner's 2026-11-11 directive removed the classic UI: the `/projects` page and the classic Settings page are deleted and the `atlasOnly` flag is gone (`SETTINGS_SECTIONS` rows carry only `scope` now). The prohibitions about the classic Settings page and the flag's position are void. The rest stand, and the reason under them is now stronger: this section is the ONLY place the archived tier can be reached, so never mount it twice and never give it a second confirm.
+
 Atlas restructure (epic `9fe8cd4e`), unblocking card `5afd71bd` (retire Mission Control and Projects as Atlas destinations). Card `c9b78d80` re-homed five of the six surfaces that lived only on the classic `/projects` page; this is the sixth, and the one whose loss would have been worst. `api.archivedProjects` had exactly one consumer in the whole web source (`pages/Projects.tsx`), so under Atlas a soft-archived project would have become invisible AND unrestorable — which silently converts a reversible archive into a permanent delete.
 
 ## Do not

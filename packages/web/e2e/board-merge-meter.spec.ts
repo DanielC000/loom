@@ -56,12 +56,14 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
     branch: "loom/mrg1",
     task: { title: mergeTitle, columnKey: "review" },
   });
-  // A SECOND, non-merging worker card in the same project/lane — the footprint baseline.
+  // A SECOND, non-merging worker card in the same project/lane — the footprint baseline. It carries NO
+  // branch: a merging card hides its branch chip (asserted below), so a baseline WITH one measures that
+  // chip, not the merge state. In a narrow lane (the Atlas board's, since card acbb6df6) the chip wraps to
+  // a row of its own, which made the plain card 24px TALLER than the merging one.
   const plainTitle = `plain-card-${Date.now()}`;
   await loomDaemon.seedLiveSession({
     project: seeded.project,
     role: "worker",
-    branch: "loom/pln1",
     task: { title: plainTitle, columnKey: "review" },
   });
   await pinActiveProject(page, seeded.projectId);

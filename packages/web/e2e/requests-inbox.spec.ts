@@ -233,11 +233,12 @@ test.describe("requests inbox (card 695ebab0)", () => {
     });
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
-    // "Review →" opens the modal in place — the URL stays /inbox.
+    // "Review →" opens the modal in place — the URL stays the inbox's own (`/inbox` is the Workspace node's
+    // inbox tab since card 41eab0eb, so the address it lands on is `/home?tab=inbox`).
     await page.locator("main").getByRole("button", { name: "Review →" }).first().click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
-    await expect(page).toHaveURL(/\/inbox$/);
+    await expect(page).toHaveURL(/\/home\?tab=inbox$/);
     await expect(dialog.getByText("git push --force origin main")).toBeVisible();
 
     // The expiry select starts DISABLED (scope defaults to "once")…
@@ -474,7 +475,8 @@ test.describe("requests inbox (card 695ebab0)", () => {
 
     // The standalone deep-link page (/question/:id) renders the same detail as the modal.
     await page.goto(`${loomDaemon.baseURL}/question/${qId}`);
-    await expect(page.getByText(reqTitle, { exact: true })).toBeVisible();
+    // Scoped to the content column: the Atlas breadcrumb names the request by its title too.
+    await expect(page.locator("#atlas-content").getByText(reqTitle, { exact: true })).toBeVisible();
 
     // The header's linked-task chip is clickable; click it (OBSERVABLE navigation, not inert metadata).
     const chip = page.getByRole("button", { name: new RegExp(`^task #${task.id.slice(0, 8)}`) });
@@ -505,7 +507,8 @@ test.describe("requests inbox (card 695ebab0)", () => {
     // The detail page also renders fine, with a CLICKABLE chip — the title never resolves for a bogus id
     // (the soft-link task lookup simply finds nothing), but the chip itself is never blocked from rendering.
     await page.goto(`${loomDaemon.baseURL}/question/${qId}`);
-    await expect(page.getByText(reqTitle, { exact: true })).toBeVisible();
+    // Scoped to the content column: the Atlas breadcrumb names the request by its title too.
+    await expect(page.locator("#atlas-content").getByText(reqTitle, { exact: true })).toBeVisible();
     const chip = page.getByRole("button", { name: new RegExp(`^task #${bogusTaskId.slice(0, 8)}`) });
     await expect(chip).toBeVisible();
 
@@ -760,7 +763,7 @@ test.describe("request provenance vs routing (card 5b22b262)", () => {
     expect(short(filed)).not.toEqual(short(routed.sessionId));
     await pinActiveProject(page, routed.projectId);
 
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     const row = page.locator("main").getByText(title, { exact: false }).first();
     await expect(row).toBeVisible();
     // The attention queue is a COMPACT surface where the roomy "filed by X · now routed to Y" does not

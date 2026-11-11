@@ -75,7 +75,7 @@ test("the default is System: with nothing stored, the page follows the OS from f
   // Nothing is seeded: the default itself is under test. The suite emulates a dark OS
   // (playwright.config.ts), so start from a LIGHT one, where the old interim default ("dark") would differ.
   await page.emulateMedia({ colorScheme: "light" });
-  await page.goto(loomDaemon.baseURL + "/settings");
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
   expect(await themeOf(page)).toEqual({ attr: "light", scheme: "light", stored: null });
   await expect(page.getByTestId("theme-switch").getByRole("radio", { name: "System", exact: true }))
     .toHaveAttribute("aria-checked", "true");
@@ -95,7 +95,7 @@ test("the default is System: with nothing stored, the page follows the OS from f
 });
 
 test("each Settings option sets data-theme on <html>, and the choice survives a reload", async ({ page, loomDaemon }) => {
-  await page.goto(loomDaemon.baseURL + "/settings");
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
 
   await pickTheme(page, "Light");
   expect(await themeOf(page)).toEqual({ attr: "light", scheme: "light", stored: "light" });
@@ -151,7 +151,7 @@ const themeAtParse = (page: Page) =>
 test("no flash: the stored theme is on <html> before the stylesheet and the app script are parsed", async ({ page, loomDaemon }) => {
   // The OS stays dark (the suite's emulation) and the CSS fallback on a bare :root is dark too, so only
   // the inline script reading the STORED light can make the probe see "light".
-  await page.goto(loomDaemon.baseURL + "/settings");
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
   await pickTheme(page, "Light");
   await installParseProbe(page);
   await page.reload();
@@ -164,15 +164,15 @@ test("no flash for the default: with nothing stored, the OS theme is on <html> b
   // AND resolve it through matchMedia before anything else runs.
   await page.emulateMedia({ colorScheme: "light" });
   await installParseProbe(page);
-  await page.goto(loomDaemon.baseURL + "/settings");
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
   expect((await themeOf(page)).stored, "nothing was seeded").toBeNull();
   expect(await themeAtParse(page)).toEqual({ stylesheet: "light", moduleScript: "light" });
 });
 
 test("another tab's change is applied at once", async ({ page, loomDaemon, context }) => {
-  await page.goto(loomDaemon.baseURL + "/settings");
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
   const other = await context.newPage();
-  await other.goto(loomDaemon.baseURL + "/settings");
+  await other.goto(loomDaemon.baseURL + "/home?tab=settings");
   expect((await themeOf(other)).attr).toBe("dark");
 
   await pickTheme(page, "Light");
@@ -231,7 +231,7 @@ test("the main contrast pairs clear AA in both themes, read from live token valu
     ["healthy meter fill (UI)", "--loom-meter-ok", "--loom-track", 3],
     ["secondary text on a panel", "--loom-text-2", "--loom-surface", 4.5],
   ];
-  await page.goto(loomDaemon.baseURL + "/settings");
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
   const bgByTheme: Record<string, [number, number, number]> = {};
   for (const theme of ["Dark", "Light"] as const) {
     await pickTheme(page, theme);
@@ -263,7 +263,7 @@ test("every token in the contrast table is defined, so no pair is measured again
     "--loom-attn", "--loom-attn-text", "--loom-attn-soft", "--loom-on-attn", "--loom-attn-fg", "--loom-inset",
     "--loom-danger", "--loom-danger-text", "--loom-danger-soft", "--loom-danger-fill", "--loom-on-danger",
   ];
-  await page.goto(loomDaemon.baseURL + "/settings");
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
   for (const theme of ["Dark", "Light"] as const) {
     await pickTheme(page, theme);
     const missing = await page.evaluate((names) => names.filter(
@@ -299,7 +299,7 @@ test("Overview, the board and a session render in light; the terminal stays a da
   await shoot(page, "session-dark.png");
 
   // Switch theme from Settings and come back: the SAME token now resolves to the light page's well.
-  await page.goto(loomDaemon.baseURL + "/settings");
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
   await pickTheme(page, "Light");
   await page.goto(`${loomDaemon.baseURL}/session/${seeded.sessionId}`);
   await expect(page.locator(".xterm-accessibility-tree > div").filter({ hasText: "THEME-SWITCH-593674a7" })).toBeVisible();
@@ -317,7 +317,7 @@ test("Overview, the board and a session render in light; the terminal stays a da
   // LIVE re-theme of an open terminal: flip the preference from another tab while this one stays put.
   // The pane must follow without being re-created (re-creating would drop the pty attach).
   const settings = await page.context().newPage();
-  await settings.goto(loomDaemon.baseURL + "/settings");
+  await settings.goto(loomDaemon.baseURL + "/home?tab=settings");
   await pickTheme(settings, "Dark");
   await settings.close();
   await expect.poll(async () => close(await termBg(), darkWell), { message: "the open terminal re-themed live" }).toBe(true);
@@ -325,10 +325,10 @@ test("Overview, the board and a session render in light; the terminal stays a da
   await expect(page.locator(".xterm-accessibility-tree > div").filter({ hasText: "THEME-SWITCH-593674a7" })).toBeVisible();
   await shoot(page, "session-dark-after-live-switch.png");
 
-  // Overview and the board, in light.
-  await page.goto(loomDaemon.baseURL + "/settings");
+  // The board, in light. (The classic Overview embed was a second surface here until card acbb6df6.)
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
   await pickTheme(page, "Light");
-  for (const [route, name] of [["/overview", "overview"], ["/board", "board"]] as const) {
+  for (const [route, name] of [["/board", "board"]] as const) {
     await page.goto(loomDaemon.baseURL + route);
     expect((await themeOf(page)).attr).toBe("light");
     await expect(page.getByText(seeded.taskTitle!, { exact: true }).first()).toBeVisible();
@@ -336,7 +336,7 @@ test("Overview, the board and a session render in light; the terminal stays a da
     await shoot(page, `${name}-light.png`);
   }
   await pickThemeVia(page, loomDaemon.baseURL, "Dark");
-  for (const [route, name] of [["/overview", "overview"], ["/board", "board"]] as const) {
+  for (const [route, name] of [["/board", "board"]] as const) {
     await page.goto(loomDaemon.baseURL + route);
     await expect(page.getByText(seeded.taskTitle!, { exact: true }).first()).toBeVisible();
     await shoot(page, `${name}-dark.png`);
@@ -397,6 +397,6 @@ async function expectXtermTheme(page: Page, t: "light" | "dark") {
 }
 
 async function pickThemeVia(page: Page, baseURL: string, label: "System" | "Light" | "Dark") {
-  await page.goto(baseURL + "/settings");
+  await page.goto(baseURL + "/home?tab=settings");
   await pickTheme(page, label);
 }

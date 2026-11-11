@@ -200,45 +200,30 @@ test.describe("Atlas crumb trail at 420px (card 9477a5ed)", () => {
       // honest shape the drawer toggle has at this width, and the reason this is not toHaveCount(0).
       await expect(page.getByTestId("atlas-crumb-more")).toBeAttached();
       await expect(page.getByTestId("atlas-crumb-more")).toBeHidden();
-      // The leave button is back to its full wording at this width, and its name never moved.
-      const leave = page.getByTestId("atlas-leave");
-      await expect(leave).toHaveAccessibleName("Switch to the classic UI");
-      expect(await leave.evaluate((el) => ({
-        full: getComputedStyle(el.querySelector(".loom-atlas-leave-full")!).display,
-        icon: getComputedStyle(el.querySelector(".loom-atlas-leave-icon")!).display,
-      })), "at 1440px the leave button is its full wording, not the narrow icon")
-        .toEqual({ full: "inline", icon: "none" });
-    });
-
-  test("switch OFF at 420px: none of this card's machinery exists in the classic shell",
-    async ({ page, loomDaemon }) => {
-      test.setTimeout(180_000);
-      const { projectId, workerId } = await seedSessionAddress(loomDaemon);
-      await pinProject(page, projectId);
-      await page.setViewportSize(NARROW);
-      await page.goto(`${loomDaemon.baseURL}/review/${workerId}`);
-
-      // POSITIVE ANCHOR FIRST — an absence read inside a shell that never mounted passes for the
-      // wrong reason and reads identically to a real absence.
-      await expect(page.locator(".loom-rail")).toBeVisible();
-      await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-
-      await expect(page.getByTestId("atlas-breadcrumb")).toHaveCount(0);
-      await expect(page.getByTestId("atlas-crumb-more")).toHaveCount(0);
-      await expect(page.locator(".loom-atlas-leave-icon")).toHaveCount(0);
+      // The Jump button is back to its full wording at this width, and its name never moved. (It was
+      // the second of two right-hand controls until card acbb6df6 deleted the leave button.)
+      const jump = page.getByTestId("atlas-jump");
+      await expect(jump).toHaveAccessibleName("Jump to a page, project, agent or session");
+      const jumpParts = await jump.evaluate((el) => ({
+        word: getComputedStyle(el.querySelector(".loom-atlas-jump-word")!).display,
+        icon: getComputedStyle(el.querySelector(".loom-atlas-jump-icon")!).display,
+      }));
+      expect(jumpParts.icon, "at 1440px the Jump button's narrow icon is hidden").toBe("none");
+      expect(jumpParts.word, "at 1440px the Jump button shows its full wording").not.toBe("none");
+      await expect(page.getByTestId("atlas-leave"), "the deleted leave button is back").toHaveCount(0);
     });
 });
 
 // ── Card c88ac078 (Atlas audit findings A-02 + A-14) ─────────────────────────────────────────────
 // A-02: a 186-character request title took every pixel of the row — "Workspace" and "Inbox" went to
-// 0px behind their own "/" separators, and the leave button wrapped onto two lines. A-14: at 390px a
+// 0px behind their own "/" separators, and the right-hand chrome wrapped onto two lines. A-14: at 390px a
 // three-segment trail clipped its leaf ("Agen…") while a long project name kept its room.
 const LONG_TITLE = "Should the reconciliation job retry failed ledger exports automatically overnight, or page the "
   + "on-call engineer and hold every downstream invoice until a person reviews the export batch?";
 const LONG_PROJECT = "AUDIT-Delta Extremely Long Project Name For Reconciliation And Ledger Exports";
 
 test.describe("Atlas crumb ancestors stay visible beside a long leaf (card c88ac078)", () => {
-  test("1440px: a 186-character request title leaves every ancestor legible and the leave button on one line",
+  test("1440px: a 186-character request title leaves every ancestor legible and the right-hand chrome on one line",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       expect(LONG_TITLE.length, "the fixture is the audit's 186-character title").toBe(186);
@@ -264,14 +249,15 @@ test.describe("Atlas crumb ancestors stay visible beside a long leaf (card c88ac
         expect(c.width, `the ancestor "${c.text}" keeps about four characters (got ${c.width}px)`)
           .toBeGreaterThanOrEqual(Math.min(c.natural, c.fourChars) - 1);
       }
-      // The right-hand chrome never yields: pre-fix the button wrapped to 46px tall.
-      const leave = await page.getByTestId("atlas-leave").evaluate((el) => {
+      // The right-hand chrome never yields: pre-fix the (since deleted) leave button wrapped to 46px tall,
+      // and the Jump button beside it is held to the same rule.
+      const jump = await page.getByTestId("atlas-jump").evaluate((el) => {
         const lh = parseFloat(getComputedStyle(el).lineHeight) || 20;
         return { height: el.getBoundingClientRect().height, lineHeight: lh, flexShrink: getComputedStyle(el).flexShrink };
       });
-      expect(leave.flexShrink, "the leave button does not shrink").toBe("0");
-      expect(leave.height, `the leave button is one line (height ${leave.height})`)
-        .toBeLessThan(leave.lineHeight * 2);
+      expect(jump.flexShrink, "the Jump button does not shrink").toBe("0");
+      expect(jump.height, `the Jump button is one line (height ${jump.height})`)
+        .toBeLessThan(jump.lineHeight * 2);
     });
 
   test("390px: a three-segment trail collapses the project crumb before the leaf gives anything up",
@@ -293,8 +279,8 @@ test.describe("Atlas crumb ancestors stay visible beside a long leaf (card c88ac
       expect(all[2]?.clipped, "the leaf reads in full; pre-fix it was \"Agen…\"").toBe(false);
 
       // Card d3a17f31: the kit Button's inline padding beat the narrow rule's `padding: 0`, squeezing
-      // the leave glyph to 8px of its 16 inside the 34px square. Both icon Buttons keep the full glyph.
-      for (const [id, icon] of [["atlas-leave", ".loom-atlas-leave-icon"], ["atlas-jump", ".loom-atlas-jump-icon"]] as const) {
+      // the icon glyph to 8px of its 16 inside the 34px square. The icon Button keeps the full glyph.
+      for (const [id, icon] of [["atlas-jump", ".loom-atlas-jump-icon"]] as const) {
         const w = await page.getByTestId(id).evaluate((el, sel) =>
           el.querySelector(sel)!.getBoundingClientRect().width, icon);
         expect(w, `the ${id} icon keeps its 16px width at 390px (got ${w}px)`).toBe(16);

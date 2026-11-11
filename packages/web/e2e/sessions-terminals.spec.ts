@@ -75,10 +75,11 @@ test.describe("TerminalTile (unified full-feature card)", () => {
     });
     await page.goto(`${loomDaemon.baseURL}/session/${seeded.sessionId}`);
 
-    // The single live tile mounts. The identity line appears in BOTH the SessionView page header AND the
-    // tile title (showProject on) — scope to the TILE's own node so only the tile can satisfy this.
-    await expect(tileIdentity(page)).toBeVisible();
-    await expect(tileIdentity(page)).toContainText(new RegExp(`${seeded.agentName} · ${shortId(seeded.sessionId)}`));
+    // The single live card mounts, on the session node (the only /session/:id page since card acbb6df6). Its
+    // head is the node's state cluster rather than the grid tile's identity line, and the node names the
+    // session in its breadcrumb.
+    await expect(page.getByTestId("session-node-state")).toBeVisible();
+    await expect(page.getByTestId("atlas-breadcrumb")).toContainText(seeded.agentName);
 
     // The header action cluster: Fork (idle-only) + graceful Stop + Maximize. (Presets moved OFF the header
     // and INTO the composer — the bottom-right sparkle trigger — with the "Spark" presets change 2026-07-07.)
@@ -115,25 +116,9 @@ test.describe("TerminalTile (unified full-feature card)", () => {
     await expect(page.getByText(`Task · ${shortId(seeded.taskId!)}`)).toHaveCount(0);
   });
 
-  test("the project Overview grid tiles the live session with the full control set", async ({ page, loomDaemon }) => {
-    const seeded = await loomDaemon.seedLiveSession({ role: "plain", task: { title: `ov-task-${Date.now()}` } });
-    await pinActiveProject(page, seeded.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
-
-    // The Terminals section header reports one live session, and the tile carries the full cluster + task.
-    await expect(page.getByText("(1 live)", { exact: false })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Fork" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Preset prompts" }).first()).toBeVisible();
-    await expect(page.getByTitle("Maximize terminal")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Send turn" })).toBeVisible();
-    // The task title appears in the tile's SessionTaskCard AND the Overview Board card below — match first.
-    await expect(page.getByText(seeded.taskTitle!, { exact: true }).first()).toBeVisible();
-  });
-
   test("the global /terminals grid tiles the live session at parity", async ({ page, loomDaemon }) => {
     const seeded = await loomDaemon.seedLiveSession({ role: "plain" });
-    await page.goto(`${loomDaemon.baseURL}/terminals`);
+    await page.goto(`${loomDaemon.baseURL}/workspace-terminals`);
 
     // /terminals shows EVERY project's live sessions — scope to this test's project via the filter dropdown
     // so the assertions are deterministic on the shared worker daemon.
@@ -159,7 +144,7 @@ test.describe("sessions list (role + state)", () => {
       project: mgr.project, agentId: mgr.agentId, role: "worker", busy: true,
       parentSessionId: mgr.sessionId,
     });
-    await page.goto(`${loomDaemon.baseURL}/terminals`);
+    await page.goto(`${loomDaemon.baseURL}/workspace-terminals`);
     await projectFilter(page).selectOption({ label: mgr.projectName });
 
     // The manager ROW header names the manager (a "manager" status pill) and its worker count.
@@ -176,88 +161,6 @@ test.describe("sessions list (role + state)", () => {
   });
 });
 
-// ── SessionCockpit — the Overview fleet-row inline cockpit. Now a <TerminalCard> binding with role-scoped
-// tabs: Terminal + Transcript always, a manager's Timeline / a worker's Diff. The tab set is the cockpit's
-// UNIQUE contribution (the ProjectTerminals TerminalTiles below have no tabs), so Timeline/Diff/Transcript
-// are clean witnesses even though presets/maximize/task also appear on the sibling tiles. ────────────────
-test.describe("SessionCockpit (Overview fleet expand)", () => {
-  test("expanding a manager row opens a cockpit with Terminal/Transcript/Timeline tabs + presets/maximize/task", async ({ page, loomDaemon }) => {
-    const mgr = await loomDaemon.seedLiveSession({
-      role: "manager", agentName: "MgrCk",
-      task: { title: `ck-task-${Date.now()}` },
-    });
-    // A worker under it, so the accordion has a nested worker row (and its Diff cockpit) to drill next.
-    const wkr = await loomDaemon.seedLiveSession({
-      project: mgr.project, agentId: mgr.agentId, role: "worker",
-      parentSessionId: mgr.sessionId,
-    });
-    await pinActiveProject(page, mgr.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
-
-    // The Fleet accordion (expanded by default) lists both sessions by their role-tagged handles.
-    await expect(page.getByText(new RegExp(`mgr ${shortId(mgr.sessionId)}`))).toBeVisible();
-    await expect(page.getByText(new RegExp(`w:${shortId(wkr.sessionId)}`))).toBeVisible();
-
-    // Expand the manager row (managers render first ⇒ its caret is the first "Expand…" control).
-    await page.getByTitle("Expand to this session's cockpit").first().click();
-
-    // The cockpit is the ONLY card with a Timeline tab — pin it as the manager cockpit's Panel and assert
-    // its chrome within (presets + maximize also appear on the sibling ProjectTerminals tiles, so scope).
-    await expect(page.getByRole("button", { name: "Timeline" })).toBeVisible();
-    const cockpit = page.locator("div")
-      .filter({ has: page.getByRole("button", { name: "Timeline" }) })
-      .filter({ has: page.getByRole("button", { name: "Preset prompts" }) })
-      .last();
-    await expect(cockpit.getByRole("button", { name: "Terminal" })).toBeVisible();
-    await expect(cockpit.getByRole("button", { name: "Transcript" })).toBeVisible();
-    await expect(cockpit.getByRole("button", { name: "Timeline" })).toBeVisible();
-    await expect(cockpit.getByRole("button", { name: "Diff" })).toHaveCount(0); // Diff is worker-only
-    await expect(cockpit.getByRole("button", { name: "Preset prompts" })).toBeVisible();
-    await expect(cockpit.getByTitle("Maximize terminal")).toBeVisible();
-    await expect(cockpit.getByText(mgr.taskTitle!, { exact: true })).toBeVisible();
-
-    // EXERCISE — switch to the Timeline tab: the orchestration-events panel mounts (empty for a seeded
-    // manager) — an observable tab change, not just a rendered bar.
-    await cockpit.getByRole("button", { name: "Timeline" }).click();
-    await expect(cockpit.getByText("No events yet.")).toBeVisible();
-    // …and back to Transcript (the shared TranscriptPane) — the tab bar drives the body.
-    await cockpit.getByRole("button", { name: "Transcript" }).click();
-    await expect(cockpit.getByRole("button", { name: "Timeline" })).toBeVisible(); // tab bar persists
-  });
-
-  test("expanding a worker row opens a cockpit with a Diff tab (and no Timeline)", async ({ page, loomDaemon }) => {
-    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "MgrDf" });
-    const wkr = await loomDaemon.seedLiveSession({
-      project: mgr.project, agentId: mgr.agentId, role: "worker",
-      parentSessionId: mgr.sessionId, branch: "loom/seeded-branch",
-    });
-    await pinActiveProject(page, mgr.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
-
-    // Expand the WORKER row: after the caret's title flips on the manager, the worker's is the remaining
-    // "Expand…" control. (Expand the manager first, then the worker — single-open, so the worker's caret is
-    // the only "Expand…" left once the manager's reads "Collapse…".)
-    await page.getByTitle("Expand to this session's cockpit").first().click(); // manager
-    await expect(page.getByRole("button", { name: "Timeline" })).toBeVisible();
-    await page.getByTitle("Expand to this session's cockpit").click(); // now the sole remaining = worker
-
-    // The worker cockpit carries a Diff tab (worker-only) and NO Timeline (manager-only).
-    await expect(page.getByRole("button", { name: "Diff" })).toBeVisible();
-    const cockpit = page.locator("div")
-      .filter({ has: page.getByRole("button", { name: "Diff" }) })
-      .filter({ has: page.getByRole("button", { name: "Preset prompts" }) })
-      .last();
-    await expect(cockpit.getByRole("button", { name: "Terminal" })).toBeVisible();
-    await expect(cockpit.getByRole("button", { name: "Transcript" })).toBeVisible();
-    await expect(cockpit.getByRole("button", { name: "Timeline" })).toHaveCount(0);
-
-    // EXERCISE — the Diff tab mounts the branch-diff panel (the seeded worker has no real branch content,
-    // so it resolves to the graceful "No diff" message — an observable tab change either way).
-    await cockpit.getByRole("button", { name: "Diff" }).click();
-    await expect(cockpit.getByText(/No diff|Loading diff|no changes/i)).toBeVisible();
-  });
-});
-
 // ── ShellTile — the raw-shell <TerminalCard> variant. A raw shell is an ephemeral PtyHost process (NOT a
 // DB Session row), so unlike every other variant here it can't ride /internal/test/seed — the ONLY way to
 // make one render is a REAL `POST /api/terminals`, which spawns a local host shell and logs
@@ -269,7 +172,7 @@ test.describe("SessionCockpit (Overview fleet expand)", () => {
 // composer — plus the empty-state lane chrome. ────────────────────────────────────────────────────────
 test.describe("ShellTile (shells lane)", () => {
   test("the Shells lane and its spawn control render (empty-state chrome)", async ({ page, loomDaemon }) => {
-    await page.goto(`${loomDaemon.baseURL}/terminals`);
+    await page.goto(`${loomDaemon.baseURL}/workspace-terminals`);
     // The Shells lane's spawn control renders (the "Shells" label is a mixed text+count+button node, so the
     // "+ Shell" button is the clean lane witness).
     await expect(page.getByRole("button", { name: "+ Shell" })).toBeVisible();
@@ -282,7 +185,7 @@ test.describe("ShellTile (shells lane)", () => {
   test("a LIVE shell renders the ShellTile chrome and its controls actually work", async ({ page, loomDaemon }) => {
     // Spawn ONE real host shell (default shell ⇒ cross-platform). afterEach hard-kills any survivor.
     const shell = await loomDaemon.spawnShell();
-    await page.goto(`${loomDaemon.baseURL}/terminals`);
+    await page.goto(`${loomDaemon.baseURL}/workspace-terminals`);
 
     // The Shells lane is GLOBAL (no project filter — the page's project dropdown scopes only the Claude
     // sessions grid, and this shell's project has no live SESSION so it wouldn't even be an option there).

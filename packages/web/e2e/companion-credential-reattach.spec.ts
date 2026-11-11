@@ -101,7 +101,7 @@ test("re-entering a credential re-attaches the companion chat in place — and r
 
   await page.addInitScript(INSTRUMENT);
   await page.goto(`${loomDaemon.baseURL}/companion`);
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   // FOCUS THIS SPEC'S OWN COMPANION. The picker renders only with 2+ companions, and whether siblings
   // have accumulated on the shared daemon depends on run order — so the CLICK is necessarily conditional.
   // Let the page settle on whatever companion it auto-focuses FIRST. Clicking the picker before the

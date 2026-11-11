@@ -275,47 +275,12 @@ test.describe("Atlas Settings scope split (card 595e2a47)", () => {
     await expect(page.getByTestId("default-harness-project")).toBeVisible();
     await expect(page.getByTestId("default-harness-platform"),
       "the PLATFORM default-harness panel leaked onto the project node").toHaveCount(0);
-    await expect(page.locator("main").getByText("Merge gate", { exact: true })).toBeVisible();
-  });
-
-  test("with the switch OFF the classic page is untouched and the Atlas-only address renders nothing", async ({ page, loomDaemon }) => {
-    const { rows } = parseSettingsSections();
-    await pinProject(page, (await loomDaemon.createProject(`atlas-settings-off-${Date.now()}`)).id);
-
-    // No seedAtlasOn: OFF is the default.
-    await page.goto(loomDaemon.baseURL + PROJECT_NODE);
-    await expect(page.locator(".loom-rail"), "the classic shell did not render").toBeVisible();
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    // EVERY row the classic shell declares, both scopes, in ONE column — the classic page keeps the
-    // whole page it always had. An `atlasOnly` row is subtracted (card c9b78d80: its controls already
-    // live on classic /projects, and a second permanent-delete site is the thing to avoid), and its
-    // ABSENCE here is asserted below rather than merely skipped.
-    const classic = rows.filter((r) => !r.atlasOnly);
-    const atlasOnly = rows.filter((r) => r.atlasOnly);
-    expect(classic.length, "every section is atlasOnly, so the classic page assertions are vacuous")
-      .toBeGreaterThan(0);
-    for (const r of classic) {
-      await expect(sectionBox(page, r.key),
-        `the classic Settings page lost the ${r.scope} section ${r.key}`).toHaveCount(1);
-    }
-    for (const r of atlasOnly) {
-      await expect(sectionBox(page, r.key),
-        `the classic Settings page renders ${r.key}, which is declared atlasOnly`).toHaveCount(0);
-      // And the label itself, not merely its wrapper — scoped to `main`, since the classic rail draws
-      // nav labels as exact text of its own.
-      await expect(page.locator("main").getByText(r.label, { exact: true }),
-        `the classic Settings page still shows the atlasOnly label "${r.label}"`).toHaveCount(0);
-    }
-    // And in declaration order, which is the order the page has always rendered in (Disk Reclaim last).
-    const rendered = await page.locator("main [data-testid^='settings-section-']")
-      .evaluateAll((els) => els.map((el) => el.getAttribute("data-testid")?.replace("settings-section-", "") ?? ""));
-    expect(rendered, "the classic Settings page reordered its sections").toEqual(classic.map((r) => r.key));
-
-    // The Workspace node is an ATLAS_HOMES address; LegacyShell deliberately mounts none of those, so
-    // under the classic shell this path renders an empty content column rather than a second Settings.
-    await page.goto(loomDaemon.baseURL + WORKSPACE_NODE);
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.locator("main [data-testid^='settings-section-']"),
-      "the Atlas-only /workspace-settings address rendered Settings under the classic shell").toHaveCount(0);
+    // The merge-gate section. Since card acbb6df6 it also hosts the live strip re-homed from the deleted
+    // classic Overview, which carries its own "Merge gate" label — so the label reads twice, and the strip
+    // itself is asserted by its testid.
+    const mergeGateLabels = page.locator("main").getByText("Merge gate", { exact: true });
+    await expect(mergeGateLabels).toHaveCount(2);
+    await expect(mergeGateLabels.first()).toBeVisible();
+    await expect(page.getByTestId("merge-gate-strip")).toBeVisible();
   });
 });

@@ -138,36 +138,4 @@ test.describe("Atlas project selection (card e47df20a)", () => {
     await expect(card(firstCard)).toHaveCount(0);
     await expect(openProject).toContainText(second.name);
   });
-
-  test("switch OFF: the rail chip still switches projects the old way", async ({ page, loomDaemon }) => {
-    const { first, second, firstCard, secondCard } = await seedTwoProjects(loomDaemon);
-
-    await pinProject(page, first.id);
-    await page.goto(loomDaemon.baseURL + "/board");
-
-    // The classic shell, and provably not the Atlas one — otherwise this test could pass while
-    // measuring the very frame it exists to prove was left alone.
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("atlas-tree")).toHaveCount(0);
-
-    const card = (title: string) => page.getByText(title, { exact: true });
-    await expect(card(firstCard)).toBeVisible();
-    await expect(card(secondCard)).toHaveCount(0);
-
-    // The chip, unchanged: trigger → listbox → option, the flow project-picker.spec.ts pins. Located
-    // by its own class rather than by role+name, so what is asserted untouched is unmistakably the
-    // old rail control and never, say, a same-named option inside the menu it opens.
-    const chip = page.locator("button.loom-rail-proj");
-    await expect(chip).toContainText(first.name);
-    await chip.click();
-
-    const menu = page.getByRole("listbox");
-    await expect(menu).toBeVisible();
-    await menu.getByRole("option", { name: new RegExp(escapeRe(second.name)) }).click();
-    await expect(menu).toHaveCount(0);
-
-    await expect(card(secondCard)).toBeVisible();
-    await expect(card(firstCard)).toHaveCount(0);
-    await expect(chip).toContainText(second.name);
-  });
 });

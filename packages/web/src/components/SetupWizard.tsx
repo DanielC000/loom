@@ -18,7 +18,7 @@ import { roleDisplay, roleColor } from "../lib/roleDisplay";
 //      browser / no-commit rig for its roster chip). "Start empty" skips the template apply entirely.
 //   2. Project step      → a "Bind existing / Create new" segmented toggle picks between two DISTINCT
 //      backend calls: "Bind existing" → api.createProject (registers a project at a repoPath/vaultPath
-//      already on disk, exactly like the Projects "New project" form); "Create new" → api.projectInit
+//      already on disk); "Create new" → api.projectInit
 //      (the host-write REST mirror of the setup-MCP project_init tool — Loom creates + `git init`s a
 //      BRAND-NEW directory under its sanctioned workspace base; only a name is needed, no path).
 //   3. Review & confirm  → nothing is applied until the primary "Apply template" — the mode-appropriate
@@ -162,7 +162,8 @@ function WizardBody({ onClose }: { onClose: () => void }) {
     : !!name.trim() && !!repoPath.trim(); // vaultPath is optional — a project may have no vault bound
 
   const goToBoard = () => { setProjectId(created!.projectId); onClose(); navigate("/board"); };
-  const goSpawnOrchestrator = () => { setProjectId(created!.projectId); onClose(); navigate("/overview"); };
+  // The project's Agents node is where an agent is spawned (its launch bay, card 699fe92a).
+  const goSpawnOrchestrator = () => { setProjectId(created!.projectId); onClose(); navigate("/agents"); };
 
   return (
     <div
@@ -479,7 +480,7 @@ function StepProject({
 
 // ── Reference-repos editor (wizard variant) ─────────────────────────────────────────────────────────────
 // A repo-list add/remove for the project's read-only sibling repos (reference-repos epic, Interpretation
-// A) — the SAME shape as the Projects "Manage project" ReferenceReposEditor, but with NO Save button: the
+// A) — the SAME shape as the project lifecycle's ReferenceReposEditor, but with NO Save button: the
 // wizard collects the rows into its own state and binds them at Apply (createProject / projectInit). The
 // primary repoPath stays a DISTINCT field above. A bad entry surfaces its server 400 on the Review screen.
 function ReferenceReposField({ repos, onChange }: { repos: string[]; onChange: (r: string[]) => void }) {
@@ -635,7 +636,7 @@ function StepReview({
           note={isEmpty ? "an empty project — add agents later" : `→ ${template?.agents.length ?? 0} agents`}>
           {isEmpty ? (
             <p style={{ fontSize: fs.sm, color: color.text3, margin: "2px 0 0", lineHeight: 1.5 }}>
-              No template — a blank project. You can define agents and profiles afterward from the Projects page.
+              No template — a blank project. You can define its agents afterward on the project's Agents node.
             </p>
           ) : (
             (template?.agents ?? []).map((a, i) => (
@@ -707,7 +708,7 @@ function StepDone({
       <p style={{ fontSize: fs.body, color: color.text2, lineHeight: 1.65, margin: "12px auto 0", maxWidth: 520 }}>
         {agentCount > 0
           ? "Your team is standing by. The Orchestrator can pick up the starter card as soon as you spawn it."
-          : "Your empty project is ready. Define its agents and profiles from the Projects page whenever you like."}
+          : "Your empty project is ready. Define its agents on the project's Agents node whenever you like."}
       </p>
 
       <div style={{ display: "flex", justifyContent: "center", gap: 12, margin: "24px 0 26px" }}>
@@ -724,7 +725,7 @@ function StepDone({
       <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
         <Button variant="primary" onClick={onBoard} style={{ padding: "7px 16px", fontSize: fs.body }}>Go to the board →</Button>
         {agentCount > 0 && (
-          <Button onClick={onSpawn} style={{ padding: "7px 16px", fontSize: fs.body }} title="Open the project's fleet to spawn the Orchestrator">
+          <Button onClick={onSpawn} style={{ padding: "7px 16px", fontSize: fs.body }} title="Open the project's agents to spawn the Orchestrator">
             Spawn the Orchestrator
           </Button>
         )}

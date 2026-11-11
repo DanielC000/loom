@@ -34,7 +34,7 @@ test("Google Analytics preset creates an oauth2 google connection with the ticke
   const project = await loomDaemon.createProject(`ga-preset-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
   // The Connections panel is daemon-global; open the New-connection form.
   await expect(page.getByText("Connections", { exact: false }).first()).toBeVisible();
@@ -98,7 +98,7 @@ test("Custom connector remains available for a non-preset oauth2/api-key connect
   const project = await loomDaemon.createProject(`ga-custom-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
   await page.getByRole("button", { name: "New connection" }).click();
 
   // In the default GA preset, the auth-scheme dropdown is absent (it's a preset, not the raw form).

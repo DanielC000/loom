@@ -54,10 +54,10 @@ test("create → floor-gate → toggle → delete a poll job end to end", async 
   await seedAgent(loomDaemon.baseURL, project.id, agentName);
   const pollPath = `/e2e-poll-${stamp}`;
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
   // The Poll Jobs section renders (its data queries — poll-jobs + connections — resolved).
-  await expect(page.getByText("Poll Jobs", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("settings-section-poll-jobs").getByText("Poll Jobs", { exact: true })).toBeVisible(); // scoped: the Workspace Settings index names it too
   await page.getByRole("button", { name: "New poll job" }).click();
 
   // --- Fill the create form. Connection + agent selects are located by their (unique) option text so the

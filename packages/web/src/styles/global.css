@@ -197,10 +197,6 @@
   --loom-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --loom-dur-1: 140ms;
 
-  /* Instrument Rail (sidebar) — collapsed gutter width + expanded (hover/pin) width. */
-  --loom-rail-w: 60px;
-  --loom-rail-open: 236px;
-
   /* Atlas shell (card 757c80dd) — the entity-tree rail's width. Mirrors the round-4
      mockup's own --tree-w; the shell is dropped entirely below the narrow breakpoint
      while the tree is still empty (see .loom-atlas below). */
@@ -434,11 +430,19 @@ body {
   }
 }
 
-/* Merge-gate strip (components/mergeGate.tsx, card 00664e74) — the Overview cadence row.
-   It holds ONE row at every desktop width: the plain sentence is the only part allowed to shrink, and it
-   ellipses rather than letting any control wrap away from its siblings (a lone orphaned button on a second
-   line reads as a layout bug, and in the failed state this row carries the most chips). Below 980px there
-   genuinely isn't room, so the row wraps and the sentence is released to full width on its own line. */
+/* Merge-gate strip (components/mergeGate.tsx, card 00664e74) — the project Settings tab's cadence row
+   (re-homed from the deleted full-width Overview by card acbb6df6).
+   It holds ONE row when its column is wide enough: the plain sentence is the only part allowed to shrink, and
+   it ellipses rather than letting any control wrap away from its siblings (a lone orphaned button on a second
+   line reads as a layout bug, and in the failed state this row carries the most chips). Below 980px of its
+   OWN width there genuinely isn't room, so the row wraps and the sentence is released to full width on its
+   own line. A CONTAINER query, not a viewport one: the Settings column is ~800px at a 1440 window, so a
+   viewport breakpoint kept the one-row layout there, squeezed the sentence to 0px and pushed the buttons
+   past the panel's edge. */
+.loom-gate-host {
+  container-type: inline-size;
+  container-name: gatestrip;
+}
 .loom-gate-strip {
   display: flex;
   align-items: center;
@@ -460,7 +464,7 @@ body {
   flex: 1 1 0;
   min-width: 0;
 }
-@media (max-width: 980px) {
+@container gatestrip (max-width: 980px) {
   .loom-gate-strip {
     flex-wrap: wrap;
   }
@@ -471,21 +475,6 @@ body {
     flex-basis: 100%;
     white-space: normal;
     overflow: visible;
-  }
-}
-
-/* Classic Mission Control's fleet + activity split. Both tracks are minmax(0, …) so neither can push
-   the page, and they fold to ONE column at the same 820px phone width `.loom-bandpanel` and
-   `.loom-kpideck` use — a 1.4fr/1fr split held at 420 gave the activity track 101px, which is less than
-   the event row's own un-shrinkable timestamp. */
-.loom-mc-split {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-  gap: 16px;
-}
-@media (max-width: 820px) {
-  .loom-mc-split {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -920,22 +909,10 @@ select.loom-field:disabled {
   outline-offset: 2px;
 }
 
-/* Segmented option (components/ui `Segmented`) and the Companion mode toggle (pages/Companion.tsx
-   `ModeToggle`): the same ring, drawn INSET. The mode toggle sits flush inside a rounded `overflow:
-   hidden` track, which clips anything painted outside a segment's border box, so the positive offset
-   above would be invisible there; the Segmented track no longer clips, but its 2px inner padding is too
-   tight for an outset ring to read, so it keeps the inset one. Same reason the rail items and Atlas tree nodes below use a negative offset.
-
-   `.loom-modetoggle` is its own class rather than a second `.loom-segment` so that class keeps naming
-   EXACTLY the kit primitive: `PAGE_SUB_TAB` (e2e/fixtures/daemon.ts) leans on `.loom-segment` to tell a
-   page's own sub-tabs apart from every other radiogroup on the page.
-
-   ⚠️ Order matters: a mode-toggle button also carries `.loom-toggle` (for its hover + transitions), so
-   this rule only wins the +2px one above by coming LATER at equal specificity. Moving either block past
-   the other silently re-clips the ring — `segmented-focus-ring.spec.ts` asserts the resolved `-2px`,
-   which is what catches that. */
-.loom-segment:focus-visible,
-.loom-modetoggle:focus-visible {
+/* Segmented option (components/ui `Segmented`): the same ring, drawn INSET. The track's 2px inner
+   padding is too tight for an outset ring to read. Same reason the Atlas tree nodes below use a negative
+   offset. `segmented-focus-ring.spec.ts` asserts the resolved `-2px`. */
+.loom-segment:focus-visible {
   outline: 2px solid var(--loom-ring);
   outline-offset: -2px;
 }
@@ -1125,407 +1102,6 @@ button.loom-cardtab:focus-visible {
   outline: 2px solid var(--loom-ring);
   outline-offset: 2px;
   border-radius: 2px;
-}
-
-/* ── Instrument Rail (sidebar nav — Direction A) ──────────────────────────────────
-   A 60px icon-only rail that expands to full labels on hover / keyboard focus / pin, floating OVER
-   the cockpit (the gutter reserves only the collapsed width, so expanding never reflows content).
-   Component: components/Sidebar.tsx; icons: components/navIcons.tsx. */
-.loom-railgutter {
-  width: var(--loom-rail-w);
-  flex: none;
-}
-.loom-rail {
-  position: fixed;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: var(--loom-rail-w);
-  z-index: 40;
-  display: flex;
-  flex-direction: column;
-  background: var(--loom-surface);
-  border-right: 1px solid var(--loom-line);
-  transition:
-    width 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    box-shadow 160ms ease;
-  overflow: hidden;
-}
-/* Expand on hover, keyboard focus (a11y — Tab reveals the labels), the pin toggle, or while the
-   rail's own project dropdown is open. */
-.loom-rail:hover,
-.loom-rail:focus-within,
-.loom-rail.is-pinned,
-.loom-rail.is-open {
-  width: var(--loom-rail-open);
-  box-shadow: var(--loom-pop-shadow);
-}
-/* Label text — hidden (and non-interactive) until the rail opens. */
-.loom-rail-lbl {
-  opacity: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
-  min-width: 0;
-  transition: opacity 120ms ease 20ms;
-}
-.loom-rail:hover .loom-rail-lbl,
-.loom-rail:focus-within .loom-rail-lbl,
-.loom-rail.is-pinned .loom-rail-lbl,
-.loom-rail.is-open .loom-rail-lbl {
-  opacity: 1;
-}
-.loom-rail-revealonly {
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-.loom-rail:hover .loom-rail-revealonly,
-.loom-rail:focus-within .loom-rail-revealonly,
-.loom-rail.is-pinned .loom-rail-revealonly,
-.loom-rail.is-open .loom-rail-revealonly {
-  opacity: 1;
-}
-
-/* Brand + pin */
-.loom-rail-brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 52px;
-  padding: 0 16px;
-  flex: none;
-  /* A <button>: the UA border's other three sides drew (dark, under color-scheme light). Keep their 2px
-     width, transparent, because the collapsed mark's -16px centring below is measured against it. */
-  border: 2px solid transparent;
-  border-bottom: 1px solid var(--loom-line);
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-.loom-rail-mark {
-  color: var(--loom-live);
-  flex: none;
-  display: flex;
-}
-/* Collapsed: center the mark on the same 60px axis as the nav-icon column below (mirrors
-   .loom-rail-ico) so the logo lines up with the icons instead of sitting 4px to the left.
-   Reverts to the left-biased flow layout on expand, keeping the expanded lockup unchanged. */
-.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-mark {
-  width: var(--loom-rail-w);
-  margin-left: -16px;
-  display: grid;
-  place-items: center;
-}
-.loom-rail-wordmark {
-  font-family: var(--loom-font-ui);
-  font-weight: 600;
-  font-size: 16px;
-  letter-spacing: 0.12em;
-  color: var(--loom-text);
-}
-.loom-rail-pinbtn {
-  margin-left: auto;
-  color: var(--loom-text-3);
-  flex: none;
-  display: flex;
-}
-.loom-rail-pinbtn svg {
-  width: 15px;
-  height: 15px;
-}
-.loom-rail-brand:hover .loom-rail-pinbtn {
-  color: var(--loom-text);
-}
-.loom-rail.is-pinned .loom-rail-pinbtn {
-  color: var(--loom-accent-fg);
-}
-
-/* Active-project chip */
-.loom-rail-proj {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  height: 48px;
-  padding: 0 14px;
-  flex: none;
-  border: 2px solid transparent; /* the UA button border's width, minus its colour (see .loom-rail-brand) */
-  border-bottom: 1px solid var(--loom-line);
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  width: 100%;
-}
-.loom-rail-proj:disabled {
-  cursor: default;
-}
-.loom-rail-sig {
-  position: relative;
-  width: 32px;
-  height: 32px;
-  flex: none;
-  border-radius: var(--loom-radius);
-  background: var(--loom-inset);
-  border: 1px solid var(--loom-line-strong);
-  display: grid;
-  place-items: center;
-  font-family: var(--loom-font-ui);
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--loom-text);
-}
-.loom-rail-sig-live {
-  position: absolute;
-  top: -3px;
-  right: -3px;
-  width: 8px;
-  height: 8px;
-  border-radius: 8px;
-  background: var(--loom-live);
-  box-shadow: 0 0 6px var(--loom-live);
-  border: 2px solid var(--loom-surface);
-}
-.loom-rail-proj-meta {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.25;
-}
-.loom-rail-eyebrow {
-  font-family: var(--loom-font-ui);
-  font-size: var(--loom-fs-xs);
-  color: var(--loom-text-3);
-}
-.loom-rail-proj-name {
-  font-size: 13px;
-  color: var(--loom-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.loom-rail-caret {
-  margin-left: auto;
-  color: var(--loom-text-3);
-  font-size: var(--loom-fs-xs);
-  flex: none;
-}
-
-/* Nav */
-.loom-rail-nav {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 8px 0;
-}
-.loom-rail-grp {
-  padding: 10px 16px 4px;
-  font-family: var(--loom-font-ui);
-  font-size: var(--loom-fs-xs);
-  font-weight: 700;
-  color: var(--loom-text-3);
-  height: 24px;
-}
-/* Collapsed: group labels hide (no room), but the first keeps a thin gap so the rail doesn't jump. */
-.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-grp {
-  visibility: hidden;
-}
-.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-grp.is-first {
-  visibility: visible;
-  font-size: 0;
-}
-.loom-rail-sep {
-  height: 1px;
-  background: var(--loom-line);
-  margin: 8px 16px;
-}
-.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-sep {
-  margin: 8px 12px;
-}
-.loom-rail-item {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  height: 38px;
-  padding: 0 16px;
-  color: var(--loom-text-2);
-  text-decoration: none;
-  cursor: pointer;
-  position: relative;
-  border-left: 2px solid transparent;
-  transition:
-    color 80ms linear,
-    background 80ms linear;
-}
-.loom-rail-item .loom-rail-ico {
-  width: var(--loom-rail-w);
-  flex: none;
-  margin-left: -16px;
-  display: grid;
-  place-items: center;
-  color: inherit;
-}
-.loom-rail-item .loom-rail-ico svg {
-  width: 19px;
-  height: 19px;
-}
-.loom-rail-item .loom-rail-lbl {
-  font-size: 12.5px;
-  letter-spacing: 0.03em;
-}
-.loom-rail-item:hover {
-  color: var(--loom-text);
-  background: var(--loom-inset);
-}
-.loom-rail-item.is-active {
-  color: var(--loom-text);
-  border-left-color: var(--loom-accent-fg);
-  background: var(--loom-selected);
-}
-.loom-rail-item.is-active .loom-rail-ico {
-  color: var(--loom-accent-fg);
-}
-.loom-rail-scopedot {
-  width: 4px;
-  height: 4px;
-  border-radius: 4px;
-  background: var(--loom-text-3);
-  opacity: 0.85;
-  margin-left: 6px;
-  flex: none;
-}
-.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-scopedot {
-  display: none;
-}
-.loom-rail-badge {
-  margin-left: auto;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 9px;
-  background: var(--loom-attn);
-  color: var(--loom-on-attn);
-  font-size: var(--loom-fs-xs);
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-}
-/* Phase 2 of card 59fa6403 — a second, deliberately LESS alarming "N unread" indicator alongside the
-   pending-request badge above: unread FYI items (e.g. notices) aren't urgent the way a pending decision
-   is, so this never reuses the amber treatment. Sits after the pending badge, never replacing it — the
-   two counts are kept visually AND numerically distinct (see Sidebar.tsx's own doc on why). */
-.loom-rail-badge-muted {
-  margin-left: 4px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 8px;
-  background: var(--loom-line-strong);
-  color: var(--loom-text-3);
-  font-size: var(--loom-fs-xs);
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-}
-/* Collapsed: float the count badge onto the icon's top-right corner so it still signals. */
-.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-item .loom-rail-badge {
-  position: absolute;
-  top: 5px;
-  right: 8px;
-  margin: 0;
-}
-.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-item .loom-rail-badge-muted {
-  position: absolute;
-  top: 5px;
-  right: 20px;
-  margin: 0;
-}
-
-/* Footer status (Alerts · Settings + running pill · version) */
-.loom-rail-foot {
-  flex: none;
-  border-top: 1px solid var(--loom-line);
-  padding: 8px 0 6px;
-}
-.loom-rail-statrow {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  height: 34px;
-  padding: 0 16px;
-  color: var(--loom-text-2);
-  cursor: pointer;
-  text-decoration: none;
-  background: transparent;
-  border: none;
-  border-left: 2px solid transparent;
-  width: 100%;
-  text-align: left;
-  position: relative;
-  transition:
-    color 80ms linear,
-    background 80ms linear;
-}
-.loom-rail-statrow .loom-rail-ico {
-  width: var(--loom-rail-w);
-  flex: none;
-  margin-left: -16px;
-  display: grid;
-  place-items: center;
-  color: inherit;
-}
-.loom-rail-statrow .loom-rail-ico svg {
-  width: 18px;
-  height: 18px;
-}
-.loom-rail-statrow:hover {
-  color: var(--loom-text);
-  background: var(--loom-inset);
-}
-.loom-rail-statrow.is-alert {
-  color: var(--loom-attn-text);
-}
-.loom-rail-statrow.is-active {
-  color: var(--loom-text);
-  border-left-color: var(--loom-accent-fg);
-}
-.loom-rail-statrow.is-active .loom-rail-ico {
-  color: var(--loom-accent-fg);
-}
-.loom-rail-statrow .loom-rail-lbl {
-  font-size: 12px;
-}
-.loom-rail-runpill {
-  margin-left: auto;
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  font-family: var(--loom-font-mono);
-  font-size: var(--loom-fs-xs);
-  color: var(--loom-live-text);
-  border: 1px solid var(--loom-live);
-  border-radius: var(--loom-radius-sm);
-  padding: 1px 7px;
-}
-.loom-rail-ver {
-  padding: 6px 16px 2px;
-  font-size: var(--loom-fs-xs);
-  color: var(--loom-text-3);
-  letter-spacing: 0.04em;
-}
-.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-ver {
-  text-align: center;
-  padding: 6px 0 2px;
-}
-/* Keyboard focus ring on the rail's interactive rows. */
-.loom-rail-brand:focus-visible,
-.loom-rail-proj:focus-visible,
-.loom-rail-item:focus-visible,
-.loom-rail-statrow:focus-visible {
-  outline: 2px solid var(--loom-ring);
-  outline-offset: -2px;
 }
 
 /* Role picker cards (Profiles editor, components/RolePicker): a selectable capability "class" card.
@@ -1834,12 +1410,9 @@ button.loom-cardtab:focus-visible {
   width: 100%;
 }
 
-/* ── Atlas shell (card 757c80dd — the opt-in Atlas UI preview) ────────────────────────
-   The phase-1 frame App.tsx renders INSTEAD OF the Instrument Rail shell above when the
-   Atlas switch is on (lib/atlasUi.ts): a fixed entity-tree rail, a breadcrumb + node-head
-   topbar, and a content column that scrolls on its own rather than the document. Exactly one
-   of the two shells is ever mounted, so none of these rules can reach the classic UI.
-   Structure only — every colour, font and radius is the same token every other surface reads.
+/* ── Atlas shell (card 757c80dd; the app's only shell since card acbb6df6) ────────────────
+   A fixed entity-tree rail, a breadcrumb + node-head topbar, and a content column that scrolls on its
+   own rather than the document. Structure only — every colour, font and radius is the same token every other surface reads.
    Plan: docs/plans/atlas-ui/02-architecture.md. */
 .loom-atlas {
   display: grid;
@@ -1864,7 +1437,7 @@ button.loom-cardtab:focus-visible {
   display: flex;
   align-items: center;
   gap: 10px;
-  /* Same 52px as .loom-rail-brand, so the two shells share one vertical rhythm. */
+  /* 52px — the topbar's own height, so the tree head and the crumb row share one baseline. */
   height: 52px;
   flex: none;
   padding: 0 16px;
@@ -2033,8 +1606,7 @@ button.loom-atlas-node.is-branch.is-open {
   transform: rotate(90deg);
   color: var(--loom-accent-fg);
 }
-/* Live-session marker on a project row: the same count + phosphor dot the rail chip's dropdown rows
-   carry, so both shells say "work is running here" in one language. */
+/* Live-session marker on a project row: a count + phosphor dot that says "work is running here". */
 .loom-atlas-live {
   display: inline-flex;
   align-items: center;
@@ -2433,42 +2005,26 @@ button.loom-atlas-node.is-branch.is-open {
   padding: 20px;
 }
 
-/* The drawer toggle and the short leave label are OUT of the media query in their off state, so the
-   wide shell renders exactly what it rendered before card 49e883a9: neither is reachable, and
-   neither takes a gap in the crumb row. The crumb disclosure and the leave icon (card 9477a5ed) join
-   them on the same terms — the wide crumb row gains no control and no gap. */
+/* The drawer toggle, the crumb disclosure (card 9477a5ed) and the scrim are OUT of the media query in
+   their off state, so the wide crumb row gains no control and no gap. */
 .loom-atlas-drawerbtn {
   display: none;
 }
-.loom-atlas-leave-short {
-  display: none;
-}
-.loom-atlas-leave-icon {
-  display: none;
-}
+
 .loom-atlas-crumbmore {
   display: none;
 }
 .loom-atlas-scrim {
   display: none;
 }
-.loom-atlas-leave {
-  /* On the CLASS, never inline: a `style` padding would beat the square icon-sized padding the
-     narrow rule below needs. The button passes `classPadding`, so the kit sets none inline either
-     (card d3a17f31); the value is the kit's own, so the wide button renders exactly as before. */
-  padding: 4px 12px;
-  /* Right-hand chrome never yields to the trail (card c88ac078): a 186-character request title
-     squeezed this to two lines at 1440. The trail is the one thing in this row built to shrink. */
-  flex: none;
-  white-space: nowrap;
-}
+
 /* The ⌘K palette's visible door (card bafbca40): before it, nothing in Atlas said the palette
-   existed. Right-hand chrome like the leave button, so it never yields to the trail either. */
+   existed. Right-hand chrome, so it never yields to the trail. */
 .loom-atlas-jump {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  /* 28px tall with the key below, the leave button's own height, so the crumb row does not grow. */
+  /* 28px tall with the key below, the row's own control height, so the crumb row does not grow. */
   padding: 4px 4px 4px 10px;
   flex: none;
   white-space: nowrap;
@@ -2640,30 +2196,7 @@ button.loom-atlas-node.is-branch.is-open {
     padding: 4px 12px;
     gap: 6px;
   }
-  /* The crumb trail's own half of backlog card 9477a5ed: the full "Switch to the classic UI" wording
-     took ~110px off a 420px row, which is most of what a two-segment trail needs. Card 9477a5ed
-     takes the remaining 83px too — a four-segment session address needs it — and the button becomes
-     an icon the same 34px square as the drawer toggle at the other end of the row. The accessible
-     name is unchanged at every width (it is the `aria-label`, not either label span), so nothing a
-     screen reader or a by-name locator sees moves with the breakpoint; only the tooltip carries the
-     wording for a sighted reader now. */
-  .loom-atlas-leave-full,
-  .loom-atlas-leave-short {
-    display: none;
-  }
-  .loom-atlas-leave-icon {
-    display: block;
-  }
-  .loom-atlas-leave {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex: none;
-    width: 34px;
-    height: 34px;
-    padding: 0;
-  }
-  /* The palette door becomes a search icon here, the same 34px square as the leave button: a key hint
+  /* The palette door becomes a search icon here, the same 34px square as the drawer toggle: a key hint
      means nothing on a phone, and the trail keeps the width the word took. The name is the
      `aria-label`, so it does not move with the breakpoint either. */
   .loom-atlas-jump-word,
@@ -2832,9 +2365,8 @@ button.loom-atlas-node.is-branch.is-open {
   flex-wrap: wrap;
   row-gap: 8px;
 }
-/* .loom-navtab carries no focus ring of its own (it is a shared primitive the classic shell
-   also uses). Scoped here rather than added to the primitive: this card has no business
-   changing chrome in the shell it is not building. */
+/* .loom-navtab carries no focus ring of its own (it is a shared primitive). Scoped here rather than
+   added to the primitive. */
 .loom-atlas-tabs .loom-navtab:focus-visible {
   outline: 2px solid var(--loom-ring);
   outline-offset: 3px;
@@ -3439,8 +2971,7 @@ button.loom-atlas-node.is-branch.is-open {
 /* The chat pane's history rail + conversation column (components/CompanionChat.tsx). Side by side on a
    real screen; STACKED below the narrow breakpoint, where a 232px non-shrinking rail otherwise left the
    message column a few characters wide and pushed the connection pill past the right edge (measured at
-   420px — a defect the classic page has too, not one Atlas introduced). Both shells render this pane,
-   so both get the fix. */
+   420px). */
 .loom-companion-chatsplit {
   display: flex;
   min-width: 0;
@@ -5422,11 +4953,6 @@ button.loom-ovbrief-cell.is-open {
   .loom-fade,
   .loom-tree-row,
   .loom-crumb,
-  .loom-rail,
-  .loom-rail-lbl,
-  .loom-rail-revealonly,
-  .loom-rail-item,
-  .loom-rail-statrow,
   .loom-manifest-row,
   .loom-gate-row,
   /* The Atlas tree's rows: their hover/active colour fade, and the project twist's rotation (card

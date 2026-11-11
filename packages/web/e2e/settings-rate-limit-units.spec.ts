@@ -75,7 +75,7 @@ const ILLEGIBLE = /0\.0166|0\.1666/;
 test("the sub-hour-floor rate-limit fields state their bounds in minutes, and a save persists both (card 7663eeb4)", async ({ page, loomDaemon }) => {
   const project = await loomDaemon.createProject(`settings-rl-units-save-${Date.now()}`);
   await pinActiveProject(page, project.id);
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
   // The panel loaded (GET /api/platform/config) — "Rate Limits" only appears once it has.
   await expect(globalSection(page).getByText("Rate Limits", { exact: true })).toBeVisible();
@@ -178,7 +178,7 @@ test("an out-of-range entry on either field is reported in minutes, never raw ms
   expect(rejected.status).toBe(400);
   expect(await rejected.text()).toMatch(/600000/);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
   const noResetBox = box(page, NO_RESET.label);
   const noReset = field(page, NO_RESET.label);
 

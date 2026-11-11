@@ -670,40 +670,4 @@ test.describe("Atlas Companion node — the three modes and the twelve Manage se
     await expect(trust.locator('[data-testid="companion-delete-confirm"]')).toBeVisible();
     await expect(trust.locator('[data-testid="companion-delete-go"]')).toBeVisible();
   });
-
-  test("switch OFF: the classic Companion page is untouched", async ({ page, loomDaemon }) => {
-    const name = `Classic-${Date.now().toString(36)}`;
-    await loomDaemon.seedCompanion({ name });
-    // No seedAtlasOn — OFF is the default (an empty storage key), which is the state a user who never
-    // opted in is in.
-    await page.goto(`${loomDaemon.baseURL}/companion`);
-
-    // The classic page's own tabpanel id, which only it renders.
-    const classicChat = page.locator("#companion-panel-chat");
-    await expect(classicChat).toBeVisible();
-    await expect(page.getByText(name, { exact: true }).first()).toBeVisible();
-
-    // NONE of the Atlas node's structure exists here.
-    await expect(node(page)).toHaveCount(0);
-    await expect(modeTabs(page)).toHaveCount(0);
-    await expect(managePanel(page)).toHaveCount(0);
-
-    // The classic mode switch still works, and Manage is still ONE column — no sub-section panels, so
-    // every section is where it has always been.
-    await page.getByRole("tab", { name: "Manage" }).click();
-    await expect(page.locator("#companion-panel-manage")).toBeVisible();
-    for (const group of MODEL.groups) {
-      await expect(groupPanel(page, group.key),
-        "the classic column must not grow Atlas sub-section panels").toHaveCount(0);
-    }
-    // ...and all twelve sections are visible in that one column at once — the thing the sub-sections
-    // deliberately change for Atlas and must NOT change here.
-    const column = page.locator("#companion-panel-manage");
-    for (const s of MODEL.sections) {
-      await expect(column.getByText(SECTION_LABEL[s.key]!, { exact: true }).first(),
-        `the classic Manage column must still render "${s.key}"`).toBeVisible();
-    }
-    // The URL never grew a ?tab= either: the classic mode is React state, as it always was.
-    await expect(page).toHaveURL(/\/companion$/);
-  });
 });

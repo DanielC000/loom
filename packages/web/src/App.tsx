@@ -1,11 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES } from "./nav";
 import { Button } from "./components/ui";
-import { Sidebar } from "./components/Sidebar";
 import { AtlasShell } from "./components/AtlasShell";
-import { AtlasSwitchNotice } from "./components/AtlasSwitchNotice";
 import { CommandPalette } from "./components/CommandPalette";
 import { SetupWizard } from "./components/SetupWizard";
 import { CredentialBanner } from "./components/CredentialBanner";
@@ -18,10 +15,8 @@ import { useAttention, useNewAttention, useMutedBrowserNotifications, attentionK
 import { useDismissable } from "./lib/useDismissable";
 import { useDockClearance } from "./lib/bottomDock";
 import { ActiveProjectProvider } from "./lib/activeProject";
-import { useAtlasUi } from "./lib/atlasUi";
 import { color, font, radius, shadow, tone, wash, fs } from "./theme";
 import { Dot } from "./components/ui";
-import { page } from "./ui";
 import { errorText } from "./lib/loopbackCredential";
 
 // Epic 2c-2 — the "Update available" banner. Unobtrusive slim bar ABOVE the page content, shown ONLY when
@@ -82,8 +77,8 @@ function UpdateBanner() {
   );
 }
 
-// In-app surface of the same "new attention item" signal the rail's Alerts row counts: a bottom-right
-// stack so the human notices attention without watching the rail. Shares useNewAttention with the browser
+// In-app surface of the "new attention item" signal: a bottom-right stack so the human notices attention
+// without watching the Workspace node's Needs-you band. Shares useNewAttention with the browser
 // Notification, so each new item pings once per surface — never twice on one surface.
 //
 // Two lanes, deliberately different (card 0d27f20c — N requests used to stack N persistent toasts over the
@@ -100,25 +95,21 @@ const TOAST_TTL_MS = 6000;
 let nextToastId = 0;
 
 // Routes whose page ALREADY renders the full pending-Request queue, so the count pill there is pure
-// duplication — suppress it and let the page be the surface. (The sidebar badge is everywhere and is
-// only a bare count, so the pill's "→ inbox" affordance still earns its place on every OTHER route.)
-// Classic: Mission Control ("/") and the project Overview show the queue, and /inbox IS the queue.
-// Atlas (nav.tsx › ATLAS_HOMES) — exactly TWO of the four nodes render it, each a "Needs you" band
-// plus the `needs you` KPI pop-over off the same `useAttention()` and shared `AttentionList`: `/home`
-// over the unfiltered items (pages/WorkspaceHome.tsx), and `/project` over items filtered by
-// `attentionItemInProject` (pages/ProjectHome.tsx) — the SAME project-filtered queue classic
-// `/overview` builds from that same helper, so `/project` is parity with the already-suppressed
-// `/overview`, inherited trade-off included (pill counts daemon-wide, band is project-scoped).
-// `/agents` and `/workspace-settings` render no queue and keep the pill — listed by hand, never
-// derived from ATLAS_HOMES, since this set tracks what a node RENDERS, not that it is a node. The
-// lookup below is EXACT on `pathname`, never a prefix: `/project` cannot match the unrelated
-// `/projects`, and it covers both its sub-tabs, whose `?tab=` query `pathname` drops.
-const REQUEST_PILL_SUPPRESSED_ROUTES = new Set(["/", "/overview", "/inbox", "/home", "/project"]);
+// duplication — suppress it and let the page be the surface. Exactly TWO nodes render it (nav.tsx ›
+// ATLAS_HOMES), each a "Needs you" band plus the `needs you` KPI pop-over off the same `useAttention()`
+// and shared `AttentionList`: `/home` over the unfiltered items (pages/WorkspaceHome.tsx), and `/project`
+// over items filtered by `attentionItemInProject` (pages/ProjectHome.tsx) — a known trade-off there: the
+// pill counts daemon-wide and the band is project-scoped. `/home` also covers the Inbox, which is its
+// `?tab=inbox` (the old `/inbox` address redirects there). `/agents` and `/workspace-settings` render no
+// queue and keep the pill — listed by hand, never derived from ATLAS_HOMES, since this set tracks what a
+// node RENDERS, not that it is a node. The lookup is EXACT on `pathname`, never a prefix, and it covers
+// every sub-tab, whose `?tab=` query `pathname` drops.
+const REQUEST_PILL_SUPPRESSED_ROUTES = new Set(["/home", "/project"]);
 
 // The toast/pill corner's stacking level — BELOW every overlay in the app, above page content.
 // Dialog scrims start at 50 (board card, agent editor, shell picker, maximized terminal) and go up to
 // 1600 (the setup wizard); the narrow-width tree drawer is 45 over its 44 scrim; popovers/menus are 60.
-// Page content tops out at the composer's 31, and the classic rail (40) is on the opposite edge.
+// Page content tops out at the composer's 31.
 // It used to be 2000, which floated the pill over the open agent editor and its scrim (Atlas audit
 // A-01, card 3094c4aa). A stacking floor rather than "detect an open dialog": several overlays carry
 // no `role="dialog"` at all (command palette, shell picker, task drawer, maximized terminal), so a
@@ -289,7 +280,7 @@ function Toast({ item, onDismiss, onOpen }: { item: AttentionItem; onDismiss: ()
 // the user into the live operator terminal (the "Platform" page, route /platform). Gated purely on the ordinary project
 // list being EMPTY (api.projects excludes the reserved Getting Started + Platform homes), so it vanishes
 // the moment a real project exists — and stays gone. Also human-dismissable (× / "Maybe later"), persisted
-// so it doesn't nag on every reload of a still-empty install; the "Platform" nav entry remains the way in.
+// so it doesn't nag on every reload of a still-empty install; the tree's Platform node remains the way in.
 const WELCOME_DISMISSED_KEY = "loom.setupWelcomeDismissed";
 
 function FirstRunWelcome() {
@@ -338,19 +329,16 @@ function FirstRunWelcome() {
   );
 }
 
-// The cross-cutting chrome, ONE definition each, mounted by whichever shell is live (the placement
-// rule: docs/plans/atlas-ui/02-architecture.md). Both return fragments, so neither adds a DOM node of
-// its own and the legacy tree below renders the same elements in the same order it always has. The
-// overlays are fixed-position or null and sit at the shell root; the banners are in document flow
-// directly above the page content. Nothing here knows which shell it is in, and nothing here is
-// inside a route table.
+// The cross-cutting chrome, ONE definition each, handed to the shell as two slots (the placement rule:
+// docs/plans/atlas-ui/02-architecture.md). The overlays are fixed-position or null and sit at the shell
+// root; the banners are in document flow directly above the page content. Nothing here is inside a route
+// table.
 function ShellOverlays() {
   return (
     <>
       <CommandPalette />
       <FirstRunWelcome />
       <ToastContainer />
-      <AtlasSwitchNotice />
     </>
   );
 }
@@ -367,53 +355,13 @@ function ShellBanners() {
   );
 }
 
-// Today's shell: the fixed Instrument Rail + its 60px flow gutter on the left, the page column on
-// the right. The route table below maps EVERY NAV_PAGES route (a companion-gated page stays
-// reachable by URL), the legacy redirects, and every PARAM_PAGES route.
-//
-// Extracted from App() unchanged, and it stays the DEFAULT until the owner signs off the parity
-// checklist (docs/plans/atlas-ui/), so this subtree must keep rendering exactly what it always has.
-function LegacyShell() {
-  return (
-    <div style={{ display: "flex", minHeight: "100vh" }}>
-      <ShellOverlays />
-      <Sidebar />
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-        <ShellBanners />
-        <main style={page}>
-          <Routes>
-            {NAV_PAGES.map((p) => (
-              <Route key={p.to} path={p.to} element={p.element} />
-            ))}
-            {/* The legacy-URL redirects, from the SAME declaration the Atlas shell mounts
-                (src/nav.tsx › LEGACY_REDIRECTS) — see its comment for why each has one target and
-                not a per-shell pair. Each row's own comment there says what it is compatibility for. */}
-            {LEGACY_REDIRECTS.map((r) => (
-              <Route key={r.from} path={r.from} element={r.element} />
-            ))}
-            {/* The 3 parameterized routes, from the SAME declaration the Atlas shell mounts
-                (src/nav.tsx › PARAM_PAGES) — see its comment for why they are not two lists. */}
-            {PARAM_PAGES.map((p) => (
-              <Route key={p.to} path={p.to} element={p.element} />
-            ))}
-          </Routes>
-        </main>
-      </div>
-    </div>
-  );
-}
-
+// Atlas is the only shell (card acbb6df6 deleted the classic one and the switch between them). A browser
+// that still holds the old `loom.atlasUi` preference is unaffected: nothing reads that key any more.
 export default function App() {
-  // The Atlas UI switch (lib/atlasUi.ts, card 757c80dd) gates WHICH top-level shell mounts, and
-  // nothing else. Exactly one shell is ever mounted — never both, never one hidden behind the other -
-  // so no Atlas rule, class or handler can reach the classic UI.
-  const [atlasUi] = useAtlasUi();
   return (
     <ActiveProjectProvider>
       <RequestModalProvider>
-        {atlasUi
-          ? <AtlasShell overlays={<ShellOverlays />} banners={<ShellBanners />} />
-          : <LegacyShell />}
+        <AtlasShell overlays={<ShellOverlays />} banners={<ShellBanners />} />
       </RequestModalProvider>
     </ActiveProjectProvider>
   );

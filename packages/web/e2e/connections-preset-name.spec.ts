@@ -32,7 +32,7 @@ type PresetLabel = keyof typeof PRESET_NAME;
 
 async function openNewConnectionForm(page: import("@playwright/test").Page, baseURL: string, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
-  await page.goto(`${baseURL}/settings`);
+  await page.goto(`${baseURL}/home?tab=settings`);
   await expect(page.getByText("Connections", { exact: false }).first()).toBeVisible();
   await page.getByRole("button", { name: "New connection" }).click();
   // The form opens on the Google Analytics preset with its own name pre-filled.

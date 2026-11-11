@@ -501,42 +501,4 @@ test.describe("Atlas Workspace Terminals node", () => {
     await expect.poll(() => sockets.for(f.alphaWorker.sessionId).filter((w) => !w.isClosed()).length,
       { message: "returning to the node left more than one live socket for one session" }).toBe(1);
   });
-
-  test("switch OFF: the classic rail keeps one Terminals entry at /terminals, and that page has no columns picker", async ({ page, loomDaemon }) => {
-    const f = await seedFleet(loomDaemon);
-    // Override the describe-level Atlas seed: this leg is the switch-OFF contract, and off is the
-    // default. `addInitScript` cannot be unregistered, so the key is cleared on every navigation
-    // instead — which is also what makes the classic assertions below measure the classic shell.
-    await page.addInitScript((key) => {
-      try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
-    }, ATLAS_KEY);
-    await page.goto(`${loomDaemon.baseURL}/`);
-
-    // Presence first: the classic rail really rendered.
-    const rail = page.locator(".loom-rail");
-    await expect(rail).toBeVisible();
-    const railRoutes = await rail.locator("a.loom-rail-item, a.loom-rail-statrow")
-      .evaluateAll((els) => els.map((el) => new URL((el as HTMLAnchorElement).href).pathname));
-    expect(railRoutes, "the classic rail lost its own Terminals destination").toContain("/terminals");
-    // ⭐ EXACTLY ONE. The node is an ATLAS_HOMES row precisely so the classic rail does not gain a
-    // SECOND Terminals entry for a user who never opted in; a NAV_PAGES row would read as two.
-    expect(railRoutes.filter((r) => r === "/terminals"),
-      "the classic rail has more than one Terminals entry").toHaveLength(1);
-    expect(railRoutes, "the Atlas-only Terminals node leaked into the classic rail").not.toContain(NODE);
-    await expect(node(page)).toHaveCount(0);
-
-    // ⭐ AND THE GOD-EYE CONTRACT HELD. This card gave the ATLAS node a columns picker by giving the
-    // shared component a `layoutKey`; the classic page passes none, so it must still have NO picker
-    // and no reorder controls — card ac0cfe91's own contract, which this card had to leave intact.
-    await page.goto(`${loomDaemon.baseURL}/terminals`);
-    await expect(page.getByTestId("sessions-bar")).toBeVisible();
-    await expect(page.getByTestId("tile-identity").first()).toBeVisible();
-    await expect(page.getByTestId("sessions-bar")).toContainText("Project");
-    await expect(page.getByTestId("sessions-bar"),
-      "the classic god-eye page gained a Columns control").not.toContainText("Columns");
-    await expect(page.getByTestId("sessions-columns")).toHaveCount(0);
-    await expect(page.getByTestId("sessions-order-reset")).toHaveCount(0);
-    // Its grid still carries the unchanged `auto` template.
-    await expect(page.getByTestId(`sessions-grid-${f.managerRowKey}`)).toHaveAttribute("data-columns", "auto");
-  });
 });

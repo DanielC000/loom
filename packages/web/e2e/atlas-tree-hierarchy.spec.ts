@@ -51,13 +51,12 @@ const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
 // (derived from the rendered tree, so it cannot go stale) still refuses to let it fall out of both.
 // The two together are what make the claim both specific and drift-proof.
 // ⚠️ `/terminals` LEFT this list with card 25c08fba, which took it DOWN to project depth as the
-// project node's "Sessions" tab. It stays out: this list's members are all resolved below as either
-// a WORKSPACE node tab or a retirement, and a PROJECT node tab (card ec1aa18e's bucket, which that
-// card's own spec — atlas-tree.spec.ts — partitions exhaustively) is neither. Card 41eab0eb's seven
-// STAY here, because a Workspace node TAB is still not a row, and so do card 5afd71bd's two RETIRED
-// ones, which are not a row either — which is what the tab/retired split below records.
+// project node's "Sessions" tab. It stays out: this list's members are all resolved below as a
+// WORKSPACE node tab, and a PROJECT node tab (card ec1aa18e's bucket, which atlas-tree.spec.ts
+// partitions exhaustively) is not one. Card 5afd71bd's two RETIRED members (`/`, `/projects`) left this
+// list when card acbb6df6 deleted their pages; their redirects are atlas-legacy-redirects.spec.ts's.
 const RE_HOMED = [
-  "/", "/inbox", "/gates", "/projects", "/actors", "/companion", "/automation", "/usage",
+  "/inbox", "/gates", "/actors", "/companion", "/automation", "/usage",
   // The Atlas-only workspace Settings node (card 595e2a47) — a `ROOT_TABS` row in the approved design,
   // so it re-homes with the nine rail destinations above rather than staying the tier's footer.
   "/workspace-settings",
@@ -86,26 +85,6 @@ function parseWorkspaceNodeTabs(): { rows: { key: string; from: string }[]; rawM
   const rows = [...block.matchAll(/\bkey:\s*"([^"]+)",\s*from:\s*"([^"]+)"/g)]
     .map((m) => ({ key: m[1] ?? "", from: m[2] ?? "" }));
   return { rows, rawMarkers, block };
-}
-
-// The retired destinations (card 5afd71bd), `from` → the node that absorbed them, with the same
-// raw-marker control as the tab parse above: a regex that quietly stopped matching a row hands back a
-// plausible SUBSET, and a subset reads exactly like a complete list.
-function retirementsUnderTest(): Map<string, string> {
-  const src = readFileSync(NAV_SOURCE, "utf8");
-  const start = src.indexOf("export const ATLAS_RETIREMENTS");
-  if (start < 0) throw new Error(`no ATLAS_RETIREMENTS declaration found in ${NAV_SOURCE}`);
-  const end = src.indexOf("\n];", start);
-  if (end < 0) throw new Error(`ATLAS_RETIREMENTS in ${NAV_SOURCE} has no closing "];"`);
-  const block = src.slice(start, end);
-  const rawMarkers = (block.match(/\bfrom:\s*"/g) ?? []).length;
-  const rows = [...block.matchAll(/\bfrom:\s*"([^"]+)",\s*to:\s*"([^"]+)"/g)]
-    .map((m) => ({ from: m[1] ?? "", to: m[2] ?? "" }));
-  expect(rows.length, `the ATLAS_RETIREMENTS parse found no rows. Block:\n${block}`).toBeGreaterThan(0);
-  expect(rows.length,
-    `the parse returned ${rows.length} row(s) but the declaration contains ${rawMarkers} entries`
-    + ` — the pattern is dropping rows. Block:\n${block}`).toBe(rawMarkers);
-  return new Map(rows.map((r) => [r.from, r.to]));
 }
 
 // The rows that deliberately STAYED at the workspace tier, IN ORDER: the tier's own home, the
@@ -439,25 +418,12 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
         `the parse returned ${tabs.rows.length} row(s) but the declaration contains ${tabs.rawMarkers}`
         + ` entries — the pattern is dropping rows. Block:\n${tabs.block}`).toBe(tabs.rawMarkers);
       const tabFor = new Map(tabs.rows.map((r) => [r.from, r.key]));
-      // ...and which of them is RETIRED outright (card 5afd71bd) — the third answer, parsed from its
-      // own declaration the same way. A retired address is neither a row nor a tab nor a hatch entry:
-      // it redirects to the node that absorbed it, which is what its leg below asserts instead of
-      // reachability.
-      const retiredTo = retirementsUnderTest();
-      // The two branches that still have members must actually RUN, or one of them is an untested
-      // claim hiding behind a list that happens to be all one kind.
-      expect(RE_HOMED.filter((r) => tabFor.has(r)).length,
-        "no re-homed destination is a Workspace node tab, so that branch never runs").toBeGreaterThan(0);
-      expect(RE_HOMED.filter((r) => retiredTo.has(r)).length,
-        "no re-homed destination is retired, so that branch never runs").toBeGreaterThan(0);
-      // The hatch branch has NO members left, deliberately: card 5afd71bd retired the last two
-      // destinations that were in it and deleted the disclosure with them. Asserted rather than left
-      // implicit, so the dead branch is a stated fact instead of looking like a collector that broke.
-      // ⛔ Do NOT "fix" a future red here by re-adding a hatch — decide the new destination's
-      // placement (a tree row, a node tab, or a retirement) the way this card's own card did.
-      expect(RE_HOMED.filter((r) => !tabFor.has(r) && !retiredTo.has(r)),
-        "a re-homed destination is neither a node tab nor retired, and the escape hatch that used to"
-        + " hold such a destination no longer exists — so it is unreachable").toEqual([]);
+      // Every re-homed destination must be a Workspace node TAB — the escape hatch that used to hold
+      // the others is deleted (card 5afd71bd), and the two it retired went with card acbb6df6.
+      // ⛔ Do NOT "fix" a future red here by re-adding a hatch — decide the new destination's placement.
+      expect(RE_HOMED.filter((r) => !tabFor.has(r)),
+        "a re-homed destination is not a Workspace node tab, and nothing else can hold it — so it is"
+        + " unreachable").toEqual([]);
 
       // The Workspace node is where a tab can be seen at all; the tree is identical on every route.
       await page.goto(loomDaemon.baseURL + "/home");
@@ -465,79 +431,13 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
 
       for (const gone of RE_HOMED) {
         expect(treeRoutes, `${gone} is still an Atlas tree row`).not.toContain(gone);
-        // The other half of the claim depends on which answer the destination got. For a RE-HOMED one
-        // it is reachability: removed from the rows, NOT removed from the app (deleting the row and
-        // stranding the surface would also satisfy the line above). For a RETIRED one there is nothing
-        // left to reach by design, so the claim is that the address LANDS on the node that absorbed
-        // it rather than on the catch-all — which is the same guarantee in the only form it can take
-        // once the destination itself is gone.
+        // Removed from the rows, NOT removed from the app: deleting the row and stranding the surface
+        // would also satisfy the line above, so the tab that now holds it must be there.
         const key = tabFor.get(gone);
-        const to = retiredTo.get(gone);
-        if (key) {
-          await expect(page.getByTestId(`atlas-tab-${key}`),
-            `${gone} left the tree rows without a Workspace node tab — it is now unreachable`).toHaveCount(1);
-          await expect(page.getByTestId(`atlas-unhomed-${gone}`),
-            `${gone} is a node tab and STILL an escape-hatch entry`).toHaveCount(0);
-        } else if (to) {
-          await page.goto(loomDaemon.baseURL + gone);
-          await expect(page.getByTestId("atlas-shell")).toBeVisible();
-          await expect(page.getByTestId("atlas-empty"),
-            `the retired ${gone} fell through to the Atlas catch-all instead of redirecting`).toHaveCount(0);
-          await expect(page, `the retired ${gone} did not redirect to ${to}`)
-            .toHaveURL(loomDaemon.baseURL + to);
-          await expect(page.getByTestId(`atlas-unhomed-${gone}`),
-            `${gone} is retired and STILL an escape-hatch entry`).toHaveCount(0);
-          // Back to the Workspace node, which is where the tab assertions above are readable, so the
-          // loop's remaining iterations are not reading a tab row that is not on the page.
-          await page.goto(loomDaemon.baseURL + "/home");
-          await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
-        }
-        // No third branch: the control above has already required this list to be exhaustively
-        // covered by the two, so an uncovered member fails there rather than silently skipping here.
-      }
-    });
-
-  test("switch OFF: the classic rail renders every destination and no Atlas element is mounted",
-    async ({ page, loomDaemon }) => {
-      const { alpha, alphaCard } = await seedHierarchy(loomDaemon);
-      await pinProject(page, alpha.id);
-      await page.goto(loomDaemon.baseURL + "/board");
-
-      // Fixture identity on this side too, so "the rail is unchanged" is asserted on a page that
-      // really rendered this spec's own data rather than on an empty or errored shell.
-      await expect(page.locator(".loom-rail")).toBeVisible();
-      await expect(page.getByText(alphaCard, { exact: true })).toBeVisible();
-
-      // Not one element of the new frame exists — the DoD's own wording. Asserted on the class
-      // PREFIX, so a tree row, the escape hatch, the shell and the node head are all covered by one
-      // claim rather than by a list of the ones this spec happened to think of.
-      await expect(page.locator("[class*='loom-atlas']"),
-        "an Atlas element is mounted with the switch off").toHaveCount(0);
-      await expect(page.getByTestId("atlas-tree")).toHaveCount(0);
-      await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-      await expect(page.getByTestId("atlas-unhomed")).toHaveCount(0);
-
-      // Every NAV_PAGES destination is still a rail link — including the nine this card removed from
-      // the Atlas tree, which is the point: the classic shell is untouched by the restructure.
-      const nav = parseNavPages();
-      expect(nav.paths.length, `the NAV_PAGES parse found no rows. Block:\n${nav.block}`).toBeGreaterThan(0);
-      expect(nav.paths.length,
-        `the parse returned ${nav.paths.length} row(s) but the declaration contains ${nav.rawMarkers} entries`
-        + ` — the pattern is dropping rows. Block:\n${nav.block}`).toBe(nav.rawMarkers);
-
-      const railRoutes = await page.locator(RAIL_LINKS)
-        .evaluateAll((els) => els.map((el) => new URL((el as HTMLAnchorElement).href).pathname));
-      expect([...new Set(railRoutes)].sort(), "the classic rail no longer renders exactly the declared destinations")
-        .toEqual([...nav.paths].sort());
-      for (const gone of RE_HOMED) {
-        if (gone === "/workspace-settings") {
-          // The one Atlas-ONLY address in that list: it must NOT be in the classic rail, or a user who
-          // never opted in would see a second Settings row.
-          expect(railRoutes, "the Atlas-only workspace Settings node leaked into the classic rail")
-            .not.toContain(gone);
-          continue;
-        }
-        expect(railRoutes, `the classic rail lost ${gone}, which only the ATLAS tree re-homed`).toContain(gone);
+        await expect(page.getByTestId(`atlas-tab-${key}`),
+          `${gone} left the tree rows without a Workspace node tab — it is now unreachable`).toHaveCount(1);
+        await expect(page.getByTestId(`atlas-unhomed-${gone}`),
+          `${gone} is a node tab and STILL an escape-hatch entry`).toHaveCount(0);
       }
     });
 });

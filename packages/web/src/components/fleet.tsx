@@ -1,7 +1,7 @@
 import { useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { SessionListItem, OrchestrationEvent, UsageLimitsStatus, UsageWindow } from "@loom/shared";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { SessionListItem, OrchestrationEvent } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { attentionKindLabel, isRateLimited, isAnswerableRequest, usePendingDecisionsBySession, type AttentionItem, type PendingDecision } from "../lib/attention";
@@ -45,103 +45,16 @@ export function Stat({ label, value, tone: t = "live" }: { label: string; value:
   );
 }
 
-// ── Plan-usage strip ───────────────────────────────────────────────────────────
-// The user's REAL Claude *account/plan* usage (rate-limit headroom) — 5h + 7d windows, per-model
-// weekly + extra-usage — from the daemon's single cached OAuth poll (GET /api/usage/limits). The
-// daemon polls modestly; the UI just re-reads the cache. Every failure mode comes back as
-// `available:false` + a reason → a small muted note, never an error/crash.
-
-// Utilization → tone, consistent with CONTEXT_WARN_RATIO styling: phosphor < 80% ≤ amber < 95% ≤ red.
-function usageTone(utilization: number): Tone {
-  if (utilization >= 95) return "danger";
-  if (utilization >= 80) return "attn";
-  return "accent";
-}
-
-// ms-from-now → "3d 4h" / "1h 42m" / "12m" / "now". "—" when there's no reset instant.
-function resetCountdown(resetsAt: string | null): string {
-  if (!resetsAt) return "—";
-  const ms = new Date(resetsAt).getTime() - Date.now();
-  if (!Number.isFinite(ms)) return "—";
-  if (ms <= 0) return "now";
-  const totalMin = Math.floor(ms / 60_000);
-  const d = Math.floor(totalMin / 1440), h = Math.floor((totalMin % 1440) / 60), m = totalMin % 60;
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
-}
-
-function UsageGauge({ label, window: w }: { label: string; window: UsageWindow }) {
-  const util = Math.round(w.utilization);
-  const t = usageTone(w.utilization);
-  return (
-    <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
-      <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-        <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>{sentenceCase(label)}</span>
-        <span style={{ flex: 1 }} />
-        <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[t] }}>{util}%</span>
-      </span>
-      <Meter value={util} max={100} tone={t} width={110} />
-      <span style={{ fontSize: fs.sm, color: color.text3 }}>resets in <span style={{ fontFamily: font.mono }}>{resetCountdown(w.resetsAt)}</span></span>
-    </div>
-  );
-}
-
-export function PlanUsageStrip() {
-  // The daemon caches; a light refetch keeps the countdowns and percentages fresh.
-  const usage = useQuery<UsageLimitsStatus>({ queryKey: ["usageLimits"], queryFn: ({ signal }) => api.usageLimits(signal), refetchInterval: 30_000 });
-  const data = usage.data;
-
-  if (!data || !data.available) {
-    const reason = data && !data.available ? data.reason : usage.isLoading ? "loading…" : "no data";
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Plan usage</span>
-        <span title={reason} style={{ fontSize: fs.sm, color: color.text3 }}>unavailable</span>
-      </div>
-    );
-  }
-
-  const extra = data.extraUsage;
-  // Extra-usage utilization is null until metered → derive from credits when we can.
-  const extraUtil = extra
-    ? extra.utilization ?? (extra.monthlyLimit && extra.usedCredits != null ? (extra.usedCredits / extra.monthlyLimit) * 100 : 0)
-    : 0;
-
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-      <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Plan usage</span>
-      {data.fiveHour && <UsageGauge label="5h session" window={data.fiveHour} />}
-      <UsageGauge label="7d weekly" window={data.sevenDay} />
-      {data.sevenDayOpus && <UsageGauge label="7d opus" window={data.sevenDayOpus} />}
-      {data.sevenDaySonnet && <UsageGauge label="7d sonnet" window={data.sevenDaySonnet} />}
-      {extra?.isEnabled && (
-        <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.line}`, borderRadius: radius.sm, padding: "6px 12px", minWidth: 132 }}>
-          <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
-            <span style={{ fontFamily: font.ui, fontSize: fs.xs, color: color.text3 }}>Extra usage</span>
-            <span style={{ flex: 1 }} />
-            <span style={{ fontFamily: font.mono, fontSize: fs.body, color: tone[usageTone(extraUtil)] }}>{Math.round(extraUtil)}%</span>
-          </span>
-          <Meter value={extraUtil} max={100} tone={usageTone(extraUtil)} width={110} />
-          <span style={{ fontFamily: font.mono, fontSize: fs.xs, color: color.text3 }}>
-            {extra.usedCredits ?? 0}/{extra.monthlyLimit ?? "—"} credits
-          </span>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /**
  * Card 51a80b4d — what AttentionRow needs to RENDER a row, which is strictly less than what
  * `useAttention` must produce. `notify` (the browser-notification category) is OPTIONAL here and
  * REQUIRED on `AttentionItem`, deliberately: the required field on `AttentionItem` is what guarantees
  * every alert that can raise a desktop notification also has a Settings toggle, but a caller that only
  * BORROWS this row shape to render something never routed through `useAttention` (today:
- * `MergeGateAttention` in components/mergeGate.tsx, which renders straight onto Overview and never
+ * `MergeGateAttention` in components/mergeGate.tsx, which renders straight onto the project Home tab and never
  * reaches `useNewAttention`) has no notification to categorise. Forcing it to name one would ship a
  * toggle in Settings that silences nothing. A real `AttentionItem` satisfies this type, so the two
- * genuine callers (MissionControl, Overview) are unaffected.
+ * genuine callers (the Workspace and project Home tabs) are unaffected.
  *
  * ⚠️ If a render-only borrowing is ever wired INTO `useAttention`'s item list, it stops being render-only
  * and must gain a real `notify` kind (+ its Settings toggle) at that point.
@@ -432,37 +345,6 @@ export function FleetRow({ s, star }: { s: SessionListItem; star?: boolean }) {
           dense, fast-moving row (the Archive, where a session is final, treats them differently). */}
       {ctx > 0 && <ContextUsage ctxInputTokens={s.ctxInputTokens} model={s.model} />}
     </div>
-  );
-}
-
-// Wave/fleet CONSUMPTION roll-up — total context tokens across a session set + the worst-case occupancy.
-// Framed as usage/consumption (tokens, % of window), deliberately NOT a $ API bill: Loom runs the
-// subscription CLI, so there is no per-call dollar cost — the honest signal is how much context the wave
-// is burning and who is closest to overflow. Rendered inline in the expanded fleet panel header.
-export function totalContext(sessions: SessionListItem[]): { tokens: number; reporting: number } {
-  let tokens = 0, reporting = 0;
-  for (const s of sessions) {
-    const c = s.ctxInputTokens ?? 0;
-    if (c > 0) { tokens += c; reporting++; }
-  }
-  return { tokens, reporting };
-}
-
-export function WaveConsumption({ sessions }: { sessions: SessionListItem[] }) {
-  const total = totalContext(sessions);
-  const wc = worstContext(sessions);
-  const hot = wc.ratio > CONTEXT_WARN_RATIO;
-  if (total.reporting === 0) return null;
-  return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: fs.sm }}
-      title={`${total.tokens.toLocaleString()} input tokens in context across ${total.reporting} reporting session${total.reporting === 1 ? "" : "s"} (subscription usage, not an API $ bill)`}>
-      <span style={{ color: color.text3 }}>consumption</span>
-      <span style={{ color: color.text, fontFamily: font.mono }}>{(total.tokens / 1000).toFixed(0)}k ctx</span>
-      <span style={{ color: color.text3 }}>·</span>
-      <span style={{ color: color.text3 }}>peak</span>
-      <Meter value={wc.ctx} max={wc.window || 1} tone={hot ? "attn" : "accent"} width={70} />
-      <span style={{ color: hot ? color.attnText : color.text3, fontFamily: font.mono }}>{wc.ctx > 0 ? `${Math.round(wc.ratio * 100)}%` : "—"}</span>
-    </span>
   );
 }
 

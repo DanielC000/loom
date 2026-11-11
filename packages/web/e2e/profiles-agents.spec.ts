@@ -1,9 +1,9 @@
 // Profiles & agents spec (card 5c41c20d) — proves the two HUMAN-only rig-management surfaces render and
 // mutate through the real REST paths, with an observable before/after for every interactive control:
-//   1. Projects (/projects) — the per-project Agents column LISTS REST-seeded agents, CREATING an agent
-//      through the AgentForm (revealed by "＋ New agent") reflects in the list + over REST, and ASSIGNING a
-//      Profile to an agent produces an observable change (the agent row gains the profile's role/icon; the
-//      agent row's profileId flips over REST). The bind dropdown also HIDES platform-tier profiles on this
+//   1. The Atlas Agents node (/agents; ported from the deleted /projects list by card acbb6df6) — it LISTS
+//      REST-seeded agents as cards, CREATING an agent through the AgentForm (revealed by "＋ New agent")
+//      reflects as a card + over REST, and ASSIGNING a Profile in the card's editor produces an observable
+//      change (the card gains the profile's role; the agent row's profileId flips over REST). The bind dropdown also HIDES platform-tier profiles on this
 //      LOOM_DEV=0 fixture (card 921e06b0), while still rendering one an agent is already bound to.
 //   2. Profiles (/profiles) — a profile's capability toggles RENDER (browserTesting / documentConversion),
 //      toggling documentConversion reveals the shared-venv provisioning panel (interactive observable), and
@@ -12,7 +12,7 @@
 // profiles inline via `fetch(loomDaemon.baseURL + "/api/...")` — the fixture is NOT edited (shared file).
 //
 // Determinism: the `loomDaemon` fixture is worker-scoped (one daemon for the whole run), so more than one
-// project/profile can exist on it. Every Projects test seeds its OWN project and PINS it active via
+// project/profile can exist on it. Every Agents-node test seeds its OWN project and PINS it active via
 // addInitScript localStorage `loom.projectId` (see lib/activeProject) BEFORE navigating, so it never races
 // another test's project; profiles are addressed by a unique name/id, never by list position. The first-run
 // "Welcome to Loom" overlay (App.tsx › FirstRunWelcome, a fixed pointer-intercepting layer) is suppressed
@@ -62,38 +62,50 @@ async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
-// An agent row in the Projects-page Agents list is a <button> whose text starts with the agent name (and,
-// once a profile is assigned, also its icon + role). Nav items are <a> links and the profile options live in
-// a <select>, so a role-button filter on the unique name pins exactly the agent row.
-const agentRow = (page: Page, name: string) => page.getByRole("button").filter({ hasText: name }).first();
+// An agent on the Agents node is a CARD: `atlas-agent-card-<id>` in the "You spawn these" group, or
+// `atlas-worker-rig-<id>` in the "Your manager dispatches these" group (a worker-role bind). Matching both
+// prefixes keeps a card addressable when a rebind moves it between the groups. Filtered by the card's own
+// name element (exact), so no substring of another card's prompt or rig can hijack it.
+const agentCard = (page: Page, name: string) =>
+  page.locator('[data-testid^="atlas-agent-card-"], [data-testid^="atlas-worker-rig-"]')
+    .filter({ has: page.locator(".loom-baycard-name", { hasText: new RegExp(`^${name}$`) }) });
 
-// Must match `PLAIN_BIND_GROUP_LABEL` in pages/Projects.tsx verbatim. Deliberately a copy rather than an
+const openAgentsNode = async (page: Page, baseURL: string) => {
+  await page.goto(`${baseURL}/agents`);
+  await expect(page.getByTestId("atlas-agents-node")).toBeVisible();
+};
+
+// Opens the card's editor dialog (the only route to the profile picker now) by the agent's id.
+const openEditor = async (page: Page, agentId: string) => {
+  await page.getByTestId(`atlas-agent-edit-${agentId}`).click();
+  await expect(page.getByTestId("atlas-agent-editor")).toBeVisible();
+};
+
+// Must match `PLAIN_BIND_GROUP_LABEL` in components/agentEditor.tsx verbatim. Deliberately a copy rather than an
 // import: pulling that module into the Playwright process would drag in React, the theme and the whole UI
 // kit for one string. Drift fails loudly (the optgroup simply isn't found), never silently passes.
 const PLAIN_BIND_GROUP_LABEL = "role not conferred — binds as a plain session";
 
-// The profile-assignment control is the ONLY <select> on the page carrying the "— none —" placeholder option
-// (the board-preset select in the project form does not), so this filter disambiguates it from that select.
-const profileSelect = (page: Page) => page.locator("select").filter({ hasText: "— none —" });
+// The profile-assignment control is the editor dialog's <select> carrying the "— none —" placeholder option;
+// scoping to the dialog keeps any other select on the node out of the match.
+const profileSelect = (page: Page) =>
+  page.getByTestId("atlas-agent-editor").locator("select").filter({ hasText: "— none —" });
 
 test.describe("profiles & agents", () => {
   // The first-run "Welcome to Loom" overlay is dismissed globally by the fixture (fixtures/daemon.ts) — no
   // spec re-derives it.
 
-  test("the Agents panel lists the REST-seeded agents", async ({ page, loomDaemon }) => {
+  test("the Agents node lists the REST-seeded agents", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`agents-list-${Date.now()}`);
     const names = ["Orchestrator", "Dev", "Bugfix"];
     for (const n of names) await seedAgent(loomDaemon.baseURL, project.id, n);
     await pinActiveProject(page, project.id);
 
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await openAgentsNode(page, loomDaemon.baseURL);
 
-    // The per-project Agents panel renders (it only mounts once an active project resolves).
-    await expect(page.getByText("Agents", { exact: true })).toBeVisible();
-
-    // Every seeded agent shows up as a selectable row.
+    // Every seeded agent shows up as a card.
     for (const n of names) {
-      await expect(agentRow(page, n)).toBeVisible();
+      await expect(agentCard(page, n)).toBeVisible();
     }
 
     // Cross-check the REST source the list is built from carries exactly these seeded agents.
@@ -104,27 +116,23 @@ test.describe("profiles & agents", () => {
   test("creating an agent through the UI reflects in the list and over REST", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`agents-create-${Date.now()}`);
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
-
-    await expect(page.getByText("Agents", { exact: true })).toBeVisible();
+    await openAgentsNode(page, loomDaemon.baseURL);
 
     const newName = `QA Verifier ${Date.now()}`;
-    // BEFORE: no such agent exists in the list.
-    await expect(agentRow(page, newName)).toHaveCount(0);
+    // BEFORE: no such agent exists on the node.
+    await expect(agentCard(page, newName)).toHaveCount(0);
 
-    // ACT: reveal the AgentForm in the editor pane ("＋ New agent"), fill it (its "agent name" input is
-    // distinct from the project form's "name"), and Create. The Create button (exact) is the AgentForm's —
-    // the project form's button reads "Create project".
-    await page.getByRole("button", { name: /new agent/i }).click();
-    await page.getByPlaceholder("agent name").fill(newName);
-    await page.getByTestId("agent-create-form").getByLabel("Startup prompt")
-      .fill("Verify the assigned task end-to-end and report with evidence.");
-    const create = page.getByRole("button", { name: "Create", exact: true });
+    // ACT: open the create dialog ("＋ New agent"), fill the AgentForm, and Create.
+    await page.getByTestId("atlas-agents-new").click();
+    const form = page.getByTestId("agent-create-form");
+    await form.getByPlaceholder("agent name").fill(newName);
+    await form.getByLabel("Startup prompt").fill("Verify the assigned task end-to-end and report with evidence.");
+    const create = page.getByTestId("agent-create-submit");
     await expect(create).toBeEnabled();
     await create.click();
 
-    // AFTER (observable #1 — UI): the new agent row appears in the list.
-    await expect(agentRow(page, newName)).toBeVisible();
+    // AFTER (observable #1 — UI): the new agent's card appears on the node.
+    await expect(agentCard(page, newName)).toBeVisible();
 
     // AFTER (observable #2 — REST): the store the list is built from now holds it, with the saved prompt.
     await expect
@@ -132,30 +140,30 @@ test.describe("profiles & agents", () => {
       .toBe(true);
   });
 
-  test("assigning a profile to an agent produces an observable change (agent row + REST)", async ({ page, loomDaemon }) => {
+  test("assigning a profile to an agent produces an observable change (agent card + REST)", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`agents-assign-${Date.now()}`);
     const agent = await seedAgent(loomDaemon.baseURL, project.id, "Lead");
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Manager Rig ${Date.now()}`, role: "manager", icon: "🧭" });
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await openAgentsNode(page, loomDaemon.baseURL);
 
-    // Select the agent so its Profile assignment control mounts.
-    await agentRow(page, "Lead").click();
+    // Open the agent's editor so its Profile assignment control mounts.
+    await openEditor(page, agent.id);
     const select = profileSelect(page);
     await expect(select).toBeVisible();
 
     // BEFORE: no profile is assigned — the select sits on the "— none —" placeholder (empty value), and the
-    // agent row carries no role signal ("manager" comes only from an assigned profile). The role tag now
+    // agent card carries no role signal ("manager" comes only from an assigned profile). The role tag now
     // renders the centralized display label ("Manager") — case-insensitive match keeps this robust to the
     // label vs raw-enum casing (card 04fec5be: one role display map).
     await expect(select).toHaveValue("");
-    await expect(agentRow(page, "Lead")).not.toContainText(/manager/i);
+    await expect(agentCard(page, "Lead")).not.toContainText(/manager/i);
 
     // ACT: pick the seeded profile by its id (the option's value).
     await select.selectOption(profile.id);
 
-    // AFTER (observable #1 — UI): the agent row now renders the assigned profile's role.
-    await expect(agentRow(page, "Lead")).toContainText(/manager/i);
+    // AFTER (observable #1 — UI): the agent card now renders the assigned profile's role.
+    await expect(agentCard(page, "Lead")).toContainText(/manager/i);
 
     // AFTER (observable #2 — REST): the agent row's profileId flipped to the assigned profile.
     await expect
@@ -221,8 +229,8 @@ test.describe("profiles & agents", () => {
     const project = await loomDaemon.createProject(`grants-${Date.now()}`);
     const agent = await seedAgent(loomDaemon.baseURL, project.id, "Granter");
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
-    await agentRow(page, "Granter").click();
+    await openAgentsNode(page, loomDaemon.baseURL);
+    await openEditor(page, agent.id);
 
     const connToggle = page.getByTestId(`agent-connection-${agent.id}-${connection.id}`);
     await expect(connToggle).toBeVisible();
@@ -247,7 +255,7 @@ test.describe("profiles & agents", () => {
   // them on.
   test("the agent profile picker hides platform-tier profiles on a non-dev install", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`agents-tier-${Date.now()}`);
-    await seedAgent(loomDaemon.baseURL, project.id, "Binder");
+    const binder = await seedAgent(loomDaemon.baseURL, project.id, "Binder");
     // The platform-tier rig this test is about. `auditor` is deliberately NOT seeded here: validateProfile's
     // roleCarryForwardOnlyError refuses to MINT one over REST, so the sweep below (which rejects an option
     // of EITHER dev-layer role) is what covers it, rather than a seed this surface cannot create.
@@ -256,9 +264,9 @@ test.describe("profiles & agents", () => {
     // an empty/mislocated dropdown would satisfy the absence assertions for the wrong reason.
     const manager = await seedProfile(loomDaemon.baseURL, { name: `Manager Rig ${Date.now()}`, role: "manager", icon: "🧭" });
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await openAgentsNode(page, loomDaemon.baseURL);
 
-    await agentRow(page, "Binder").click();
+    await openEditor(page, binder.id);
     const select = profileSelect(page);
     await expect(select).toBeVisible();
 
@@ -277,10 +285,10 @@ test.describe("profiles & agents", () => {
     expect((await getProfile(loomDaemon.baseURL, platform.id)).role).toBe("platform");
 
     // EXERCISE the control: the dropdown still works for the rigs it does offer, with an observable
-    // before/after on both the agent row and the store.
+    // before/after on both the agent card and the store.
     await expect(select).toHaveValue("");
     await select.selectOption(manager.id);
-    await expect(agentRow(page, "Binder")).toContainText(/manager/i);
+    await expect(agentCard(page, "Binder")).toContainText(/manager/i);
     await expect(select).toHaveValue(manager.id);
   });
 
@@ -294,9 +302,9 @@ test.describe("profiles & agents", () => {
     // Bind it over the same human REST route the UI drives, BEFORE the page loads.
     await apiJson(`${loomDaemon.baseURL}/api/agents/${agent.id}`, { method: "POST", body: JSON.stringify({ profileId: platform.id }) });
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await openAgentsNode(page, loomDaemon.baseURL);
 
-    await agentRow(page, "Prebound").click();
+    await openEditor(page, agent.id);
     const select = profileSelect(page);
     await expect(select).toBeVisible();
 
@@ -315,7 +323,7 @@ test.describe("profiles & agents", () => {
   // can legitimately create one) but under the group label, and a bound one says so inline.
   test("the agent profile picker groups non-dev non-spawnable rigs instead of offering them as real roles", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`agents-nonspawn-${Date.now()}`);
-    await seedAgent(loomDaemon.baseURL, project.id, "Chooser");
+    const chooser = await seedAgent(loomDaemon.baseURL, project.id, "Chooser");
     // The two non-spawnable, NON-dev-layer roles a human can actually mint over REST. (`auditor` and
     // `workspace-auditor` are refused by roleCarryForwardOnlyError, so the direct-child sweep below is
     // what covers them — same reasoning as 921e06b0's own auditor note.)
@@ -325,9 +333,9 @@ test.describe("profiles & agents", () => {
     // an empty/mislocated dropdown would satisfy the "not a direct option" assertions for the wrong reason.
     const workerRig = await seedProfile(loomDaemon.baseURL, { name: `Worker Rig ${Date.now()}`, role: "worker", icon: "▸" });
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await openAgentsNode(page, loomDaemon.baseURL);
 
-    await agentRow(page, "Chooser").click();
+    await openEditor(page, chooser.id);
     const select = profileSelect(page);
     await expect(select).toBeVisible();
 
@@ -380,14 +388,12 @@ test.describe("profiles & agents", () => {
     await expect(page.getByTestId("agent-profile-plain-bind")).toHaveCount(0);
   });
 
-  // Card 57deed24 — c40489c6 (above) disclosed a non-conferred bind in the PICKER only; the agent LIST ROW
-  // still rendered the bound profile's role badge bare, so a `setup` rig read as plain "Operator" on the
+  // Card 57deed24 — c40489c6 (above) disclosed a non-conferred bind in the PICKER only; the agent's own
+  // listing still rendered the bound profile's role bare, so a `setup` rig read as plain "Operator" on the
   // one surface you see without opening anything. Same predicate (`profileRoleBindsAsPlainSession`), same
-  // wording (PLAIN_BIND_GROUP_LABEL) — flagged where the badge makes the claim.
-  test("the agent list row flags a bound profile's role when the bind would not confer it", async ({ page, loomDaemon }) => {
-    // The project name deliberately shares NO substring with either agent name: `agentRow`'s hasText
-    // filter is substring + case-INSENSITIVE, and the project picker is an EARLIER <button> carrying the
-    // active project's name, so an overlapping stem silently hijacks `.first()`.
+  // wording (PLAIN_BIND_GROUP_LABEL) — flagged where the role is claimed. The /projects list row this
+  // first pinned was deleted by card acbb6df6; the flag now rides the Agents node CARD.
+  test("the agent card flags a bound profile's role when the bind would not confer it", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`agents-rowflag-${Date.now()}`);
     const plainAgent = await seedAgent(loomDaemon.baseURL, project.id, "Plainbound");
     const realAgent = await seedAgent(loomDaemon.baseURL, project.id, "Realbound");
@@ -399,35 +405,35 @@ test.describe("profiles & agents", () => {
     await bind(plainAgent.id, setupRig.id);
     await bind(realAgent.id, workerRig.id);
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await openAgentsNode(page, loomDaemon.baseURL);
 
-    const plainRow = agentRow(page, "Plainbound");
-    const realRow = agentRow(page, "Realbound");
-    await expect(plainRow).toBeVisible();
-    await expect(realRow).toBeVisible();
+    const plainCard = agentCard(page, "Plainbound");
+    const realCard = agentCard(page, "Realbound");
+    await expect(plainCard).toBeVisible();
+    await expect(realCard).toBeVisible();
+    const flagIn = (card: ReturnType<typeof agentCard>, agentId: string) =>
+      card.getByTestId(`atlas-agent-plain-bind-${agentId}`);
 
-    // POSITIVE CONTROL: `worker` IS inside PROFILE_SPAWNABLE_ROLES, so that row reads exactly as it did
-    // before — the badge renders, carries no flag, and the tooltip states only "name · role".
-    // Without it, an unconditional flag (or a locator matching nothing) would satisfy the setup-row
-    // assertions below for the wrong reason.
-    await expect(realRow).toContainText(/worker/i);
-    await expect(realRow.getByTestId("agent-row-plain-bind")).toHaveCount(0);
-    await expect(realRow).toHaveAttribute("title", "Realbound · worker");
+    // POSITIVE CONTROL: `worker` IS inside PROFILE_SPAWNABLE_ROLES, so that card renders its role and
+    // carries no flag. Without it, an unconditional flag (or a locator matching nothing) would satisfy the
+    // setup-card assertions below for the wrong reason.
+    await expect(realCard).toContainText(/worker/i);
+    await expect(flagIn(realCard, realAgent.id)).toHaveCount(0);
 
-    // `setup` is outside it, so the same badge is flagged and the tooltip carries the one shared wording
+    // `setup` is outside it, so the same card is flagged — inside ITS card, carrying the one shared wording
     // the picker's <optgroup> and inline note already use.
-    await expect(plainRow.getByTestId("agent-row-plain-bind")).toBeVisible();
-    await expect(plainRow).toHaveAttribute("title", `Plainbound · setup (${PLAIN_BIND_GROUP_LABEL})`);
+    await expect(flagIn(plainCard, plainAgent.id)).toBeVisible();
+    await expect(flagIn(plainCard, plainAgent.id)).toHaveAttribute("title", PLAIN_BIND_GROUP_LABEL);
 
     // EXERCISE the real control, with an observable before/after: the flag keys off the BIND, not off the
-    // row, so rebinding the control agent to the setup rig through the picker grows the flag on ITS row
-    // too. This is what a hard-coded or row-indexed flag would fail.
-    await realRow.click();
+    // card, so rebinding the control agent to the setup rig through the picker grows the flag on ITS card
+    // too. This is what a hard-coded or position-indexed flag would fail.
+    await openEditor(page, realAgent.id);
     const select = profileSelect(page);
     await expect(select).toHaveValue(workerRig.id);
     await select.selectOption(setupRig.id);
     await expect(select).toHaveValue(setupRig.id);
-    await expect(realRow.getByTestId("agent-row-plain-bind")).toBeVisible();
-    await expect(realRow).toHaveAttribute("title", `Realbound · setup (${PLAIN_BIND_GROUP_LABEL})`);
+    await expect(flagIn(realCard, realAgent.id)).toHaveCount(1);
+    await expect(flagIn(realCard, realAgent.id)).toHaveAttribute("title", PLAIN_BIND_GROUP_LABEL);
   });
 });

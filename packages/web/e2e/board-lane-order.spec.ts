@@ -34,7 +34,7 @@ async function pressAndNudgeHandle(page: Page, key: string) {
   await page.mouse.move(h.x + h.width / 2 - 20, h.y + h.height / 2, { steps: 4 });
 }
 
-for (const surface of ["/overview", "/board"] as const) {
+for (const surface of ["/board"] as const) {
   test.describe(`board lane controls on ${surface}`, () => {
     test("drag a lane by its header to reorder it", async ({ page, loomDaemon }) => {
       const project = await loomDaemon.createProject(`lane-drag-${Date.now()}`);

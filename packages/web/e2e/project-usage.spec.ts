@@ -324,20 +324,4 @@ test.describe("project node Usage tab (card 30266229)", () => {
       await expect(page.getByTestId("project-usage-empty")).toBeVisible();
       await expect(taskRow(page, seeded.solo.id)).toHaveCount(0);
     });
-
-  test("switch OFF: there is no project-usage surface in the classic shell", async ({ page, loomDaemon }) => {
-    test.setTimeout(120_000);
-    const seeded = await seedUsageProject(loomDaemon);
-    await pinProject(page, seeded.project.id);
-    await page.setViewportSize(VIEWPORT);
-    // PRESENCE FIRST (card 625d791c): a leading absence check is satisfied by a page still loading.
-    await page.goto(loomDaemon.baseURL + "/usage");
-    await expect(page.locator(".loom-rail"), "the classic rail did not render").toBeVisible();
-    await expect(page.getByText("Interactive sessions", { exact: true })).toBeVisible();
-    // The project tab's own body is Atlas-only: /project is not a classic address at all, and the
-    // cross-project page carries no by-task breakdown.
-    await expect(page.getByTestId("project-usage")).toHaveCount(0);
-    await expect(page.getByTestId("project-usage-overhead")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-  });
 });

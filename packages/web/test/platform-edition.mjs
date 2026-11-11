@@ -236,9 +236,9 @@ check("the operator's spawn role trusts resolvedLead.role directly, with no prof
     "PlatformView.tsx must read resolvedLead?.role for the operator's spawn role");
 });
 
-// ── 6. card c07ff42a (Atlas P2-4) — the shell now drives TWO LAYOUTS (the classic stack and the Atlas
-// node tabs) off the SAME resolved values. These pin the properties that make that split safe, i.e. that
-// a layout is presentation only: it cannot decide an edition, re-derive what an edition may show, or
+// ── 6. card c07ff42a (Atlas P2-4) — the shell drives the Atlas node-tab layout off values it resolved
+// itself (it drove a classic stack too until card acbb6df6 deleted it). These pin that the layout is
+// presentation only: it cannot decide an edition, re-derive what an edition may show, or
 // stand up a second spawn surface. SOURCE-TEXT checks, same shape as sections 3-5 above. ──────────────
 const findingsSrc = readFileSync(new URL("../src/pages/PlatformFindings.tsx", import.meta.url), "utf8");
 
@@ -249,31 +249,32 @@ check("the findings event kind is FORKED per edition — the kind is what scopes
   assert.equal(endUserEdition.findingEventKind, "workspace_audit_suggestion");
 });
 
-check("the Atlas switch is read ONCE, in the shell — never inside a layout or a section", () => {
-  // One call, at the top of PlatformView, purely to pick a layout. A second one would mean some section
-  // had started branching on the display switch, which is how a layout fork becomes a behavior fork.
-  const calls = [...shellSrc.matchAll(/useAtlasUi\(/g)].length;
-  assert.equal(calls, 1, `expected exactly one useAtlasUi() call in PlatformView.tsx, found ${calls}`);
-  assert.ok(!findingsSrc.includes("useAtlasUi"), "PlatformFindings.tsx must not read the Atlas switch");
+check("there is ONE layout, and nothing on the Platform surface reads a display switch", () => {
+  // Card acbb6df6 deleted the classic layout and the Atlas switch that chose between the two. A switch
+  // read coming back here would mean a second layout — the shape a layout fork becomes a behavior fork in.
+  for (const [src, name] of [[shellSrc, "PlatformView.tsx"], [findingsSrc, "PlatformFindings.tsx"]]) {
+    assert.ok(!/useAtlasUi|lib\/atlasUi/.test(src), `${name} must not read an Atlas display switch`);
+  }
+  assert.ok(!shellSrc.includes("ClassicPlatformLayout"), "the classic Platform layout must stay deleted");
+  assert.ok(shellSrc.includes("return <AtlasPlatformLayout {...surface} />"), "PlatformView renders the one layout");
 });
 
-check("BOTH layouts render the ONE shared agents section — neither builds its own spawn card", () => {
+check("the layout renders the ONE shared agents section — it builds no spawn card of its own", () => {
   // The gating props (previewDisabled / roleUnknown / gate) reach AgentControl through exactly ONE
   // <AgentControl> pair, inside PlatformAgentsSection. If a layout grew its own <AgentControl>, that
-  // thread could be dropped on one layout and not the other — so the count is the guard.
+  // thread could be dropped there — so the count is the guard.
   const controls = [...shellSrc.matchAll(/<AgentControl\b/g)].length;
   assert.equal(controls, 2, `expected exactly 2 <AgentControl> mounts (operator + auditor), found ${controls}`);
   const sections = [...shellSrc.matchAll(/<PlatformAgentsSection\b/g)].length;
-  assert.equal(sections, 2, `both layouts must render <PlatformAgentsSection>, found ${sections} mount(s)`);
+  assert.equal(sections, 1, `the layout must render <PlatformAgentsSection> once, found ${sections} mount(s)`);
 });
 
-// The section is shared, but `previewOnly` is handed to it once PER LAYOUT — so the thread is only as
-// strong as its WEAKEST mount, and a single mount regressed to `previewOnly={false}` stays green on
-// every other check in this file and in the e2e suite that exercises the OTHER layout. What it would
+// `previewOnly` is handed to the section at every mount — so the thread is only as strong as its WEAKEST
+// mount, and a single mount regressed to `previewOnly={false}` stays green on every other check in this
+// file. (There were two mounts, one per layout, until card acbb6df6 deleted the classic layout.) What it would
 // actually do is re-enable "Start Platform" in a dev install's End-user preview, against §1c: the
 // underlying Getting-Started agent there is never upgraded to the Lead, so a click would mint a stray
-// role:"platform" session on it. Count-equality against the mount count is what makes a dropped or
-// hardcoded hop on EITHER layout fail here rather than only in whichever layout a test happened to walk.
+// role:"platform" session on it. Checking every mount is what makes a dropped or hardcoded hop fail here.
 // ⚠️ This check USED to be a whole-file count of `previewOnly={previewOnly}` against the
 // `<PlatformAgentsSection>` mount count, because that spelling was unique to those mounts. Card
 // b472645a broke that premise: SEVERAL component kinds now thread the same attribute, so a whole-file
@@ -282,7 +283,7 @@ check("BOTH layouts render the ONE shared agents section — neither builds its 
 // mount's real attribute text instead of counting occurrences anywhere in the file.
 check("EVERY <PlatformAgentsSection> mount threads previewOnly — no layout may hardcode it", () => {
   const mounts = mountAttrs(shellSrc, "PlatformAgentsSection");
-  assert.ok(mounts.length >= 2, `expected at least two <PlatformAgentsSection> mounts, found ${mounts.length}`);
+  assert.ok(mounts.length >= 1, `expected at least one <PlatformAgentsSection> mount, found ${mounts.length}`);
   for (const mount of mounts) {
     assert.match(mount, /\bpreviewOnly=\{previewOnly\}/,
       `a <PlatformAgentsSection> mount is hardcoding or dropping previewOnly: ${mount.slice(0, 160)}…`);
@@ -323,13 +324,17 @@ const runHistorySrc = readFileSync(new URL("../src/components/RunHistory.tsx", i
 // truncated (or empty) attribute text would make every per-mount assertion below pass vacuously, and a
 // vacuous pass here reads exactly like a real one.
 check("mountAttrs extracts a WHOLE mount, nested element included, and stops at its own tag end", () => {
+  // (a) it does not truncate. The real file's one mount with a NESTED element in a brace attribute went
+  // with the classic layout (card acbb6df6), so the nested case is controlled on a planted fixture in
+  // exactly that shape, then the real mounts are checked for the over-run half.
+  const planted = mountAttrs(
+    '<Agents a={x ? <Inner b={1} /> : undefined} previewOnly={previewOnly} />\n<Next />', "Agents");
+  assert.equal(planted.length, 1, "control: the planted fixture has exactly one <Agents> mount");
+  assert.ok(planted[0].includes("<Inner b={1} />") && planted[0].includes("previewOnly={previewOnly}"),
+    `the scanner truncated a mount at its nested element: ${planted[0]}`);
+  assert.ok(!planted[0].includes("<Next"), "the scanner ran past the planted mount's own tag end");
   const mounts = mountAttrs(shellSrc, "PlatformAgentsSection");
-  assert.ok(mounts.length >= 2, `expected >=2 mounts to control on, found ${mounts.length}`);
-  // (a) it does not truncate: the classic mount's nested auditorFooter element must be INSIDE the text.
-  const withNested = mounts.filter((m) => m.includes("<AuditorScheduleInline"));
-  assert.equal(withNested.length, 1,
-    "exactly one <PlatformAgentsSection> mount should carry the nested <AuditorScheduleInline> footer"
-    + ` — found ${withNested.length}, so the scanner is truncating or the layouts changed`);
+  assert.ok(mounts.length >= 1, `expected >=1 mount to control on, found ${mounts.length}`);
   // (b) it does not over-run: no mount may swallow the sibling element that follows it.
   for (const m of mounts) {
     assert.ok(!m.includes("<PlatformSessionsSection"),
@@ -346,16 +351,16 @@ check("mountAttrs extracts a WHOLE mount, nested element included, and stops at 
 const GATE_THREAD = [
   { tag: "AgentControl", attr: /\bpreviewDisabled=\{previewOnly\}/, min: 2,
     why: "both go-live cards — the auditor one was the hole this card closed" },
-  { tag: "PlatformAgentsSection", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "once per layout" },
-  { tag: "PlatformSessionsSection", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "once per layout" },
+  { tag: "PlatformAgentsSection", attr: /\bpreviewOnly=\{previewOnly\}/, min: 1, why: "the Home tab" },
+  { tag: "PlatformSessionsSection", attr: /\bpreviewOnly=\{previewOnly\}/, min: 1, why: "the Home tab" },
   { tag: "AuditorCadenceFormSection", attr: /\bpreviewOnly=\{previewOnly\}/, min: 1, why: "the Atlas Cadence tab" },
-  { tag: "AuditorScheduleInline", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2,
-    why: "the classic auditor-card footer AND the Atlas cadence section" },
+  { tag: "AuditorScheduleInline", attr: /\bpreviewOnly=\{previewOnly\}/, min: 1,
+    why: "the Cadence tab's single-form section" },
   { tag: "PlatformSessions", attr: /\bpreviewOnly=\{previewOnly\}/, min: 1, why: "the dev session grid" },
   { tag: "SingleSession", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "the end-user operator + auditor wrappers" },
   { tag: "PlatformSessionTile", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "the grid tile + the single-session tile" },
   { tag: "AgentPromptEditor", attr: /\breadOnly=\{!!previewDisabled\}/, min: 1, why: "inside AgentControl, one per card" },
-  { tag: "PlatformHistorySections", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2, why: "once per layout" },
+  { tag: "PlatformHistorySections", attr: /\bpreviewOnly=\{previewOnly\}/, min: 1, why: "the History tab" },
   { tag: "RunHistory", attr: /\bpreviewOnly=\{previewOnly\}/, min: 2,
     why: "the operator AND auditor histories — each run row carries a Resume that respawns the session" },
 ];

@@ -81,7 +81,7 @@ const uniqueSlug = (tag: string) => `env-${tag}-${Date.now().toString(36)}`;
 
 /** Open the Capabilities section's editor for one slug, asserting the toggle exists before clicking. */
 async function openEditor(page: Page, baseURL: string, slug: string) {
-  await page.goto(`${baseURL}/settings`);
+  await page.goto(`${baseURL}/home?tab=settings`);
   const toggle = page.getByTestId(`capability-passenv-toggle-${slug}`);
   await expect(toggle).toBeVisible();
   await toggle.click();
@@ -224,7 +224,7 @@ test.describe("capability ambient-env editor", () => {
     expect(builtin!.id, "a builtin is not a capability_defs row, so it carries no id to PATCH").toBeUndefined();
     expect(builtin!.passEnv, "and no passEnv concept at all").toBeUndefined();
 
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     // CONTROL FIRST: the SAME locator shape resolves on an owner-added row. Without this, the zero
     // below would be satisfied by a typo in the testid just as well as by a correct gate.

@@ -191,16 +191,4 @@ test.describe("Atlas Workspace Sessions card", () => {
     await expect(terminals(page).getByRole("button", { name: /^stop$/i })).toHaveCount(0);
     await expect(terminals(page).getByRole("button", { name: /^fork$/i })).toHaveCount(0);
   });
-
-  test("switch OFF: the classic Overview renders and the card does not exist", async ({ page, loomDaemon }) => {
-    await seedFleet(loomDaemon);
-    // No seedAtlasOn — off is the default.
-    await page.goto(`${loomDaemon.baseURL}/`);
-
-    // Presence first: the classic shell really rendered, so the absence below is a measured absence
-    // and not a page that failed to load.
-    await expect(page.locator("main")).toBeVisible();
-    await expect(card(page)).toHaveCount(0);
-    await expect(page.getByTestId("atlas-sessions-card")).toHaveCount(0);
-  });
 });

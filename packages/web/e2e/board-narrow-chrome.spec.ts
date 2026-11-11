@@ -35,7 +35,7 @@ async function settled(page: Page): Promise<number> {
   throw new Error("board grid never stopped scrolling");
 }
 
-for (const surface of ["/overview", "/board"] as const) {
+for (const surface of ["/board"] as const) {
   test.describe(`board lanes and narrow chrome on ${surface}`, () => {
     test("the more-lanes chip counts the cut-off lanes and scrolls them into view", async ({ page, loomDaemon }) => {
       const project = await loomDaemon.createProject(uniq("lane-overflow"));

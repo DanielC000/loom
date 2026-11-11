@@ -197,7 +197,7 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
     await expect(page.getByTestId("session-node-task")).toHaveCount(0);
   });
 
-  test("the session is named ONCE in the body, and the classic page is untouched", async ({ page, loomDaemon }) => {
+  test("the session is named ONCE in the body", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const worker = await loomDaemon.seedLiveSession({
       role: "worker", agentName: "DedupWkr", id: `e2e-dedup-${Date.now()}`,
@@ -207,17 +207,11 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
     const label = `${worker.agentName} · worker · ${worker.sessionId.slice(0, 8)}`;
     const url = `${loomDaemon.baseURL}/session/${worker.sessionId}`;
 
-    // ── CLASSIC FIRST, so the Atlas absences below are known to be absences of something that EXISTS.
-    // A zero read against a page that never had the thing is not evidence of de-duplication.
+    // The two copies card 525c8ad9 removed (SessionView's header row and the tile's identity line) were
+    // proven present against the classic shell first, until card acbb6df6 deleted that shell and the
+    // header row's code with it. The positive control for the absences below is now the ended-session
+    // leg further down, whose own panel is rendered by SessionView itself.
     await pinProject(page, worker.projectId);
-    await page.goto(url);
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("session-view-header")).toBeVisible();
-    await expect(page.getByTestId("tile-identity")).toHaveCount(1);
-    await expect(page.locator(".loom-atlas-nodehead h1")).toHaveCount(0);
-
-    // ── ATLAS: the same URL, the same session. ────────────────────────────────────────────────────
-    await seedAtlasOn(page);
     await page.goto(url);
     await expect(page.getByTestId("session-node")).toBeVisible();
 
@@ -264,20 +258,6 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
     await expect(page.getByTestId("session-node")).toBeVisible();
     await expect(deepestCrumb(page)).toHaveText("Terminal");
 
-    // ── BACK TO CLASSIC, in the same test: the removal is scoped to the Atlas shell, and a reader of
-    // this file can see both legs asserted against one seeded session rather than two.
-    await page.addInitScript((key) => {
-      try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
-    }, ATLAS_KEY);
-    await page.goto(endedUrl);
-    await expect(page.locator("main").getByText("View transcript in Archive →")).toBeVisible();
-    await expect(page.getByTestId("session-view-header")).toBeVisible();
-
-    await page.goto(url);
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("session-view-header")).toBeVisible();
-    await expect(page.getByTestId("tile-identity")).toHaveCount(1);
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
   });
 
   test("the worker node's Diff tab IS /review/:workerId, and it is the full review surface", async ({ page, loomDaemon }) => {
@@ -290,12 +270,6 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
     await serveCannedDiff(page);
     await pinProject(page, worker.projectId);
 
-    // CLASSIC leg first: /review/:id is the standalone page it has always been, header row and all.
-    await page.goto(`${loomDaemon.baseURL}/review/${worker.sessionId}`);
-    await expect(page.locator("main").getByText(`worker w:${worker.sessionId.slice(0, 8)}`)).toBeVisible();
-    await expect(page.getByTestId("session-node")).toHaveCount(0);
-
-    await seedAtlasOn(page);
     await page.goto(`${loomDaemon.baseURL}/session/${worker.sessionId}`);
     await expect(page.getByTestId("session-node-pane-terminal")).toBeVisible();
 
@@ -365,7 +339,7 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
   // /review/:id does the same to the tile. Either way, two drafts have to come back: the composer's
   // (store-backed since card 14c68c62) and the queue editor's (store-backed by this card's review round
   // 2 — before it, plain useState with no backing store, so this hop destroyed it).
-  for (const shell of [{ name: "atlas", atlas: true }, { name: "classic", atlas: false }]) {
+  for (const shell of [{ name: "atlas", atlas: true }]) {
     test(`a route-changing hop keeps the composer AND the open queue editor (${shell.name})`, async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const worker = await loomDaemon.seedLiveSession({

@@ -21,7 +21,8 @@
 // SEEDING (the no-real-claude invariant): `seedLiveSession` inserts `processState:"live"` DB rows via the
 // test-only POST /internal/test/seed — never startSession, so the fixture's `[pty] spawn` guard is never
 // tripped. `role: "assistant"` is already part of SeededLiveRole, so no daemon change is needed. Both
-// sessions are seeded into ONE project so the Overview grid renders them side by side.
+// sessions are seeded into ONE project. (The classic Overview's terminal grid was a second route here until
+// card acbb6df6 deleted it; the Terminals page that replaced it excludes companions at the source.)
 import { expect, test } from "./fixtures/daemon";
 import type { Page } from "@playwright/test";
 
@@ -111,24 +112,5 @@ test.describe("companion terminals are watch-only; every other session's is not"
     await page.waitForTimeout(300); // give a frame that WOULD be sent time to actually be sent
     expect((await stdinFrames(page)).slice(before)).toEqual([]);
     await expect(composer(page)).toHaveCount(0);
-  });
-
-  test("Overview's Terminals grid — the same guard, on the route that needs no alert at all", async ({ page, loomDaemon }) => {
-    const worker = await loomDaemon.seedLiveSession({ role: "worker", agentName: "Grid Worker" });
-    await loomDaemon.seedLiveSession({
-      role: "assistant", project: worker.project, agentId: worker.agentId, agentName: worker.agentName,
-    });
-
-    await pinActiveProject(page, worker.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
-
-    // Fixture identity: this project's own grid, with the writable worker present.
-    await expect(page.getByText(new RegExp(shortId(worker.sessionId))).first()).toBeVisible();
-
-    // The grid renders BOTH live sessions — Overview never filtered companions out, which is exactly why
-    // this route was exposed with no alert required. So exactly ONE of the two tiles may carry a composer:
-    // the worker's. Before the fix this was 2.
-    await expect(xtermScreen(page)).toHaveCount(2);
-    await expect(composer(page)).toHaveCount(1);
   });
 });

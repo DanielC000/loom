@@ -30,9 +30,10 @@ import { expect, test } from "./fixtures/daemon";
 test("the Platform nav tab reaches the shipping onboarding surface", async ({ page, loomDaemon }) => {
   await page.goto(`${loomDaemon.baseURL}/`);
 
-  // The onboarding entry is discoverable as a primary header tab (nav.tsx: Platform is `primary`, so it's a
-  // top-level tab, not tucked in "More ▾"). NavTab renders an <a> whose accessible name is "Platform".
-  const tab = page.getByRole("link", { name: "Platform", exact: true });
+  // The onboarding entry is discoverable as the entity tree's own Platform node (the classic header tab went
+  // with that shell, card acbb6df6). Addressed by its testid: the Workspace node also links to /platform
+  // from its bands, so a role/name match is ambiguous there.
+  const tab = page.getByTestId("atlas-node-/platform");
   await expect(tab).toBeVisible();
   await tab.click();
   await expect(page).toHaveURL(/\/platform$/);
@@ -43,8 +44,9 @@ test("the Platform nav tab reaches the shipping onboarding surface", async ({ pa
   // edition — so the dev-only "View as" preview toggle is absent.
   await expect(page.getByRole("group", { name: "Preview edition" })).toHaveCount(0);
 
-  // The reserved "Platform" home header + its explainer copy (a substring unique to this surface).
-  await expect(page.getByText("your cross-project workspace agent · hidden from the project picker", { exact: false })).toBeVisible();
+  // The reserved home's scope pill on the node head carries the explainer as its title (the classic
+  // header printed it inline until card acbb6df6).
+  await expect(page.getByTitle("your cross-project workspace agent · hidden from the project picker")).toBeVisible();
 });
 
 test("the onboarding surface renders the operator + auditor entries and no live session", async ({ page, loomDaemon }) => {
@@ -73,8 +75,10 @@ test("the onboarding surface renders the operator + auditor entries and no live 
   // "Operator session" is its own SectionLabel (no live pill), so exact-match it — a loose match would
   // trip strict-mode against the "every operator session …" history caption + the empty-state copy.
   await expect(page.getByText("Operator session", { exact: true })).toBeVisible();
-  // The reserved home's board section: assert its unique descriptive caption (the "Your board" label shares
-  // its SectionLabel with that span, so no element has exactly "Your board").
+  // The reserved home's board section, on the Platform node's own Board tab: assert its unique descriptive
+  // caption (the "Your board" label shares its SectionLabel with that span, so no element has exactly
+  // "Your board").
+  await page.getByTestId("atlas-tab-board").click();
   await expect(page.getByText("your setup checklist + Auditor suggestions", { exact: false })).toBeVisible();
 });
 
@@ -106,5 +110,7 @@ test("the legacy /setup route redirects to the consolidated /platform surface", 
   // App.tsx maps /setup → <Navigate to="/platform" replace/>, so any lingering onboarding link lands on the
   // consolidated surface.
   await expect(page).toHaveURL(/\/platform$/);
-  await expect(page.getByText("your cross-project workspace agent · hidden from the project picker", { exact: false })).toBeVisible();
+  // The reserved home's scope pill on the node head carries the explainer as its title (the classic
+  // header printed it inline until card acbb6df6).
+  await expect(page.getByTitle("your cross-project workspace agent · hidden from the project picker")).toBeVisible();
 });

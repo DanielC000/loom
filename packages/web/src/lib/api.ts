@@ -824,7 +824,8 @@ export const api = {
     post<{ reset: boolean }>(`/api/projects/${projectId}/mainline-watermark/reset`, {}),
   // `doneLimit` (card a483cbec) is OPT-IN: pass a number to ask for only the N most-recently-done
   // terminal-lane cards (plus `doneTotal`, the lane's true length, and `doneLimit`, the effective
-  // post-parse window). Omit it — as every consumer other than pages/Board.tsx does — and the request
+  // post-parse window). Omit it — as every consumer other than pages/Board.tsx and the project node
+  // (pages/ProjectHome.tsx, which shares Board's own windowed entry) does — and the request
   // URL is byte-identical to before, so the shared `["board", projectId]` cache entry still holds the
   // WHOLE done set. `doneTotal`/`doneLimit` are absent, not zero, on that unwindowed response: read
   // `doneTotal !== undefined` as "this response is windowed", never a falsy check.

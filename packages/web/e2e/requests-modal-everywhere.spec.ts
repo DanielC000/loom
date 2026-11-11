@@ -17,7 +17,7 @@ async function pinActiveProject(page: Page, projectId: string) {
 const uniq = (p: string) => `${p}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
 test.describe("Request detail opens as an in-place modal everywhere (owner report)", () => {
-  test("Overview 'Answer →' opens the Request modal in place — URL stays /overview, Esc closes it", async ({ page, loomDaemon }) => {
+  test("Overview 'Answer →' opens the Request modal in place — URL stays /project, Esc closes it", async ({ page, loomDaemon }) => {
     const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "OvReqMgr" });
     const title = uniq("overview-decision");
     await loomDaemon.seedQuestion({
@@ -26,28 +26,28 @@ test.describe("Request detail opens as an in-place modal everywhere (owner repor
     });
 
     await pinActiveProject(page, mgr.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
 
     // The Attention section renders the pending Request as an AttentionRow with an "Answer →" affordance.
     const answer = page.locator("main").getByRole("button", { name: "Answer →" }).first();
     await expect(answer).toBeVisible();
 
-    // Clicking it opens the shared modal IN PLACE — a dialog appears and the URL never leaves /overview.
+    // Clicking it opens the shared modal IN PLACE — a dialog appears and the URL never leaves /project.
     const urlBefore = page.url();
     await answer.click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText(title, { exact: true })).toBeVisible();
     expect(page.url()).toBe(urlBefore);
-    await expect(page).toHaveURL(/\/overview$/);
+    await expect(page).toHaveURL(/\/project$/);
 
     // Esc dismisses it (observable close), still without a navigation.
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
-    await expect(page).toHaveURL(/\/overview$/);
+    await expect(page).toHaveURL(/\/project$/);
   });
 
-  test("Mission Control 'Answer →' opens the Request modal in place — URL stays / (no route push)", async ({ page, loomDaemon }) => {
+  test("Mission Control 'Answer →' opens the Request modal in place — URL stays /home (no route push)", async ({ page, loomDaemon }) => {
     const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "McReqMgr" });
     const title = uniq("mission-decision");
     await loomDaemon.seedQuestion({
@@ -55,10 +55,10 @@ test.describe("Request detail opens as an in-place modal everywhere (owner repor
       body: "Approve the risky migration, or split it?", options: ["Approve", "Split"],
     });
 
-    await page.goto(`${loomDaemon.baseURL}/`);
+    await page.goto(`${loomDaemon.baseURL}/home`);
 
     // The god-eye attention queue renders the pending Request with an "Answer →" affordance (first in DOM,
-    // above the Fleet cards). Clicking it opens the shared modal over "/" — no push to /question/:id.
+    // above the Fleet cards). Clicking it opens the shared modal over "/home" — no push to /question/:id.
     const answer = page.locator("main").getByRole("button", { name: "Answer →" }).first();
     await expect(answer).toBeVisible();
 
@@ -86,7 +86,8 @@ test.describe("Request detail opens as an in-place modal everywhere (owner repor
 
     await page.goto(`${loomDaemon.baseURL}/question/${qId}`);
     // The standalone route renders the same RequestDetail body (no dialog wrapper) — the ask + its control.
-    await expect(page.getByText(title, { exact: true })).toBeVisible();
+    // Scoped to the content column: the Atlas breadcrumb names the request by its title too.
+    await expect(page.locator("#atlas-content").getByText(title, { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "← back" })).toBeVisible();
     await expect(page).toHaveURL(new RegExp(`/question/${qId}$`));
   });

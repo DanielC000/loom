@@ -9,18 +9,19 @@
 // same component's computed-style hover behaviour). The two assertions here are deliberately split so each
 // lands on ONE mechanism, and each has its own single-property control — see §CONTROLS at the bottom.
 //
-// Why /overview: AgentControl is the only SpawnControls call site, and an agent with NO live session
-// renders no terminal tile, so the page stays light (see CLAUDE.md on the cockpit renderer).
+// Since card acbb6df6 the page is the Agents node (`/agents`): its agent cards are the SpawnControls call site
+// (components/atlasAgents.tsx), and the fixed left column the panel must clear is the Atlas entity TREE,
+// which took the deleted instrument rail's place. An agent with NO live session renders no terminal tile,
+// so the page stays light.
 import { expect, test, type LoomDaemon } from "./fixtures/daemon";
 import type { Locator, Page } from "@playwright/test";
 
-/** The rail's collapsed width — `--loom-rail-w` in styles/global.css. Read from the live rail, not pinned
- *  here, so a change to that token can never leave this spec asserting against a stale number. */
-async function collapsedRailWidth(page: Page): Promise<number> {
-  const rail = page.locator(".loom-rail");
-  await expect(rail).toHaveCount(1);
-  const box = await rail.boundingBox();
-  expect(box, "the instrument rail should have a layout box").toBeTruthy();
+/** The entity tree's rendered width, read from the live tree rather than pinned here. */
+async function treeWidth(page: Page): Promise<number> {
+  const tree = page.getByTestId("atlas-tree");
+  await expect(tree).toHaveCount(1);
+  const box = await tree.boundingBox();
+  expect(box, "the entity tree should have a layout box").toBeTruthy();
   return box!.width;
 }
 
@@ -56,7 +57,7 @@ async function openSpawnMenu(page: Page, loomDaemon: LoomDaemon, slug: string) {
   })).json();
   expect(agent.id, "the probe agent should be created").toBeTruthy();
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-  await page.goto(loomDaemon.baseURL + "/overview"); // `/` is Mission Control; the spawn cards are Overview's
+  await page.goto(loomDaemon.baseURL + "/agents"); // the Agents node's cards host the spawn split-button
 
   // FIXTURE IDENTITY: exactly one spawn card, and it is the agent this test created — so the panel measured
   // below belongs to this project and not to whatever a sibling spec left on the shared daemon.
@@ -72,18 +73,13 @@ async function openSpawnMenu(page: Page, loomDaemon: LoomDaemon, slug: string) {
   return { menu, items };
 }
 
-test("the spawn-role menu opens clear of the instrument rail and inside the viewport", async ({ page, loomDaemon }) => {
+test("the spawn-role menu opens clear of the entity tree and inside the viewport", async ({ page, loomDaemon }) => {
   test.setTimeout(60_000);
   const { menu } = await openSpawnMenu(page, loomDaemon, "spawn-menu-rail");
 
-  // The rail must be COLLAPSED for this measurement to mean anything: it expands to `--loom-rail-open`
-  // (236px) on `:hover`/`:focus-within`, which would occlude a panel that is genuinely clear of the 60px
-  // collapsed rail. Nothing in this test moves the pointer (`elementFromPoint` is a DOM query, not a
-  // pointer action) and the trigger click left it on the ▾ inside the card — but assert the premise rather
-  // than hoping, since a silently-expanded rail would make the hit-test below fail for the wrong reason.
-  const railWidth = await collapsedRailWidth(page);
-  expect(railWidth, "the rail must be collapsed (--loom-rail-w), not expanded, while the panel is measured")
-    .toBeLessThan(120);
+  const railWidth = await treeWidth(page);
+  expect(railWidth, "the entity tree must render as the left column for this measurement to mean anything")
+    .toBeGreaterThan(100);
 
   const box = await menu.boundingBox();
   expect(box, "the open menu should have a layout box").toBeTruthy();
@@ -97,16 +93,16 @@ test("the spawn-role menu opens clear of the instrument rail and inside the view
   // puts the panel at x≈-9, PAST the viewport's left edge. Both are "grew leftward out of the card", and a
   // non-overlap assertion reddens on both. A hit-test alone does not: at x≈-9 `elementFromPoint` is
   // outside the viewport and returns null, which is a different fact from "the rail covers it".
-  const railBox = await page.locator(".loom-rail").boundingBox();
-  expect(railBox, "the instrument rail should have a layout box").toBeTruthy();
-  expect(box!.x, `the menu (x=${box!.x}) must start right of the ${railWidth}px rail, not under or past it`)
+  const railBox = await page.getByTestId("atlas-tree").boundingBox();
+  expect(railBox, "the entity tree should have a layout box").toBeTruthy();
+  expect(box!.x, `the menu (x=${box!.x}) must start right of the ${railWidth}px tree, not under or past it`)
     .toBeGreaterThanOrEqual(railBox!.x + railBox!.width);
 
   // (2) Reachability, as the corroborating check the card names: a real pointer at the panel's own left
   // edge — and 58px in, roughly where the 8 swallowed characters of the longest label sat — must land on
   // the panel. The helper names whatever IS in the way (an occluding element, or the axis on which the
   // point fell outside the viewport), so a failure here is self-diagnosing rather than a bare `false`.
-  expect(await hitTestAtLeftEdge(menu, 2), "the menu's left edge must not be under the instrument rail")
+  expect(await hitTestAtLeftEdge(menu, 2), "the menu's left edge must not be under the entity tree")
     .toBe("<the menu>");
   expect(await hitTestAtLeftEdge(menu, 58), "the first ~8 characters of each label must be reachable")
     .toBe("<the menu>");

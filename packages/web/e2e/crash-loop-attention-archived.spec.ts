@@ -6,7 +6,7 @@
 // on every exit, including the exit that pushes a crash-loop past its cap — and nothing un-archives the
 // row before the watcher's own give-up tick stamps the `[loom:crash-loop]` banner. So the item could
 // never be built for exactly the population it exists to warn about: a worker that crash-looped to
-// exhaustion. Mirrors overview-attention-archived.spec.ts's structure (same daemon fixture, same
+// exhaustion. Mirrors project-attention-archived.spec.ts's structure (same daemon fixture, same
 // archive-then-assert shape) for the kind that card's own list did not cover.
 //
 // WHY BEFORE/AFTER, NOT A RENDER CHECK: a filter that always answers true satisfies any "the row is
@@ -57,12 +57,12 @@ test.afterEach(async ({ loomDaemon }) => {
   }
 });
 
-/** Pin the header-selected active project, exactly as overview-attention-archived.spec.ts does. */
+/** Pin the header-selected active project, exactly as project-attention-archived.spec.ts does. */
 async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
-/** Same helper as overview-attention-archived.spec.ts — archives ONE session via the test-only seed route. */
+/** Same helper as project-attention-archived.spec.ts — archives ONE session via the test-only seed route. */
 async function archiveSession(baseURL: string, sessionId: string): Promise<void> {
   const res = await fetch(`${baseURL}/internal/test/seed`, {
     method: "POST",
@@ -88,7 +88,8 @@ async function expectArchivedOutOfLiveFeed(baseURL: string, sessionId: string): 
 const attentionRow = (page: Page, kind: string, sessionId: string) =>
   page.locator(`main [data-testid="attention-row"][data-kind="${kind}"][data-session-id="${sessionId}"]`);
 
-const attentionHeading = (page: Page) => page.locator("main").getByText(/^Attention \(/);
+// The project Home tab's "Needs you" card (the classic Overview's "Attention" section until card acbb6df6).
+const attentionHeading = (page: Page) => page.getByTestId("atlas-band-needs");
 
 test.describe("CRASH-LOOPED survives archive, on both Mission Control and the project Overview (card 7be85378)", () => {
   test("an archived crash-looped worker's item appears on MC + its Overview, never on a foreign project's", async ({ page, loomDaemon }) => {
@@ -96,15 +97,15 @@ test.describe("CRASH-LOOPED survives archive, on both Mission Control and the pr
     // on, so a sibling spec's row on the SHARED e2e daemon can never be mistaken for this one's.
     const worker = await loomDaemon.seedLiveSession({ id: mintId("cla-wkr"), role: "worker", agentName: `ClaWkr${Date.now()}` });
 
-    // A SECOND project — the cross-project control, same as overview-attention-archived.spec.ts.
+    // A SECOND project — the cross-project control, same as project-attention-archived.spec.ts.
     const foreign = await loomDaemon.seedLiveSession({ id: mintId("cla-fgn"), role: "worker", agentName: `ClaFgn${Date.now()}` });
     expect(foreign.projectId, "the control must be a genuinely DIFFERENT project").not.toBe(worker.projectId);
 
     // BEFORE: no crash-loop signal filed yet. Nothing for this session on either surface.
     await pinActiveProject(page, worker.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     await expect(attentionRow(page, "CRASH-LOOPED", worker.sessionId)).toHaveCount(0);
-    await page.goto(`${loomDaemon.baseURL}/`);
+    await page.goto(`${loomDaemon.baseURL}/home`);
     await expect(attentionRow(page, "CRASH-LOOPED", worker.sessionId)).toHaveCount(0);
 
     // Now ARCHIVE the worker — the exact transition that happens before the real watcher's give-up tick
@@ -125,7 +126,7 @@ test.describe("CRASH-LOOPED survives archive, on both Mission Control and the pr
     abandonedWorkerIds.push(worker.sessionId);
 
     // AFTER: Mission Control (the global queue, route "/") shows it.
-    await page.goto(`${loomDaemon.baseURL}/`);
+    await page.goto(`${loomDaemon.baseURL}/home`);
     const mcRow = attentionRow(page, "CRASH-LOOPED", worker.sessionId);
     await expect(mcRow).toBeVisible();
     await expect(mcRow).toContainText("died 3");
@@ -133,7 +134,7 @@ test.describe("CRASH-LOOPED survives archive, on both Mission Control and the pr
 
     // AFTER: the project Overview (project-scoped) shows it too — resolved via the event's own
     // appendEvent-backstopped projectId, not a session lookup (the session is no longer live).
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     const ovRow = attentionRow(page, "CRASH-LOOPED", worker.sessionId);
     await expect(ovRow).toBeVisible();
     await expect(ovRow).toContainText("died 3");
@@ -141,7 +142,7 @@ test.describe("CRASH-LOOPED survives archive, on both Mission Control and the pr
     // THE FILTER STILL FILTERS: the foreign project's Overview never shows this worker's row, with the
     // section itself visible as the positive control for that absence.
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), foreign.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     await expect(attentionHeading(page)).toBeVisible();
     await expect(attentionRow(page, "CRASH-LOOPED", worker.sessionId)).toHaveCount(0);
   });

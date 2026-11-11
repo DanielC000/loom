@@ -28,7 +28,7 @@ async function setPosition(baseURL: string, id: string, position: number) {
 const rendered = (page: Page, lane: string) =>
   page.getByTestId(`lane-${lane}`).locator(".loom-board-card").evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.cardId));
 
-for (const surface of ["/overview", "/board"] as const) {
+for (const surface of ["/board"] as const) {
   test.describe(`board card reorder on ${surface}`, () => {
     test("a drag within the lane lands on the line's slot, clamped to its band, and survives a reload", async ({ page, loomDaemon }) => {
       const project = await loomDaemon.createProject(uniq("reorder-drag"));

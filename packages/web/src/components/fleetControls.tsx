@@ -207,11 +207,10 @@ export function OrchestrationChip() {
   const [open, setOpen] = useState(false);
   const ref = useDismissable<HTMLDivElement>(open, () => setOpen(false));
   const paused = useOrchestrationPaused();
-  // Gated on `open`: the chip itself costs nothing (the two entries it reads are already shell-wide in
-  // BOTH shells — the classic rail reads `["orchStatus"]` and `["allSessions"]` on every page), but a
-  // shell-wide usage subscription would be a poll neither shell makes today. Same `["usageLimits"]`
-  // entry the Workspace node and the classic PlanUsageStrip fill, so an open pop-over reuses whatever
-  // is already cached rather than issuing its own read.
+  // Gated on `open`: the chip itself costs nothing (the two entries it reads, `["orchStatus"]` and
+  // `["allSessions"]`, are already read shell-wide), but a shell-wide usage subscription would be a poll
+  // the shell does not make today. Same `["usageLimits"]` entry the Workspace node fills, so an open
+  // pop-over reuses whatever is already cached rather than issuing its own read.
   const usageQ = useQuery<UsageLimitsStatus>({
     queryKey: ["usageLimits"], queryFn: ({ signal }) => api.usageLimits(signal), enabled: open,
   });

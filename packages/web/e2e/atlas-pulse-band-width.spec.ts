@@ -375,20 +375,4 @@ test.describe("Atlas dashboard band track budget (card b4442d27)", () => {
       .map((c) => `${JSON.stringify(c.text)}: ${c.box.toFixed(2)}px box vs ${c.natural.toFixed(2)}px natural`);
     expect(tooNarrow, "a Pulse column is still short of its natural width at full card width").toEqual([]);
   });
-
-  test("switch OFF: the classic Overview renders no dashboard band at all, so the budget cannot have leaked into it", async ({ page, loomDaemon }) => {
-    const seeded = await seedPulseRows(loomDaemon);
-    // Deliberately NO seedAtlasOn — off is the default, and seeding it off would re-clear the key on
-    // every navigation for a reason unrelated to the app (measured on P1-0).
-    await pinProject(page, seeded.projectId);
-
-    await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.goto(loomDaemon.baseURL + "/overview");
-
-    // PRESENCE of the classic page first: an absence claim on a page that never loaded is vacuous.
-    await expect(page.getByTestId("atlas-board-embed")).toHaveCount(0);
-    await expect(page.locator("main")).toBeVisible();
-    await expect(page.locator(".loom-atlas-band")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-band-pulse")).toHaveCount(0);
-  });
 });

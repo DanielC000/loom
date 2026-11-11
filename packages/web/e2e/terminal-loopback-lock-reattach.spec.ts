@@ -38,7 +38,7 @@
 // origin is non-loopback and its sockets are gateway-token authenticated. A LOOPBACK page's sockets are
 // not token-authenticated at all, so this whole behaviour is unreachable on the shared `loomDaemon`
 // fixture and a spec written there would pass vacuously.
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import { GATEWAY_PROXY_LAUNCH_OPTIONS, GATEWAY_PROXY_RIG_BOOT_TIMEOUT_MS, startGatewayProxyRig, type GatewayProxyRig } from "./fixtures/gateway-proxy-rig";
 
@@ -128,6 +128,22 @@ async function tokenIdByName(name: string): Promise<string> {
   return match[0]!.id;
 }
 
+
+/** Unmount and remount the focused companion's whole detail (its Chat pane included) without leaving the
+ *  page: "+ New companion" swaps the detail for the create form, Cancel swaps it back. The count-0 step is
+ *  what proves the unmount really happened rather than the pane merely being hidden. */
+async function remountCompanionDetail(page: Page, chat: import("@playwright/test").Locator) {
+  await page.getByRole("button", { name: "+ New companion" }).click();
+  await expect(chat).toHaveCount(0);
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(chat).toBeVisible();
+}
+
+/** One of the companion node's mode tabs (Chat / Manage / Terminal) — real `role="tab"` links in the node's
+ *  own "Companion view" tablist since card acbb6df6 (the classic page's `#companion-tab-*` buttons are gone). */
+const modeTab = (page: Page, name: "Chat" | "Manage" | "Terminal") =>
+  page.getByRole("tablist", { name: "Companion view" }).getByRole("tab", { name, exact: true });
+
 test("a companion attach carrying NO gateway token is terminal on its own pill, not a ladder", async ({ page }) => {
   test.setTimeout(120_000); // includes a 14s observation window
 
@@ -136,20 +152,22 @@ test("a companion attach carrying NO gateway token is terminal on its own pill, 
   // already-resolved list, so the page keeps rendering this companion while its next attach carries
   // nothing. That is the real-world shape too: a page whose credential was cleared under it.
   await openCompanionPage(page, rig.token);
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   await expect(chat.getByText("connected", { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(chat.getByText(companion.name, { exact: true })).toBeVisible();
   const openedWhileHealthy = await page.evaluate(compOpens);
   expect(openedWhileHealthy, "the panel must have attached under the live token").toBeGreaterThan(0);
 
   await page.evaluate(() => { try { localStorage.removeItem("loom.gatewayToken"); } catch { /* blocked */ } });
-  // Chat → Manage → Chat UNMOUNTS and remounts the panel, so the next attach runs with `everOpened ===
-  // false`. That matters: `noteRemoteSocketRefusal` is false for an already-opened socket by design, so a
-  // panel that merely reconnects after connecting once never reaches this branch.
-  await page.locator("#companion-tab-manage").click();
-  await expect(chat).toHaveCount(0);
-  await page.locator("#companion-tab-chat").click();
-  await expect(chat).toBeVisible();
+  // UNMOUNT and remount the panel, so the next attach runs with `everOpened === false`. That matters:
+  // `noteRemoteSocketRefusal` is false for an already-opened socket by design, so a panel that merely
+  // reconnects after connecting once never reaches this branch. The classic page did this with a
+  // Chat → Manage → Chat switch; the Atlas companion node keeps its mode panels MOUNTED (hidden) across a
+  // switch (card acbb6df6 made it the only one), so swap the whole detail out for the create form and
+  // Cancel back — an in-place unmount/remount on the same node, with NO extra REST reads (leaving the node
+  // made the destination's token-less reads trip the rig's auth-fail lockout for the next test), and never
+  // a reload, which would also reset the window-scoped socket counters this verdict compares.
+  await remountCompanionDetail(page, chat);
 
   // THE VERDICT. `no gateway token` is reachable from exactly ONE place in the component —
   // `stopForNoToken`, run only by `noteRemoteSocketRefusal` returning true, which needs a remote origin
@@ -193,7 +211,7 @@ test("a terminal pane's dead-token close must not strand the companion's re-atta
   // Open under the LIVE token first, for the same reason as test 1 (the REST reads must resolve the
   // companion list), then kill it through the REAL human route.
   await openCompanionPage(page, rig.token);
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   await expect(chat.getByText("connected", { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(chat.getByText(companion.name, { exact: true })).toBeVisible();
 
@@ -211,7 +229,7 @@ test("a terminal pane's dead-token close must not strand the companion's re-atta
   // ── the TERMINAL pane, under the now-dead token ────────────────────────────────────────────────
   // This is the half card 7a77e46b owned. The pane's upgrade 401s, so no socket opens and the browser
   // reports a bare 1006 — the exact close whose credential attribution was wrong.
-  await page.locator("#companion-tab-terminal").click();
+  await modeTab(page, "Terminal").click();
   await expect(page.locator(".xterm-rows").first()).toBeVisible({ timeout: 30_000 });
   await expect.poll(() => page.evaluate(termOpens), { timeout: 30_000 }).toBeGreaterThan(0);
   // DEFECT ASSERTION 1 — the pane names the GATEWAY credential, because the remote arm ran. Pre-fix this
@@ -229,9 +247,12 @@ test("a terminal pane's dead-token close must not strand the companion's re-atta
   await expect(page.getByLabel("Local access credential")).toHaveCount(0);
   await expect(page.getByLabel("Gateway token")).toBeVisible();
 
-  // ── back to the chat, which now reaches its own terminal state under the dead token ───────────
-  await page.locator("#companion-tab-chat").click();
-  await expect(chat).toBeVisible();
+  // ── back to the chat, REMOUNTED, which now reaches its own terminal state under the dead token ──
+  // A mode switch alone no longer remounts it (the Atlas node keeps its panels mounted), so remount the
+  // detail in place — same document, so the window-scoped counters below still hold. Back on Chat FIRST:
+  // the node keeps its mode in the URL, so a remount on the Terminal tab would come back on Terminal.
+  await modeTab(page, "Chat").click();
+  await remountCompanionDetail(page, chat);
   await expect(chat.getByText("token refused", { exact: true })).toBeVisible({ timeout: 30_000 });
   const frozen = await page.evaluate(compOpens);
   expect(frozen, "the dead-token remount must have attempted a socket of its own").toBeGreaterThan(0);

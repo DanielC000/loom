@@ -239,28 +239,6 @@ test.describe("the project node has no dashboard disclosure (cards 44f725fe → 
     const gridOverflows = await page.locator(".loom-board-grid").evaluate((el) => el.scrollWidth > el.clientWidth);
     expect(gridOverflows, "the board grid does not overflow at 820, so the overflow read above proves nothing").toBe(true);
   });
-
-  test("switch OFF: no dashboard disclosure exists on the classic project page", async ({ page, loomDaemon }) => {
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    // Deliberately NOT seedAtlasOn — off is the default. The project is still pinned so the classic
-    // page renders its real content rather than a pick-a-project empty state.
-    await pinProject(page, seeded.project.id);
-    await page.setViewportSize(WIDE);
-    await page.goto(loomDaemon.baseURL + "/overview");
-
-    // Presence FIRST: the classic shell AND the classic Overview's own board embed are really here,
-    // so the absences below are absences and not a page that never loaded. (Same sentinel trio
-    // atlas-home.spec.ts's own switch-OFF leg uses — `h1` is not one: the classic Overview has no
-    // bare `<h1>`, measured.)
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByText(seeded.inboxCard, { exact: true })).toBeVisible();
-    await expect(lanes(page)).toHaveCount(7);
-
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    await expect(bar(page)).toHaveCount(0);
-    await expect(page.getByTestId("atlas-dashboard-band")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-banddisc-summary")).toHaveCount(0);
-  });
 });
 
 test.describe("the Workspace node's dashboard disclosure (card 4a0ad464)", () => {
@@ -398,26 +376,5 @@ test.describe("the Workspace node's dashboard disclosure (card 4a0ad464)", () =>
     await page.goto(loomDaemon.baseURL + "/project");
     await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
     await expect(bar(page), "the project node grew a dashboard disclosure back").toHaveCount(0);
-  });
-
-  test("switch OFF: no dashboard disclosure exists on the classic Mission-Control-era pages", async ({ page, loomDaemon }) => {
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    // Deliberately NOT seedAtlasOn — off is the default.
-    await pinProject(page, seeded.project.id);
-    await page.setViewportSize(WIDE);
-    await page.goto(loomDaemon.baseURL + "/");
-
-    // Presence FIRST: the classic shell really is here, so the absences below are absences and not a
-    // page that never loaded.
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    await expect(bar(page)).toHaveCount(0);
-    await expect(page.getByTestId("atlas-dashboard-band")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-banddisc-summary")).toHaveCount(0);
-    // ...and the Atlas-only workspace node is not mounted in the classic shell either.
-    await page.goto(loomDaemon.baseURL + "/home");
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
-    await expect(bar(page)).toHaveCount(0);
   });
 });

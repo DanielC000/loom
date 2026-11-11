@@ -20,7 +20,7 @@ test("the edit form names, refuses, saves and clears the api-key header; it is a
   })).json()) as { id: string };
   try {
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
     await expect(page.getByTestId(`connection-row-${created.id}`)).toBeVisible();
     await page.getByTestId(`connection-edit-open-${created.id}`).click();
     const form = page.getByTestId(`connection-edit-${created.id}`);
@@ -67,7 +67,7 @@ test("the create form carries the header field for api-key only and sends it", a
   let createdId: string | undefined;
   try {
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
     await page.getByRole("button", { name: "New connection" }).click();
     await page.getByRole("button", { name: "Custom", exact: true }).click();
 

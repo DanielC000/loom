@@ -15,11 +15,12 @@ async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
-// Open the selected project's "Manage project" collapsible (where the reference-repos editor lives).
+// Reach the project's lifecycle controls (formerly the "Manage project" collapsible) (where the reference-repos editor lives).
 async function openManage(page: Page) {
-  const toggle = page.getByRole("button", { name: /Manage project/ });
-  await expect(toggle).toBeVisible();
-  await toggle.click();
+  // The project Settings tab's Project Lifecycle section mounts these controls un-collapsed (card
+  // c9b78d80); it is their only home since card acbb6df6 deleted the Projects page's "Manage project"
+  // disclosure. So "opening" it is waiting for the section to render.
+  await expect(page.getByTestId("settings-section-project-lifecycle")).toBeVisible();
 }
 
 test.describe("reference-repos editor (card f4888775)", () => {
@@ -31,7 +32,7 @@ test.describe("reference-repos editor (card f4888775)", () => {
     expect(validPath).toBeTruthy();
 
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await openManage(page);
 
     // Empty state: a quiet "none" line, NOT a phantom blank input row.
@@ -49,7 +50,7 @@ test.describe("reference-repos editor (card f4888775)", () => {
     await expect(saveBtn).toBeDisabled();
 
     // PERSISTENCE: reload the page fresh and confirm the saved row round-tripped through the server.
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await openManage(page);
     await expect(page.getByRole("textbox", { name: /Reference repo 1/ })).toHaveValue(validPath);
     // No lingering error, no phantom blank row.

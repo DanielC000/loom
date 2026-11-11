@@ -106,8 +106,7 @@ const platformSrc = read("../src/pages/PlatformView.tsx");
 // every `includes` below is simply false — which reads exactly like a real regression.
 check("positive control: all four sources were really read", () => {
   assert.ok(navSrc.includes("export const LEGACY_REDIRECTS"), "nav.tsx is not the file that was read");
-  assert.ok(shellSrc.includes("ATLAS_RETIREMENTS") || shellSrc.includes("atlasRetirementFor"),
-    "AtlasShell.tsx is not the file that was read");
+  assert.ok(shellSrc.includes("export function AtlasShell"), "AtlasShell.tsx is not the file that was read");
   assert.ok(boardSrc.includes("export default function Board"), "Board.tsx is not the file that was read");
   assert.ok(platformSrc.includes("AtlasPlatformLayout"), "PlatformView.tsx is not the file that was read");
 });
@@ -123,13 +122,24 @@ check("every LEGACY_REDIRECTS row goes through QueryPreservingRedirect, and none
     "QueryPreservingRedirect no longer merges the incoming search through the shared rule");
 });
 
-check("the Atlas retirement hop preserves the query too", () => {
-  // One declared row chains THROUGH a retirement (/workspace → /projects → /home), so a bare
-  // <Navigate> here would make that row preserve under the classic shell and drop under Atlas.
-  assert.ok(shellSrc.includes("<QueryPreservingRedirect to={retired.to} />"),
-    "the retirement hop no longer preserves the incoming query");
-  assert.ok(!/<Navigate to=\{retired\.to\} replace \/>/.test(shellSrc),
-    "the retirement hop is back to a bare <Navigate>, which drops the query the first hop carried");
+check("no LEGACY_REDIRECTS row chains through another row", () => {
+  // Card 260fb29a's retirement hop (/workspace → /projects → /home) needed its own query-preserving
+  // redirect in the shell. Card acbb6df6 made every retired address a plain row pointing straight at
+  // its final address, so no deep link pays two hops — a row whose `to` is another row's `from` would
+  // bring the two-hop case back.
+  const parse = (src) => [...src.matchAll(/redirect\("([^"]+)",\s*([^)]+)\)/g)]
+    .map((m) => ({ from: m[1], to: m[2].trim().replace(/^"|"$/g, "").split("?")[0] }));
+  const chains = (rows) => {
+    const froms = new Set(rows.map((r) => r.from));
+    return rows.filter((r) => froms.has(r.to)).map((r) => `${r.from} → ${r.to}`);
+  };
+  const rows = parse(navSrc);
+  // Anti-vacuity: the parse must see the real rows, or "no chains" is true of an empty list.
+  assert.ok(rows.length >= 8, `the row parse found only ${rows.length} redirect rows`);
+  assert.deepEqual(chains(rows), [], "a redirect row chains through another redirect row");
+  // Positive control: the same parse + detector on a planted chain must fire.
+  assert.deepEqual(chains(parse('redirect("/a", "/b"),\nredirect("/b", "/c"),')), ["/a → /b"],
+    "control: the detector must flag a planted /a → /b → /c chain");
 });
 
 check("Board's deep-link effect is gated on deepLinks, and deepLinks is in its dep array", () => {
@@ -146,11 +156,10 @@ check("Board's deep-link effect is gated on deepLinks, and deepLinks is in its d
 check("the Atlas Platform board panel passes deepLinks, and only while it is the visible tab", () => {
   assert.ok(platformSrc.includes('deepLinks={tab === "board"}'),
     "the Platform node's board panel no longer gates its deep-link consumption on being visible");
-  // The CLASSIC layout's own mount must NOT pass it: there every section is visible at once, and a
-  // `false` there would kill a deep link that has always worked.
-  const classicMount = platformSrc.match(/<PlatformBoardSection edition=\{edition\} project=\{project\} \/>/g) ?? [];
-  assert.equal(classicMount.length, 1,
-    `expected exactly one ungated (classic-layout) PlatformBoardSection mount, found ${classicMount.length}`);
+  // And that gated mount is the ONLY one (card acbb6df6 deleted the classic layout's always-visible,
+  // ungated twin), so no hidden panel elsewhere on the node can consume the param first.
+  const mounts = platformSrc.match(/<PlatformBoardSection\b/g) ?? [];
+  assert.equal(mounts.length, 1, `expected exactly one PlatformBoardSection mount, found ${mounts.length}`);
 });
 
 check("the Platform node normalizes the ADDRESS onto tab=board, rather than deriving the tab", () => {

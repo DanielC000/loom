@@ -296,21 +296,4 @@ test.describe("Atlas board cards open the centred dialog (card a6d7a102)", () =>
       await fetch(`${loomDaemon.baseURL}/api/tasks/${task.id}`, { method: "DELETE" }).catch(() => {});
     }
   });
-
-  // ── The other polarity ──────────────────────────────────────────────────────────────────────────
-  test("switch OFF: the classic board is untouched and opens the same centred dialog", async ({ page, loomDaemon }) => {
-    const project = await loomDaemon.createProject(uniq("atlasdlg-classic"));
-    const task = await seedCard(loomDaemon, project.id);
-
-    await pinProject(page, project.id); // no seedAtlasOn — OFF is the default
-    await page.setViewportSize(VIEWPORT);
-    await page.goto(`${loomDaemon.baseURL}/board`);
-
-    // PRESENCE: the classic shell is really the one that mounted…
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    // …and nothing Atlas is in the document, so this leg cannot be measuring the Atlas frame.
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-
-    await assertSurfaceOpensCentredDialog(page, page.locator("main"), task, "classic Board page");
-  });
 });

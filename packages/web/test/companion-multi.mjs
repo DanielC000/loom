@@ -5,7 +5,7 @@
 //   1. Surfaces a "+ New companion" affordance (always available) that POSTs to /api/companion/provision to
 //      create an ADDITIONAL companion, and a CompanionSwitcher picker to switch which companion is in focus.
 //   2. Branches on existence + a `creating` flag: no companion (or the owner opted to create) → the
-//      CompanionCreate box; else the switcher + the focused companion's CompanionDetail. Selection is
+//      CompanionCreate box; else the switcher + the focused companion's AtlasCompanionDetail. Selection is
 //      client-only via `selectedId`, tolerating a stale/deleted selection by falling back to companions[0].
 //   3. The proactive HOME lives INSIDE each companion's OWN Manage tab as a <section>, scoped to that
 //      companion's sessionId (multi-companion heartbeat cross-delivery fix, task e849a487 — home used to be
@@ -58,7 +58,7 @@ check("per-companion selection + create-mode state wiring is present", () => {
 check("the page resolves the focused companion, tolerating a stale selection via a companions[0] fallback", () => {
   assert.ok(compSrc.includes("companions.find((c) => c.sessionId === selectedId)"), "the focus is resolved by selectedId");
   assert.ok(compSrc.includes("?? companions[0] ?? null"), "a stale/absent selection falls back to the first companion");
-  assert.ok(compSrc.includes("<CompanionDetail"), "the focused companion renders CompanionDetail");
+  assert.ok(compSrc.includes("<AtlasCompanionDetail"), "the focused companion renders AtlasCompanionDetail");
   assert.ok(compSrc.includes("<CompanionCreate"), "the create box renders CompanionCreate");
 });
 
@@ -82,13 +82,19 @@ check("the standalone GlobalHome sidebar card is gone; ProactiveHomeSection repl
 });
 
 check("ProactiveHomeSection is rendered INSIDE the Manage tab panel", () => {
-  const managePanelAt = compSrc.indexOf('id="companion-panel-manage"');
+  // A Manage section becomes a component in ONE place, `manageSection`, and the proactive home is one of
+  // its cases — so it sits among the Manage sections (before Pairing), never on a surface of its own.
+  const switchAt = compSrc.indexOf("function manageSection(");
   const homeRenderAt = compSrc.indexOf("<ProactiveHomeSection sessionId=");
   const pairingAt = compSrc.indexOf("<PairingSection");
-  assert.ok(managePanelAt !== -1, "the Manage tab panel exists");
-  assert.ok(homeRenderAt > managePanelAt, "the proactive home renders within the Manage panel");
-  // It sits among the Manage sections (before the last one, Pairing) — i.e. genuinely alongside them.
-  assert.ok(homeRenderAt < pairingAt, "the proactive home is grouped among the Manage sections");
+  assert.ok(switchAt !== -1, "the manageSection switch exists");
+  assert.ok(homeRenderAt > switchAt && homeRenderAt < pairingAt, "the proactive home is one of the Manage sections");
+  // And that switch is reached only from the Manage tab panel (AtlasManagePanel, mounted inside the
+  // node's `companion-mode-panel-manage`), so a Manage section cannot render anywhere else.
+  assert.equal((compSrc.match(/\bmanageSection\(key, ctx\)/g) ?? []).length, 1, "manageSection has exactly one call site");
+  assert.ok(compSrc.indexOf("manageSection(key, ctx)") > compSrc.indexOf("function AtlasManagePanel"),
+    "that call site is inside AtlasManagePanel");
+  assert.ok(compSrc.includes('data-testid="companion-mode-panel-manage"'), "the Manage tab panel exists");
 });
 
 check("proactive-home behavior is preserved (set / change / clear THIS companion's OWN home, per-session)", () => {

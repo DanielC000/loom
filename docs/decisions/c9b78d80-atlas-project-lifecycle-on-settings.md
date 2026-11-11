@@ -1,5 +1,7 @@
 # c9b78d80 — project lifecycle controls on the Atlas project node's Settings tab
 
+> **Superseded in part by card `acbb6df6` (2026-11-11).** The owner's 2026-11-11 directive removed the classic UI: `pages/Projects.tsx`, the classic Settings page, the Atlas switch and the `atlasOnly` flag are all deleted, so `projectLifecycle.tsx` now has one frame (Settings). The prohibitions about `useAtlasUi()`, the classic Settings page and the flag's position are void. "Do not fork these controls" and "Do not relax the delete confirm" stand unchanged.
+
 Atlas restructure (epic `9fe8cd4e`), unblocking card `5afd71bd` (retire Mission Control and Projects as Atlas destinations). Atlas card 11's investigation found five surfaces living ONLY on the classic `/projects` page, so retiring that destination under Atlas would have lost them outright. This record is where they went and why that shape.
 
 ## Do not

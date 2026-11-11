@@ -332,51 +332,6 @@ test.describe("Atlas project lifecycle on the Settings tab (card c9b78d80)", () 
     await expect(treeRow(page, keep.name), "the tree rendered no project rows, so the absence above proves nothing")
       .toHaveCount(1);
   });
-
-  test("with the switch OFF the classic page keeps all five, and classic Settings does not grow them", async ({ page, loomDaemon }) => {
-    const project = await loomDaemon.createProject(`lifecycle-off-${Date.now()}`);
-    await pinProject(page, project.id);
-    // No seedAtlasOn: OFF is the default.
-
-    // The classic Projects page still owns these controls, behind its own "Manage project" disclosure.
-    await page.goto(loomDaemon.baseURL + "/projects");
-    await expect(page.locator(".loom-rail"), "the classic shell did not render").toBeVisible();
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    // Collapsed by default, as it always was — the body is absent until the disclosure is opened.
-    await expect(page.getByTestId("project-manage-fields"),
-      "the classic Manage project disclosure is no longer collapsed on mount").toHaveCount(0);
-    const manage = page.getByRole("button", { name: /Manage project/ });
-    await expect(manage).toBeVisible();
-    await manage.click();
-    const body = page.getByTestId("project-manage-fields");
-    await expect(body, "the classic Manage project disclosure rendered no control body").toHaveCount(1);
-    // All five surfaces, in the frame they have always had.
-    await expect(body.getByPlaceholder("name", { exact: true })).toBeVisible();
-    await expect(body.getByPlaceholder(/^vault path/)).toBeVisible();
-    await expect(body.getByText("No reference repos.")).toBeVisible();
-    await expect(body.getByText("No registered repos.")).toBeVisible();
-    await expect(body.getByRole("button", { name: /Archive \(reversible\)/ })).toBeVisible();
-    await expect(body.getByRole("button", { name: /Delete permanently/ })).toBeVisible();
-    // The draft survives a collapse — the state lives above the disclosure, as it did before this card
-    // split the frame off the body.
-    await body.getByPlaceholder("name", { exact: true }).fill(`${project.name}-draft`);
-    await manage.click();
-    await expect(page.getByTestId("project-manage-fields")).toHaveCount(0);
-    await manage.click();
-    await expect(page.getByTestId("project-manage-fields").getByPlaceholder("name", { exact: true }),
-      "collapsing the classic disclosure discarded a half-typed rename").toHaveValue(`${project.name}-draft`);
-
-    // And the classic Settings page did NOT grow a second copy of them: the section is atlasOnly.
-    await page.goto(loomDaemon.baseURL + PROJECT_NODE);
-    await expect(page.locator("main [data-testid^='settings-section-']").first(),
-      "the classic Settings page rendered no sections, so the absence below proves nothing").toBeVisible();
-    await expect(section(page),
-      "the classic Settings page grew the Atlas-only Project Lifecycle section").toHaveCount(0);
-    await expect(page.locator("main").getByText("Project Lifecycle", { exact: true }),
-      "the classic Settings page still shows the Project Lifecycle label").toHaveCount(0);
-    await expect(page.locator("main").getByTestId("project-manage-fields"),
-      "the classic Settings page grew a second project-lifecycle control body").toHaveCount(0);
-  });
 });
 
 // Card 196d951a — two defects in the SAME shared body c9b78d80 moved here, so each is one component
@@ -442,41 +397,5 @@ test.describe("project lifecycle: labelled fields and a separated Retire group (
     await fields(page).getByTestId("project-retire").getByRole("button", { name: /Archive \(reversible\)/ }).click();
     await expect.poll(() => restArchivedIds(loomDaemon.baseURL),
       { message: "Archive stopped working once it moved into the retire group" }).toContain(project.id);
-  });
-
-  test("switch OFF: the classic Manage project disclosure labels both fields and separates the retire actions", async ({ page, loomDaemon }) => {
-    const project = await loomDaemon.createProject(`lifecycle-a11y-off-${Date.now()}`);
-    const seeded = await restProject(loomDaemon.baseURL, project.id);
-    expect(seeded?.vaultPath, "the seeded project has no vaultPath to assert against").toBeTruthy();
-    await pinProject(page, project.id);
-    // No seedAtlasOn: OFF is the default, and it is the only state /projects is reachable in.
-
-    await page.goto(loomDaemon.baseURL + "/projects");
-    await expect(page.locator(".loom-rail"), "the classic shell did not render").toBeVisible();
-    await expect(page.getByTestId("atlas-shell"),
-      "the Atlas shell mounted, so this leg is not testing the classic frame").toHaveCount(0);
-    const manage = page.getByRole("button", { name: /Manage project/ });
-    await manage.click();
-    const body = page.getByTestId("project-manage-fields");
-    await expect(body, "the classic disclosure rendered no control body").toHaveCount(1);
-    await expect(body.getByPlaceholder("name", { exact: true }),
-      "the classic disclosure is not scoped to the pinned project").toHaveValue(project.name);
-
-    await assertLabelledFields(body, project.name, seeded?.vaultPath ?? "");
-    await assertRetireGroup(body);
-
-    // The permanent-delete reveal still arms the same way behind the type-the-name gate — the confirm
-    // input is NOT one of the two labelled fields, so the exact matches above must still hold with it
-    // on screen.
-    await body.getByTestId("project-retire").getByRole("button", { name: /Delete permanently/ }).click();
-    const deleteForever = body.getByRole("button", { name: "Delete forever" });
-    await expect(deleteForever, "Delete forever is live before the name was typed").toBeDisabled();
-    await assertLabelledFields(body, project.name, seeded?.vaultPath ?? "");
-    await body.getByPlaceholder(project.name, { exact: true }).fill(project.name);
-    await expect(deleteForever, "typing the exact project name did not arm Delete forever").toBeEnabled();
-    // Nothing is destroyed here: the armed button is never clicked, and the store still has the project.
-    await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
-    expect((await restProject(loomDaemon.baseURL, project.id))?.id,
-      "the project was destroyed by a leg that only meant to arm the confirm").toBe(project.id);
   });
 });

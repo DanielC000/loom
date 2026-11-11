@@ -107,34 +107,29 @@ test.describe("Atlas — tree rows that tell sessions apart, tiles that stay rea
     await expect.poll(() => rowsOfTiles(narrow.mgr.sessionId), { message: "the default 80 columns stopped drawing two-up" }).toBe(1);
   });
 
-  // Card 41a933d4: at phone width an `auto` tile takes the row instead of pushing the page sideways.
-  // The god-eye Terminals page in BOTH shells, because the classic page and the Atlas node share the
-  // template. Two measures, because they fail differently: the classic page scrolls the DOCUMENT
-  // (774px at 390 before the fix), while the Atlas content column clips, so there the document stays
-  // 390 and only the tile's own box (560px in a 350px grid) shows it. The long project name is the
-  // fixture for the Project filter, which was the other thing widening the classic page.
-  for (const shell of ["atlas", "classic"] as const) {
-    test(`${shell}: at 390px no Auto tile, and nothing else, overflows sideways`, async ({ page, loomDaemon }) => {
-      const f = await seedRow(loomDaemon, `ovf41-${shell}-a-long-customer-onboarding-and-billing-reconciliation-project`, 80, [{ agentName: "Phone Dev" }]);
-      if (shell === "atlas") await seedAtlas(page, f.project.id);
-      else await page.addInitScript((key) => { try { localStorage.removeItem(key); } catch { /* unavailable */ } }, ATLAS_KEY);
-      await page.setViewportSize({ width: 390, height: 844 });
-      await page.goto(`${loomDaemon.baseURL}${shell === "atlas" ? "/workspace-terminals" : "/terminals"}`);
+  // Card 41a933d4: at phone width an `auto` tile takes the row instead of pushing the page sideways. On the
+  // god-eye Terminals node, whose content column clips — so the document stays 390 and only the tile's own
+  // box (560px in a 350px grid, before the fix) shows it; both are measured. The long project name is the
+  // fixture for the Project filter, which also widened the page. (A classic-shell leg was deleted with
+  // that shell by card acbb6df6.)
+  test("at 390px no Auto tile, and nothing else, overflows sideways", async ({ page, loomDaemon }) => {
+    const f = await seedRow(loomDaemon, "ovf41-atlas-a-long-customer-onboarding-and-billing-reconciliation-project", 80, [{ agentName: "Phone Dev" }]);
+    await seedAtlas(page, f.project.id);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${loomDaemon.baseURL}/workspace-terminals`);
 
-      // FIXTURE IDENTITY: this spec's own row, with both of its panes attached, in the shell it names.
-      const grid = page.getByTestId(`sessions-grid-${f.mgr.sessionId}`);
-      await expect(grid.locator(".xterm-rows")).toHaveCount(2);
-      await expect(page.locator(".loom-rail")).toHaveCount(shell === "classic" ? 1 : 0);
+    // FIXTURE IDENTITY: this spec's own row, with both of its panes attached.
+    const grid = page.getByTestId(`sessions-grid-${f.mgr.sessionId}`);
+    await expect(grid.locator(".xterm-rows")).toHaveCount(2);
 
-      // THE CLAIM, tile side: each tile fits inside its grid.
-      const overhang = () => grid.evaluate((g) => {
-        const right = g.getBoundingClientRect().right;
-        return Math.max(...[...g.children].map((t) => Math.round(t.getBoundingClientRect().right - right)));
-      });
-      await expect.poll(overhang, { message: "an Auto tile is wider than its grid" }).toBeLessThanOrEqual(0);
-      // …and the document as a whole does not scroll sideways.
-      const sideways = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-      expect(sideways, "the page scrolls sideways at 390px").toBeLessThanOrEqual(0);
+    // THE CLAIM, tile side: each tile fits inside its grid.
+    const overhang = () => grid.evaluate((g) => {
+      const right = g.getBoundingClientRect().right;
+      return Math.max(...[...g.children].map((t) => Math.round(t.getBoundingClientRect().right - right)));
     });
-  }
+    await expect.poll(overhang, { message: "an Auto tile is wider than its grid" }).toBeLessThanOrEqual(0);
+    // …and the document as a whole does not scroll sideways.
+    const sideways = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(sideways, "the page scrolls sideways at 390px").toBeLessThanOrEqual(0);
+  });
 });

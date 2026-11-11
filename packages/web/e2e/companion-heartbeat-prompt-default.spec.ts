@@ -43,7 +43,7 @@ async function seedIsolatedCompanion(loomDaemon: LoomDaemon) {
  *  Waiting for the chat to settle first is load-bearing: the page's own "focus the most active companion"
  *  effect runs once the companion list resolves and overrides a selection made ahead of it. */
 async function focusOwnCompanion(page: import("@playwright/test").Page, name: string) {
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   await expect(chat.getByText("connected", { exact: true })).toBeVisible();
   const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
   if (await pickerBtn.count()) {
@@ -178,7 +178,9 @@ test("Manage tab: the heartbeat-prompt placeholder follows the server's resolved
     },
   );
 
-  await page.reload();
+  // A fresh navigation rather than a reload: the Atlas node keeps its mode in the URL (`sub=manage`), so a
+  // reload would land back on Manage with the Chat pane `focusOwnCompanion` reads hidden.
+  await page.goto(`${loomDaemon.baseURL}/companion`);
   const envSection = await openEditor();
   expect(patchedOurRow).toBe(true); // the override really served this render (not a cached pre-route read)
   const envPrompt = envSection.locator("textarea");

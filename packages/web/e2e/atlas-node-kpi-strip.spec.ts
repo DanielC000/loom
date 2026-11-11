@@ -239,39 +239,4 @@ test.describe("Atlas node tab rows carry no KPI strip (card 4a0ad464)", () => {
     expect(offenders, "no address the project node's tab row links to carries a tab-row KPI readout")
       .toEqual([]);
   });
-
-  // UNCHANGED by card 4a0ad464, and kept deliberately: the classic shell never had a strip, so this
-  // leg passed before and after. It is the control that says the ON legs above are measuring the
-  // Atlas shell's own chrome rather than an absence that was always true everywhere.
-  test("switch OFF: no KPI strip exists at any of those addresses", async ({ page, loomDaemon }) => {
-    test.setTimeout(180_000);
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    // Deliberately NOT seedAtlasOn — off is the default. The project is still pinned so the classic
-    // project-scoped pages render their real content rather than a pick-a-project empty state.
-    await pinProject(page, seeded.project.id);
-    await page.setViewportSize({ width: 1440, height: 1000 });
-
-    // The classic addresses behind the node tabs this card touches, plus both node paths. Listed
-    // here because with the switch OFF there is no tab row to collect them from — that is the
-    // point of the leg — so the ON legs above own the "collected from the app" guarantee.
-    const addresses = ["/project", "/home", "/board", "/terminals", "/repository", "/memory",
-      "/runs", "/archive", "/settings", "/inbox", "/gates", "/automation", "/actors", "/usage"];
-
-    const offenders: string[] = [];
-    for (const path of addresses) {
-      await page.goto(loomDaemon.baseURL + path);
-      // Presence first: the classic shell's own rail must be up before any absence here means
-      // anything — a page still loading has no strip either.
-      await expect(page.locator(".loom-rail")).toBeVisible();
-      const byTestId = await page.getByTestId("atlas-kpi-strip").count();
-      // Both the testid and the class, because a strip rendered without its testid would still be
-      // the regression this leg exists to catch.
-      const byClass = await page.locator(".loom-kpistrip, .loom-kpipill").count();
-      if (byTestId !== 0 || byClass !== 0) offenders.push(`${path}: testid=${byTestId} class=${byClass}`);
-    }
-    expect(offenders, "the classic shell renders no KPI strip anywhere").toEqual([]);
-    // And nothing Atlas at all, so the absence above is the switch being off rather than a strip
-    // that merely failed to render inside a mounted frame.
-    await expect(page.locator("[class^='loom-atlas-'], [class*=' loom-atlas-']")).toHaveCount(0);
-  });
 });

@@ -69,13 +69,13 @@ test("pending binding surfaces in Settings, then Review & grant commits only on 
 
   // --- Settings: the Pending bindings queue + the Connections badges ---
   await pinActiveProject(page, seeded.projectId);
-  await page.goto(`${base}/settings`);
+  await page.goto(`${base}/home?tab=settings`);
 
   await expect(page.getByText("Pending bindings", { exact: true }).first()).toBeVisible();
   const reviewBtn = page.getByRole("button", { name: "Review & grant" });
   await expect(reviewBtn).toBeVisible();
   // The row names the REQUESTING agent (the grant target) and, as context, the profile named in the ask.
-  await expect(page.getByText(`Billing Bot ${ts}`, { exact: true })).toBeVisible();
+  await expect(page.getByTestId("settings-section-pending-bindings").getByText(`Billing Bot ${ts}`, { exact: true })).toBeVisible(); // scoped: the entity tree names the session too
   await expect(page.getByText(`profile Payments Worker ${ts}`, { exact: false }).first()).toBeVisible();
 
   // The Connections panel badges the auto-provisioned, not-yet-bound connection. This connection is the

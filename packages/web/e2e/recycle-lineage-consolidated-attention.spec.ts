@@ -58,7 +58,7 @@ test.describe("RECYCLE LINEAGE CONSOLIDATED survives the generic ORPHANED FLEET 
     // BEFORE: no event yet — isOrphanedFleet(P) alone renders the GENERIC item, never the specific one.
     // This is the positive control: it proves the exclusion added to the generic loop is reachable at all
     // (it only skips a predecessor id the specific derivation actually covers).
-    await page.goto(`${loomDaemon.baseURL}/`);
+    await page.goto(`${loomDaemon.baseURL}/home`);
     await expect(attentionRow(page, "RECYCLE LINEAGE CONSOLIDATED", predecessor.sessionId)).toHaveCount(0);
     await expect(attentionRow(page, "ORPHANED FLEET", predecessor.sessionId)).toBeVisible();
 
@@ -71,14 +71,14 @@ test.describe("RECYCLE LINEAGE CONSOLIDATED survives the generic ORPHANED FLEET 
 
     // AFTER: the specific item appears on Mission Control (global queue, route "/") — and the generic
     // ORPHANED FLEET item for the SAME predecessor is gone: exactly one item for this lineage, not two.
-    await page.goto(`${loomDaemon.baseURL}/`);
+    await page.goto(`${loomDaemon.baseURL}/home`);
     const mcRow = attentionRow(page, "RECYCLE LINEAGE CONSOLIDATED", predecessor.sessionId);
     await expect(mcRow).toBeVisible();
     await expect(mcRow).toContainText("consolidated back here");
     await expect(attentionRow(page, "ORPHANED FLEET", predecessor.sessionId)).toHaveCount(0);
 
     // AFTER: the project Overview (project-scoped) shows it too.
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     const ovRow = attentionRow(page, "RECYCLE LINEAGE CONSOLIDATED", predecessor.sessionId);
     await expect(ovRow).toBeVisible();
     await expect(attentionRow(page, "ORPHANED FLEET", predecessor.sessionId)).toHaveCount(0);
@@ -87,9 +87,9 @@ test.describe("RECYCLE LINEAGE CONSOLIDATED survives the generic ORPHANED FLEET 
     // retire this one). isStillConsolidated re-derives off the live session row on every poll, so once P
     // is no longer present (archived), both surfaces drop the item with no separate "cleared" event.
     await archiveSession(loomDaemon.baseURL, predecessor.sessionId);
-    await page.goto(`${loomDaemon.baseURL}/`);
+    await page.goto(`${loomDaemon.baseURL}/home`);
     await expect(attentionRow(page, "RECYCLE LINEAGE CONSOLIDATED", predecessor.sessionId)).toHaveCount(0);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     await expect(attentionRow(page, "RECYCLE LINEAGE CONSOLIDATED", predecessor.sessionId)).toHaveCount(0);
   });
 });

@@ -144,7 +144,7 @@ test("a dead held token leaves the companion pane terminally refused, not re-han
   }, rig.token);
   await page.goto(`${rig.origin}/companion`);
 
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   const picker = page.getByRole("group", { name: "Select companion" });
   // Let the page settle on whatever it auto-focuses FIRST: its "focus the most active companion" effect
   // runs after the companion list query resolves and would override a selection made ahead of it.

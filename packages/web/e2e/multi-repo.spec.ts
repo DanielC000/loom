@@ -24,12 +24,13 @@ async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
-// Open the selected project's "Manage project" collapsible (where the registry editor lives, directly
+// Reach the project's lifecycle controls (formerly the "Manage project" collapsible) (where the registry editor lives, directly
 // below the reference-repos editor).
 async function openManage(page: Page) {
-  const toggle = page.getByRole("button", { name: /Manage project/ });
-  await expect(toggle).toBeVisible();
-  await toggle.click();
+  // The project Settings tab's Project Lifecycle section mounts these controls un-collapsed (card
+  // c9b78d80); it is their only home since card acbb6df6 deleted the Projects page's "Manage project"
+  // disclosure. So "opening" it is waiting for the section to render.
+  await expect(page.getByTestId("settings-section-project-lifecycle")).toBeVisible();
 }
 
 async function repoPathOf(baseURL: string, projectId: string): Promise<string> {
@@ -55,7 +56,7 @@ test.describe("multi-repo registry + card routing (card ebb50819)", () => {
     const secondRepoPath = await repoPathOf(loomDaemon.baseURL, donor.id);
 
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await openManage(page);
 
     // Empty state: a quiet "none" line, NOT a phantom blank row.
@@ -84,7 +85,7 @@ test.describe("multi-repo registry + card routing (card ebb50819)", () => {
     await expect(saveBtn).toBeDisabled();
 
     // PERSISTENCE: reload fresh and confirm the row round-tripped through the server.
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await openManage(page);
     await expect(page.getByRole("textbox", { name: /Repo 1 key/ })).toHaveValue("api");
     await expect(page.getByRole("alert")).toHaveCount(0);
@@ -228,7 +229,7 @@ test.describe("multi-repo registry + card routing (card ebb50819)", () => {
     const secondRepoPath = await repoPathOf(loomDaemon.baseURL, donor.id);
 
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await openManage(page);
 
     await page.getByRole("button", { name: /Register repo/ }).click();
@@ -247,7 +248,7 @@ test.describe("multi-repo registry + card routing (card ebb50819)", () => {
     expect(entry?.ungatedLandingCheckCommand).toBe("pnpm guards");
 
     // Reload fresh and confirm BOTH fields round-trip into the editor, not just gateCommand.
-    await page.goto(`${loomDaemon.baseURL}/projects`);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
     await openManage(page);
     await expect(page.getByRole("textbox", { name: /Repo 1 gate command/ })).toHaveValue("pnpm build");
     await expect(page.getByRole("textbox", { name: /Repo 1 ungated landing check command/ })).toHaveValue("pnpm guards");

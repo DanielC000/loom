@@ -12,7 +12,7 @@
 //      override, which carries `kanbanColumns` — a key it does not even model.
 //   3. Actors › Profiles — a profile field rewritten over REST after the editor opens survives a save that
 //      only renames the rig.
-//   4. Projects › agent startup prompt — a prompt rewritten over REST is ADOPTED into the textarea rather
+//   4. Agents node › agent startup prompt (the Projects page until card acbb6df6) — a prompt rewritten over REST is ADOPTED into the textarea rather
 //      than sitting behind stale text with Save armed to revert it.
 //
 // 🔴 TIMING IS THE WHOLE TEST, for 1/3/4. The defect needs the form's copy to be STALE, so the server value
@@ -245,9 +245,12 @@ test("Projects: an agent prompt written after load is adopted, not left armed to
   };
 
   await pinActiveProject(page, project.id);
-  await page.goto(`${loomDaemon.baseURL}/projects`);
-  await page.getByRole("button").filter({ hasText: agentName }).first().click();
-  const prompt = page.locator("textarea");
+  // The agent editor's host is the Agents node's edit dialog (the classic Projects page that also hosted
+  // it was deleted by card acbb6df6).
+  await page.goto(`${loomDaemon.baseURL}/agents`);
+  await page.getByTestId(`atlas-agent-card-${agent.id}`).getByTestId(`atlas-agent-edit-${agent.id}`).click();
+  await expect(page.getByTestId("atlas-agent-editor")).toBeVisible();
+  const prompt = page.getByTestId(`agent-editor-${agent.id}`).locator("textarea");
   await expect(prompt).toHaveValue(seededPrompt); // the editor seeded from THIS agent
 
   // The editor's copy is now stale — stands in for an `agent_update` landing while the owner has it open.
@@ -471,9 +474,12 @@ test("Projects: the agent-prompt conflict notice retires after its own save and 
   };
 
   await pinActiveProject(page, project.id);
-  await page.goto(`${loomDaemon.baseURL}/projects`);
-  await page.getByRole("button").filter({ hasText: agentName }).first().click();
-  const prompt = page.locator("textarea");
+  // The agent editor's host is the Agents node's edit dialog (the classic Projects page that also hosted
+  // it was deleted by card acbb6df6).
+  await page.goto(`${loomDaemon.baseURL}/agents`);
+  await page.getByTestId(`atlas-agent-card-${agent.id}`).getByTestId(`atlas-agent-edit-${agent.id}`).click();
+  await expect(page.getByTestId("atlas-agent-editor")).toBeVisible();
+  const prompt = page.getByTestId(`agent-editor-${agent.id}`).locator("textarea");
   await expect(prompt).toHaveValue(agent.startupPrompt);
   const notice = page.getByTestId("agent-prompt-conflict");
   await expect(notice).toHaveCount(0); // NEGATIVE CONTROL

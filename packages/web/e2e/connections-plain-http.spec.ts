@@ -19,7 +19,7 @@ test("the edit form opts a connection into plain http for a LAN host, badges it,
   const plain = (await (await postConnection(loomDaemon.baseURL, { name: uniq("plain"), host: "api.example.com", authScheme: "api-key", secret: "s" })).json()) as { id: string };
   try {
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     // Before: no badge anywhere, flag absent on the daemon's own read.
     await expect(page.getByTestId(`connection-row-${lan.id}`)).toBeVisible();

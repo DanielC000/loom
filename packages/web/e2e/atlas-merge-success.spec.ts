@@ -152,37 +152,6 @@ test.describe("one-click merge success is acknowledged (card c2182f9d)", () => {
     await expect(bareMergedLine).toHaveCount(0);
     expectMergePost(hits, 2, seeded.wkr.sessionId);
   });
-
-  test("switch OFF: the classic Review queue card names a subject the same way", async ({ page, loomDaemon }) => {
-    test.setTimeout(150_000);
-    const seeded = await seedPendingReview(loomDaemon);
-    const subject = `fix(web): land merge-ok-${seeded.short}`;
-    let reply: Record<string, unknown> = { ...MERGED_OK };
-    const hits = await interceptMerge(page, () => reply);
-
-    await pinProject(page, seeded.projectId);
-    await page.goto(loomDaemon.baseURL + "/overview");
-
-    const card = page.locator("main div")
-      .filter({ hasText: `w:${seeded.short}` }).filter({ hasText: "Approve & merge" }).last();
-    const goButton = card.getByRole("button", { name: "Approve & merge" });
-    await expect(goButton).toBeVisible();
-
-    const bareMergedLine = card.getByText("merged", { exact: true });
-    const mergedWithSubjectLine = card.getByText(`merged — ${subject}`, { exact: true });
-
-    await expect(bareMergedLine).toHaveCount(0);
-    await goButton.click();
-    await expect(bareMergedLine).toBeVisible();
-    await expect(mergedWithSubjectLine).toHaveCount(0);
-    expectMergePost(hits, 1, seeded.wkr.sessionId);
-
-    reply = { merged: true, pending: false, commitSubject: subject };
-    await goButton.click();
-    await expect(mergedWithSubjectLine).toBeVisible();
-    await expect(bareMergedLine).toHaveCount(0);
-    expectMergePost(hits, 2, seeded.wkr.sessionId);
-  });
   test("switch ON: the Atlas band row confirms a merge, and still reads both other outcomes", async ({ page, loomDaemon }) => {
     // One node load and three merge round-trips is past the 30s default.
     test.setTimeout(150_000);
@@ -246,70 +215,5 @@ test.describe("one-click merge success is acknowledged (card c2182f9d)", () => {
     await expect(mergedLine).toHaveCount(0);
     await expect(rejectedLine).toHaveCount(0);
     expectMergePost(hits, 3, seeded.wkr.sessionId);
-  });
-
-  test("switch OFF: the classic Review queue card confirms the same merge, and gains no band row", async ({ page, loomDaemon }) => {
-    test.setTimeout(150_000);
-    const seeded = await seedPendingReview(loomDaemon);
-    const rejectedReason = `gate-red-${seeded.short}`;
-    const pendingReason = `gate-running-${seeded.short}`;
-    let reply: Record<string, unknown> = { ...MERGED_OK };
-    const hits = await interceptMerge(page, () => reply);
-
-    // Deliberately NO seedAtlasOn — off is the default, and seeding it off would re-clear the key on
-    // every navigation for a reason unrelated to the app (measured on P1-0).
-    await pinProject(page, seeded.projectId);
-    await page.goto(loomDaemon.baseURL + "/overview");
-
-    // ── PRESENCE: classic renders THIS worker as the rich Review-queue card it always did. The
-    //    `w:<short>` label is this worker's own (the seeded id's first 8 chars), so the card the rest
-    //    of this leg talks about is unambiguously ours on a shared daemon.
-    await expect(page.locator("main").getByText(`w:${seeded.short}`, { exact: true })).toBeVisible();
-    // The card is the deepest element holding BOTH this worker's id label and a merge button: inside
-    // the Panel, the identity row has the id without the buttons and the action row has the buttons
-    // without the id, so nothing smaller satisfies both. Locators come back in DOCUMENT order and an
-    // ancestor precedes its descendants, so `.last()` is that deepest match — `.first()` would be
-    // `main`, which on a shared daemon could pair my id with a sibling spec's button.
-    const card = page.locator("main div")
-      .filter({ hasText: `w:${seeded.short}` }).filter({ hasText: "Approve & merge" }).last();
-    const goButton = card.getByRole("button", { name: "Approve & merge" });
-    await expect(goButton).toBeVisible();
-
-    const mergedLine = card.getByText("merged", { exact: true });
-    const rejectedLine = card.getByText(`rejected — ${rejectedReason}`, { exact: true });
-    const pendingLine = card.getByText(`still running — ${pendingReason}`, { exact: true });
-
-    // ── BEFORE / AFTER, same shape as the Atlas leg. This is the half that proves the success branch
-    //    reached the CLASSIC rendering too, from the one shared reader rather than a second copy.
-    await expect(mergedLine).toHaveCount(0);
-    expect(hits).toHaveLength(0);
-    await goButton.click();
-    await expect(mergedLine).toBeVisible();
-    await expect(rejectedLine).toHaveCount(0);
-    await expect(pendingLine).toHaveCount(0);
-    expectMergePost(hits, 1, seeded.wkr.sessionId);
-
-    // ── BOTH OTHER BRANCHES, unchanged here as well — the classic card reads the identical component,
-    //    so a mis-ordered insertion would surface on this surface too and is asserted on it.
-    reply = { merged: false, pending: false, reason: rejectedReason };
-    await goButton.click();
-    await expect(rejectedLine).toBeVisible();
-    await expect(mergedLine).toHaveCount(0);
-    expectMergePost(hits, 2, seeded.wkr.sessionId);
-
-    reply = { merged: null, pending: true, reason: pendingReason };
-    await goButton.click();
-    await expect(pendingLine).toBeVisible();
-    await expect(mergedLine).toHaveCount(0);
-    await expect(rejectedLine).toHaveCount(0);
-    expectMergePost(hits, 3, seeded.wkr.sessionId);
-
-    // ── THE OFF POLARITY IS STILL STRUCTURAL. The shared success branch reaching the classic card
-    //    must not have brought the compact band action — or the band row shape — with it. This is
-    //    scoped to what card c2968651 built, not to "no merge button in classic", which has always
-    //    been false (that button is the one clicked above).
-    await expect(page.getByTestId(`atlas-band-merge-${seeded.wkr.sessionId}`)).toHaveCount(0);
-    await expect(page.getByTestId(`atlas-band-merge-go-${seeded.wkr.sessionId}`)).toHaveCount(0);
-    await expect(page.locator(`[data-testid="attention-row"][data-session-id="${seeded.wkr.sessionId}"]`)).toHaveCount(0);
   });
 });

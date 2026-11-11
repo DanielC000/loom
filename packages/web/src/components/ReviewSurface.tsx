@@ -1,10 +1,8 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { errorText } from "../lib/loopbackCredential";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api, workerDiffQuery } from "../lib/api";
-import { Panel, Button, SectionLabel, Chip, Meter, Dot, Badge } from "./ui";
+import { Panel, Button, SectionLabel, Chip, Dot, Badge } from "./ui";
 import { FileDiffBlock, FileOverviewRow } from "./Diff";
 import { analyzeDiff, defaultOpenPaths, riskOrder, riskTone } from "../lib/diff";
 import { color, font, tone, fs, radius } from "../theme";
@@ -13,21 +11,15 @@ import { color, font, tone, fs, radius } from "../theme";
 // branch diff is parsed CLIENT-SIDE (lib/diff) into an auto-summary, a risk-ranked file overview, and
 // per-file collapsible hunks, with one-step Approve & merge / Request-changes wired to the EXISTING
 // daemon merge gate (fail-closed build gate → squash-merge) and the sendInput turn surface. Reached
-// from Mission Control's review queue. The merge logic itself is unchanged — this only surfaces it.
+// from the review queue. The merge logic itself is unchanged — this only surfaces it.
 //
-// It lives in components/ rather than pages/ because it has TWO mounts since card 525c8ad9: the
-// `/review/:workerId` page under the classic shell, and — under Atlas — the worker node's Diff pane,
-// which `nav.tsx` already declares that same URL to be. Keeping it in pages/ and importing it from the
+// It lives in components/ rather than pages/ because it is the worker session node's Diff pane
+// (card 525c8ad9), which `/review/:workerId` renders. Keeping it in pages/ and importing it from the
 // node would have made a page↔component cycle.
 //
 // Every caller must key it on the worker id, so result / note / openFiles never carry across a
 // review→review switch (latent stale-banner / lost-open-by-default guard — card 496fe90e).
-export function ReviewSurface({ workerId, embedded = false }: {
-  workerId: string;
-  /** Drop this surface's OWN identity header — the Atlas frame's crumb and `<h1>` already carry it. */
-  embedded?: boolean;
-}) {
-  const navigate = useNavigate();
+export function ReviewSurface({ workerId }: { workerId: string }) {
   const qc = useQueryClient();
   const [note, setNote] = useState("");
   const [result, setResult] = useState<string | null>(null);
@@ -52,9 +44,6 @@ export function ReviewSurface({ workerId, embedded = false }: {
     mutationFn: () => api.sendInput(workerId, `[loom:review] Changes requested before merge:\n${note}`),
     onSuccess: (r) => { setResult(r.delivered ? "changes requested (sent to worker)" : "worker not live — couldn't send"); setNote(""); },
   });
-
-  const ctx = worker?.ctxInputTokens ?? 0;
-  const window = contextWindowForModel(worker?.model);
 
   // Parse + risk-rank once per diff payload. Files for the OVERVIEW are sorted risk-desc then by churn
   // so the load-bearing changes sit at the top; the DIFF blocks below keep git's original file order
@@ -89,33 +78,13 @@ export function ReviewSurface({ workerId, embedded = false }: {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* Header. EMBEDDED (the Atlas worker node's Diff pane) drops the `← back` / MERGE REQUEST /
-          `worker w:…` identity run — the frame's crumb trail and node head state all three already,
-          and the node head carries the same context meter. The branch + diffstat chips stay: they are
-          about THIS REVIEW, not about which session you are looking at, so the pane keeps them. */}
-      {embedded ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="muted" />}
-          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="muted" />}
-        </div>
-      ) : (
-        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <Button onClick={() => navigate(-1)}>← back</Button>
-          <span style={{ fontFamily: font.ui, fontSize: fs.body, color: color.text }}>Merge request</span>
-          <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text2 }}>
-            worker w:{workerId.slice(0, 8)}{worker?.taskId ? ` · task ${worker.taskId.slice(0, 8)}` : ""}
-          </span>
-          <span style={{ flex: 1 }} />
-          {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="muted" />}
-          {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="muted" />}
-          {ctx > 0 && (
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <Meter value={ctx} max={window} tone={ctx > window * CONTEXT_WARN_RATIO ? "attn" : "accent"} width={60} />
-              <span style={{ fontFamily: font.mono, fontSize: fs.mono, color: color.text3 }}>{(ctx / 1000).toFixed(1)}k ctx</span>
-            </span>
-          )}
-        </div>
-      )}
+      {/* No identity run (`← back` / MERGE REQUEST / `worker w:…`): the frame's crumb trail and node
+          head state all three, and the node head carries the context meter. The branch + diffstat chips
+          stay: they are about THIS REVIEW, not about which session you are looking at. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {worker?.branch && <Chip label="branch" value={`${worker.branch} → main`} tone="muted" />}
+        {diff.data && <Chip value={`${diff.data.filesChanged} files · +${diff.data.insertions} −${diff.data.deletions}`} tone="muted" />}
+      </div>
 
       {!workerId && <Panel><span style={{ color: color.text3 }}>No worker.</span></Panel>}
       {workerId && diff.isError && <Panel><span style={{ color: color.danger, fontSize: fs.sm }}>No diff (worker has no branch, or it was merged/removed).</span></Panel>}

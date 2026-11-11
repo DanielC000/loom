@@ -71,22 +71,19 @@ lands exactly where a sibling session row's label does. Deliberately not a link:
 already the way into the project, and a second one would be the page row this card just removed
 wearing a different label.
 
-### ⚠️ `/overview` now has NO Atlas navigation, and that is a loose end
+### `/overview` — resolved by card `acbb6df6`: it redirects to the project node
 
-It is the one destination left in neither bucket: not a node tab (the project node's own Overview tab
-is a different component), not a tree row, not retired. Its address still routes and still renders
-its own page under **both** shells, and `SetupWizard` still lands a freshly-created project on it —
-so nothing is broken, but a reader reaches it only by URL.
+This card left `/overview` as a loose end: in neither bucket (not a node tab, not a tree row, not
+retired), still rendering the classic page by URL only, with the retirement deferred to the owner
+because it overruled `@decision fd99b2d7`.
 
-`atlas-tree.spec.ts` names this as a sixth placement, `PAGE_ONLY_DESTINATIONS`, spelled out one entry
-at a time rather than derived from "whatever fell out of the tree" — so a destination that falls out
-by accident still fails that spec's partition.
-
-**The tidier end state would be a retirement onto the project node**, the same shape card `5afd71bd`
-gave Mission Control and `/projects`: the classic `/overview`'s panes are all on the project node now
-(board → the home tab's embed, terminals → Sessions, agents → Agents, activity → Runs). That is NOT
-done here. `@decision fd99b2d7` forbids re-pointing `/overview` inside `AtlasShell`, and overruling it
-is an IA call of its own rather than a side effect of deleting a tree row. It wants its own card.
+The owner gave that sign-off in chat on 2026-11-11 ("before the push I want to remove the old UI"),
+and card `acbb6df6` acted on it: the classic Overview page is deleted and `/overview` is a plain
+`LEGACY_REDIRECTS` row to `/project`, query preserved. Its panes are all on the project node: the
+board is the Board tab (the home tab's embed went with card `269f46ef`, on the owner's own "Remove
+Board."), terminals are Sessions, agents are Agents, activity is Runs. The one co-location change:
+classic Overview showed Terminals, Board and Fleet on one page; they are now three tabs. `SetupWizard`'s
+"Spawn the Orchestrator" step now lands on the Agents node instead.
 
 ## C. The Workspace node has one home tab
 
@@ -104,8 +101,8 @@ appended section, not restated here.
   do not make it unconditional — both halves of its rule are asserted in
   `atlas-tree-hierarchy.spec.ts`, and each is what keeps the other honest.
 - **Do not make `.loom-atlas-idle` a control.** It is the branch's empty state, not a destination.
-- **Do not retire `/overview` as a tidy-up.** See part B above: it is a real IA decision that
-  contradicts a standing `@decision`, and it needs its own card and the owner's eyes.
+- **Do not bring a page back at `/overview`.** The retirement this record deferred was made with the
+  owner's sign-off (card `acbb6df6`, part B above); the address is a redirect to the project node.
 - **Do not delete the tab-overflow spec or the fold machinery it covers because no desktop width
   folds any more.** Part A's 35px/one-line measurement is at 1280/1440/1920 only — see `d4350286`'s
   record for the widths (900 and below with the rail present; 600 and below once it is a drawer) where

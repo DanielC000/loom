@@ -83,7 +83,8 @@ test.describe("worker-diff query freshness window (client-side burst fix)", () =
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ filesChanged: 1, insertions: 2, deletions: 1, patch, uncommitted: false }),
+        // filesChanged follows the patch, so the Diff tab's count (which reads it) moves when the patch does.
+        body: JSON.stringify({ filesChanged: (patch.match(/^diff --git /gm) ?? []).length, insertions: 2, deletions: 1, patch, uncommitted: false }),
       });
     });
     const trace: string[] = [];
@@ -94,18 +95,20 @@ test.describe("worker-diff query freshness window (client-side burst fix)", () =
     // logged rate covers the app's own load + navigation phase and nothing else — otherwise boot time
     // would dilute it differently on every run and the before/after numbers wouldn't be comparable.
     const startedAt = performance.now();
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/session/${wkr.sessionId}`);
 
-    // MOUNT 1 — Overview's Attention block renders the worker as a Review-queue card, which fetches and
-    // renders the diff. This is the one request the whole scenario is allowed to make.
-    const reviewBtn = page.getByRole("button", { name: "Review →" });
+    // MOUNT 1 — the worker's session node counts its Diff tab off the same worker-diff query. This is the
+    // one request the whole scenario is allowed to make. (The classic Overview's Review-queue card was this
+    // first consumer until card acbb6df6 deleted that page; the session node is the same shape of mount.)
+    const reviewBtn = page.getByTestId("atlas-tab-diff");
     await expect(reviewBtn).toBeVisible();
-    const card = page.locator("main").getByText("1 file", { exact: true });
-    await expect(card).toBeVisible();
-    mark("overview-mount");
+    const card = reviewBtn.locator(".loom-atlas-tabcount");
+    await expect(card).toHaveText("1");
+    mark("node-mount");
 
-    // MOUNT 2 — client-side navigate into the full ReviewPanel. Same query key, fresh consumer, fresh
-    // mount. Pre-fix this refetched immediately; the header chip proves the panel rendered the diff.
+    // MOUNT 2 — client-side navigate into the Diff tab, which IS /review/:workerId and remounts the node
+    // around the full review surface. Same query key, fresh consumer, fresh mount. Pre-fix this refetched
+    // immediately; the header chip proves the panel rendered the diff.
     const panelChip = page.locator("main").getByText(/files . \+2/);
     await reviewBtn.click();
     await expect(page).toHaveURL(/\/review\//);
@@ -124,9 +127,8 @@ test.describe("worker-diff query freshness window (client-side burst fix)", () =
     await expect(card).toBeVisible();
     mark("back");
 
-    // THE MEASUREMENT. Scenario: land on Overview, open the review, back, forward, back — 5 mounts of a
-    // worker-diff consumer, navigating as fast as the app settles, with no dwell long enough for the
-    // Review-queue cards' own 8s refetchInterval to fire. Pre-fix (staleTime 0) the untuned consumers
+    // THE MEASUREMENT. Scenario: land on the session node, open the Diff tab, back, forward, back — 5 mounts
+    // of a worker-diff consumer, navigating as fast as the app settles. Pre-fix (staleTime 0) the untuned consumers
     // refetch on every mount; with the window the whole scenario costs 1 request.
     const elapsedMs = performance.now() - startedAt;
     const perMin = (diffRequests / (elapsedMs / 60_000)).toFixed(1);
@@ -138,7 +140,7 @@ test.describe("worker-diff query freshness window (client-side burst fix)", () =
     expect(diffRequests).toBe(1);
 
     // ── No correctness regression: the window delays a refetch, it does not suppress one. ──────────────
-    // Dwell on the ReviewPanel (which has NO refetchInterval, unlike the Review-queue cards) until the
+    // Dwell on the review surface (which has NO refetchInterval) until the
     // window has elapsed, with the worktree "changed" underneath. Then remount → the refetch fires and the
     // new diff renders. This is what bounds the staleness to the window rather than forever.
     await page.goForward();
@@ -148,7 +150,7 @@ test.describe("worker-diff query freshness window (client-side burst fix)", () =
     const beforeRefetch = diffRequests;
 
     await page.goBack();
-    await expect(page.locator("main").getByText("2 files", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("atlas-tab-diff").locator(".loom-atlas-tabcount")).toHaveText("2");
     expect(diffRequests).toBeGreaterThan(beforeRefetch);
   });
 });

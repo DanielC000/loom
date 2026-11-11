@@ -13,8 +13,9 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { profileRoleBindsAsPlainSession } from "@loom/shared";
 import { api } from "../lib/api";
-import { AgentEditor, AgentForm, UnsavedCloseBar, useAgentWrites } from "./agentEditor";
+import { AgentEditor, AgentForm, PLAIN_BIND_GROUP_LABEL, UnsavedCloseBar, useAgentWrites } from "./agentEditor";
 import { SpawnControls } from "./SpawnControls";
 import { RepinGrantsControl } from "./RepinGrants";
 import { Button, Panel, SectionLabel, Select, StatusPill } from "./ui";
@@ -113,6 +114,22 @@ function AgentEditButton({ entry, onEdit }: { entry: RosterAgent; onEdit: () => 
   );
 }
 
+/** The amber △ for a bound profile whose role the bind would NOT confer. Drawn by BOTH the compact
+ *  roster row and the node card, so the flag reads the same wherever the role claim is made. */
+function PlainBindMark({ entry, inline }: { entry: RosterAgent; inline?: boolean }) {
+  // The badge states the BOUND PROFILE's role — but a profile confers only manager / worker / assistant,
+  // so a card carrying any other role (setup, operator, platform, …) advertises powers the spawn silently
+  // drops. Flag it where the claim is made (card 57deed24, re-homed here from the deleted Projects list by
+  // card acbb6df6): an amber △ beside the badge, with the editor note's own wording as its tooltip.
+  // `profileRoleBindsAsPlainSession` answers CONFERRAL — never `isDevLayerRole`, which answers picker
+  // VISIBILITY and is false for setup / operator / workspace-auditor (the c40489c6 trap).
+  if (!profileRoleBindsAsPlainSession(entry.role)) return null;
+  return (
+    <span data-testid={`atlas-agent-plain-bind-${entry.agent.id}`} role="img" aria-label={PLAIN_BIND_GROUP_LABEL}
+      title={PLAIN_BIND_GROUP_LABEL} style={{ color: color.attnText, marginRight: inline ? 4 : undefined }}>△</span>
+  );
+}
+
 /** Name, rig badge and live pill — the identity half of every roster mount, so a row in a 250px
  *  band column and a card on the node page introduce the agent the same way. */
 function AgentIdentity({ entry }: { entry: RosterAgent }) {
@@ -121,6 +138,7 @@ function AgentIdentity({ entry }: { entry: RosterAgent }) {
   return (
     <>
       <div className="loom-agentrow-head">
+        <PlainBindMark entry={entry} />
         <RoleBadge role={entry.role} />
         <strong className="loom-agentrow-name" title={entry.agent.name}>{entry.agent.name}</strong>
         <span style={{ flex: 1 }} />
@@ -211,7 +229,7 @@ export function AgentRosterCard({ entry, onEdit, dispatched = false, cron = [], 
           {/* The tier is dropped when it only repeats the label — "Companion · companion" states
               one fact twice, which is the defect this whole card is about, at 9.5px. */}
           <span className="loom-baycard-role" style={{ color: roleColor(entry.role) }}>
-            {role.label}
+            <PlainBindMark entry={entry} inline />{role.label}
             {role.tierLabel.toLowerCase() !== role.label.toLowerCase() &&
               <span className="loom-baycard-tier"> · {role.tierLabel}</span>}
           </span>

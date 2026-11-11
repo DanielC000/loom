@@ -68,10 +68,13 @@ function computeFit(a: {
   return greedy(room - activeW - a.rowGap, a.activeIdx);
 }
 
-export function NodeTabs({ tabs, active, hrefFor }: {
+export function NodeTabs({ tabs, active, hrefFor, label = "Node tabs" }: {
   tabs: NodeTab[];
   active: string;
   hrefFor: (key: string) => string;
+  /** The tablist's accessible name. A row NESTED inside a node's own tab row (the companion's
+   *  Chat/Manage/Terminal) must name itself, or the page carries two tablists both called "Node tabs". */
+  label?: string;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const rowRef = useRef<HTMLDivElement>(null);
@@ -252,7 +255,7 @@ export function NodeTabs({ tabs, active, hrefFor }: {
   return (
     <div className="loom-atlas-tabs" data-testid="atlas-node-tabs" ref={wrapRef}
       data-nt-measuring={measuring ? "" : undefined}>
-      <div className="loom-atlas-tabrow" role="tablist" aria-label="Node tabs" ref={rowRef}>
+      <div className="loom-atlas-tabrow" role="tablist" aria-label={label} ref={rowRef}>
         {rowTabs.map((t) => (
           <Link key={t.key} to={hrefFor(t.key)} role="tab" aria-selected={t.key === active}
             data-testid={`atlas-tab-${t.key}`} data-nt-chip=""
@@ -774,7 +777,7 @@ export function BandFoot({ children }: { children: ReactNode }) {
 export type AvailableUsage = Extract<UsageLimitsStatus, { available: true }>;
 
 /** The real plan headroom — the daemon's cached OAuth poll, read through the same `["usageLimits"]`
- *  entry components/fleet.tsx's PlanUsageStrip fills. Every failure mode is a muted line, never an
+ *  entry the shell's orchestration chip pop-over reads (components/fleetControls.tsx). Every failure mode is a muted line, never an
  *  error state: the figure is informational and an unavailable one must not look like a fault. */
 export function PlanUsageDetail({ usage }: { usage: AvailableUsage | null }) {
   if (!usage) return <BandEmpty>Plan usage is unavailable on this daemon.</BandEmpty>;

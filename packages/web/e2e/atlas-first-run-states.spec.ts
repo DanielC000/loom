@@ -66,7 +66,6 @@ const credentialBanner = (page: Page) => page.getByTestId("credential-banner");
 const welcomeDialog = (page: Page) => page.getByRole("dialog", { name: "Welcome to Loom" });
 
 const SHELLS = [
-  { name: "switch OFF", atlas: false },
   { name: "switch ON", atlas: true },
 ] as const;
 

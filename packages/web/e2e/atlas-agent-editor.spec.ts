@@ -293,7 +293,7 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     expect(await page.evaluate((k) => localStorage.getItem(k), PROJECT_KEY)).toBe(other.project.id);
   });
 
-  test("the go-live guard holds a STARTING manager on BOTH shells, and releases it", async ({ page, loomDaemon }) => {
+  test("the go-live guard holds a STARTING manager, and releases it", async ({ page, loomDaemon }) => {
     test.setTimeout(120_000);
     const seeded = await seedRoster(loomDaemon);
     // A manager session at `starting` — the state the old `processState === "live"` guard was blind to.
@@ -307,37 +307,9 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     const nativeDialogs: string[] = [];
     page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });
 
-    // ── CLASSIC SHELL first, deliberately: the defect was carried verbatim from Overview's own
-    //    AgentControl, so the fix has to be visible THERE, not only in Atlas.
+    // The classic Overview's spawn cards were the other host of this guard until card acbb6df6 deleted
+    // that page; the Agents node is now the only one.
     await pinProject(page, seeded.project.id);
-    await page.goto(loomDaemon.baseURL + "/overview");
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-
-    // Scoped to each agent's own spawn card by id (`agent-control-<id>`, added by this card so the
-    // classic leg can be addressed at all) — a text filter over unclassed Panels resolves whichever
-    // ancestors happen to contain the name too.
-    const classicCard = (agentId: string) => page.getByTestId(`agent-control-${agentId}`);
-    const mgrCard = classicCard(seeded.manager.id);
-    await expect(mgrCard).toBeVisible();
-    // THE GUARD: a held, disabled button that says what it is actually holding — never "Live" over a
-    // session that has not reached live.
-    const held = mgrCard.getByRole("button", { name: "Starting…" });
-    await expect(held).toBeVisible();
-    await expect(held).toBeDisabled();
-    await expect(spawnIn(mgrCard)).toHaveCount(0);
-
-    // THE CONTRAST CASE, same page, same moment: the PLAIN agent's spawn is still enabled AND still
-    // reaches the network. Without it, "the guard fired" is equally satisfied by a page that lost every
-    // control — and it is also the positive control for the route seam, so the manager's missing spawn
-    // above is an absence this instrument could have seen.
-    const plainSpawn = spawnIn(classicCard(seeded.plain.id));
-    await expect(plainSpawn).toBeEnabled();
-    await plainSpawn.click();
-    await expect.poll(() => spawns.paths.length, { message: "the contrast spawn never reached the network" }).toBe(1);
-    expect(spawns.paths[0]).toBe(`/api/agents/${seeded.plain.id}/sessions`);
-
-    // ── THE ATLAS SHELL, same seeded state: one predicate, so both must agree.
     await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + "/agents");
     const atlasHeld = page.getByTestId(`atlas-agent-live-${seeded.manager.id}`);
@@ -348,8 +320,15 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     await expect(spawnIn(mgrAtlasCard)).toHaveCount(0);
     // The Stop stays reachable: a manager stuck mid-startup must still be stoppable from here.
     await expect(page.getByTestId(`atlas-agent-stop-${seeded.manager.id}`)).toBeVisible();
-    // Contrast again, on this shell's own roster.
-    await expect(spawnIn(page.getByTestId(`atlas-agent-card-${seeded.plain.id}`))).toBeEnabled();
+    // THE CONTRAST CASE, same page, same moment: the PLAIN agent's spawn is still enabled AND still
+    // reaches the network. Without it, "the guard fired" is equally satisfied by a page that lost every
+    // control — and it is also the positive control for the route seam, so the manager's missing spawn
+    // above is an absence this instrument could have seen.
+    const plainSpawn = spawnIn(page.getByTestId(`atlas-agent-card-${seeded.plain.id}`));
+    await expect(plainSpawn).toBeEnabled();
+    await plainSpawn.click();
+    await expect.poll(() => spawns.paths.length, { message: "the contrast spawn never reached the network" }).toBe(1);
+    expect(spawns.paths[0]).toBe(`/api/agents/${seeded.plain.id}/sessions`);
     // And the pill does not call a starting session live. Scoped to the identity HEAD, not the whole
     // card — the held button below it also says "Starting…", so a card-wide text match would pass on
     // the button alone and prove nothing about the pill. The head is `.loom-baycard-head` since card
@@ -366,34 +345,6 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     await page.reload();
     await expect(spawnIn(page.getByTestId(`atlas-agent-card-${seeded.manager.id}`))).toBeVisible();
     await expect(page.getByTestId(`atlas-agent-live-${seeded.manager.id}`)).toHaveCount(0);
-  });
-
-  test("switch OFF: nothing this card built reached the classic shell, and Projects still hosts the editor", async ({ page, loomDaemon }) => {
-    const seeded = await seedRoster(loomDaemon);
-    // Deliberately NO seedAtlasOn — off is the default, and seeding it off would re-clear the key on
-    // every navigation for a reason unrelated to the app (measured on P1-0).
-    await pinProject(page, seeded.project.id);
-    await page.goto(loomDaemon.baseURL + "/overview");
-
-    // PRESENCE first: the classic shell really is what rendered.
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    // …and none of this card's Atlas surfaces exist in it.
-    await expect(page.getByTestId("atlas-agent-editor")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-agents-new")).toHaveCount(0);
-    await expect(page.locator(".loom-atlas-plus, .loom-atlas-noderow")).toHaveCount(0);
-    await expect(page.locator('[data-testid^="atlas-project-quickspawn-"]')).toHaveCount(0);
-
-    // THE ORIGINAL HOST IS UNTOUCHED — the "one implementation" half of the claim. The editor Projects
-    // mounts is the very component the Atlas dialog mounts, so its testids are the same ones.
-    await page.goto(loomDaemon.baseURL + "/projects");
-    await page.getByText(seeded.plain.name, { exact: true }).click();
-    const editor = page.getByTestId(`agent-editor-${seeded.plain.id}`);
-    await expect(editor).toBeVisible();
-    await expect(page.getByTestId(`agent-prompt-${seeded.plain.id}`)).toBeVisible();
-    await expect(page.getByTestId(`agent-delete-${seeded.plain.id}`)).toBeVisible();
-    // And it is the PAGE's pane, not a dialog — the frame is the host's call, the editor is shared.
-    await expect(page.getByTestId("atlas-agent-editor")).toHaveCount(0);
   });
 
   // Card 5e628a76: the dialog is near full-viewport and the prompt field takes most of its height,

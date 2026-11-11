@@ -157,46 +157,19 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
         body: JSON.stringify({ archiveSessions: [deadMgr.sessionId, deadWorker.sessionId] }),
       });
 
-      // ── MISSION CONTROL FIRST, with the switch still OFF. Measured, not assumed: the card's DoD says
-      //    the Atlas entry must navigate "where Mission Control's did", and that destination turns out to
-      //    be NOWHERE — a muted card's expand is a no-op and the card holds no link. Reading it here is
-      //    what makes the comparison below a measurement instead of a guess.
-      await page.goto(loomDaemon.baseURL + "/");
-      await expect(page.locator(".loom-rail"), "the classic shell did not render").toBeVisible();
-      const mcStrip = page.getByTestId("inactive-fleet");
-      await expect(mcStrip, "Mission Control lost its inactive-projects strip").toHaveCount(1);
-      // Collapsed on Mission Control — the strip sits under the live fleet grid there, so it must not
-      // push it off the fold. That is the `defaultOpen`-off half of the shared component's contract.
-      await expect(mcStrip, "Mission Control's inactive strip is no longer collapsed on mount")
-        .toHaveAttribute("aria-expanded", "false");
-      await expect(page.getByTestId("inactive-fleet-list"),
-        "Mission Control's inactive strip rendered its cards before being opened").toHaveCount(0);
-      await mcStrip.click();
-      const mcCard = cardFor(page.getByTestId("inactive-fleet-list"), dead.name);
-      await expect(mcCard, "Mission Control's inactive strip does not list the finished-wave project")
-        .toHaveCount(1);
-      const mcSurface = await entrySurface(mcCard);
-      // POSITIVE CONTROL on the href half, on the same page at the same moment. Scoped to `body`, NOT
-      // `main`: measured here, Mission Control's whole <main> carries ZERO anchors — every affordance on
-      // it is a button or a programmatic navigate() — so a main-scoped control would itself come back
-      // empty and prove nothing. The rail's links are outside <main>, which is why body is the scope.
-      expect(await hrefsIn(page.locator("body")),
-        "the href collector found no links anywhere on Mission Control, so the card's empty list proves nothing")
-        .not.toHaveLength(0);
-      // POSITIVE CONTROL on the CARD-scoped collector itself: it resolved a real element and read a real
-      // control off it, so the empty href list beside it is an absence rather than a missed card.
-      expect(mcSurface.buttons,
-        "the card-scoped collector read no control at all, so its empty href list proves nothing")
-        .not.toHaveLength(0);
+      // Mission Control, whose inactive strip this tier replaced, was deleted with the classic shell (card
+      // acbb6df6). Its entry's surface was MEASURED here while it existed: a muted FleetCard holding no
+      // link and one inert Expand control. That measurement is now the literal below.
+      const MISSION_CONTROL_SURFACE = { hrefs: [] as string[], buttons: ["Expand"] };
 
-      // ── NOW THE ATLAS SIDE. ──
+      // ── THE ATLAS SIDE. ──
       await seedAtlasOn(page);
       await openReplayTab(page, loomDaemon.baseURL);
       const section = inactiveSection(page);
       const strip = section.getByTestId("inactive-fleet");
       await expect(strip, "the Replay tab has no inactive-projects tier").toHaveCount(1);
-      // OPEN by default here, unlike Mission Control: nothing sits above it on a tab a reader navigated
-      // to deliberately, so the collapse that protects MC's live fleet is pure friction.
+      // OPEN by default here, unlike Mission Control's was: nothing sits above it on a tab a reader
+      // navigated to deliberately, so a collapse would be pure friction.
       await expect(strip, "the Replay tab's inactive tier is collapsed, so its content needs a second click")
         .toHaveAttribute("aria-expanded", "true");
       const list = section.getByTestId("inactive-fleet-list");
@@ -214,13 +187,12 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
         "a project with a live session is listed as inactive").toHaveCount(0);
       expect(aliveMgr.sessionId, "the live manager was never seeded").toBeTruthy();
 
-      // ⭐ THE EQUIVALENCE, both sides MEASURED rather than assumed. The card's DoD asks that the entry
-      // "navigate where Mission Control's did", and the measurement above says that destination is
-      // NOWHERE: a muted FleetCard holds no link, and its one control is an inert Expand. So the claim
+      // ⭐ THE EQUIVALENCE. The card's DoD asks that the entry "navigate where Mission Control's did", and
+      // that destination was measured to be NOWHERE: a muted FleetCard holds no link, and its one control is an inert Expand. So the claim
       // is an equality of the whole interactive surface — links AND controls — which is falsifiable in
       // both directions: an added link or a lost Expand on this side both break it.
       expect(await entrySurface(atlasCard),
-        "the Atlas inactive entry's links/controls differ from Mission Control's").toEqual(mcSurface);
+        "the Atlas inactive entry's links/controls differ from Mission Control's").toEqual(MISSION_CONTROL_SURFACE);
       // POSITIVE CONTROL on the href half here too — and on THIS surface `main` is the right scope,
       // because the Atlas content column genuinely does carry anchors (tab links, band exits).
       expect(await hrefsIn(page.locator("main")),
@@ -349,53 +321,6 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
           .toHaveText(`${FIT_CHECK_KINDS.length}/${FIT_CHECK_KINDS.length}`);
         await expectTimestampInsideRow(wave, FIT_CHECK_KINDS.length, `Atlas Replay tab @${width}px`);
       }
-    });
-
-  test("switch OFF: Mission Control keeps both surfaces, and the Replay tab's address renders nothing",
-    async ({ page, loomDaemon }) => {
-      test.setTimeout(180_000);
-      const dead = await loomDaemon.createProject(`atlas-replay-off-${Date.now()}`);
-      const deadMgr = await loomDaemon.seedLiveSession({ project: dead, role: "manager", agentName: "OffMgr" });
-      await loomDaemon.seedOrchestrationEvent({ managerSessionId: deadMgr.sessionId, kind: "merge_done" });
-      await fetch(`${loomDaemon.baseURL}/internal/test/seed`, {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ archiveSessions: [deadMgr.sessionId] }),
-      });
-      // No seedAtlasOn: OFF is the default.
-
-      await page.goto(loomDaemon.baseURL + "/");
-      await expect(page.locator(".loom-rail"), "the classic shell did not render").toBeVisible();
-      await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-
-      // Wave replay is still Mission Control's own collapsed section, with its own toggle — unchanged by
-      // the component being shared with an Atlas mount. (The gated-poll half of that contract is
-      // mission-control-wave-replay.spec.ts's claim, not re-made here.)
-      const toggle = page.locator("main").getByRole("button", { name: /Wave replay/i });
-      await expect(toggle, "Mission Control lost its Wave replay section").toBeVisible();
-      await expect(toggle, "Mission Control's Wave replay is no longer collapsed by default")
-        .toHaveAttribute("aria-expanded", "false");
-      await expect(page.getByTestId("audit-replay"),
-        "Mission Control mounted the replay panel while its section was collapsed").toHaveCount(0);
-      await toggle.click();
-      await expect(page.getByTestId("audit-replay"),
-        "expanding Mission Control's Wave replay mounted no panel").toHaveCount(1);
-
-      // And the inactive tier is still there, still collapsed, under the fleet.
-      const strip = page.getByTestId("inactive-fleet");
-      await expect(strip, "Mission Control lost its inactive-projects strip").toHaveCount(1);
-      await expect(strip).toHaveAttribute("aria-expanded", "false");
-      await strip.click();
-      await expect(cardFor(page.getByTestId("inactive-fleet-list"), dead.name),
-        "Mission Control's inactive strip no longer lists a finished-wave project").toHaveCount(1);
-
-      // The Replay tab is an Atlas-only reading of an Atlas-only node: LegacyShell mounts no ATLAS_HOMES
-      // route, so under the classic shell its address renders nothing rather than a second replay surface.
-      await page.goto(loomDaemon.baseURL + REPLAY_TAB_URL);
-      await expect(page.locator(".loom-rail")).toBeVisible();
-      await expect(page.locator("main"),
-        "the Atlas-only Replay tab address rendered something under the classic shell").toBeEmpty();
-      await expect(page.locator("[class*='loom-atlas']"),
-        "the Replay tab's address mounted an Atlas element with the switch off").toHaveCount(0);
     });
 });
 

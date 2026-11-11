@@ -101,7 +101,6 @@ const updateBanner = (page: Page) =>
   page.locator('[role="status"]').filter({ hasText: "A new Loom release is available" });
 
 const SHELLS = [
-  { name: "switch OFF", atlas: false },
   { name: "switch ON", atlas: true },
 ] as const;
 
@@ -372,40 +371,3 @@ for (const shell of SHELLS) {
     });
   });
 }
-
-// ── The remount, asserted rather than described ───────────────────────────────────────────────────
-// The property the P1-0 Code Review found and this card's triage note records: the chrome is NOT a single
-// root mount that both shells share. Toggling the switch swaps the whole shell, so the chrome subtree is
-// destroyed and rebuilt. Proven by DOM IDENTITY, not by appearance: a marker set on the live banner node
-// before the toggle must be gone from the banner node after it — a surviving marker would mean the same
-// element had been reparented (what a true root mount would look like), and an absent one that a fresh
-// element was created.
-test("toggling the switch REMOUNTS the chrome rather than carrying one root mount across (card a045bec3)", async ({ page, loomDaemon }) => {
-  const MARK = "data-loom-chrome-identity";
-  await fakeUpdateAvailable(page);
-  await page.goto(loomDaemon.baseURL + "/settings");
-  await expect(rail(page)).toBeVisible();
-
-  const banner = updateBanner(page);
-  await expect(banner).toBeVisible();
-
-  // Mark the live node, then READ THE MARK BACK through the same locator — so "the mark is gone" later is
-  // a statement about a real, previously-observable mark, not about a selector that never worked.
-  await banner.evaluate((el, mark) => el.setAttribute(mark, "1"), MARK);
-  await expect(banner).toHaveAttribute(MARK, "1");
-
-  // The switch itself, through its own testid + case-insensitive names: the Segmented kit uppercases its
-  // labels in CSS and Chromium folds text-transform into the accessible name, so an exact-case match here
-  // would be matching a presentation detail (measured on card 757c80dd). Segmented is role="radiogroup"/
-  // "radio" (card 3f28f1c3), not "tablist"/"tab".
-  await page.getByTestId("atlas-ui-switch").getByRole("radio", { name: /^atlas preview$/i }).click();
-  await expect(atlasShell(page)).toBeVisible();
-  await expect(rail(page)).toHaveCount(0);
-
-  // The chrome is present in the new shell...
-  const atlasBanner = atlasShell(page).locator('[role="status"]').filter({ hasText: "A new Loom release is available" });
-  await expect(atlasBanner).toBeVisible();
-  // ...and it is a DIFFERENT element: the marker did not come with it.
-  expect(await atlasBanner.getAttribute(MARK), "the banner node survived the shell swap — the chrome is a single root mount after all, and this spec's premise (plus the P1-5 plan note) needs rewriting").toBeNull();
-  expect(await page.locator(`[${MARK}]`).count(), "the marked node is still somewhere in the document").toBe(0);
-});

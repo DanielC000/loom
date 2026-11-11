@@ -1,7 +1,7 @@
 // Manager→human DECISION INBOX e2e (card 8701bdbb, child B). Exercises the full web flow end-to-end
 // against the isolated daemon, with NO real claude:
-//   1. A seeded PENDING question surfaces as a "DECISION NEEDED" attention item in Mission Control and
-//      badges the Requests nav item (its pending-requests count). (The footer Alerts badge deliberately
+//   1. A seeded PENDING question surfaces as a "DECISION NEEDED" attention item on the project node's
+//      Needs-you card and badges the Workspace node's Inbox tab (its pending-requests count). (The footer Alerts badge deliberately
 //      counts only NON-request heuristic/session attention, so a pending request does NOT badge it — see
 //      the nav-cleanup pass; nav-cleanup.spec.ts covers that de-duplication directly.)
 //   2. The global /inbox lists it cross-project with a working per-project facet.
@@ -27,15 +27,18 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
       recommendation: "Fail fast — free the slots now",
     });
 
-    // (1) Mission Control: the DECISION NEEDED attention item renders + the Requests nav item badges it.
-    await page.goto(`${loomDaemon.baseURL}/`);
+    // (1) The project node's Needs-you card: the DECISION NEEDED attention item renders. (Mission Control
+    //     carried it until it was deleted with the classic shell, card acbb6df6; the project card is scoped to
+    //     THIS manager's project and not height-fitted, so a sibling spec's requests cannot crowd it out.)
+    await page.addInitScript((pid) => localStorage.setItem("loom.projectId", pid), mgr.projectId);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     const attnRow = page.locator("main").getByText("Decision needed", { exact: true }).first();
     await expect(attnRow).toBeVisible();
     await expect(page.locator("main").getByText(title)).toBeVisible();
-    // The Inbox rail item (renamed from "Requests", card 59fa6403) shows a non-zero pending-requests
-    // count — a pending decision IS a request. (The footer Alerts badge is NOT expected to tick here: it
-    // counts only non-request attention now.)
-    await expect(page.locator(".loom-rail-item", { hasText: "Inbox" }).locator(".loom-rail-badge"))
+    // The Workspace node's Inbox tab (the classic rail's Inbox item until card acbb6df6) shows a non-zero
+    // pending-requests count — a pending decision IS a request.
+    await page.goto(`${loomDaemon.baseURL}/home`);
+    await expect(page.getByTestId("atlas-tab-inbox").locator(".loom-atlas-tabcount"))
       .toHaveText(/[1-9]/, { timeout: 10_000 });
 
     // (2) The global inbox lists it with a project facet.
@@ -50,7 +53,7 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
     await page.locator("main").getByRole("button", { name: "Answer →" }).first().click();
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
-    await expect(page).toHaveURL(/\/inbox$/);
+    await expect(page).toHaveURL(/\/home\?tab=inbox$/); // `/inbox` is the Workspace node's inbox tab
     await expect(dialog.getByText(title)).toBeVisible();
     // The recommendation is flagged inside the modal.
     await expect(dialog.getByText("recommended")).toBeVisible();
@@ -72,8 +75,8 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
     await expect(page.locator("main").getByText("Keep workers warm")).toBeVisible();
     await expect(page.locator("main").getByText("Answered", { exact: true })).toBeVisible();
 
-    // The attention item CLEARS: back on Mission Control, the answered decision no longer surfaces.
-    await page.goto(`${loomDaemon.baseURL}/`);
+    // The attention item CLEARS: back on the project node, the answered decision no longer surfaces.
+    await page.goto(`${loomDaemon.baseURL}/project`);
     await expect(page.locator("main").getByText(title)).toHaveCount(0);
   });
 
@@ -148,9 +151,11 @@ test.describe("decision STALE + owner snooze (card 889ae619)", () => {
       escalatedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
     });
 
-    await page.goto(`${loomDaemon.baseURL}/`);
+    // The project node's Needs-you card, scoped to this manager's project (Mission Control until card acbb6df6).
+    await page.addInitScript((pid) => localStorage.setItem("loom.projectId", pid), mgr.projectId);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     const main = page.locator("main");
-    // `.last()`, not `.first()`: Mission Control ALSO renders a per-manager "waiting on you" mini-card
+    // `.last()`, not `.first()`: the page may ALSO render a per-manager "waiting on you" mini-card
     // with its OWN "Answer →" button elsewhere on the page, and `title` is nested several ancestor divs
     // deep — `.first()` resolves to an outer wrapping div broad enough to also contain that unrelated
     // button (a strict-mode violation once two matching "Answer →" buttons are in scope). Since ancestor
@@ -194,8 +199,9 @@ test.describe("decision STALE + owner snooze (card 889ae619)", () => {
       options: ["A", "B"],
     });
 
-    await page.goto(`${loomDaemon.baseURL}/`);
-    const row = page.locator("main").locator("div").filter({ hasText: title }).first();
+    await page.addInitScript((pid) => localStorage.setItem("loom.projectId", pid), mgr.projectId);
+    await page.goto(`${loomDaemon.baseURL}/project`);
+    const row = page.locator("main").locator("div").filter({ hasText: title }).last();
     await expect(row).toBeVisible();
     await expect(row.getByText("Decision needed", { exact: true })).toBeVisible();
     await expect(row.locator("select")).toHaveCount(0);

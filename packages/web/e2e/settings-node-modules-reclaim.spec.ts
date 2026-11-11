@@ -81,14 +81,14 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
     const listed = page.waitForResponse(
       (r) => r.url().includes("/api/worktrees/node-modules-reclaimable") && r.request().method() === "GET",
     );
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     const res = await listed;
     expect(res.status()).toBe(200);
     const body = (await res.json()) as { count: number; entries: unknown[] };
     expect(body.entries).toHaveLength(body.count);
 
-    await expect(page.getByText("Disk Reclaim", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("settings-section-disk-reclaim").getByText("Disk Reclaim", { exact: true })).toBeVisible(); // scoped: the Workspace Settings index names it too
     await expect(page.getByText(`Reclaimable worktrees (${body.count})`)).toBeVisible();
     // This daemon has a scratch LOOM_HOME and never spawns a real worker, so no worktree exists to
     // reclaim — the empty state is the correct rendering, and it must not look like a broken panel.
@@ -100,7 +100,7 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
 
   test("the confirm step names what it will delete, and cancelling backs out cleanly", async ({ page, loomDaemon }) => {
     await fulfilListing(page, TWO_CANDIDATES);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     // FIXTURE IDENTITY: the fulfilled candidates are on screen, not the real (empty) listing.
     await expect(page.getByText("Reclaimable worktrees (2)")).toBeVisible();
@@ -145,7 +145,7 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
         { worktreePath: PATH_B, projectId: "proj-b", projectName: "Beta Project", taskId: null, outcome: "removed", bytesReclaimed: 32_100_000 },
       ],
     });
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     // Move the idle threshold off its default so the assertion below can actually distinguish "the
     // panel sent the value it listed at" from "the panel happened to send the default".
@@ -174,7 +174,7 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
         { worktreePath: PATH_B, projectId: "proj-b", projectName: "Beta Project", taskId: null, outcome: "wedged", bytesReclaimed: null },
       ],
     });
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     await page.getByRole("button", { name: "Select all 2" }).click();
     await page.getByRole("button", { name: "Delete node_modules from 2 worktrees" }).click();
@@ -215,7 +215,7 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
       noLongerEligible: 0, missing: 0, wedged: 1, leftOnDisk: 0,
       results: [{ worktreePath: PATH_B, projectId: "proj-b", projectName: "Beta Project", taskId: null, outcome: "wedged", bytesReclaimed: null }],
     });
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     await page.getByLabel(`Select ${PATH_B}`).check();
     await page.getByRole("button", { name: "Delete node_modules from 1 worktree" }).click();
@@ -233,7 +233,7 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
       noLongerEligible: 0, missing: 0, wedged: 0, leftOnDisk: 0,
       results: [{ worktreePath: PATH_A, projectId: "proj-a", projectName: "Alpha Project", taskId: null, outcome: "removed", bytesReclaimed: 1_500_000_000 }],
     });
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     await page.getByLabel(`Select ${PATH_A}`).check();
     await page.getByRole("button", { name: "Delete node_modules from 1 worktree" }).click();
@@ -258,7 +258,7 @@ test.describe("Settings › Disk Reclaim (card 08ac5925)", () => {
         { worktreePath: PATH_B, projectId: "proj-b", projectName: "Beta Project", taskId: null, outcome: "rejected", bytesReclaimed: null, rejectionMessage: "ENOENT: spawn rmdir ENOENT (synthetic)" },
       ],
     });
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     await page.getByRole("button", { name: "Select all 2" }).click();
     await page.getByRole("button", { name: "Delete node_modules from 2 worktrees" }).click();

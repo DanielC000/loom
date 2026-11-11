@@ -42,7 +42,7 @@ test("a duplicate create is refused 409, and an existing duplicate pair is flagg
 
   try {
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
     for (const id of [a.id, b.id]) {
       const row = page.getByTestId(`connection-row-${id}`);
       await expect(row).toBeVisible();

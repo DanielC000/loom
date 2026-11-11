@@ -172,7 +172,7 @@ export function SessionNode({ session, tab = "terminal" }: {
     ...(nodeTabs.includes("timeline") ? { timeline: <ManagerTimeline managerId={session.id} fill /> } : null),
     // Keyed on the id for the same reason /review/:workerId keys it: result / note / openFiles must
     // never carry across a session switch (card 496fe90e).
-    ...(hasDiff ? { diff: <ReviewSurface key={session.id} workerId={session.id} embedded /> } : null),
+    ...(hasDiff ? { diff: <ReviewSurface key={session.id} workerId={session.id} /> } : null),
   };
 
   // EVERY write surface is gated on the session still being reachable, here rather than at the call

@@ -426,32 +426,4 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     await expect(panel.locator('button[title^="Spawn from profile"]')).toHaveCount(0);
     await expect(panel.locator("button.loom-btn-danger")).toHaveCount(0);
   });
-
-  test("switch OFF: the classic Overview's spawn cards are untouched and no Atlas agent surface exists", async ({ page, loomDaemon }) => {
-    const seeded = await seedRoster(loomDaemon);
-    // Deliberately NO seedAtlasOn — off is the default, and seeding it off would re-clear the key on
-    // every navigation for a reason unrelated to the app (measured on P1-0).
-    await pinProject(page, seeded.project.id);
-    await page.goto(loomDaemon.baseURL + "/overview");
-
-    // PRESENCE first: the classic shell, and its OWN spawn cards, still render — including the same
-    // worker exclusion, which is where this card's roster rule came from.
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByText(seeded.manager.name, { exact: true })).toBeVisible();
-    await expect(page.getByText(seeded.plain.name, { exact: true })).toBeVisible();
-    await expect(page.getByText(seeded.worker.name, { exact: true })).toHaveCount(0);
-    await expect(page.locator('button[title^="Spawn from profile"]')).toHaveCount(2);
-
-    // …and nothing this card built reached the shell a user who never opted in is looking at.
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-band-agents")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-quickspawn-open")).toHaveCount(0);
-    await expect(page.locator(".loom-agentrow, .loom-agentcard, .loom-atlas-plus")).toHaveCount(0);
-
-    // The Agents address is not mounted in the classic shell at all (ATLAS_HOMES is the one
-    // declaration in nav.tsx LegacyShell deliberately does not map — @decision fd99b2d7).
-    await page.goto(loomDaemon.baseURL + "/agents");
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("atlas-agents-node")).toHaveCount(0);
-  });
 });

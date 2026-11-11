@@ -348,7 +348,8 @@ test("a note deleted out from under the viewer shows a read error with a working
   await expect(page.getByText("Unable to read this note")).toBeVisible();
   await expect(page.getByText("file not found")).toBeVisible();
   await expect(page.getByText(bravoOnly)).toHaveCount(0);
-  await expect(page.getByText("…", { exact: true })).toHaveCount(0);
+  // Scoped to the content column: the Atlas breadcrumb carries its own "…" (the collapsed-trail button).
+  await expect(page.locator("#atlas-content").getByText("…", { exact: true })).toHaveCount(0);
   // Nothing can be edited into a note that could not be read.
   await expect(editButton(page)).toBeDisabled();
 

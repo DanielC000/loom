@@ -82,9 +82,12 @@ test("every attention item can be dismissed; the dismiss sticks and silences its
     title: `Seed witness ${seedNeedle}`, options: ["A", "B"],
   });
 
-  // Mission Control renders every kind as a compact AttentionRow (the Overview pulls merge requests out
-  // into rich review cards instead), so it is the surface that shows both of ours side by side.
-  await page.goto(`${loomDaemon.baseURL}/`);
+  // The project node's Needs-you card renders every kind as a compact AttentionRow, scoped to THIS spec's
+  // own project and not height-fitted (cap 10), so it shows both of ours side by side. (Mission Control
+  // did this until it was deleted with the classic shell, card acbb6df6; the Workspace node's band is
+  // height-fitted and overflows a third row into "+N more", so it is not a list this spec can rely on.)
+  await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), mgr.projectId);
+  await page.goto(`${loomDaemon.baseURL}/project`);
 
   // READINESS WITNESS, and the reason the controls below are trustworthy. The witness row is RENDERED
   // (so `items` is populated) and announced NOTHING (so `useNewAttention` has already seeded its seen-set

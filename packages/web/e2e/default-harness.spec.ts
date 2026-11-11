@@ -85,7 +85,7 @@ test.describe("default harness settings", () => {
   test("switching the fleet default to codex is gated by a confirm that names both caveats, and Cancel holds the save", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`harness-platform-${Date.now()}`);
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // the platform panel: a daemon-global section
 
     const sel = selectIn(page, "platform", "Vendor CLI");
     await expect(sel).toBeVisible();
@@ -96,7 +96,7 @@ test.describe("default harness settings", () => {
     await expect(panelOf(page, "platform")).toContainText("effective: Claude Code");
 
     await sel.selectOption("codex");
-    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
     await expect(globalSave).toBeEnabled();
     await globalSave.click();
 
@@ -137,12 +137,12 @@ test.describe("default harness settings", () => {
       body: JSON.stringify({ config: { harness: { default: "codex" } } }),
     });
 
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // the platform panel: a daemon-global section
     const sel = selectIn(page, "platform", "Vendor CLI");
     await expect(sel).toHaveValue("codex");
 
     await sel.selectOption("claude");
-    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
     await globalSave.click();
 
     // No dialog at all — the save goes straight through to the store.
@@ -157,7 +157,7 @@ test.describe("default harness settings", () => {
   test("the fleet scope is offered disabled with its reason, and workers remains settable", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`harness-scope-${Date.now()}`);
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // the platform panel: a daemon-global section
 
     const scope = selectIn(page, "platform", "Roles covered");
     await expect(scope).toBeVisible();
@@ -171,7 +171,7 @@ test.describe("default harness settings", () => {
 
     // BEFORE/AFTER on the control that IS usable: an explicit "workers" override is a real edit (the
     // stored value was inherit), so it dirties the form and persists.
-    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
     await expect(globalSave).toBeDisabled();
     await scope.selectOption("workers");
     await expect(globalSave).toBeEnabled();
@@ -238,18 +238,22 @@ test.describe("default harness settings", () => {
     await expect(drain.getByTestId("harness-drain-scope")).toContainText("Target: Codex CLI");
     await expect(drain.getByTestId("harness-drain-scope")).toContainText("this project's default");
 
-    const fleetDrain = panelOf(page, "platform").getByTestId("harness-drain");
-    await expect(fleetDrain).toHaveAttribute("data-done", "false");
-    await expect(fleetDrain.getByTestId("harness-drain-scope")).toContainText("Fleet default: Claude Code");
-    await expect(fleetDrain.getByTestId("harness-drain-scope")).toContainText("may be heading somewhere else");
-    // …and it must NOT present that fleet default as where the listed session is going.
-    await expect(fleetDrain).not.toContainText("Draining to");
     // Nothing is blocked, so that group must not render at all — otherwise "blocked" could be an empty
     // heading that always shows and the next test would prove nothing.
     await expect(panel.getByTestId("harness-drain-blocked")).toHaveCount(0);
 
     // …and the two-layer effective hint follows the override.
     await expect(panel).toContainText("effective: Codex CLI");
+
+    // The FLEET banner is the platform panel's, a daemon-global section on the Workspace node's Settings
+    // tab since card acbb6df6 split Settings by scope.
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
+    const fleetDrain = panelOf(page, "platform").getByTestId("harness-drain");
+    await expect(fleetDrain).toHaveAttribute("data-done", "false");
+    await expect(fleetDrain.getByTestId("harness-drain-scope")).toContainText("Fleet default: Claude Code");
+    await expect(fleetDrain.getByTestId("harness-drain-scope")).toContainText("may be heading somewhere else");
+    // …and it must NOT present that fleet default as where the listed session is going.
+    await expect(fleetDrain).not.toContainText("Draining to");
   });
 
   // ── The BLOCKED branch, route-fulfilled, and why.

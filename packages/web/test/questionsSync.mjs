@@ -189,7 +189,7 @@ await check("no inbox reader still carries a refetchInterval (positive control: 
     }
   })(SRC);
   assert.deepEqual(bad, []);
-  const readers = ["lib/attention.ts", "pages/Board.tsx", "components/Sidebar.tsx", "components/requests.tsx"].reduce((n, f) => n + (read(f).match(/queryKey:\s*\["openQuestions"/g) ?? []).length, 0);
+  const readers = ["lib/attention.ts", "pages/Board.tsx", "pages/WorkspaceHome.tsx", "components/requests.tsx"].reduce((n, f) => n + (read(f).match(/queryKey:\s*\["openQuestions"/g) ?? []).length, 0);
   assert.ok(readers >= 7, `control: the scan really covers the 7 known readers (saw ${readers})`);
 });
 

@@ -324,21 +324,4 @@ test.describe("the Board's multi-select filters on every Atlas board surface (ca
       }
     }
   });
-
-  // ── The other polarity ──────────────────────────────────────────────────────────────────────────
-  test("switch OFF: the classic board's filters are untouched", async ({ page, loomDaemon }) => {
-    const project = await loomDaemon.createProject(uniq("atlasfilt-classic"));
-    const cards = await seedCards(loomDaemon, project.id);
-
-    await pinProject(page, project.id); // no seedAtlasOn — OFF is the default
-    await page.setViewportSize(VIEWPORT);
-    await page.goto(`${loomDaemon.baseURL}/board`);
-
-    // PRESENCE: the classic shell is really the one that mounted…
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    // …and nothing Atlas is in the document, so this leg cannot be measuring the Atlas frame.
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-
-    await assertMultiSelectFilters(page.locator("main"), cards, "classic Board page", SEED.length);
-  });
 });

@@ -99,7 +99,7 @@ async function clipPx(page: Page): Promise<number> {
 
 const SHORT_ID = "atrest00";
 
-for (const atlas of [false, true] as const) {
+for (const atlas of [true] as const) {
   const shell = atlas ? "atlas" : "classic";
 
   test(`${shell}: a live terminal pane is geometrically at rest, and never clips its own grid`, async ({ page, loomDaemon }) => {
@@ -118,7 +118,13 @@ for (const atlas of [false, true] as const) {
     // Pinned BEFORE the first paint: the budget is derived during layout, and 1200x900 is the width
     // that oscillates under both shells (see the header).
     await page.setViewportSize({ width: 1200, height: 900 });
-    await openShell(page, loomDaemon.baseURL, atlas, "/overview");
+    // The project node's Sessions tab (`/terminals`), pinned to THIS seeded project so its tile is the only
+    // terminal on the page — the instrument reads the document's first `.xterm`. It is a HUG-mode tile (a
+    // numeric height budget), which is the mode this spec is about: the classic /overview tile it measured
+    // went with that page (card acbb6df6). Not the session node: that renders `height="auto"`, where the
+    // solver never writes the pane height this instrument compares against.
+    await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), seeded.projectId);
+    await openShell(page, loomDaemon.baseURL, atlas, "/terminals");
     await expect(page.locator(".xterm-rows").first()).toBeVisible({ timeout: 20_000 });
 
     // Identity: this is THIS spec's seeded session, not a sibling's identically-rendered app.

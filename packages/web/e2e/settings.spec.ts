@@ -44,9 +44,11 @@ test("renders the active project's config and the daemon-global config", async (
   // shell) — resolveConfig ran and rendered real values.
   await expect(page.getByText(/effective:/).first()).toBeVisible();
 
-  // The daemon-global section loads over GET /api/platform/config; "Rate Limits" only appears once that
-  // query resolves, so asserting it visible also proves the platform-config read endpoint works.
-  await expect(page.getByText("Global / Daemon", { exact: true })).toBeVisible();
+  // The daemon-global section, on the Workspace node's Settings tab since card acbb6df6 split Settings by
+  // scope. It loads over GET /api/platform/config; "Rate Limits" only appears once that query resolves, so
+  // asserting it visible also proves the platform-config read endpoint works.
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
+  await expect(page.getByTestId("settings-section-global-daemon").getByText("Global / Daemon", { exact: true })).toBeVisible(); // scoped: the Workspace Settings index names it too
   await expect(page.getByText("Rate Limits", { exact: true })).toBeVisible();
   await expect(field(page, "Git push (s)")).toBeVisible();
 });
@@ -87,14 +89,14 @@ test("editing the project gate command persists (REST read-back + reload)", asyn
 // The merge-gate control moved from a binary checkbox to the three-valued CADENCE panel (card 00664e74),
 // so its coverage moved with it: `merge-gate-cadence.spec.ts` drives the same persistence assertions this
 // test used to make (mergeGate -> "off", and back to the key being REMOVED rather than stored as "on"),
-// plus the interval key, the validation that blocks Save, and the Overview strip.
+// plus the interval key, the validation that blocks Save, and the gate strip.
 
 test("editing a daemon-global setting persists to the platform override", async ({ page, loomDaemon }) => {
   // Pin a project so the page is fully populated, though the global section is project-independent.
   const project = await loomDaemon.createProject(`settings-global-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
   // Wait for the platform-config query to resolve (the global fields only mount after it loads).
   const gitPush = field(page, "Git push (s)");
@@ -104,7 +106,7 @@ test("editing a daemon-global setting persists to the platform override", async 
   // stores canonical ms (×1000).
   await gitPush.fill("47");
   // The global Save is the LAST "Save" button (the global section follows the project section in DOM order).
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
   await expect(globalSave).toBeEnabled();
   await globalSave.click();
 
@@ -130,11 +132,11 @@ test("editing maxConcurrentGates: blank inherits, a set value persists, blank-AF
   const project = await loomDaemon.createProject(`settings-gates-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
   const gates = field(page, "Max concurrent merge/deploy gates");
   await expect(gates).toBeVisible();
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
   // The field's own label container, so the "effective: N" hint assertion can't match another field's hint.
   const gatesLabel = page.locator('label:has(> span:text-is("Max concurrent merge/deploy gates"))');
 
@@ -204,12 +206,12 @@ test("editing maxConcurrentManagers (card 52ab5d45): blank inherits, a set value
   const project = await loomDaemon.createProject(`settings-managers-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
   const label = "Max concurrent scheduler-spawned managers · restart required";
   const managers = field(page, label);
   await expect(managers).toBeVisible();
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
   const managersLabel = page.locator(`label:has(> span:text-is(${JSON.stringify(label)}))`);
 
   const readManagersOverride = async (): Promise<number | null> => {
@@ -268,12 +270,12 @@ test("editing maxConcurrentAuditors (sweep G2): blank inherits, a set value pers
   const project = await loomDaemon.createProject(`settings-auditors-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
   const label = "Max concurrent scheduler-spawned auditors · restart required";
   const auditors = field(page, label);
   await expect(auditors).toBeVisible();
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
   const auditorsLabel = page.locator(`label:has(> span:text-is(${JSON.stringify(label)}))`);
 
   const readAuditorsOverride = async (): Promise<number | null> => {
@@ -335,12 +337,12 @@ test("editing a message-delivery toggle (coalesceAgentMessages): set persists, c
   const project = await loomDaemon.createProject(`settings-coalesce-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
   const labelText = "Group agent & worker messages into a single turn (legacy)";
   const toggle = field(page, labelText);
   await expect(toggle).toBeVisible();
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
   const toggleLabel = page.locator(`label:has(> span:text-is(${JSON.stringify(labelText)}))`);
 
   const readOverride = async (): Promise<boolean | null> => {
@@ -405,7 +407,7 @@ test.describe("cross-group sibling preservation (code-review fix, card fd55ac8a;
 
     const project = await loomDaemon.createProject(`settings-nongrid-sibling-${Date.now()}`);
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
     // The seeded value loaded straight into its own control.
     await expect(field(page, "Exhausted threshold (%)")).toHaveValue("77");
@@ -415,7 +417,7 @@ test.describe("cross-group sibling preservation (code-review fix, card fd55ac8a;
     const wakeMs = field(page, "Wake tick (s)");
     await expect(wakeMs).toBeVisible();
     await wakeMs.fill("50");
-    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
     await expect(globalSave).toBeEnabled();
     await globalSave.click();
 
@@ -440,11 +442,11 @@ test.describe("cross-group sibling preservation (code-review fix, card fd55ac8a;
   test("editing Exhausted threshold (%) directly: a set value persists, blank clears to inherit (sweep §2)", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`settings-exhausted-pct-${Date.now()}`);
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
     const pct = field(page, "Exhausted threshold (%)");
     await expect(pct).toBeVisible();
-    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
 
     const readPct = async (): Promise<number | null> => {
       const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
@@ -484,7 +486,7 @@ test.describe("cross-group sibling preservation (code-review fix, card fd55ac8a;
 
     const project = await loomDaemon.createProject(`settings-grid-field-clear-${Date.now()}`);
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
     const busyStale = field(page, "PTY busy-stale (s)");
     const provision = field(page, "Worktree provision (s)");
@@ -495,7 +497,7 @@ test.describe("cross-group sibling preservation (code-review fix, card fd55ac8a;
 
     // Blank ONLY busyStaleMs; leave provisionMs exactly as loaded (a non-blank, unchanged resend).
     await busyStale.fill("");
-    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
     await expect(globalSave).toBeEnabled();
     await globalSave.click();
 
@@ -534,13 +536,13 @@ test.describe("cross-group sibling preservation (code-review fix, card fd55ac8a;
 
     const project = await loomDaemon.createProject(`settings-grid-garbage-${Date.now()}`);
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
     const busyStale = field(page, "PTY busy-stale (s)");
     await expect(busyStale).toHaveValue("120");
 
     await busyStale.fill("abc");
-    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
     await expect(globalSave).toBeEnabled();
     await globalSave.click();
 
@@ -570,7 +572,7 @@ test("editing the newly-added watcher/timeout fields (crashRecoveryWatchMs, runM
   // "Git push (s)" test above) — these two were simply absent from GLOBAL_FIELDS until this card.
   const project = await loomDaemon.createProject(`settings-watchtimeouts-${Date.now()}`);
   await pinActiveProject(page, project.id);
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
   const crashRecovery = field(page, "Crash-recovery watch (s)");
   const runTimeout = field(page, "Agent Run hard timeout (s)");
@@ -579,7 +581,7 @@ test("editing the newly-added watcher/timeout fields (crashRecoveryWatchMs, runM
 
   await crashRecovery.fill("90");
   await runTimeout.fill("900");
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
   await expect(globalSave).toBeEnabled();
   await globalSave.click();
 
@@ -602,7 +604,7 @@ test("editing the Authenticated Request Guard (connections) fields persists whol
   // together (blank fields omit that key, clearing it to default).
   const project = await loomDaemon.createProject(`settings-connections-${Date.now()}`);
   await pinActiveProject(page, project.id);
-  await page.goto(`${loomDaemon.baseURL}/settings`);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`); // a daemon-global section — the Workspace node's Settings tab
 
   await expect(page.getByText("Authenticated Request Guard", { exact: true })).toBeVisible();
   const reqTimeout = field(page, "Request timeout (s)");
@@ -623,7 +625,7 @@ test("editing the Authenticated Request Guard (connections) fields persists whol
   await maxBytes.fill("2000000");
   await rateLimitMax.fill("50");
   await rateLimitWindow.fill("600");
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
   await expect(globalSave).toBeEnabled();
   await globalSave.click();
 

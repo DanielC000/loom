@@ -2,20 +2,19 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { matchPath, Navigate, Route, Routes, useLocation, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
-import { Badge, Button, Panel, SectionLabel } from "./ui";
+import { Button, Panel, SectionLabel } from "./ui";
 import { ATLAS_TREE_ID, AtlasTree } from "./AtlasTree";
 import { OrchestrationChip, useOrchestrationPaused } from "./fleetControls";
 import { PALETTE_SHORTCUT, openCommandPalette } from "./CommandPalette";
 import {
   ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, PROJECT_NODE_PATH, PROJECT_NODE_TABS,
-  QueryPreservingRedirect, atlasRetirementFor, isRehomedProjectTab, projectNodeTabAt, projectTabPath,
+  isRehomedProjectTab, projectNodeTabAt, projectTabPath,
   workspaceNodeTabFor,
   type AtlasHome, type NavPage, type ParamPage,
 } from "../nav";
 import { AtlasNodeHeadContext } from "../lib/atlasNodeHead";
 import { activeSessionNodeTab, SESSION_NODE_TAB_LABEL } from "../lib/sessionNodeTabs";
 import { useLatchedSession } from "../lib/useLatchedSession";
-import { setAtlasUi } from "../lib/atlasUi";
 import { useActiveProject } from "../lib/activeProject";
 import { api } from "../lib/api";
 import { color, font, fs } from "../theme";
@@ -23,35 +22,23 @@ import { color, font, fs } from "../theme";
 /** The skip link's target: the shell's <main> (card fa8a2887). */
 const ATLAS_CONTENT_ID = "atlas-content";
 
-// The Atlas shell — cards 757c80dd (P1-0, the frame) and 8cbb2ac2 (P1-1, the nodes). What Atlas is,
-// and which card builds what: docs/plans/atlas-ui/02-architecture.md + 03-decomposition.md.
+// The Atlas shell — the app's only shell since card acbb6df6 deleted the classic one. Cards 757c80dd
+// (P1-0, the frame) and 8cbb2ac2 (P1-1, the nodes) built it; the history is in
+// docs/plans/atlas-ui/02-architecture.md + 03-decomposition.md.
 //
-// Phase 1 MOUNTS, it does not redesign: the tree (components/AtlasTree.tsx) holds a node per nav
-// destination, and every route below renders that destination's EXISTING component verbatim — the
-// nav destinations, the three parameterized addresses, and the legacy-URL redirects, each from the
-// one declaration in src/nav.tsx that the classic shell maps too. Only the frame's crumbs and
-// heading learn where an address sits in the tree.
+// The tree (components/AtlasTree.tsx) holds the nodes, and every route below renders a destination's
+// component from its ONE declaration in src/nav.tsx: the nav destinations, the Atlas nodes, the three
+// parameterized addresses and the legacy-URL redirects. The frame's crumbs and heading are derived from
+// the same declarations. Never hand-list a route here: a path copied into this file drifts invisibly the
+// moment someone edits nav.tsx.
 //
-// Routes, crumbs and the node heading are all DERIVED from those declarations. Never hand-list them:
-// a path copied into this file drifts invisibly the moment someone edits nav.tsx.
-//
-// Chrome is PASSED IN, never imported: App.tsx mounts the overlays and banners for BOTH shells and
-// stays their single owner. Both slots sit OUTSIDE the route table, as in the legacy shell.
+// Chrome is PASSED IN, never imported: App.tsx owns the overlays and banners. Both slots sit OUTSIDE the
+// route table.
 
 
-// Longest path first, so a specific destination always beats a shorter prefix (and "/" — which must
-// match exactly, hence `end` straight off the page — never swallows everything). `end` is the same
-// flag the Instrument Rail's NavLinks and the tree's own nodes consume, so all three agree on which
-// destination a URL belongs to by construction.
-//
-// A RETIRED destination (card 5afd71bd) is excluded, so the frame never NAMES one. Its route below
-// redirects, but a redirect is a navigation the router performs on the first render AFTER this match
-// — so leaving it in would put "Mission Control" in the node head and the crumb trail for that one
-// frame, naming a node the tree no longer holds. The tree drops the row and the frame drops the name
-// together, from the same declaration.
-const BY_SPECIFICITY: NavPage[] = [...NAV_PAGES]
-  .filter((p) => !atlasRetirementFor(p.to))
-  .sort((a, b) => b.to.length - a.to.length);
+// Longest path first, so a specific destination always beats a shorter prefix. `end` is the same flag
+// the tree's own nodes consume, so the two agree on which destination a URL belongs to by construction.
+const BY_SPECIFICITY: NavPage[] = [...NAV_PAGES].sort((a, b) => b.to.length - a.to.length);
 
 function currentPage(pathname: string): NavPage | undefined {
   return BY_SPECIFICITY.find((p) => matchPath({ path: p.to, end: p.end ?? false }, pathname));
@@ -103,10 +90,8 @@ const CRUMB_FLOOR_CHARS = 5;
 /**
  * A re-homed cross-project address, redirected into its Workspace node tab — card 41eab0eb.
  *
- * ATLAS-ONLY, deliberately: the `from` path stays a live NAV_PAGES/ATLAS_HOMES route that the CLASSIC
- * shell mounts verbatim, so a user who never opted in is untouched. That is why this is not a
- * LEGACY_REDIRECTS row — those carry ONE target for both shells by design (src/nav.tsx), and this is
- * the one case where the two shells must genuinely differ.
+ * Not a LEGACY_REDIRECTS row, because it is not a plain redirect: the `from` path is still the
+ * NAV_PAGES/ATLAS_HOMES row the tab resolves its label and body from, and the hop TRANSLATES a query.
  *
  * An incoming `?tab=` is TRANSLATED to the host's sub-key rather than dropped: `/actors?tab=skills` is
  * a real address today — it is `/skills`'s own legacy target — and chaining it into the tab without
@@ -142,13 +127,12 @@ function sessionNodeLabel(s: Pick<SessionListItem, "agentName" | "role" | "id">)
 // and fetcher the page below already uses — ["allSessions"] in SessionView/ReviewPanel, ["question",
 // id] in RequestDetail — so the crumb shares that cache entry instead of issuing a second request,
 // and can never name a different entity than the page is showing. `enabled` keeps each read off
-// every OTHER Atlas route: subscribing shell-wide would add a poll the classic shell never makes, on
-// pages that read neither.
+// every OTHER route: subscribing shell-wide would add a poll to pages that read neither.
 //
 // Unresolved degrades honestly rather than guessing. An id that resolves to nothing has no project
 // to hang under, so the project crumb is OMITTED instead of borrowing the ACTIVE project's name —
 // which would assert a tree position the data never established. The page under it renders its own
-// not-found state exactly as it does under the classic shell.
+// not-found state.
 function useParamAddress(
   current: { page: ParamPage; id: string } | undefined,
   activeProjectName: string,
@@ -289,8 +273,8 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
   // so the three cannot disagree about which tab an address means or how deep it sits.
   //
   // For seven of the eight this reproduces exactly what the `scoped` flag already said. The eighth is
-  // `/terminals`, which genuinely CHANGED TIER: the classic rail still carries it as the god-eye
-  // "Terminals", and under Atlas it is the project node's "Sessions". Deriving it from the flag would
+  // `/terminals`, which genuinely CHANGED TIER: its page is the god-eye "Terminals", and on the tree
+  // it is the project node's "Sessions". Deriving it from the flag would
   // put the project node's own tab at workspace depth, naming the wrong tier and the wrong label.
   //
   // The two HOME tabs are excluded: the project node is its tier's head, so its trail stops at the
@@ -474,36 +458,6 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
                 7b893d54). The Workspace root carries the same cluster as a full-width bar; this is the
                 mount that makes a paused fleet discoverable without navigating to the root. */}
             <OrchestrationChip />
-            {/* The way back. Settings is a tree node now, so this is no longer the ONLY exit — but it
-                stays: it is one click from anywhere, and a preview whose exit is buried in a settings
-                page is a preview people stop trying. */}
-            {/* THREE renderings, ONE accessible name. At 420px the full wording was eating the crumb
-                row. Card 49e883a9 took the first cut at that, shortening the wording to "Classic"
-                and freeing ~110px. That was not enough for a four-segment trail (measured:
-                the nav reached 184px of a 420px row, and 83px of what remained was still this
-                button), so below the breakpoint it now drops its word entirely and renders as an
-                icon the same size as the drawer toggle opposite it — ~49px more for the trail, and
-                the one control in this row whose meaning a reader can recover from its tooltip.
-                The `aria-label` is stated so the name does NOT change with the breakpoint: a control
-                whose accessible name depends on viewport width is a different control to a screen
-                reader at every size, and every by-name locator would have to know which width it is
-                at.
-
-                Its padding is `.loom-atlas-leave`'s, NOT inline: inline beats class, so a `style`
-                here (or the kit's own, hence `classPadding`) would shadow the narrow rule's. */}
-            <Button data-testid="atlas-leave" onClick={() => setAtlasUi(false)} classPadding
-              aria-label="Switch to the classic UI"
-              title="Turn the Atlas preview off and return to the classic UI"
-              className="loom-atlas-leave">
-              <span className="loom-atlas-leave-full">Switch to the classic UI</span>
-              <span className="loom-atlas-leave-short" aria-hidden>Classic</span>
-              <svg className="loom-atlas-leave-icon" width="16" height="16" viewBox="0 0 16 16"
-                fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
-                strokeLinejoin="round" aria-hidden focusable="false">
-                <path d="M6.5 2.5H3.5a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h3" />
-                <path d="M10 5.5 13 8l-3 2.5M13 8H6" />
-              </svg>
-            </Button>
           </div>
 
           <div className="loom-atlas-nodehead">
@@ -511,7 +465,6 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
               color: color.text, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {heading}
             </h1>
-            <Badge tone="muted">preview</Badge>
             {/* A node with live state and lifecycle controls fills this; every other node leaves it
                 empty, and `:empty` hides it so it costs no gap. */}
             <div className="loom-atlas-nodehead-extras" data-testid="atlas-nodehead-extras" ref={setNodeHeadSlot} />
@@ -523,49 +476,32 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
         <main className="loom-atlas-content" id={ATLAS_CONTENT_ID} tabIndex={-1}>
           <AtlasNodeHeadContext.Provider value={nodeHeadSlot}>
           <Routes>
-            {/* Each destination's own component, rendered exactly as the legacy shell renders it —
-                minus the eight card 25c08fba re-homed onto the PROJECT node, which are mounted at the
-                bottom of this table pointing at the node instead — and unless card 41eab0eb re-homed
-                it as a WORKSPACE node tab, in which case this address redirects into that tab and the
-                component is mounted there instead — or unless card 5afd71bd RETIRED it, in which case
-                the address redirects to the node that absorbed it and the component is not mounted by
-                this shell at all. (The three sets are disjoint: a destination is at one depth, and a
-                retired one is at none.) The CLASSIC shell still mounts the page at this same path,
-                unchanged — which is why the path is still a <Route> here rather than simply absent:
-                dropping it would hand the address to the catch-all, and "Nothing here yet" is a worse
-                answer than the node that actually holds what the reader came for. */}
+            {/* Each destination's own component — minus the eight card 25c08fba re-homed onto the
+                PROJECT node, which are mounted at the bottom of this table pointing at the node instead
+                — and unless card 41eab0eb re-homed it as a WORKSPACE node tab, in which case this
+                address redirects into that tab and the component is mounted there instead. (The two
+                sets are disjoint: a destination is at one depth.) */}
             {NAV_PAGES.filter((p) => !REHOMED_TAB_PATHS.has(p.to)).map((p) => {
               const tab = workspaceNodeTabFor(p.to);
-              const retired = atlasRetirementFor(p.to);
               return (
                 <Route key={p.to} path={p.to}
-                  element={retired
-                    // Query-preserving (card 260fb29a) because one LEGACY_REDIRECTS row chains THROUGH
-                    // a retirement: /workspace → /projects → /home. A plain <Navigate> here would drop
-                    // the query this second hop inherited, so that row's deep link would survive the
-                    // classic shell's single hop and die on Atlas's two — a per-shell divergence in the
-                    // one place both shells are meant to agree.
-                    ? <QueryPreservingRedirect to={retired.to} />
-                    : tab
-                      ? <RehomedToNodeTab to={workspaceTabHref(tab.key)} subKey={WORKSPACE_SUB_KEY} />
-                      : p.element} />
+                  element={tab
+                    ? <RehomedToNodeTab to={workspaceTabHref(tab.key)} subKey={WORKSPACE_SUB_KEY} />
+                    : p.element} />
               );
             })}
-            {/* The parameterized addresses (P1-2), from the SAME declaration LegacyShell mounts —
-                the identical element, so the page is byte-for-byte the one the old URL rendered. */}
+            {/* The parameterized addresses (P1-2). */}
             {PARAM_PAGES.map((p) => (
               <Route key={p.to} path={p.to} element={p.element} />
             ))}
-            {/* The legacy-URL redirects (P1-3), from the SAME declaration LegacyShell mounts. They
-                need nothing Atlas-specific: each lands on a NAV_PAGES address that is already a node
-                above, so the crumbs, the heading and the tree's active node all derive themselves
-                from the destination exactly as a direct visit to it would. */}
+            {/* The legacy-URL redirects (P1-3). Each lands on an address that is already a node above,
+                so the crumbs, the heading and the tree's active node all derive themselves from the
+                destination exactly as a direct visit to it would. */}
             {LEGACY_REDIRECTS.map((r) => (
               <Route key={r.from} path={r.from} element={r.element} />
             ))}
-            {/* The Atlas-only nodes (P2-1's two home nodes, P2-2's Agents node). The classic shell
-                deliberately does NOT mount these; see ATLAS_HOMES' own anchor in src/nav.tsx for
-                why, and why `/` and `/overview` must not be re-pointed at them. */}
+            {/* The Atlas nodes (P2-1's two home nodes, P2-2's Agents node, the workspace Settings and
+                Terminals nodes). */}
             {ATLAS_HOMES.filter((h) => !REHOMED_TAB_PATHS.has(h.to)).map((h) => {
               const tab = workspaceNodeTabFor(h.to);
               return (
@@ -581,8 +517,8 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
             {[...REHOMED_TAB_PATHS].map((to) => (
               <Route key={to} path={to} element={PROJECT_NODE_ELEMENT} />
             ))}
-            {/* Anything not yet mounted (an address phase 2 still owes, a typo) lands on the frame
-                with an explanation instead of an empty column. */}
+            {/* An unknown address (a typo, a link to something since removed) lands on the frame with
+                an explanation instead of an empty column. */}
             <Route path="*" element={<AtlasEmptyNode />} />
           </Routes>
           </AtlasNodeHeadContext.Provider>
@@ -595,12 +531,12 @@ export function AtlasShell({ overlays, banners }: { overlays?: ReactNode; banner
 function AtlasEmptyNode() {
   return (
     <Panel data-testid="atlas-empty" style={{ maxWidth: 560, padding: "18px 20px" }}>
-      <SectionLabel style={{ margin: "0 0 10px" }}>Nothing here yet</SectionLabel>
+      <SectionLabel style={{ margin: "0 0 10px" }}>Nothing at this address</SectionLabel>
       {/* Copy stays position-neutral on purpose: the tree rail moves above the content below the
           narrow breakpoint (styles/global.css), so "the tree on the left" would be false on a phone. */}
       <p style={{ margin: 0, color: color.text2, fontSize: fs.body, lineHeight: 1.7 }}>
-        This address has no node in the Atlas preview yet. Pick a destination from the entity tree, or
-        switch back to the classic UI for anything the preview has not reached.
+        This address doesn't match any page. It may be mistyped, or point at something that has since
+        moved. Pick a destination from the entity tree to carry on.
       </p>
     </Panel>
   );

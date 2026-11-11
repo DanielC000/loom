@@ -247,9 +247,6 @@ async function assertSharedRule(
 }
 
 test.describe("the parent row and the relation editor share one label column (card e8e6d91e)", () => {
-  test("switch OFF: the classic dialog states every relation on one rule, at 1600 and at 420", async ({ page, loomDaemon }) => {
-    await assertSharedRule(page, loomDaemon, { atlas: false, label: "classic dialog", shot: "classic" });
-  });
 
   test("switch ON: the Atlas dialog states every relation on one rule, at 1600 and at 420", async ({ page, loomDaemon }) => {
     await assertSharedRule(page, loomDaemon, { atlas: true, label: "Atlas dialog", shot: "atlas" });

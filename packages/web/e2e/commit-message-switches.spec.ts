@@ -202,44 +202,4 @@ test.describe("Task drawer ship state with trailers off (card bd828fb3)", () => 
     await expect(page.getByRole("dialog")).toBeVisible();
     await expect(page.getByRole("dialog").getByTestId("ship-state-trailers-off")).toHaveCount(0);
   });
-
-  // Atlas and the classic shell mount the ONE `<Board>` component (pages/Board.tsx is the only module in
-  // the app that renders ship state at all), so this is not a second implementation to cover — but
-  // "they share an import" is a different claim from "the note really renders there", and only the
-  // second one is worth asserting. Measured on the board EMBED the owner actually works from — a
-  // `<Board projectId>` inside a larger page, not the board as its own page body, which is the
-  // distinction this leg was written to cover and the one the test above (`/board`, classic) does not.
-  //
-  // 🔴 THAT EMBED IS `/overview` NOW, NOT `/project?tab=overview`. Card 269f46ef removed the board
-  // from the Atlas project node's Overview tab on the owner's own instruction, and that card's own
-  // decision anchor in `ProjectHome.tsx` forbids putting it back — so this leg is re-pointed, never
-  // re-embedded. `/overview` is the right re-point and not a fallback: it is a live `NAV_PAGES`
-  // entry that BOTH shells mount (card fd99b2d7's anchor in `nav.tsx` pins it as never-re-pointed
-  // inside AtlasShell), it is the one project-depth address the node's tab row does
-  // not carry, and `pages/Overview.tsx:266` is the surviving `<Board projectId>` EMBED — so with
-  // `seedAtlasOn` still seeded, this stays exactly what it always was: the shell is Atlas, the board
-  // is an embed, and it is the owner's own working surface. The project node's `/board` TAB would
-  // have proved the Atlas half while silently dropping the embed half.
-  test("the same note renders on the Atlas Overview board embed", async ({ page, loomDaemon }) => {
-    const project = await loomDaemon.createProject(uniq("cm-ship-atlas"));
-    const title = uniq("cm-ship-atlas-card");
-    await loomDaemon.createTask(project.id, { title, body: "no landing recorded", columnKey: "todo" });
-    await patchConfig(loomDaemon.baseURL, project.id, { orchestration: { commitTrailers: "off" } });
-    await seedAtlasOn(page);
-    await pinActiveProject(page, project.id);
-
-    await page.setViewportSize({ width: 1600, height: 1000 });
-    await page.goto(`${loomDaemon.baseURL}/overview`);
-    // Identity, SHELL half: `/overview` is mounted by both shells, so without this the leg would
-    // still pass with `seedAtlasOn` silently broken — and would then be a second copy of the classic
-    // `/board` test above rather than the Atlas-side claim it is here to make.
-    await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    // Identity, DATA half: this is THIS project's embedded board, with the card we seeded on it.
-    await expect(page.getByText(title, { exact: true })).toBeVisible();
-    await page.getByText(title, { exact: true }).click();
-    const note = page.getByRole("dialog").getByTestId("ship-state-trailers-off");
-    await expect(note).toBeVisible();
-    await expect(note).toContainText("unknown");
-    await shoot(page.getByRole("dialog"), "ship-state-trailers-off-atlas.png");
-  });
 });

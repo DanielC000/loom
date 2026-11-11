@@ -1,7 +1,9 @@
 // Hermetic source-scan test for card bde7957f: the standalone Orchestration page was REMOVED and its two
 // unique views (the per-manager orchestration_events TIMELINE + the worker branch-DIFF) were RELOCATED
-// into the Overview fleet-card expansion (FleetAccordion → SessionCockpit) as role-scoped tabs. This
-// replaces test/orchestration-no-global-cluster.mjs, whose premise (the page still exists) is now gone.
+// as role-scoped session tabs. They first lived in the classic Overview's fleet-card expansion; card
+// acbb6df6 deleted that page, and their home is now the Atlas session node (components/SessionNode.tsx),
+// which is what this asserts. The global kill/pause/resume cluster likewise moved from the deleted
+// Mission Control page to the fleet-controls bar (components/fleetControls.tsx).
 //
 // The web package has no component test runner, so — like the file it replaces and test/fleet.mjs — this
 // asserts on the shipped SOURCE TEXT, which can't drift from what actually ships. Run standalone with:
@@ -15,10 +17,10 @@ const dir = path.dirname(fileURLToPath(import.meta.url));
 const read = (rel) => readFileSync(path.join(dir, rel), "utf8");
 const navSrc = read("../src/nav.tsx");
 const appSrc = read("../src/App.tsx");
-const overviewSrc = read("../src/pages/Overview.tsx");
+const sessionNodeSrc = read("../src/components/SessionNode.tsx");
 const terminalCardSrc = read("../src/components/TerminalCard.tsx");
 const tabsSrc = read("../src/lib/sessionNodeTabs.ts");
-const missionControlSrc = read("../src/pages/MissionControl.tsx");
+const fleetControlsSrc = read("../src/components/fleetControls.tsx");
 const paletteSrc = read("../src/components/CommandPalette.tsx");
 
 let pass = 0;
@@ -45,22 +47,16 @@ check("the Command Palette derives from the nav list (so no orchestration entry 
   assert.ok(!paletteSrc.includes("/orchestration"), "CommandPalette must not hardcode a /orchestration link");
 });
 
-check("the events-timeline + branch-diff are relocated into the Overview fleet-card expansion", () => {
-  for (const marker of ["ManagerTimeline", "WorkerDiffPanel", "orchestrationEvents", "workerDiff", "DiffView", "EventRow"]) {
-    assert.ok(overviewSrc.includes(marker), `expected Overview.tsx to contain the relocated ${marker}`);
+check("the events-timeline + branch-diff are role-scoped tabs on the session node", () => {
+  // Manager nodes carry a Timeline tab; worker nodes a Diff tab — the manager→worker→live-diff drill-down.
+  // The node passes the role-scoped panels to the shared <TerminalCard>'s `tabs` prop.
+  assert.match(sessionNodeSrc, /nodeTabs\.includes\("timeline"\)[\s\S]*?timeline:\s*<ManagerTimeline/,
+    "the Timeline panel must be offered only where the role's tab set includes it");
+  assert.match(sessionNodeSrc, /diff:\s*<ReviewSurface/, "the Diff panel must be the review surface");
+  // The STATIC files the old checks named must be gone for real, or a stale copy could still be mounted.
+  for (const gone of ["../src/pages/Overview.tsx", "../src/pages/MissionControl.tsx"]) {
+    assert.ok(!existsSync(path.join(dir, gone)), `${gone} must stay deleted (card acbb6df6)`);
   }
-});
-
-check("the relocated views are role-scoped tabs in the session cockpit", () => {
-  // Manager rows gain a Timeline tab; worker rows gain a Diff tab — the manager→worker→live-diff drill-down.
-  // As of terminal-unification stage 3, SessionCockpit renders via the shared <TerminalCard>: the base owns
-  // the Terminal/Transcript/Timeline/Diff tab bar, and SessionCockpit passes the role-scoped panels to its
-  // `tabs` prop (a MANAGER contributes a Timeline node, a WORKER a Diff node).
-  assert.match(overviewSrc, /session\.role === "manager"[\s\S]*?timeline:\s*<ManagerTimeline/,
-    "the Timeline panel must be manager-scoped in SessionCockpit");
-  assert.match(overviewSrc, /session\.role === "worker"[\s\S]*?diff:\s*<WorkerDiffPanel/,
-    "the Diff panel must be worker-scoped in SessionCockpit");
-  assert.ok(overviewSrc.includes("tabs={tabs}"), "SessionCockpit must pass the role-scoped tabs to <TerminalCard>");
   // The Timeline/Diff tab labels were lifted OUT of the inline cockpit by card bde7957f, and card
   // 525c8ad9 lifted them one level further — out of TerminalCard too, into lib/sessionNodeTabs.ts, so
   // the Atlas frame's crumb trail names a tab by the SAME string the tab row renders. The claim this
@@ -82,16 +78,16 @@ check("the relocated views are role-scoped tabs in the session cockpit", () => {
   }
   assert.ok(terminalCardSrc.includes("SESSION_NODE_TAB_LABEL[key]"),
     "TerminalCard must build its tab labels FROM lib/sessionNodeTabs.ts, not re-spell them");
-  for (const src of [[overviewSrc, "Overview.tsx"], [terminalCardSrc, "TerminalCard.tsx"]]) {
+  for (const src of [[sessionNodeSrc, "SessionNode.tsx"], [terminalCardSrc, "TerminalCard.tsx"]]) {
     assert.ok(!src[0].includes('label: "Timeline"') && !src[0].includes('label: "Diff"'),
       `${src[1]} must not re-spell a tab label — they belong to lib/sessionNodeTabs.ts`);
   }
 });
 
-check("Mission Control still owns the global kill/pause/resume cluster (unchanged by this move)", () => {
-  assert.ok(missionControlSrc.includes("Kill all"), "Mission Control must still own the global Kill all control");
+check("the fleet-controls bar owns the global kill/pause/resume cluster", () => {
+  assert.ok(fleetControlsSrc.includes("Kill all"), "the fleet-controls bar must own the global Kill all control");
   for (const fn of ["pauseOrchestration", "resumeOrchestration", "killOrchestration"]) {
-    assert.ok(missionControlSrc.includes(fn), `Mission Control must still call api.${fn}`);
+    assert.ok(fleetControlsSrc.includes(`api.${fn}(`), `the fleet-controls bar must call api.${fn}`);
   }
 });
 

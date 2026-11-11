@@ -18,7 +18,7 @@ async function laneOf(baseURL: string, projectId: string, id: string) {
   return b.tasks.find((t) => t.id === id)?.columnKey;
 }
 
-for (const surface of ["/overview", "/board"] as const) {
+for (const surface of ["/board"] as const) {
   test.describe(`board card drag on ${surface}`, () => {
     test("drag a card by its face: preview follows, the line marks the landing slot, the drop moves it", async ({ page, loomDaemon }) => {
       const project = await loomDaemon.createProject(`card-drag-${Date.now()}`);

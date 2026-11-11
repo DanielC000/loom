@@ -76,7 +76,10 @@ for (const theme of THEMES) {
     const project = await loomDaemon.createProject(`graphite-kit-btn-${theme}-${Date.now()}`);
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
     await useTheme(page, theme);
-    await page.goto(loomDaemon.baseURL + "/settings");
+    // The Workspace node's Settings tab first: the primary variant ("New connection") is a daemon-global
+    // section there since card acbb6df6 split Settings by scope. The other variants are project sections,
+    // back on `/settings` below.
+    await page.goto(loomDaemon.baseURL + "/home?tab=settings");
     await expectTheme(page, theme);
 
     const transparent = "rgba(0, 0, 0, 0)";
@@ -96,7 +99,10 @@ for (const theme of THEMES) {
     await shot(page, `kit-button-primary-${theme}`);
     await expectRing(page, primary, "2px");
 
-    // default: the session-env "Add variable" button — a filled control on a strong hairline.
+    // default: the session-env "Add variable" button — a filled control on a strong hairline. A project
+    // section, on the project node's Settings tab.
+    await page.goto(loomDaemon.baseURL + "/settings");
+    await expectTheme(page, theme);
     const addVar = page.getByTestId("senv-add");
     await expect(addVar).toBeVisible();
     await expect(addVar).toHaveCSS("border-top-color", await cssColor(page, "--loom-line-strong"));

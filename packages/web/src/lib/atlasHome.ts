@@ -10,6 +10,7 @@
 // the detail behind it can never disagree.
 import { useQuery } from "@tanstack/react-query";
 import type { GateHistoryRow, GateRun, GatesActive, KanbanColumn, SessionListItem } from "@loom/shared";
+import { columnKeyForRole } from "@loom/shared";
 import { api } from "./api";
 import { isCompanionSession } from "./sessions";
 
@@ -43,14 +44,28 @@ export interface BoardRollup {
   lanes: BoardLane[];
 }
 
+/**
+ * `doneTotal` is the TERMINAL lane's true length from a `?doneLimit=` board response (card a483cbec),
+ * whose `tasks` carry only the newest page of that lane. Pass it whenever `tasks` came from a windowed
+ * read: the terminal lane's count and `total` then read the true figure, never the window's length.
+ * Omitted (an unwindowed read, where it is absent) ⇒ every lane is counted off `tasks` as before.
+ */
 export function boardRollup(
   columns: readonly KanbanColumn[] | undefined,
   tasks: readonly { columnKey: string }[] | undefined,
+  doneTotal?: number,
 ): BoardRollup {
   const cols = columns ?? [];
   const rows = tasks ?? [];
   const counts = new Map<string, number>();
   for (const t of rows) counts.set(t.columnKey, (counts.get(t.columnKey) ?? 0) + 1);
+  // The SAME resolution the daemon windows by (gateway/server.ts' board route), last-column fallback included.
+  const terminalKey = columnKeyForRole(cols, "terminal");
+  let total = rows.length;
+  if (doneTotal !== undefined && terminalKey !== undefined) {
+    total += doneTotal - (counts.get(terminalKey) ?? 0);
+    counts.set(terminalKey, doneTotal);
+  }
   const lanes: BoardLane[] = cols.map((c) => ({
     key: c.key, label: c.label, role: c.role, accentColor: c.accentColor, count: counts.get(c.key) ?? 0,
   }));
@@ -60,7 +75,7 @@ export function boardRollup(
     if (lane.role === "review") inReview += lane.count;
     if (lane.role === "parked") waiting += lane.count;
   }
-  return { open, inReview, waiting, total: rows.length, lanes };
+  return { open, inReview, waiting, total, lanes };
 }
 
 // ── Gate lanes ─────────────────────────────────────────────────────────────────────────────────

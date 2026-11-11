@@ -1,5 +1,7 @@
 # 41eab0eb — the cross-project surfaces are Workspace node tabs
 
+> **Superseded in part by card `acbb6df6` (2026-11-11).** The classic shell is deleted, so the "switch-OFF contract" and "classic shell" reasons below no longer bind. The re-homed addresses (`/inbox`, `/gates`, …) stay `NAV_PAGES` rows because each tab resolves its label and body from that row, and the shell still redirects the old address into the tab. The `useTabHost`, mount-on-first-visit and no-inline-`display` prohibitions stand.
+
 Card `41eab0eb` (Atlas restructure 2 of 11, epic `9fe8cd4e`), on top of card `0d0c6cee`'s entity tree. The approved design is the round-4 V2 mockup's own declarations — `atlas.js`'s `ROOT_TABS`, `VIEWS` and `NODES` — not the screenshots.
 
 In the mockup every cross-project surface is `node: "root", tabs: "root"`: a tab on the Workspace node, under one persistent readout, with the node head still reading `Workspace` and the crumb trail still stopping at it. The build gave that node only `Overview` and `Deck` and left the rest as tree rows pointing at full-page classic components — the gap audit's own item 2 (`$LOOM_PROJECT_WORK_DIR/atlas-gap-audit/REPORT.md`).

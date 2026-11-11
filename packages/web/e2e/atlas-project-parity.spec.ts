@@ -129,25 +129,6 @@ test.describe("the project node's Agents tab carries this project's schedules (c
     await row.click();
     await expect(page).toHaveURL(/\/home\?tab=automation/);
   });
-
-  test("switch OFF: the classic /overview still renders the same seeded schedule", async ({ page, loomDaemon }) => {
-    const project = await loomDaemon.createProject(uniq("classicsched"));
-    const agent = await seedAgent(loomDaemon.baseURL, project.id, uniq("ClassicAgent"));
-    const cron = "30 7 * * *";
-    const res = await fetch(`${loomDaemon.baseURL}/api/schedules`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: uniq("ClassicSched"), agentId: agent.id, cron }),
-    });
-    expect(res.ok).toBeTruthy();
-    seededScheduleIds.push(((await res.json()) as { id: string }).id);
-
-    // No seedAtlasOn — this is the classic shell, where the extraction must have changed NOTHING.
-    await pinProject(page, project.id);
-    await page.goto(loomDaemon.baseURL + "/overview");
-    // Same component as the Atlas mount, so it shows the cadence in words ("30 7 * * *").
-    await expect(page.locator("main").getByText("Every day at 7:30 AM", { exact: true })).toBeVisible();
-    await expect(page.getByTestId("atlas-agents-node")).toHaveCount(0);
-  });
 });
 
 // ── 2. End Session on the session node ────────────────────────────────────────────────────────────
@@ -290,17 +271,5 @@ test.describe("the project node's Pulse reaches an exited manager's events (card
     await expect(exitedRow).toBeVisible();
     // ...and the LIVE tier still renders, so this ADDED a tier rather than swapping one for the other.
     await expect(rowFor(liveSentinel)).toHaveCount(1);
-  });
-
-  test("switch OFF: classic /overview shows the same exited manager's event (the positive control)", async ({ page, loomDaemon }) => {
-    const project = await loomDaemon.createProject(uniq("classicpulse"));
-    const { sentinel } = await seedExitedWithEvent(loomDaemon, project);
-
-    await pinProject(page, project.id);
-    await page.goto(loomDaemon.baseURL + "/overview");
-    // Without this, a zero in the Atlas band would not distinguish "the band is blind" from "the
-    // seeded event does not render anywhere".
-    await expect(page.locator("main").getByText(sentinel, { exact: false }).first()).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId("atlas-band-pulse")).toHaveCount(0);
   });
 });

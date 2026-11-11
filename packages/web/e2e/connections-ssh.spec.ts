@@ -141,7 +141,7 @@ test("create an ssh connection with a confirmed pin, then grant it to one agent 
   try {
     await installQueryClientProbe(page);
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-    await page.goto(`${base}/settings`);
+    await page.goto(`${base}/home?tab=settings`);
     await page.getByRole("button", { name: "New connection" }).click();
     await page.getByRole("button", { name: "SSH host", exact: true }).click();
 
@@ -226,9 +226,10 @@ test("create an ssh connection with a confirmed pin, then grant it to one agent 
     expect((await mutationCacheCarries(page, passphrase)).carries, "the passphrase must not linger in the mutation cache").toBe(false);
     await shot(row, "3-saved-connection");
 
-    // ── 4. Grant to agent A only, in the agent editor.
-    await page.goto(`${base}/projects`);
-    await page.getByText(agentA.name, { exact: true }).click();
+    // ── 4. Grant to agent A only, in the agent editor — the Agents node's edit dialog (the /projects list
+    //    that hosted it was deleted with the classic shell, card acbb6df6).
+    await page.goto(`${base}/agents`);
+    await page.getByTestId(`atlas-agent-edit-${agentA.id}`).click();
     const chipA = page.getByTestId(`agent-connection-${agentA.id}-${stored.id}`);
     await expect(chipA).toBeVisible();
     await expect(chipA).toHaveText(new RegExp(`^${connName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(loom@127\\.0\\.0\\.1\\)\\s*ssh$`));
@@ -246,20 +247,22 @@ test("create an ssh connection with a confirmed pin, then grant it to one agent 
     expect(after.find((a) => a.id === agentB.id)?.profileId).toBe(after.find((a) => a.id === agentA.id)?.profileId);
 
     // B's own editor offers it, unselected.
-    await page.getByText(agentB.name, { exact: true }).click();
+    await page.getByTestId("atlas-agent-editor-close").click();
+    await expect(page.getByTestId("atlas-agent-editor")).toHaveCount(0);
+    await page.getByTestId(`atlas-agent-edit-${agentB.id}`).click();
     const chipB = page.getByTestId(`agent-connection-${agentB.id}-${stored.id}`);
     await expect(chipB).toBeVisible();
     await expect(chipB).not.toHaveText(/^✓ /);
 
     // An agent in ANOTHER project is not offered this project-scoped connection at all.
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), otherProject.id);
-    await page.goto(`${base}/projects`);
-    await page.getByText(outsider.name, { exact: true }).click();
+    await page.goto(`${base}/agents`);
+    await page.getByTestId(`atlas-agent-edit-${outsider.id}`).click();
     await expect(page.getByTestId(`agent-editor-${outsider.id}`)).toBeVisible();
     await expect(page.getByTestId(`agent-connection-${outsider.id}-${stored.id}`)).toHaveCount(0);
 
     // The Connections row now reads the grant back from the agent list.
-    await page.goto(`${base}/settings`);
+    await page.goto(`${base}/home?tab=settings`);
     await expect(page.getByTestId(`ssh-granted-${stored.id}`)).toHaveText("Granted to 1 agent");
     await expect(page.getByTestId(`ssh-granted-${stored.id}`)).toHaveAttribute("title", `${project.name} / ${agentA.name}`);
     await shot(page.getByTestId(`connection-row-${stored.id}`), "5-saved-connection-granted");
@@ -276,7 +279,7 @@ test("an unconfirmed fetched fingerprint is discarded when the host changes, and
   const before = (await apiJson<ConnRow[]>(`${base}/api/connections`)).length;
   try {
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-    await page.goto(`${base}/settings`);
+    await page.goto(`${base}/home?tab=settings`);
     await page.getByRole("button", { name: "New connection" }).click();
     await page.getByRole("button", { name: "SSH host", exact: true }).click();
     await field(page, "Name").fill(uniq("Guard"));
@@ -324,7 +327,7 @@ test("the quoted-and-piped opt-in is off and disabled while read-only, and a rea
   let connId: string | undefined;
   try {
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-    await page.goto(`${base}/settings`);
+    await page.goto(`${base}/home?tab=settings`);
     await page.getByRole("button", { name: "New connection" }).click();
     await page.getByRole("button", { name: "SSH host", exact: true }).click();
     // Create form: off by default, and not tickable while Read-only is ticked.
@@ -349,7 +352,7 @@ test("the quoted-and-piped opt-in is off and disabled while read-only, and a rea
     });
     connId = created.id;
     expect(created.shellSyntax, "control: the daemon stored the opt-in").toBe(true);
-    await page.goto(`${base}/settings`);
+    await page.goto(`${base}/home?tab=settings`);
     await page.getByTestId(`ssh-edit-open-${created.id}`).click();
     const editOptIn = page.getByTestId(`ssh-edit-shell-syntax-${created.id}`);
     await expect(editOptIn).toBeChecked();
@@ -377,7 +380,7 @@ test("a host-key mismatch offers a human re-pin to exactly the presented fingerp
     });
     connId = created.id;
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-    await page.goto(`${base}/settings`);
+    await page.goto(`${base}/home?tab=settings`);
     await page.getByTestId(`ssh-edit-open-${created.id}`).click();
     await page.getByRole("button", { name: "Fetch from host" }).click();
     await expect(page.getByTestId("ssh-hostkey-mismatch")).toContainText(stale);

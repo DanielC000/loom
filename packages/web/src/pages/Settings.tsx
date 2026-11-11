@@ -38,7 +38,6 @@ import {
   type NodeModulesReclaimRunResult,
 } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { useAtlasUi } from "../lib/atlasUi";
 import { useThemePref, type ThemePref } from "../lib/themePref";
 import { useAllAgentLabels, useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill, StaleStartupPromptWarning } from "../components/ui";
@@ -53,11 +52,10 @@ import { HARNESS_TITLE, type Harness } from "../lib/harnessFields";
 import {
   UNIT_MS, msFromUnit, msInUnit, msRangeError, msRangeErrors, msRangeHint, msStr, type Unit,
 } from "../lib/msUnits";
-import { MergeGateCadencePanel, CommitMessagePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
+import { MergeGateCadencePanel, MergeGateStrip, CommitMessagePanel, cadenceDraftFrom, type CadenceDraft } from "../components/mergeGate";
 import { ReleasedSkillsPanel } from "../components/releasedSkills";
 // The project lifecycle controls (rename / vaultPath / reference repos / registered repos / archive /
-// permanent delete), the archived-projects tier (restore / permanent delete) and their four writes —
-// ONE implementation, shared with the classic Projects page.
+// permanent delete), the archived-projects tier (restore / permanent delete) and their four writes.
 import { ArchivedProjects, ProjectManage, useProjectLifecycleWrites } from "../components/projectLifecycle";
 import { cadenceConfigWrite, commitMessageConfigWrite, commitMessageDraftFrom, intervalError, type CommitMessageDraft } from "../lib/mergeGate";
 import { type FieldComparers } from "../lib/formSync";
@@ -70,12 +68,12 @@ import { PASS_ENV_MAX_KEYS, duplicatePassEnvIndexes, passEnvEntryError, validate
 // ── The section list ───────────────────────────────────────────────────────────────────────────
 //
 // @decision 595e2a47 — a section's `scope` is the API call its own component MAKES, never what its
-// title suggests; and BOTH shells render from THIS array alone. Never give a section its own read of
-// the Atlas switch, and never add a per-shell section list beside this one.
+// title suggests; and both Settings nodes render from THIS array alone. Never add a second section list
+// beside this one.
 //
 // The full section → write-call → read-call → placement table, and the three rows whose placement
-// needed an argument rather than a lookup, are in the record. Declaration order IS the classic page's
-// order (Disk Reclaim deliberately last); `e2e/atlas-settings-scope.spec.ts` parses this block out of
+// needed an argument rather than a lookup, are in the record. Declaration order IS each node's order
+// (Disk Reclaim deliberately last); `e2e/atlas-settings-scope.spec.ts` parses this block out of
 // the real source to prove every row lands on exactly one Atlas node.
 export type SettingsScope = "project" | "workspace";
 
@@ -84,20 +82,13 @@ export type SettingsSection = {
   key: string;
   label: string;
   scope: SettingsScope;
-  /**
-   * A section the CLASSIC shell must not render, because that shell already has the same controls
-   * somewhere else. The switch is still read exactly ONCE, at `Settings()`'s own entry — this is a
-   * declarative placement field on the row, not a section reading `useAtlasUi()` for itself, so the
-   * array stays the single source of where a section belongs. Omitted (the default) = both shells.
-   */
-  atlasOnly?: boolean;
   /** `project` is the ACTIVE project (null when the workspace holds none); a workspace row ignores it. */
   render: (project: Project | null) => ReactNode;
 };
 
 export const SETTINGS_SECTIONS: SettingsSection[] = [
-  // Which shell this browser renders (card 757c80dd). WORKSPACE, and first there: it is a per-browser
-  // localStorage preference with no REST write at all (lib/atlasUi.ts) — so it is the one row placed by
+  // How this browser draws the app (the theme). WORKSPACE, and first there: it is a per-browser
+  // localStorage preference with no REST write at all (lib/themePref.ts) — so it is the one row placed by
   // an argument rather than by a call, and the argument is that it changes the WHOLE app's chrome, which
   // is the workspace's business and not any one project's.
   { key: "interface", label: "Interface", scope: "workspace", render: () => <InterfacePanel /> },
@@ -132,14 +123,11 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   // same rule as row 2: every one of these is an `updateProject`/`archiveProject`/`deleteProjectPermanent`
   // call against the ACTIVE project's id.
   //
-  // ATLAS-ONLY, and the one row in this array that is. These controls already exist under the classic
-  // shell, on `/projects` (card c9b78d80 moved them to components/projectLifecycle.tsx so both frames
-  // mount ONE implementation) — and the Atlas design retires `/projects` as a destination (card
-  // 5afd71bd), which is why they need a home here at all. Rendering them on the classic Settings page
-  // too would put a second, parallel PERMANENT-DELETE site in front of a reader who already has one,
-  // which is the opposite of what a strong confirm is for.
+  // Their only home since card acbb6df6 deleted `/projects` (card c9b78d80 moved them here from it).
+  // Never mount them a second time anywhere: a second, parallel PERMANENT-DELETE site in front of a
+  // reader who already has one is the opposite of what a strong confirm is for.
   {
-    key: "project-lifecycle", label: "Project Lifecycle", scope: "project", atlasOnly: true,
+    key: "project-lifecycle", label: "Project Lifecycle", scope: "project",
     render: (project) => <ProjectLifecyclePanel project={project} />,
   },
 
@@ -148,8 +136,8 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   // and not a judgement call: all three routes are `/api/projects/:id/skills/...` and the records are
   // keyed to the active project's own `repoPath`. The Skills page reads the daemon-GLOBAL store and has
   // no project dimension at all, which is why this cannot live there; see the decision record. Declared
-  // here — after the project rows, before the daemon-global ones — because the classic page renders in
-  // declaration order and this is project housekeeping, not workspace tuning.
+  // here — after the project rows, before the daemon-global ones — because it is project housekeeping,
+  // not workspace tuning.
   {
     key: "released-skills", label: "Released skills", scope: "project",
     render: (project) => <ReleasedSkillsPanel project={project} />,
@@ -185,14 +173,12 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   // The soft-archive tier — every archived project on this daemon, with Restore back into the tree and
   // the same permanent delete. WORKSPACE by row 2's rule and not a judgement call: the list is
   // `GET /api/projects/archived`, a daemon-global read taking no project id, and both writes name a row
-  // OF that list, never the active project. ATLAS-ONLY, the second row ever to be — the classic shell
-  // reaches these same controls from the `/projects` rail's own "Archived · N" footer.
+  // OF that list, never the active project.
   //
-  // @decision baca1835 — never put this section on the classic Settings page, and never give the
-  // archived list its own confirm: both would stand up a second permanent-delete site in front of a
-  // reader who already has one.
+  // @decision baca1835 — never mount this list a second time, and never give the archived list its own
+  // confirm: both would stand up a second permanent-delete site in front of a reader who already has one.
   {
-    key: "archived-projects", label: "Archived projects", scope: "workspace", atlasOnly: true,
+    key: "archived-projects", label: "Archived projects", scope: "workspace",
     render: () => <ArchivedProjectsPanel />,
   },
 
@@ -227,27 +213,19 @@ function useActiveProjectRow(): Project | null {
   return projects.find((p) => p.id === projectId) ?? null;
 }
 
-// `/settings` — one route, two meanings, decided by ONE read of the switch here at the page's own
-// entry. Classic: the whole page, exactly as before. Atlas: this address is the PROJECT tier's
-// Settings node (nav.tsx marks /settings `scoped`), so it carries the project-scoped rows only and
-// the daemon-global ones live on the Workspace tier's own node below.
+// `/settings` — the PROJECT tier's Settings node (nav.tsx marks /settings `scoped`), so it carries the
+// project-scoped rows only; the daemon-global ones live on the Workspace tier's own node below.
 //
-// ⛔ A section never reads the switch — placement is the array's job and the array's alone, so a
-// section cannot grow a second, per-shell idea of where it belongs.
+// ⛔ Placement is the array's `scope` field and nothing else, so a section cannot grow a second idea of
+// where it belongs.
 export default function Settings() {
-  const [atlasUi] = useAtlasUi();
   const project = useActiveProjectRow();
-  const sections = atlasUi
-    ? SETTINGS_SECTIONS.filter((s) => s.scope === "project")
-    // `atlasOnly` is the only thing the classic branch filters on, and it subtracts — the classic page
-    // still renders every row it ever rendered, in declaration order.
-    : SETTINGS_SECTIONS.filter((s) => !s.atlasOnly);
+  const sections = SETTINGS_SECTIONS.filter((s) => s.scope === "project");
   return <SettingsColumn sections={sections} project={project} />;
 }
 
-// `/workspace-settings` — the Workspace tier's Settings node (ATLAS_HOMES, card 595e2a47). Atlas-only
-// by construction: the classic shell never mounts ATLAS_HOMES, so this component needs no switch read
-// of its own — being rendered at all already means Atlas is on.
+// `/workspace-settings` — the Workspace tier's Settings node (ATLAS_HOMES, card 595e2a47), mounted as the
+// Workspace node's Settings tab.
 export function WorkspaceSettings() {
   const project = useActiveProjectRow();
   const sections = SETTINGS_SECTIONS.filter((s) => s.scope === "workspace");
@@ -313,18 +291,17 @@ function SettingsIndex({ sections }: { sections: SettingsSection[] }) {
   );
 }
 
-// The Atlas UI switch (card 757c80dd; what Atlas is: docs/plans/atlas-ui/02-architecture.md).
+// The theme (lib/themePref.ts).
 //
 // The ONLY client-local preference on this page, and it looks different for a reason: it is a
-// per-browser display choice backed by localStorage (lib/atlasUi.ts), not project or daemon config. So
-// it has no Save button, no override/inherit field and no REST write — it takes effect the instant you
-// pick a side, affects nobody else on this daemon, and no agent can reach it.
+// per-browser display choice backed by localStorage, not project or daemon config. So it has no Save
+// button, no override/inherit field and no REST write — it takes effect the instant you pick a side,
+// affects nobody else on this daemon, and no agent can reach it.
 function InterfacePanel() {
-  const [atlasUi, setAtlasUi] = useAtlasUi();
   const [theme, setTheme] = useThemePref();
   return (
     <Panel>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <span style={fieldLabel}>Theme</span>
         <Segmented
           data-testid="theme-switch"
@@ -342,22 +319,6 @@ function InterfacePanel() {
           alone. Terminals stay dark in every theme.
         </Hint>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <span style={fieldLabel}>Which UI this browser renders</span>
-        <Segmented
-          data-testid="atlas-ui-switch"
-          ariaLabel="Which UI this browser renders"
-          value={atlasUi ? "atlas" : "classic"}
-          onChange={(v) => setAtlasUi(v === "atlas")}
-          items={[{ key: "classic", label: "Classic" }, { key: "atlas", label: "Atlas preview" }]}
-        />
-      </div>
-      <Hint style={{ display: "block", marginTop: 12, maxWidth: "68ch", lineHeight: 1.6 }}>
-        Atlas is the newer shell: one entity tree for projects, agents, boards and sessions, in place of
-        the nav rail. It is still in preview, so some pages may change.
-        Classic stays the default and is unchanged by it. Stored in this browser alone, and the Atlas
-        frame carries its own way back here.
-      </Hint>
     </Panel>
   );
 }
@@ -467,14 +428,14 @@ function RepoPathEditor({ project }: { project: Project }) {
   );
 }
 
-// The project's lifecycle section (card c9b78d80) — the Atlas project node's home for the five controls
-// that used to exist ONLY on the classic Projects page. The CONTROLS are `ProjectManage`, mounted
+// The project's lifecycle section (card c9b78d80) — the project node's home for the five controls that
+// used to live on the Projects page (deleted by card acbb6df6). The CONTROLS are `ProjectManage`, mounted
 // un-collapsed; this component is just the frame plus the two things a frame owes them: the live-session
 // count their archive/delete guards read, and somewhere for the active selection to go when the project
 // it pointed at stops existing.
 //
 // The live count comes off the SAME `["allSessions"]` key every other surface polls (the project node's
-// own body, the header picker, the classic Projects rail), so this section adds no request of its own —
+// own body, the tree's project tier), so this section adds no request of its own —
 // and the figure it disables Archive on is the same one those surfaces show.
 function ProjectLifecyclePanel({ project }: { project: Project | null }) {
   const { setProjectId } = useActiveProject();
@@ -509,16 +470,15 @@ function ProjectLifecyclePanel({ project }: { project: Project | null }) {
         saving={update.isPending} archiving={archive.isPending} deleting={remove.isPending}
         // Scoped to the CURRENTLY shown project, never just "a save succeeded" — the mutation is owned
         // by this component, which re-renders on a project switch without remounting, so without this
-        // check a warning from saving project A would keep rendering under project B (the same trap the
-        // classic Projects page documents at its own call site).
+        // check a warning from saving project A would keep rendering under project B.
         staleStartupPrompts={update.isSuccess && update.data?.id === project.id ? update.data.staleStartupPrompts : undefined} />
     </Panel>
   );
 }
 
-// The Workspace tier's archived-projects section (card baca1835) — the last surface that lived ONLY on
-// the classic Projects page, and the one whose loss would have been worst: under Atlas a soft-archived
-// project would be invisible AND unrestorable, which silently turns a reversible archive into a delete.
+// The Workspace tier's archived-projects section (card baca1835) — the one surface whose loss would be
+// worst: without it a soft-archived project would be invisible AND unrestorable, which silently turns a
+// reversible archive into a delete.
 //
 // The CONTROLS are `ArchivedProjects`, mounted un-collapsed (the section already has its own heading
 // inside this Panel). This component is the frame: the archived-list read, and the two writes off the
@@ -1296,6 +1256,14 @@ function ConfigEditor({ project }: { project: Project }) {
         </div>
         <div style={{ marginTop: 12 }}>
           <SectionLabel style={{ margin: "0 0 8px" }}>Merge gate</SectionLabel>
+          {/* The live gate strip (card acbb6df6, re-homed unchanged from the deleted classic Overview):
+              status counts, "Gate the next merge" (api.gateNextMerge's only caller) and the gate-log
+              link. Its own inline cadence editor saves through its OWN read-modify-write, so it never
+              rides this form's Save. Its failed-gate ALERT lives on the project Home tab instead. */}
+          <div style={{ marginBottom: 10 }}>
+            <MergeGateStrip projectId={project.id} override={ov?.orchestration} gateCommand={resolved.orchestration.gateCommand}
+              multiRepo={(project.repos?.length ?? 0) > 0} />
+          </div>
           <MergeGateCadencePanel projectId={project.id} draft={cadence} onChange={setCadence} />
           <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 8 }}>
             <span style={fieldLabel}>Ungated landing check command</span>

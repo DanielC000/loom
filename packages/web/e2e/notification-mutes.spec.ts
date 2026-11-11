@@ -46,13 +46,13 @@ test.describe("per-kind browser-notification mutes (card 51a80b4d)", () => {
   });
 
   test("Settings: a kind unchecked stays unchecked across a reload, and re-checking it clears the stored key", async ({ page, loomDaemon }) => {
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
 
     // "Quiet board" is the kind under test: nothing else in the suite reads it, and the platform default
     // is unmuted, so "muted" is an unambiguous non-default value.
     const quietBoard = page.getByTestId("notify-quiet-board");
     const count = page.getByTestId("notify-muted-count");
-    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
 
     // BEFORE: every kind is on by default and nothing is stored.
     await expect(quietBoard).toBeVisible();
@@ -82,14 +82,14 @@ test.describe("per-kind browser-notification mutes (card 51a80b4d)", () => {
     // all-on config leaves nothing behind in the override.
     await page.getByTestId("notify-quiet-board").check();
     await expect(page.getByTestId("notify-muted-count")).toHaveText("all on");
-    await page.getByRole("button", { name: "Save", exact: true }).last().click();
+    await page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true }).click();
     await expect.poll(() => readMuted(loomDaemon.baseURL)).toBeNull();
     await page.reload();
     await expect(page.getByTestId("notify-quiet-board")).toBeChecked();
   });
 
   test("the bulk actions write the full set, and Mute all covers every rendered kind", async ({ page, loomDaemon }) => {
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
     const count = page.getByTestId("notify-muted-count");
     await expect(count).toHaveText("all on");
 
@@ -102,14 +102,14 @@ test.describe("per-kind browser-notification mutes (card 51a80b4d)", () => {
     await page.getByTestId("notify-mute-all").click();
     await expect(count).toHaveText(`${total} of ${total} muted`);
     await expect(page.locator('input[type="checkbox"][data-testid^="notify-"]:checked')).toHaveCount(0);
-    await page.getByRole("button", { name: "Save", exact: true }).last().click();
+    await page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true }).click();
     // Every rendered toggle round-trips as a VALID kind id — the daemon validates against the shared
     // BROWSER_NOTIFICATION_KINDS enum, so a stray/typo'd testid would 400 this save instead of persisting.
     await expect.poll(async () => (await readMuted(loomDaemon.baseURL))?.length ?? 0).toBe(total);
 
     await page.getByTestId("notify-unmute-all").click();
     await expect(count).toHaveText("all on");
-    await page.getByRole("button", { name: "Save", exact: true }).last().click();
+    await page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true }).click();
     await expect.poll(() => readMuted(loomDaemon.baseURL)).toBeNull();
   });
 

@@ -412,24 +412,16 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       await pinProject(page, project.id);
       await page.setViewportSize(VIEWPORT);
 
-      // The lane count is MEASURED, on the classic /board page in this same browser against this same
-      // build, before any claim about the tab. Stating a number here would make "all lanes" a
-      // comparison against this file's memory of the board rather than against the board.
-      await page.goto(loomDaemon.baseURL + "/board");
-      await expect(page.locator(".loom-rail")).toBeVisible();
-      // RETRYING, then counted. `locator.count()` does not auto-wait, so a bare count straight after
-      // the rail appears reads whatever the board's own query has resolved so far — measured: it came
-      // back 0 and reported "the classic board rendered no lanes" on a page that renders seven. Waiting
-      // for the seeded CARD (not merely for a lane) is what proves the board's data actually landed, so
-      // the number taken is the settled lane count rather than a partial one.
-      await expect(openTargetIn(page.locator("main"), cardTitles[0]!),
-        "the classic board never rendered this test's seeded card, so its lane count is not settled")
-        .toBeVisible();
-      const classicLanes = await lanesIn(page.locator("main")).count();
-      expect(classicLanes, "the classic board rendered no lanes, so there is nothing to compare")
-        .toBeGreaterThan(1);
+      // The lane count is READ from the board this tab renders, over the same REST route its query uses,
+      // before any claim about the tab. Stating a number here would make "all lanes" a comparison against
+      // this file's memory of the board rather than against the board. (It was measured on the classic
+      // /board page until that shell was deleted by card acbb6df6.)
+      const boardRes = await fetch(`${loomDaemon.baseURL}/api/projects/${project.id}/board`);
+      expect(boardRes.ok, "reading the board's own columns over REST").toBe(true);
+      const boardLanes = ((await boardRes.json()) as { columns: unknown[] }).columns.length;
+      expect(boardLanes, "the board declares no lanes, so there is nothing to compare").toBeGreaterThan(1);
 
-      // ON, reached THROUGH the tab row rather than by typing the URL — the affordance this card adds.
+      // Reached THROUGH the tab row rather than by typing the URL — the affordance this card adds.
       await seedAtlasOn(page);
       await page.goto(loomDaemon.baseURL + "/project");
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
@@ -440,8 +432,8 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       const scope = tabPanel(page, "board");
       await expect(scope).toBeVisible();
 
-      // ALL LANES — the same number the classic page just rendered.
-      await expect(lanesIn(scope), "the Board tab clipped the board's lanes").toHaveCount(classicLanes);
+      // ALL LANES — every column the board declares.
+      await expect(lanesIn(scope), "the Board tab clipped the board's lanes").toHaveCount(boardLanes);
       // ALL CARDS — every seeded card, not a summary or a trimmed slice.
       for (const title of cardTitles) {
         await expect(openTargetIn(scope, title), `the Board tab is missing the seeded card ${title}`)
@@ -478,7 +470,7 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
         "the Board tab's card detail is anchored to an edge — a drawer, not the centred dialog")
         .toBeLessThan(2);
       // And the board behind it is still whole: a drawer's cost is the reflow, not just the position.
-      await expect(lanesIn(scope), "the board reflowed when the dialog opened").toHaveCount(classicLanes);
+      await expect(lanesIn(scope), "the board reflowed when the dialog opened").toHaveCount(boardLanes);
     });
 
   test("switch ON: unfinished input on a tab survives switching away and back",
@@ -525,84 +517,5 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       await expect(tabPanel(page, "board").getByLabel("Search tasks by id, title, or description"),
         "the draft survived a full reload too, so the tab switch proved nothing about staying mounted")
         .toHaveValue("");
-    });
-
-  test("switch OFF: every re-homed path renders its classic page, with nothing Atlas mounted",
-    async ({ page, loomDaemon }) => {
-      test.setTimeout(240_000);
-      const { rows } = parseProjectNodeTabs();
-      // The addresses this card re-homed: every tab that brought its own path, i.e. everything but the
-      // two home tabs on the node's own address (which the classic shell deliberately never mounts).
-      const rehomed = [...new Set(rows.map((t) => pathOf(t.to)).filter((p) => p !== "/project"))];
-      expect(rehomed.length, "no re-homed path to check, so this test proves nothing")
-        .toBeGreaterThanOrEqual(8);
-
-      // Split by KIND, derived from NAV_PAGES — see parseNavPagePaths above for why the two halves
-      // carry different claims. Both halves get a floor, so a parse that silently emptied one would
-      // fail here rather than reduce that half's walk to nothing.
-      const nav = parseNavPagePaths();
-      expect(nav.paths.length, `the NAV_PAGES parse found no rows. Block:\n${nav.block}`).toBeGreaterThan(0);
-      expect(nav.paths.length,
-        `the parse returned ${nav.paths.length} row(s) but NAV_PAGES contains ${nav.rawMarkers} entries`
-        + ` — the pattern is dropping rows. Block:\n${nav.block}`).toBe(nav.rawMarkers);
-      const bothShells = rehomed.filter((p) => nav.paths.includes(p));
-      const atlasOnly = rehomed.filter((p) => !nav.paths.includes(p));
-      expect(bothShells.length, "no re-homed NAV_PAGES destination to check").toBeGreaterThanOrEqual(7);
-      expect(atlasOnly.length, "no re-homed Atlas-only node to check").toBeGreaterThanOrEqual(1);
-
-      const { project, cardTitles } = await seedProjectNode(loomDaemon);
-      await pinProject(page, project.id);
-      await page.setViewportSize(VIEWPORT);
-
-      const classicText = new Map<string, string>();
-      for (const to of bothShells) {
-        await page.goto(loomDaemon.baseURL + to);
-        // PRESENCE first: the classic shell really rendered, with real content in it. Deliberately NOT
-        // `main h1` — measured: the classic Board page renders no `<h1>` at all, so that probe would
-        // have been a check on which pages happen to carry a heading, not on whether they rendered.
-        await expect(page.locator(".loom-rail"), `${to} did not render the classic rail`).toBeVisible();
-        const text = (await page.locator("main").innerText()).trim();
-        expect(text.length, `${to} rendered an empty main column under the classic shell`)
-          .toBeGreaterThan(20);
-        classicText.set(to, text);
-        // …and only THEN the absences. Asserted in every way Atlas could be detected, not just by the
-        // shell's own testid: the node tab row this card adds, and the stylesheet classes the Atlas
-        // frame is the only consumer of.
-        await expect(page.getByTestId("atlas-shell"), `${to} mounted the Atlas shell`).toHaveCount(0);
-        await expect(tabRow(page), `${to} rendered the project node's tab row under the classic shell`)
-          .toHaveCount(0);
-        expect(await page.locator('[class*="loom-atlas"]').count(),
-          `${to} rendered an element carrying an Atlas frame class under the classic shell`).toBe(0);
-      }
-
-      // DISCRIMINATION CONTROL on that probe: "real content rendered" would also be satisfied by one
-      // error panel, or one still-loading shell, served at all eight addresses. Each page must read
-      // DIFFERENTLY from the others, so the walk is shown to have visited eight distinct pages rather
-      // than the same one eight times.
-      expect(new Set(classicText.values()).size,
-        `the classic pages collapsed to ${new Set(classicText.values()).size} distinct rendering(s) across`
-        + ` ${bothShells.length} addresses — the walk may be reading one shell, not ${bothShells.length} pages`)
-        .toBe(bothShells.length);
-
-      // The OTHER half: a re-homed ATLAS-ONLY node. The claim here is not "its classic page is
-      // untouched" — it has none, and never did — but that the switch being off still mounts nothing
-      // Atlas at that address, so a user who never opted in cannot reach the preview through a tab
-      // this card re-homed.
-      for (const to of atlasOnly) {
-        await page.goto(loomDaemon.baseURL + to);
-        await expect(page.locator(".loom-rail"), `${to} did not render the classic rail`).toBeVisible();
-        await expect(page.getByTestId("atlas-shell"), `${to} mounted the Atlas shell`).toHaveCount(0);
-        await expect(tabRow(page), `${to} rendered the project node's tab row under the classic shell`)
-          .toHaveCount(0);
-        expect(await page.locator('[class*="loom-atlas"]').count(),
-          `${to} rendered an element carrying an Atlas frame class under the classic shell`).toBe(0);
-      }
-
-      // FIXTURE IDENTITY, on the one re-homed page that can show it: the walk above really ran against
-      // this test's own project, so "the classic page rendered" is a claim about seeded data and not
-      // about an empty or errored shell.
-      await page.goto(loomDaemon.baseURL + "/board");
-      await expect(openTargetIn(page.locator("main"), cardTitles[0]!)).toBeVisible();
-      expect(project.name.length, "the seeded project has no name to identify it by").toBeGreaterThan(0);
     });
 });

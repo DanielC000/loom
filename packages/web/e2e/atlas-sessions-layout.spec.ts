@@ -324,31 +324,6 @@ test.describe("Atlas Sessions tab — terminal order and grid", () => {
     await expect(columnsSelect(page)).toHaveValue("3");
     await expect(resetOrder(page)).toBeVisible();
   });
-
-  test("switch OFF: the classic /terminals has neither control", async ({ page, loomDaemon }) => {
-    // No seedAtlasOn — off is the default — and no project pin: the classic page is god-eye, the one
-    // mount with no single project to store a per-project preference under.
-    const f = await seedManagerRow(loomDaemon);
-    await page.goto(loomDaemon.baseURL + SESSIONS_PATH);
-
-    // Presence first: the classic shell really rendered this page, with the filter it always had and
-    // the seeded sessions in its grid — so the absences below are measured, not a blank page.
-    await expect(page.locator("main")).toBeVisible();
-    await expect(bar(page)).toBeVisible();
-    await expect(bar(page)).toContainText("Project");
-    await expect(page.getByTestId("tile-identity").first()).toBeVisible();
-
-    await expect(bar(page)).not.toContainText("Columns");
-    await expect(columnsSelect(page)).toHaveCount(0);
-    await expect(resetOrder(page)).toHaveCount(0);
-    for (const w of f.workers) {
-      await expect(moveEarlier(page, w.sessionId)).toHaveCount(0);
-      await expect(moveLater(page, w.sessionId)).toHaveCount(0);
-    }
-    // The grid is still drawn — it just carries the unchanged `auto` template.
-    await expect(page.getByTestId(`sessions-grid-${f.rowKey}`)).toHaveAttribute("data-columns", "auto");
-    await expect(page.getByTestId("atlas-node-tabs")).toHaveCount(0);
-  });
 });
 
 /** The seeded row's rendered worker ids, in DOM order — the full ids, for a move-control locator. */

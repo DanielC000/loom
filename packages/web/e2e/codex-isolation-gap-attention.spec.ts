@@ -163,7 +163,7 @@ test.describe("codex isolation-gap attention item (card ed0858dc)", () => {
     expect(wire!.managerSessionId, "a parentless row files managerSessionId === workerSessionId").toBe(codex.sessionId);
     expect(wire!.detail.nudged, "nudged:false — nobody was told, which is the gap this surfaces").toBe(false);
 
-    await page.goto(`${loomDaemon.baseURL}/`); // Mission Control — the global attention queue
+    await page.goto(`${loomDaemon.baseURL}/`); // the Workspace node — its Needs-you band is the global attention queue
 
     // PRESENT for the codex session.
     const row = gapRowFor(page, codex.sessionId);
@@ -200,7 +200,8 @@ test.describe("codex isolation-gap attention item (card ed0858dc)", () => {
     await page.reload();
     await expect(gapRowFor(page, codex.sessionId)).toHaveCount(0);
     // Positive control for that absence — the queue itself is alive on the reloaded page, so "not found"
-    // means dismissed, not "the page never rendered an attention queue at all".
-    await expect(page.getByText(/Attention queue \(/)).toBeVisible();
+    // means dismissed, not "the page never rendered an attention queue at all". (The Workspace node's
+    // Needs-you band since card acbb6df6; it was Mission Control's "Attention queue" before.)
+    await expect(page.getByTestId("atlas-band-needs")).toBeVisible();
   });
 });

@@ -61,30 +61,12 @@ async function assertGenuinelyStale(page: Page) {
 }
 
 test.describe("new-build reload notice (card e98bf784)", () => {
-  test("switch OFF (classic shell): a tab running a superseded bundle is told, and can dismiss", async ({ page, loomDaemon }) => {
-    await serveBundle(page, SERVED_ELSEWHERE);
-    await page.goto(loomDaemon.baseURL + "/");
-    await expect(page.locator(".loom-rail")).toBeVisible(); // classic shell, the default
-
-    const own = await assertGenuinelyStale(page);
-    await expect(notice(page),
-      `this tab is running ${own} while the server serves ${SERVED_ELSEWHERE}, and nothing told the user — ` +
-      "the exact state the owner hit, where stale UI reads as 'my change wasn't done'").toBeVisible();
-    await expect(notice(page)).toContainText("A new version of Loom is available");
-
-    // Dismissal is the other half of "unobtrusive": it must actually stick for THIS build.
-    await page.getByTestId("new-build-notice-dismiss").click();
-    await expect(notice(page), "dismissing left the notice on screen").toHaveCount(0);
-    expect(await page.evaluate((k) => localStorage.getItem(k), dismissKeyFor(SERVED_ELSEWHERE)),
-      "dismissing did not record a dismissal for the served build, so it would re-appear immediately").toBe("1");
-  });
 
   test("switch ON (Atlas shell): the same notice renders — one mount covers both shells", async ({ page, loomDaemon }) => {
     await seedAtlasOn(page);
     await serveBundle(page, SERVED_ELSEWHERE);
     await page.goto(loomDaemon.baseURL + "/");
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    await expect(page.locator(".loom-rail"), "the classic shell rendered, so this is not the Atlas leg").toHaveCount(0);
 
     const own = await assertGenuinelyStale(page);
     await expect(notice(page),
@@ -123,7 +105,7 @@ test.describe("new-build reload notice (card e98bf784)", () => {
 
     await serveBundle(page, own);
     await page.reload();
-    await expect(page.locator(".loom-rail")).toBeVisible();
+    await expect(page.getByTestId("atlas-shell")).toBeVisible(); // the shell rendered (the only one since card acbb6df6)
     await expect(notice(page),
       `the tab is running ${own} and the server is serving ${own} — there is nothing stale, yet it was ` +
       "told to reload").toHaveCount(0);
@@ -134,7 +116,7 @@ test.describe("new-build reload notice (card e98bf784)", () => {
     // NO notice — never to a reload prompt the user cannot act on.
     await serveBundle(page, null);
     await page.goto(loomDaemon.baseURL + "/");
-    await expect(page.locator(".loom-rail")).toBeVisible();
+    await expect(page.getByTestId("atlas-shell")).toBeVisible(); // the shell rendered (the only one since card acbb6df6)
     expect(await ownBundle(page), "the tab did not load a production bundle").toMatch(/^index-.*\.js$/);
     await expect(notice(page), "a null served bundle (an unbuilt dist) was treated as a DIFFERENT build " +
       "and the tab was told to reload").toHaveCount(0);

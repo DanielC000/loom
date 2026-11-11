@@ -1,5 +1,7 @@
 # 595e2a47 — splitting Settings by the scope its sections actually write
 
+> **Superseded in part by card `acbb6df6` (2026-11-11).** The Atlas switch is deleted, so the Interface row now holds only the theme (`lib/themePref.ts`) and `Settings()` filters `SETTINGS_SECTIONS` by `scope` alone. The prohibition on a section reading `useAtlasUi()` is void with the switch; "place a section by the API call it makes" stands unchanged.
+
 Atlas P2-12 (epic `9fe8cd4e`), closing parity gap §J.9 of `docs/plans/atlas-ui/01-parity-checklist.md`. Round 2 proposed splitting `Settings.tsx` "by depth"; nothing had ever checked it section by section. This record is that check and the placement it produced.
 
 ## Do not

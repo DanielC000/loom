@@ -54,18 +54,21 @@ test.describe("attention toast collapse (card 0d27f20c)", () => {
     // The CTA's bottom edge is above the pill's top edge → the two rectangles do not overlap vertically.
     expect(ctaBox!.y + ctaBox!.height).toBeLessThan(pillBox!.y);
 
-    // (3) Suppressed on Mission Control ("/") and /inbox — those pages already render the full queue.
+    // (3) Suppressed on the Workspace node ("/" lands there since card acbb6df6 deleted Mission Control) and
+    //     /inbox — those pages already render the queue.
     await page.goto(`${loomDaemon.baseURL}/`);
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);
-    // The queue itself is present on Mission Control (the pill's job is done by the page).
-    await expect(page.locator("main").getByText(/^Decision needed$/).first()).toBeVisible();
+    // The queue itself is present on the page (the pill's job is done by the page). Any of the four kinds:
+    // the Needs-you band is height-fitted, so WHICH of them make the cut is the band's choice, not this spec's.
+    await expect(page.getByTestId("atlas-band-needs")
+      .getByText(/^(Decision|Input|Secret|Permission) needed$/).first()).toBeVisible();
 
     await page.goto(`${loomDaemon.baseURL}/inbox`);
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);
     // The primary action on each inbox row is fully visible (no overlay here at all).
     await expect(page.locator("main").getByRole("button", { name: "Answer →" }).first()).toBeVisible();
 
-    // (4) Dismiss survives CLIENT navigation: dismiss on /platform, then navigate via the sidebar's
+    // (4) Dismiss survives CLIENT navigation: dismiss on /platform, then navigate via the tree's
     // React-Router link (NOT page.goto, which is a hard browser reload) — the pill stays gone. ToastContainer
     // mounts ONCE at the app root outside <Routes>, so its dismissedAtCount state only survives a route change
     // that stays within the SPA; a page.goto here would remount the whole app (dismissedAtCount resets to 0)
@@ -75,8 +78,10 @@ test.describe("attention toast collapse (card 0d27f20c)", () => {
     await expect(pill).toBeVisible();
     await pill.getByRole("button", { name: "dismiss" }).click();
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);
-    await page.getByRole("link", { name: /Memory/ }).click();
-    await expect(page).toHaveURL(/\/memory$/);
+    // The Atlas tree's own Terminals row (the classic rail's Memory link went with that shell, card
+    // acbb6df6) — any in-app link to a page outside the pill's suppression set proves the same thing.
+    await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: /^Terminals/ }).click();
+    await expect(page).toHaveURL(/\/workspace-terminals$/);
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);
 
     // (5) A fresh load resets the in-memory dismiss; clicking the pill body jumps to /inbox.
@@ -85,6 +90,7 @@ test.describe("attention toast collapse (card 0d27f20c)", () => {
     const pill2 = page.getByTestId("request-count-pill");
     await expect(pill2).toBeVisible();
     await pill2.click();
-    await expect(page).toHaveURL(/\/inbox$/);
+    // The Inbox is the Workspace node's `inbox` tab (card 41eab0eb), so `/inbox` lands there.
+    await expect(page).toHaveURL(/\/home\?tab=inbox$/);
   });
 });

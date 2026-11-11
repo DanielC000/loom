@@ -50,7 +50,7 @@ test("a url-in-host connection is refused at create, and an existing one is badg
     expect(rows.find((r) => r.id === good.id)?.invalidHost).toBeUndefined();
 
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-    await page.goto(`${loomDaemon.baseURL}/settings`);
+    await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
     const badRow = page.getByTestId(`connection-row-${bad.id}`);
     await expect(badRow).toBeVisible();
     await expect(badRow.getByTestId("connection-invalid-host")).toHaveText("Invalid host");

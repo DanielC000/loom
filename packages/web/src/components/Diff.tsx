@@ -1,11 +1,9 @@
 import { color, font, radius, tone, fs } from "../theme";
-import { type DiffLineKind, type FileDiff, hunkLineKind, rawPatchLineKind, riskTone, statusGlyph } from "../lib/diff";
+import { type DiffLineKind, type FileDiff, hunkLineKind, riskTone, statusGlyph } from "../lib/diff";
 import { Dot } from "./ui";
 
-// The ONE place a classified diff line kind (from lib/diff) maps to a theme color, so DiffView and
-// FileHunks agree on the palette: green adds / red deletions / cyan hunk headers / dim context / muted
-// file headers. The classifier differs per caller (FileHunks: hunkLineKind, header-stripped content;
-// DiffView: rawPatchLineKind, raw patch with real headers) — this map does not.
+// The ONE place a classified diff line kind (from lib/diff) maps to a theme color: green adds / red
+// deletions / cyan hunk headers / dim context / muted file headers.
 const KIND_COLOR: Record<DiffLineKind, string> = {
   add: color.liveFg,
   del: color.danger,
@@ -13,20 +11,6 @@ const KIND_COLOR: Record<DiffLineKind, string> = {
   context: color.text2,
   meta: color.text3,
 };
-
-// Unified diff with green additions / red deletions / cyan hunk headers. Kept for the fleet-card
-// expansion's worker branch-diff raw whole-patch render; the review pane uses the per-file
-// FileDiffBlock below.
-export function DiffView({ patch }: { patch: string }) {
-  const lines = patch.split("\n");
-  return (
-    <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: font.mono, fontSize: fs.mono, lineHeight: 1.5 }}>
-      {lines.map((ln, i) => (
-        <div key={i} style={{ color: KIND_COLOR[rawPatchLineKind(ln)] }}>{ln || " "}</div>
-      ))}
-    </pre>
-  );
-}
 
 // The hunks of ONE file, rendered with per-line coloring + a faint hunk-header band. Pulled out so
 // the collapsible FileDiffBlock can show/hide it without re-laying the lines.

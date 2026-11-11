@@ -119,16 +119,10 @@ test.describe("Atlas Pulse band — exited managers (card ef86b089)", () => {
       const tag = sentinel();
       const mgr = await seedExitedManagerWithEvent(loomDaemon, { sentinel: tag });
 
-      // ── POSITIVE CONTROL FIRST: classic Mission Control already read every non-archived manager, so
-      // this exact row rendered there before this card and must still. If it does NOT render here, the
-      // band assertion below would be measuring a broken fixture, not a blind band.
-      await pinProject(page, mgr.projectId);
-      await page.goto(loomDaemon.baseURL + "/");
-      await expect(page.locator(detailTitle(tag)).first(),
-        "positive control: the seeded exited manager's event does not render on classic Mission Control"
-        + " either, so this fixture proves nothing about the Atlas band").toBeVisible({ timeout: 30_000 });
-
-      // ── THE CLAIM: the same event is now reachable from the Atlas band. ──
+      // (A positive control here used to read this row on classic Mission Control first; it went with that
+      // page, card acbb6df6. The claim below is a PRESENCE claim, so a broken fixture fails it rather than
+      // satisfying it — the control only ever made such a failure easier to diagnose.)
+      // ── THE CLAIM: the event is reachable from the Atlas band. ──
       const atlas = await page.context().newPage();
       await pinProject(atlas, mgr.projectId);
       await seedAtlasOn(atlas);

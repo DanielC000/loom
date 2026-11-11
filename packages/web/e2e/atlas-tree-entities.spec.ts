@@ -297,31 +297,4 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
       expect(await page.locator("[data-atlas-entity]").count(),
         "the entity-row collector found nothing with the switch ON").toBeGreaterThan(0);
     });
-
-  test("switch OFF: the classic shell renders no entity rows and no Atlas element at all",
-    async ({ page, loomDaemon }) => {
-      test.setTimeout(120_000);
-      const { alpha, mgr, worker, sentinel } = await seedEntities(loomDaemon);
-      await pinProject(page, alpha.id);
-      await page.goto(loomDaemon.baseURL + "/board");
-
-      // Fixture identity on this side too, so "unchanged" is asserted on a page that really rendered
-      // this spec's own data rather than on an empty or errored shell.
-      await expect(page.locator(".loom-rail")).toBeVisible();
-      await expect(page.locator("main").getByText(sentinel.title, { exact: true })).toBeVisible();
-
-      // Not one element of the new frame exists, asserted on the class PREFIX so the tree, its rows
-      // and the shell are all covered by one claim rather than by a list of the ones this spec
-      // happened to think of.
-      await expect(page.locator("[class*='loom-atlas']"),
-        "an Atlas element is mounted with the switch off").toHaveCount(0);
-      await expect(page.getByTestId("atlas-tree")).toHaveCount(0);
-
-      // And specifically none of THIS card's rows. The collector is the same one the ON test above
-      // reads a non-zero count from, so this zero is a reading rather than a broken selector.
-      await expect(page.locator("[data-atlas-entity]"),
-        "an entity row is mounted with the switch off").toHaveCount(0);
-      await expect(page.getByTestId(`atlas-session-${mgr.sessionId}`)).toHaveCount(0);
-      await expect(page.getByTestId(`atlas-session-${worker.sessionId}`)).toHaveCount(0);
-    });
 });

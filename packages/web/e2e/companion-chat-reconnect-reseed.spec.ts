@@ -84,7 +84,7 @@ test("an ordinary reconnect re-seeds history — a reply persisted while the soc
 
   await page.addInitScript(INSTRUMENT);
   await page.goto(`${loomDaemon.baseURL}/companion`);
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   await expect(chat.getByText("connected", { exact: true })).toBeVisible();
 
   // Not present yet — the row doesn't exist in the DB, and nothing has pushed it live.
@@ -112,7 +112,7 @@ test("a message delivered over the socket WHILE the reconnect's re-fetch is in f
 
   await page.addInitScript(INSTRUMENT);
   await page.goto(`${loomDaemon.baseURL}/companion`);
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   await expect(chat.getByText("connected", { exact: true })).toBeVisible();
 
   // Installed only NOW — after the mount's own history fetch already resolved — so this holds open

@@ -1,4 +1,6 @@
-// Project-Overview attention items survive their session being ARCHIVED (card 5ced500b).
+// Project attention items survive their session being ARCHIVED (card 5ced500b). Written against the classic
+// project Overview; ported by card acbb6df6 to the project node's Home tab "Needs you" card, which filters
+// with the SAME `attentionItemInProject` helper.
 //
 // THE DEFECT: `Overview.tsx`'s `projAttention` and `MissionControl.tsx`'s `attnByProject` both resolved an
 // attention item's owning project SOLELY by looking its session id up in the live session feed
@@ -69,8 +71,8 @@ async function expectArchivedOutOfLiveFeed(baseURL: string, sessionId: string): 
 const attentionRow = (page: Page, kind: string, sessionId: string) =>
   page.locator(`main [data-testid="attention-row"][data-kind="${kind}"][data-session-id="${sessionId}"]`);
 
-/** The Attention section heading — the positive control for any ABSENT assertion on this page. */
-const attentionHeading = (page: Page) => page.locator("main").getByText(/^Attention \(/);
+/** The project Home tab's "Needs you" card — the positive control for any ABSENT assertion on this page. */
+const attentionHeading = (page: Page) => page.getByTestId("atlas-band-needs");
 
 // ── codex isolation-gap seeding, in the daemon's own shape ─────────────────────────────────────────────
 const GAP_ITEMS = [{ id: "settingsDirReadDeny", reason: "codex has no filesystem-deny lever for this directory." }];
@@ -101,7 +103,7 @@ test.afterEach(async ({ loomDaemon }) => {
   }
 });
 
-test.describe("project Overview keeps attention items after archive (card 5ced500b)", () => {
+test.describe("the project Home tab keeps attention items after archive (cards 5ced500b, acbb6df6)", () => {
   test("a pending owner REQUEST whose asking session is ARCHIVED still shows on the project Overview", async ({ page, loomDaemon }) => {
     // THE MOST VALUABLE CASE, and one the card's own list of known-affected kinds did not name: a Request
     // routed to a manager that has since exited and archived. `QuestionInboxItem` has carried `projectId`
@@ -117,7 +119,7 @@ test.describe("project Overview keeps attention items after archive (card 5ced50
     expect(foreignMgr.projectId, "the control must be a genuinely DIFFERENT project").not.toBe(mgr.projectId);
 
     await pinActiveProject(page, mgr.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
 
     // BEFORE: the asking manager is still live, so the row resolves by the pre-existing path.
     const row = attentionRow(page, "DECISION NEEDED", mgr.sessionId);
@@ -160,7 +162,7 @@ test.describe("project Overview keeps attention items after archive (card 5ced50
     seededGaps.push({ agentSentinel, workerSessionId: codex.sessionId });
 
     await pinActiveProject(page, codex.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
 
     // BEFORE: live session, row resolves by the pre-existing path.
     await expect(attentionRow(page, "CODEX ISOLATION GAP", codex.sessionId)).toBeVisible();
@@ -197,7 +199,7 @@ test.describe("project Overview keeps attention items after archive (card 5ced50
     // PRESENT on the owning project's Overview. Scoped by the repo-path sentinel, since `data-session-id`
     // is the empty string for this kind.
     await pinActiveProject(page, mgr.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     const row = page.locator(`main [data-testid="attention-row"][data-kind="VAULT LOCK STUCK"]`).filter({ hasText: repoPath });
     await expect(row).toBeVisible();
     await expect(row).toContainText("index.lock stuck");
@@ -206,7 +208,7 @@ test.describe("project Overview keeps attention items after archive (card 5ced50
     // item is being PLACED by its projectId rather than shown to everyone. The Attention heading is the
     // positive control: "not found" here means filtered, not "the page never rendered the section".
     await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), foreign.projectId);
-    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await page.goto(`${loomDaemon.baseURL}/project`);
     await expect(attentionHeading(page)).toBeVisible();
     await expect(page.locator(`main [data-testid="attention-row"][data-kind="VAULT LOCK STUCK"]`).filter({ hasText: repoPath })).toHaveCount(0);
   });

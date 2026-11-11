@@ -312,24 +312,4 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
     // than merely looking plausible.
     expect(stopped, "the daemon must report stopping exactly the 2 workers the confirm named").toBe(2);
   });
-
-  test("switch OFF: Mission Control's own fleet cluster is untouched and nothing Atlas is mounted", async ({ page, loomDaemon }) => {
-    // No seedAtlasOn — OFF is the default.
-    await page.goto(loomDaemon.baseURL + "/");
-    const main = page.locator("main");
-
-    // Presence-first: the classic surface is all still here…
-    await expect(main.getByText(/^orchestration: (running|paused)$/)).toBeVisible();
-    await expect(main.getByRole("button", { name: "Clear usage hold" })).toBeVisible();
-    await expect(main.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
-    await expect(main.getByRole("button", { name: "Resume", exact: true })).toBeVisible();
-    await expect(main.getByRole("button", { name: "Kill all" })).toBeVisible();
-    // …including BOTH pause and resume at once, which is the classic page's own shape and is
-    // deliberately NOT what the Atlas cluster does (it swaps one for the other on the live state).
-
-    // …and only then: nothing Atlas exists under the switch's default.
-    await expect(page.getByTestId("atlas-orch-chip")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-fleet-controls-bar")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-  });
 });

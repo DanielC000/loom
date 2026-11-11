@@ -20,7 +20,21 @@
 // "Ada"), so asserting that name is visible holds regardless of which source a future UI change reads it
 // from.
 import { randomUUID } from "node:crypto";
+import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures/daemon";
+
+// The Atlas Companion node (the only shell since card acbb6df6) splits Manage into four sub-sections
+// (lib/companionManage.ts › COMPANION_MANAGE_GROUPS) and shows ONE at a time, where the classic page drew
+// every section in one column. Capabilities, lead mode and Delete live under "Trust"; persona, memory and
+// reminders under "Persona"; config and proactive home under "Run" (the default).
+type ManageSection = "Run" | "Channels" | "Persona" | "Trust";
+const openManageSection = async (page: Page, section: ManageSection) => {
+  const manage = page.getByRole("tablist", { name: "Companion view" }).getByRole("tab", { name: "Manage" });
+  if ((await manage.getAttribute("aria-selected")) !== "true") await manage.click();
+  await expect(manage).toHaveAttribute("aria-selected", "true");
+  await page.locator('[role="radiogroup"][aria-label="Companion manage sections"]')
+    .getByRole("radio", { name: section, exact: true }).click();
+};
 
 // Isolation is baked into the fixture (fixtures/daemon.ts): the first-run "Welcome to Loom" overlay is
 // dismissed globally, and the seeded companion (a non-archived assistant-role session that would otherwise
@@ -59,7 +73,7 @@ test("shows the seeded companion (not the empty create-box) with Chat + Manage t
   // The companion's name is surfaced INSIDE the chat panel itself (its header strip), not only in the
   // outer CompanionDetail header — scope to the chat tabpanel so this can't pass on the outer header alone.
   await expect(
-    page.locator("#companion-panel-chat").getByText("Ada", { exact: true }),
+    page.locator('[data-testid="companion-mode-panel-chat"]').getByText("Ada", { exact: true }),
   ).toBeVisible();
 });
 
@@ -78,7 +92,7 @@ test("card 351e89af: the Chat WS still connects through the loopback guard, and 
   await loomDaemon.seedCompanion();
   await page.goto(`${loomDaemon.baseURL}/companion`);
 
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   await expect(chat.getByText("connected", { exact: true })).toBeVisible();
 
   const box = page.getByRole("textbox", { name: "Message" });
@@ -103,23 +117,26 @@ test("Manage tab surfaces config (masked), memory, reminders, persona, and proac
   await expect(page.getByText("123456:e2e-test-token")).toHaveCount(0); // the plaintext token never renders
   await expect(page.getByText("Ada", { exact: true }).first()).toBeVisible(); // the companion's name
 
+  // ── Proactive home: the section renders (empty-but-present is fine). It is a Run section, so it is read
+  // before switching away. "Proactive home" appears twice (the section heading AND an inline
+  // cross-reference in Run configuration above it) — .last() pins the heading.
+  await expect(page.getByText("Proactive home", { exact: true }).last()).toBeVisible();
+
+  await openManageSection(page, "Persona");
   // ── Memory: the seeded entry is listed. ──────────────────────────────────────────────────────────────
   // Scoped to the Manage tabpanel: the sidebar rail ALSO renders an exact "Memory" nav label (the
   // separate project-memory page, nav.tsx) on every page including this one — an unscoped match hits
   // both and violates Playwright's strict mode. The two are legitimately distinct features (the rail's
   // is project-wide memory; this one is the companion's own self-authored memory store).
-  await expect(page.locator("#companion-panel-manage").getByText("Memory", { exact: true })).toBeVisible();
+  await expect(page.locator('[data-testid="companion-mode-panel-manage"]').getByText("Memory", { exact: true })).toBeVisible();
   await expect(page.locator("code").filter({ hasText: companion.memoryName })).toBeVisible();
 
   // ── Reminders: the seeded reminder is listed by its label. ───────────────────────────────────────────
   await expect(page.getByText("Reminders", { exact: true })).toBeVisible();
   await expect(page.getByText(companion.reminderLabel, { exact: true })).toBeVisible();
 
-  // ── Persona / proactive-home: both sections render (empty-but-present is fine — no authoring here). ──
-  // "Proactive home" appears twice (the section heading AND an inline cross-reference in Run
-  // configuration above it) — .last() pins the heading, which is what proves the SECTION itself renders.
+  // ── Persona / prompt: the section renders (empty-but-present is fine — no authoring here). ──────────
   await expect(page.getByText("Persona / prompt", { exact: true })).toBeVisible();
-  await expect(page.getByText("Proactive home", { exact: true }).last()).toBeVisible();
 });
 
 test("multi-companion: a picker lists every companion and switches the focused one", async ({ page, loomDaemon }) => {
@@ -146,13 +163,13 @@ test("multi-companion: a picker lists every companion and switches the focused o
   // Focus companion B → the chat pane (a companion's default face) re-scopes to B.
   await btnB.click();
   await expect(btnB).toHaveAttribute("aria-pressed", "true");
-  await expect(page.locator("#companion-panel-chat").getByText(nameB, { exact: true })).toBeVisible();
+  await expect(page.locator('[data-testid="companion-mode-panel-chat"]').getByText(nameB, { exact: true })).toBeVisible();
 
   // Switch to A → the panes re-scope to A (observable state change: the chat header name flips, B de-selects).
   await btnA.click();
   await expect(btnA).toHaveAttribute("aria-pressed", "true");
   await expect(btnB).toHaveAttribute("aria-pressed", "false");
-  await expect(page.locator("#companion-panel-chat").getByText(nameA, { exact: true })).toBeVisible();
+  await expect(page.locator('[data-testid="companion-mode-panel-chat"]').getByText(nameA, { exact: true })).toBeVisible();
 });
 
 test("conversation history: the rail lists an archived conversation, opening it shows a read-only transcript, the live chat stays", async ({ page, loomDaemon }) => {
@@ -189,7 +206,7 @@ test("conversation history: the rail lists an archived conversation, opening it 
     await expect(pickerBtn).toHaveAttribute("aria-pressed", "true"); // focus actually landed on ours
   }
 
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   const rail = chat.locator('aside[aria-label="Conversation history"]');
 
   // ── The history rail lists the archived conversation by its first-message preview. ──────────────────────
@@ -246,7 +263,7 @@ test("live chat: a long conversation stays anchored — scrolling up reveals 'Ju
     await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
   }
 
-  const chat = page.locator("#companion-panel-chat");
+  const chat = page.locator('[data-testid="companion-mode-panel-chat"]');
   const scroll = chat.getByTestId("companion-chat-scroll");
   const jump = chat.locator(".loom-chat-jump");
 
@@ -290,7 +307,7 @@ test("Manage tab: Delete companion is two-step, names the companion, then remove
   await picker.getByRole("button", { name: nameA }).click();
 
   // Open its Manage tab; the Delete companion control lives at the bottom.
-  await page.getByRole("tab", { name: "Manage" }).click();
+  await openManageSection(page, "Trust");
   const del = page.getByTestId("companion-delete");
   await expect(del).toBeVisible();
 
@@ -327,7 +344,7 @@ test("Capabilities: granting a lever persists across reload + prompts a restart-
     await pickerBtn.click();
     await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
   }
-  await page.getByRole("tab", { name: "Manage" }).click();
+  await openManageSection(page, "Trust");
 
   // The Capabilities section renders, with the read-only lever flagged read-only and the act-only session
   // control flagged ELEVATED (task DoD: sensitive ACT levers visually flagged).
@@ -357,7 +374,7 @@ test("Capabilities: granting a lever persists across reload + prompts a restart-
     await pickerBtn2.click();
     await expect(pickerBtn2).toHaveAttribute("aria-pressed", "true");
   }
-  await page.getByRole("tab", { name: "Manage" }).click();
+  await openManageSection(page, "Trust");
   const fleetCardReloaded = page.getByTestId("companion-lever-session-status");
   await expect(fleetCardReloaded.getByText("on · 1 project", { exact: true })).toBeVisible();
 
@@ -385,7 +402,7 @@ test("Capabilities: a lever grants across MULTIPLE projects — the per-lever co
       await pickerBtn.click();
       await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
     }
-    await page.getByRole("tab", { name: "Manage" }).click();
+    await openManageSection(page, "Trust");
   };
   await focus();
 
@@ -431,7 +448,7 @@ test("Capabilities: decisions-relay act mode reveals the decision-class picker; 
     await pickerBtn.click();
     await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
   }
-  await page.getByRole("tab", { name: "Manage" }).click();
+  await openManageSection(page, "Trust");
 
   const card = page.getByTestId("companion-lever-decisions-relay");
   await card.getByRole("combobox", { name: "Grant Decisions relay on a project" }).selectOption(companion.projectId);
@@ -466,7 +483,7 @@ test("Capabilities: granting attention-push (arms live) does NOT raise the resta
     await pickerBtn.click();
     await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
   }
-  await page.getByRole("tab", { name: "Manage" }).click();
+  await openManageSection(page, "Trust");
 
   const card = page.getByTestId("companion-lever-attention-push");
   await expect(page.getByTestId("companion-grants-apply")).toHaveCount(0); // nothing granted yet
@@ -492,7 +509,7 @@ test("Capabilities: an elevated lever (session control) gates its initial grant 
     await pickerBtn.click();
     await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
   }
-  await page.getByRole("tab", { name: "Manage" }).click();
+  await openManageSection(page, "Trust");
 
   const card = page.getByTestId("companion-lever-session-steer");
   await card.getByRole("combobox", { name: "Grant Session control on a project" }).selectOption(companion.projectId);
@@ -524,7 +541,7 @@ test("Capabilities: session-spawn (Tier-X) is elevated, flags that it confirms e
       await pickerBtn.click();
       await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
     }
-    await page.getByRole("tab", { name: "Manage" }).click();
+    await openManageSection(page, "Trust");
   };
   await focus();
 
@@ -577,7 +594,7 @@ test("Capabilities: co-granting transcript-read + session control surfaces a gra
       await pickerBtn.click();
       await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
     }
-    await page.getByRole("tab", { name: "Manage" }).click();
+    await openManageSection(page, "Trust");
   };
   await focus();
 
@@ -642,7 +659,7 @@ test("Lead mode: enable is ack-gated, flips the hero ON + shrouds the grants, an
       await pickerBtn.click();
       await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
     }
-    await page.getByRole("tab", { name: "Manage" }).click();
+    await openManageSection(page, "Trust");
   };
   await focus();
 
@@ -692,7 +709,7 @@ test("multi-companion: the create form opens over the current companion and canc
 
   // A companion is shown (its Chat pane), not the create box.
   await expect(page.getByText("New companion", { exact: true })).toHaveCount(0);
-  await expect(page.locator("#companion-panel-chat")).toBeVisible();
+  await expect(page.locator('[data-testid="companion-mode-panel-chat"]')).toBeVisible();
 
   // "+ New companion" opens the create form OVER the current companion (its heading is the exact "New companion").
   await page.getByRole("button", { name: "+ New companion" }).click();
@@ -702,5 +719,5 @@ test("multi-companion: the create form opens over the current companion and canc
   // Cancel returns to the existing companion without provisioning anything (no real spawn in this fixture).
   await page.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByText("New companion", { exact: true })).toHaveCount(0);
-  await expect(page.locator("#companion-panel-chat")).toBeVisible();
+  await expect(page.locator('[data-testid="companion-mode-panel-chat"]')).toBeVisible();
 });

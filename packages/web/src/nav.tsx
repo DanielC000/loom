@@ -3,9 +3,6 @@ import { Navigate, useLocation } from "react-router-dom";
 import ReviewPanel from "./pages/ReviewPanel";
 import QuestionAnswer from "./pages/QuestionAnswer";
 import SessionView from "./pages/SessionView";
-import MissionControl from "./pages/MissionControl";
-import Projects from "./pages/Projects";
-import Overview from "./pages/Overview";
 import Archive from "./pages/Archive";
 import Terminals from "./pages/Terminals";
 import RequestsPage from "./pages/RequestsPage";
@@ -26,125 +23,67 @@ import WorkspaceTerminals from "./pages/WorkspaceTerminals";
 import ProjectHome from "./pages/ProjectHome";
 import AgentsNode from "./pages/AgentsNode";
 
-// The four nav sections. Every destination is grouped under one of these in the Instrument Rail's
-// grouped nav (components/Sidebar.tsx), with hairline separators between groups. Also used to bucket
-// the route table (App.tsx) and the Command Palette page list.
-export type NavGroup = "operate" | "project" | "config" | "system";
-
 export type NavPage = {
-  /** Full name — used by the Command Palette. */
+  /** Full name — the tree row, the node heading and the Command Palette row. */
   label: string;
-  /** Short header-tab text when it differs from `label`. */
-  nav?: string;
   to: string;
-  /** Exact-match active state (for the index route). */
+  /** Exact-match active state. */
   end?: boolean;
   element: ReactNode;
-  /** Which nav section this page falls under — its group in the rail. */
-  group: NavGroup;
-  /** Responds to the active-project picker — gets a scope-marker dot in the nav. */
+  /** Rescopes on the active project ⇒ the destination sits at PROJECT depth in the Atlas tree. */
   scoped?: boolean;
 };
 
-// Single source of truth for the nav destinations. The Instrument Rail's grouped nav
-// (components/Sidebar.tsx), the route table (App.tsx), and the Command Palette page list
-// (CommandPalette.tsx) all derive from this array, so they can never drift out of sync.
-// Add a new destination here only — tag it with a `group`, and `scoped` as needed.
-// (The parameterized routes are not nav destinations — nothing can link to /session/:id without an
-// id — so they live in PARAM_PAGES at the bottom of this file instead.)
+// Single source of truth for the app's destinations that keep an address of their own. The Atlas shell's
+// route table, its crumbs and node heading (components/AtlasShell.tsx), the tree's workspace tier
+// (components/AtlasTree.tsx) and the Command Palette page list all derive from this array, so they can
+// never drift out of sync. The parameterized routes are not destinations (nothing can link to
+// /session/:id without an id), so they live in PARAM_PAGES below instead.
 //
-// The rail re-groups by `group`, so a destination's placement in this array only sets its order
-// WITHIN its group; the section dividers below are for reading, not display order.
+// Card acbb6df6 made Atlas the ONLY shell, so Mission Control (`/`), Projects (`/projects`) and the
+// classic project Overview (`/overview`) are gone from here: their surfaces live on the Workspace node, the
+// project node and the Agents node, and their old addresses are plain LEGACY_REDIRECTS rows below.
 //
-// `scoped` was determined from `git grep -l useActiveProject packages/web/src/pages` and then
-// VERIFIED per page (does switching the active project actually rescope it?): Overview, Board,
-// Memory (its project_memory read is enabled:!!projectId), Runs, Archive (its archived-sessions query
-// is keyed on + enabled:!!projectId — it lists ONLY the active project's stopped sessions), Repository
-// (both its Files/Git panes rescope), Settings (edits the active project's config override). Projects
-// has its OWN project rail (which writes the active project) so it is intentionally NOT scoped.
-// Automation is god-eye (both its tables span every project) so NOT `scoped`, even though its Time
-// builder's own agent picker is active-project-scoped — a builder-internal scope, not a page-level
-// rescope.
+// `scoped` was VERIFIED per page (does switching the active project actually rescope it?): Board, Memory
+// (its project_memory read is enabled:!!projectId), Runs, Archive (its archived-sessions query is keyed on
+// + enabled:!!projectId), Repository (both its Files/Git panes rescope), Settings (edits the active
+// project's config override). Automation is god-eye (both its tables span every project) so NOT `scoped`,
+// even though its Time builder's own agent picker is active-project-scoped — a builder-internal scope.
 export const NAV_PAGES: NavPage[] = [
-  // ── Formerly the "primary" header tabs — now ordinary rail destinations, grouped by `group` ──
-  // The god-eye home. Grouped under Operate so it heads the sidebar's Operate section (the first
-  // destination in the rail).
-  { label: "Mission Control", nav: "Mission", to: "/", end: true, element: <MissionControl />, group: "operate" },
-  // The project-scoped Overview — the analog of the Platform page for the header's active project
-  // (identity + fleet + go-live + board + schedules + attention/activity + archive count, all rescoped
-  // when you switch the active project). Composes the shared fleet widgets off existing endpoints.
-  { label: "Overview", to: "/overview", element: <Overview />, group: "project", scoped: true },
-  // The single "Platform" section — ONE tab, ONE /platform route. The page itself picks which surface to
+  // The single "Platform" section — ONE node, ONE /platform route. The page itself picks which surface to
   // render by EDITION (the reserved "Loom Platform" home existing): dev gets the Loom Platform home
   // (Lead/Auditor + findings board) plus a client-only "View as" toggle previewing the end-user surface;
-  // shipping gets the end-user "Platform" operator + Workspace Auditor only. A top-level surface
-  // SEPARATE from the project picker (both reserved homes stay out of the ordinary list). Deliberately
-  // `scoped` OFF. The edition logic lives IN Platform.tsx, so there is no nav-level gating anymore.
-  // /setup redirects to /platform (App.tsx) for any lingering links.
-  { label: "Platform", to: "/platform", element: <Platform />, group: "system" },
-  { label: "Terminals", to: "/terminals", element: <Terminals />, group: "operate" },
-  { label: "Board", to: "/board", element: <Board />, group: "project", scoped: true },
+  // shipping gets the end-user "Platform" operator + Workspace Auditor only. Deliberately `scoped` OFF.
+  { label: "Platform", to: "/platform", element: <Platform /> },
+  { label: "Terminals", to: "/terminals", element: <Terminals /> },
+  { label: "Board", to: "/board", element: <Board />, scoped: true },
   // Memory — the read-only, per-project window into project_memory (the durable knowledge the fleet writes
-  // + recalls via the `memory` MCP). A flagship, project-scoped surface in the Project group (alongside
-  // Overview + Board). `scoped: true`: it rescopes on the active-project picker (its one read,
-  // api.projectMemory, is `enabled: !!projectId`).
-  { label: "Memory", to: "/memory", element: <Memory />, group: "project", scoped: true },
-  // ── Operate group (cont.) ────────────────────────────────────────────────────
+  // + recalls via the `memory` MCP). `scoped: true`: its one read, api.projectMemory, is
+  // `enabled: !!projectId`.
+  { label: "Memory", to: "/memory", element: <Memory />, scoped: true },
   // The GLOBAL manager→human Inbox (card 695ebab0, generalizing the decision inbox 8701bdbb; renamed from
   // "Requests" by card 59fa6403) — a cross-project "waiting on me" + FYI queue of typed Requests (decision ·
-  // input · permission · credential · notice), a god-eye destination like Mission Control (deliberately
-  // NOT project-scoped). The bell/toast/⌘K + the Mission Control attention queue are the primary surfacing;
-  // this is the fuller "see them all, filter by type/project" view + the consumed-history tab. The label is
-  // "Inbox"; the route (`/inbox`) and the component/module names (RequestsPage, components/requests.tsx)
-  // deliberately did NOT change — see docs/decisions/59fa6403-requests-to-inbox.md §(f) for why.
-  { label: "Inbox", to: "/inbox", element: <RequestsPage />, group: "operate" },
+  // input · permission · credential · notice), deliberately NOT project-scoped. The label is "Inbox"; the
+  // route (`/inbox`) and the component/module names (RequestsPage, components/requests.tsx) deliberately
+  // did NOT change — see docs/decisions/59fa6403-requests-to-inbox.md §(f) for why.
+  { label: "Inbox", to: "/inbox", element: <RequestsPage /> },
   // Gates — the god-eye view of Loom's daemon-executed gates (merge, worker run_gate, deploy) across every
-  // project, all serialized through one GateSemaphore. Active lane-hero (running + queued) on top, settled
-  // history below, with its OWN per-project filter (default ALL) — so it's a cross-project god-eye view like
-  // Mission Control, deliberately NOT `scoped` to the header picker.
-  { label: "Gates", to: "/gates", element: <Gates />, group: "operate" },
-  // ── Project group (cont.) ────────────────────────────────────────────────────
-  // Repository — the consolidated Vault + Git surface (IA merge #3). One destination with a Files | Git
-  // segmented switch above the two verbatim-lifted panes (Files = the vault tree + type-aware viewer;
-  // Git = branches + commit-log + human-only write actions) — see pages/Repository.tsx. UNLIKE Automation,
-  // this IS `scoped`: both panes are project-scoped (enabled:!!projectId) and rescope on the active-project
-  // picker, so it keeps the scope dot. The old /vault and /git routes redirect here (App.tsx).
-  { label: "Repository", to: "/repository", element: <Repository />, group: "project", scoped: true },
-  // Runs and Archive moved here from Operate (card fc65729d, owner request): both are per-project surfaces
-  // (scoped: true — see the `scoped` provenance note above) and read more naturally alongside Overview /
-  // Board / Memory / Repository than among the god-eye Operate destinations. Routes/behavior unchanged.
-  { label: "Runs", to: "/runs", element: <Runs />, group: "project", scoped: true },
-  { label: "Archive", to: "/archive", element: <Archive />, group: "project", scoped: true },
-  // ── Config group ─────────────────────────────────────────────────────────────
-  // Projects — the definition/config layer: create/manage projects + define their agents (assign a
-  // Profile, edit the startup prompt). Renamed + repositioned from the old "Workspace" page (card
-  // 274f9ba9): it's config, not operate — it touches NO live sessions — so it sits with the other
-  // "define your actors" surfaces (Actors). Its own project rail writes the active project,
-  // so it is deliberately NOT `scoped`. /workspace redirects here (App.tsx) for lingering links.
-  { label: "Projects", to: "/projects", element: <Projects />, group: "config" },
-  // Actors — the consolidated Profiles + Skills surface (IA merge #1). One destination with a Profiles |
-  // Skills segmented switch above the shared list→editor shell (see pages/Actors.tsx). Both are
-  // daemon-global + human-only. The old /profiles and /skills routes redirect here (App.tsx).
-  { label: "Actors", to: "/actors", element: <Actors />, group: "config" },
-  // Companion management is daemon-GLOBAL (one companion config store, not project-scoped) — deliberately
-  // not `scoped`. Declared here under Config alongside Profiles (the companion's restricted-tools toggle is
-  // there), and always reachable in the rail's Config group whether or not a companion is active. (A
-  // vestigial `useVisibleNavPages` runtime "promotion" that once flipped a `primary` flag when a companion
-  // was active was removed with that flag — the rail renders every destination, so nothing consumed it.)
-  { label: "Companion", to: "/companion", element: <Companion />, group: "config" },
-  // Automation — the consolidated Schedules + Event Triggers surface (IA merge #2). One destination with a
-  // Time (cron) | Events segmented switch above the shared trigger-table + builder-modal shell (see
-  // pages/Automation.tsx). Both tables are god-eye — they span every project — so deliberately NOT `scoped`
-  // (each builder scopes its OWN picker: the Time builder's target agent stays limited to the active
-  // project). The old /schedules and /event-triggers routes redirect here (App.tsx).
-  { label: "Automation", to: "/automation", element: <Automation />, group: "config" },
-  // The standalone Orchestration page (its manager→worker→diff drill-down) was REMOVED (card bde7957f):
-  // its two unique views — the per-manager orchestration_events timeline + the worker branch-diff — now
-  // live as role-scoped tabs in the Overview fleet-card expansion (FleetAccordion → SessionCockpit), so
-  // the drill-down is reached from the fleet card rather than a duplicate top-level destination.
-  // ── System group ─────────────────────────────────────────────────────────────
-  { label: "Usage", to: "/usage", element: <Usage />, group: "system" },
-  { label: "Settings", to: "/settings", element: <Settings />, group: "system", scoped: true },
+  // project, with its OWN per-project filter (default ALL), so deliberately NOT `scoped`.
+  { label: "Gates", to: "/gates", element: <Gates /> },
+  // Repository — the consolidated Vault + Git surface (IA merge #3): a Files | Git segmented switch above
+  // the two panes (see pages/Repository.tsx). Both panes rescope on the active project, so it IS `scoped`.
+  { label: "Repository", to: "/repository", element: <Repository />, scoped: true },
+  { label: "Runs", to: "/runs", element: <Runs />, scoped: true },
+  { label: "Archive", to: "/archive", element: <Archive />, scoped: true },
+  // Actors — the consolidated Profiles + Skills surface (IA merge #1), both daemon-global + human-only.
+  { label: "Actors", to: "/actors", element: <Actors /> },
+  // Companion management is daemon-GLOBAL (one companion config store, not project-scoped).
+  { label: "Companion", to: "/companion", element: <Companion /> },
+  // Automation — the consolidated Schedules + Event Triggers surface (IA merge #2). Both tables span every
+  // project, so deliberately NOT `scoped` (each builder scopes its OWN picker).
+  { label: "Automation", to: "/automation", element: <Automation /> },
+  { label: "Usage", to: "/usage", element: <Usage /> },
+  { label: "Settings", to: "/settings", element: <Settings />, scoped: true },
 ];
 
 // ── The parameterized routes ───────────────────────────────────────────────────────────────────
@@ -164,16 +103,14 @@ export type AtlasAddress =
   | { kind: "detail"; under: string; param: string };
 
 export type ParamPage = {
-  /** The route pattern, mounted verbatim by both shells. */
+  /** The route pattern. */
   to: string;
   element: ReactNode;
   atlas: AtlasAddress;
 };
 
-// Declared HERE rather than inline in a shell because BOTH shells mount them (App.tsx's LegacyShell
-// and components/AtlasShell.tsx). A path/element pair copied into two route tables drifts the moment
-// one of them is edited — and the drift is silent, since each shell renders only when its own switch
-// state is live, so a test exercising one can never notice the other went stale.
+// Declared HERE rather than inline in the shell because the frame reads the `atlas` address too
+// (components/AtlasShell.tsx's crumbs and heading), so a route and its tree position stay one row.
 export const PARAM_PAGES: ParamPage[] = [
   { to: "/review/:workerId", element: <ReviewPanel />, atlas: { kind: "session", param: "workerId", tab: "Diff" } },
   { to: "/question/:id", element: <QuestionAnswer />, atlas: { kind: "detail", under: "/inbox", param: "id" } },
@@ -182,12 +119,12 @@ export const PARAM_PAGES: ParamPage[] = [
 
 // ── The Atlas-only nodes ───────────────────────────────────────────────────────────────────────
 // The Workspace root and the project node — card fd99b2d7 (Atlas P2-1) — joined by the Agents node
-// (card c6160c7d, P2-2). The ONLY addresses in this file the classic shell does NOT mount; its
-// three sibling lists above are both-shells by design.
+// (card c6160c7d, P2-2). Addresses that never had a destination of their own before Atlas, which is
+// why they are a list apart from NAV_PAGES: a NAV_PAGES row is a destination the tree derives a row or
+// a tab for, and these are the nodes themselves.
 //
-// @decision fd99b2d7 — never add these to LegacyShell's route table, and never re-point `/` or
-// `/overview` at them inside AtlasShell: the first shows a half-built preview to a user who never
-// opted in, the second breaks phase 1's content-identity contract. Both are P3-switch-over's job.
+// @decision fd99b2d7 — `/` and `/overview` now REDIRECT to these nodes (card acbb6df6, the owner's
+// 2026-11-11 "remove the old UI" directive); never bring a page back at either address.
 //
 // A node's own tabs are `?tab=` on the SAME path, owned by the page component — not routes, so the
 // frame's crumbs and heading stay a function of the node, not of which tab is showing.
@@ -217,18 +154,11 @@ export const ATLAS_HOMES: AtlasHome[] = [
   // under Atlas it is the PROJECT tier's Settings and carries only the rows that write a project's
   // config; the daemon-global rows need an address on the workspace tier, and this is it. Labelled
   // "Settings" like its project-tier twin — depth says which one, exactly as it does for "Home".
-  //
-  // Atlas-only, hence ATLAS_HOMES and not NAV_PAGES: a NAV_PAGES entry is mounted by BOTH shells, so
-  // it would put a second Settings row in the classic rail for a user who never opted in.
   { key: "workspace-settings", to: "/workspace-settings", label: "Settings", scoped: false, tierHead: false, element: <WorkspaceSettings /> },
   // The Workspace tier's own Terminals node (card b439c2dc, owner intake). `/terminals` cannot serve
   // here: card 25c08fba took that address down to PROJECT depth as the project node's Sessions tab,
   // so a workspace-tier row pointing at it would land on the project node — and a second <Route> on
   // one literal path is the precedence contest AtlasShell's REHOMED_TAB_PATHS note forbids.
-  //
-  // Atlas-only for the same reason the Settings node above is: a NAV_PAGES entry is mounted by BOTH
-  // shells, so it would put a SECOND "Terminals" row in the classic rail — beside the one already
-  // there — for a user who never opted in. The classic page stays exactly as it is.
   { key: "workspace-terminals", to: "/workspace-terminals", label: "Terminals", scoped: false, tierHead: false, element: <WorkspaceTerminals /> },
 ];
 
@@ -244,13 +174,12 @@ export const ATLAS_HOMES: AtlasHome[] = [
 // and it is the mockup's `ROOT_TABS` order; the node's own `Overview`/`Deck` tabs are prepended by
 // pages/WorkspaceHome.tsx, as the mockup's `homeTabs()` prepends them there.
 //
-// @decision 41eab0eb — `from` must stay a live NAV_PAGES/ATLAS_HOMES address. Removing it re-homes the
-// surface out of the CLASSIC shell too, for a user who never opted into Atlas; only the Atlas shell may
-// redirect it into the tab.
+// @decision 41eab0eb — `from` must stay a NAV_PAGES/ATLAS_HOMES address: the tab's label and body are
+// resolved from that row, and the shell redirects the old address into the tab from it.
 export type WorkspaceNodeTab = {
   /** The `?tab=` value on `/home`. */
   key: string;
-  /** The address this surface owns under the classic shell, and which Atlas redirects into the tab. */
+  /** The surface's own pre-Atlas address, which the shell redirects into the tab. */
   from: string;
 };
 
@@ -296,22 +225,18 @@ export function workspaceNodeTabOf(tab: WorkspaceNodeTab): { key: string; label:
 //
 // 🔴 A TAB'S ADDRESS IS THE PATH IT ALREADY HAD. Only the HOME tab is `?tab=` on the node's own path
 // (and in practice it is the bare path, since it is the default) — every other tab keeps `/board`,
-// `/memory`, `/repository` and friends. Three reasons, each load-bearing:
+// `/memory`, `/repository` and friends. Two reasons, each load-bearing:
 //
 //   • A `?tab=` on `/project` would COLLIDE with the page's own `?tab=`. Repository reads `?tab=git`
 //     off the query string itself (pages/Repository.tsx), as Actors and Automation do; one query
 //     parameter cannot address both the node's tab and the tab body's own sub-tab.
-//   • `LEGACY_REDIRECTS` below is mounted by BOTH shells from ONE declaration, so a row pointing
-//     `/board` at `/project?tab=board` would redirect the CLASSIC shell too — and this card's DoD is
-//     that every old path still renders its classic page untouched with the switch off. The
-//     alternative, a second Atlas-only redirect table, is a second list to keep in step for no gain.
 //   • Nothing has to be re-pointed. Every `<Link to="/runs">`, every band panel's `action`, every
 //     command-palette row and every bookmark already names these paths, so the re-home costs no link
 //     churn and no redirect hop — which is also why this card adds no `LEGACY_REDIRECTS` row at all:
 //     a redirect needs an address to leave behind, and these addresses did not move.
 //
 // @decision 25c08fba — never re-address a project tab as `?tab=` on /project. It collides with the
-// tab body's own `?tab=`, and a both-shells redirect row would break the switch-OFF contract.
+// tab body's own `?tab=`, and it would put a redirect hop in front of every existing link.
 export type ProjectNodeTab = {
   /** The `?tab=` value for a HOME tab, and the `atlas-tab-<key>` testid stem for every tab. */
   key: string;
@@ -331,11 +256,10 @@ export const PROJECT_NODE_TABS: ProjectNodeTab[] = [
   // own header. A legacy `?tab=deck` needs no row and no LEGACY_REDIRECTS entry either: it is an
   // unrecognised home tab, which `projectNodeTabAt` below already resolves to Overview.
   { key: "board", label: "Board", to: "/board" },
-  // "Sessions", not "Terminals": the only tab here that genuinely CHANGES TIER. /terminals is a
-  // god-eye page in the classic rail, and the approved design has it as a PROJECT tab ("Sessions 5"),
-  // so under Atlas it moves to project depth and takes the node's own name for it. The classic rail's
-  // own label and depth are untouched — NAV_PAGES above still declares it unscoped, because the
-  // CLASSIC page still is: it rescopes only through the project filter the Atlas tab pre-selects.
+  // "Sessions", not "Terminals": the only tab here that genuinely CHANGES TIER. /terminals was a
+  // god-eye page before Atlas, and the approved design has it as a PROJECT tab ("Sessions 5"), so it
+  // sits at project depth and takes the node's own name for it. NAV_PAGES above still declares it
+  // unscoped because the page itself is: it rescopes only through the project filter the tab pre-selects.
   { key: "sessions", label: "Sessions", to: "/terminals" },
   { key: "agents", label: "Agents", to: "/agents" },
   { key: "repository", label: "Repository", to: "/repository" },
@@ -348,7 +272,7 @@ export const PROJECT_NODE_TABS: ProjectNodeTab[] = [
   // WORKSPACE node's own cross-project tab (WORKSPACE_NODE_TABS above) and a project-depth slice of a
   // god-eye page is a different surface, not a re-home of it. That makes `?tab=` correct here rather
   // than a violation of the anchor below: this body owns no `?tab=` of its own to collide with, and
-  // there is no classic address to leave behind — so no LEGACY_REDIRECTS row and no NAV_PAGES entry.
+  // there is no pre-Atlas address to leave behind — so no LEGACY_REDIRECTS row and no NAV_PAGES entry.
   { key: "usage", label: "Usage", to: `${PROJECT_NODE_PATH}?tab=usage` },
   { key: "settings", label: "Settings", to: "/settings" },
 ];
@@ -380,17 +304,14 @@ export function projectNodeTabAt(pathname: string, search: string): ProjectNodeT
 }
 
 // ── The legacy redirects ───────────────────────────────────────────────────────────────────────
-// Old URLs kept working after an IA merge or a rename. Each one's `to` is the destination's CURRENT
-// address — including the `?tab=` that picks its sub-tab — which under phase 1 is also its ATLAS
-// node+tab address, because both shells mount every NAV_PAGES destination at its own path. So there
-// is ONE `to` per row and not an Atlas/classic pair: a second target would be a second thing to keep
-// in step, and since each shell renders only under its own switch state, a test exercising one could
-// never see the other go stale. If phase 2 ever moves a destination's real address, change `to`
-// here and BOTH shells follow.
+// Old URLs kept working after an IA merge, a rename or a retirement. Each one's `to` is the destination's
+// CURRENT address, including the `?tab=` that picks its sub-tab, so a bookmark or a link in an old message
+// still lands somewhere real instead of the shell's "nothing here" node. Every row goes straight to its
+// final address — never through another row — so no deep link pays two hops.
 export type LegacyRedirect = {
-  /** The old path, mounted verbatim by both shells. */
+  /** The old path. */
   from: string;
-  /** Where it lands — a NAV_PAGES `to`, plus the `?tab=` that selects its sub-tab where one applies. */
+  /** Where it lands — a NAV_PAGES / ATLAS_HOMES `to`, plus the `?tab=` that selects its sub-tab. */
   to: string;
   element: ReactNode;
 };
@@ -408,20 +329,36 @@ export function QueryPreservingRedirect({ to }: { to: string }) {
   return <Navigate to={mergeRedirectQuery(to, search)} replace />;
 }
 
-// The redirect element is built HERE, once per row, rather than in each shell's route table: `replace`
+// The redirect element is built HERE, once per row, rather than in the shell's route table: `replace`
 // (keep the dead URL out of the history stack, so Back leaves the page rather than bouncing through
-// the redirect) is part of the redirect's behaviour, and a flag spelled out in two route tables is a
-// flag that can end up spelled differently in two route tables.
+// the redirect) is part of the redirect's behaviour, so it belongs with the row.
 function redirect(from: string, to: string): LegacyRedirect {
   return { from, to, element: <QueryPreservingRedirect to={to} /> };
 }
 
 export const LEGACY_REDIRECTS: LegacyRedirect[] = [
+  // The three pre-Atlas destinations card acbb6df6 deleted with the classic shell (the owner's 2026-11-11
+  // "remove the old UI" directive). Each lands on the node that absorbed it — the SHALLOWEST node holding
+  // the pane a reader came for, the same "scope is depth" rule the tree follows.
+  //
+  // @decision 5afd71bd — `/` and `/projects` are ordinary redirects now; never bring a page back at
+  // either. Mission Control's surfaces are all on the Workspace node (status strip and fleet controls,
+  // KPI deck, Needs-you band, plan usage, the Pulse band, the Replay tab).
+  redirect("/", "/home"),
+  // Projects' panes: the project list is the tree's project tier plus the Workspace node's Projects grid;
+  // lifecycle is the project Settings tab (c9b78d80), the archived tier the Workspace Settings tab
+  // (baca1835), agent definition the Agents node (318b5a21), creation the Platform node's guided setup.
+  redirect("/projects", "/home"),
+  // /workspace was renamed to /projects (card 274f9ba9), which is itself retired above — so it goes
+  // straight to the final address rather than chaining through that row.
+  redirect("/workspace", "/home"),
+  // The classic project Overview → the project node, which carries every one of its panes (card
+  // 102bc915's parity record): the board as the Board tab, terminals as Sessions, agents as Agents.
+  // @decision 4a0ad464 — this is the retirement that record deferred to the owner; acbb6df6 made it.
+  redirect("/overview", "/project"),
   // /setup was the old end-user Platform route — now consolidated into /platform. Catches lingering
   // links/bookmarks and the first-run welcome's historical target.
   redirect("/setup", "/platform"),
-  // /workspace was renamed + repositioned to /projects (card 274f9ba9).
-  redirect("/workspace", "/projects"),
   // /profiles + /skills were consolidated into the single /actors page (IA merge #1).
   redirect("/profiles", "/actors"),
   redirect("/skills", "/actors?tab=skills"),
@@ -433,60 +370,9 @@ export const LEGACY_REDIRECTS: LegacyRedirect[] = [
   redirect("/git", "/repository?tab=git"),
 ];
 
-// ── The Atlas retirements ──────────────────────────────────────────────────────────────────────
-// Card 5afd71bd (Atlas restructure 11 of 11). The approved round-4 V2 design DISSOLVES two
-// destinations rather than re-homing them: Mission Control, whose every surface the Workspace node
-// now carries (its KPI tiles, its fleet-controls bar, its five band panels and the Replay tab), and
-// Projects, whose three panes split across the tree's own project tier, the project node's Settings
-// tab and the Agents node. Neither has anything left of its own to show, so under Atlas each
-// address redirects to the node that absorbed it instead of standing as a tree row and a full page.
-//
-// A row is the retired address plus where it lands. The ADDRESSES STAY in NAV_PAGES above — that is
-// what keeps the classic shell byte-identical for a user who never opted in, which is this card's
-// own scope boundary and the condition of the owner's sign-off (request b54c9e59).
-//
-// @decision 5afd71bd — never move a retirement into LEGACY_REDIRECTS, and never drop its `from` from
-// NAV_PAGES: either one deletes the destination from the CLASSIC shell too.
-//
-// There is deliberately no "retired" FLAG on NavPage: a flag would be read by the classic shell's own
-// mapping of that array, where it means nothing, and the pair here states the one thing a flag cannot
-// — WHERE the address goes.
-export type AtlasRetirement = {
-  /** The retired destination's own address, still a live NAV_PAGES `to`. */
-  from: string;
-  /** The Atlas node that absorbed it — where the address redirects under the Atlas shell only. */
-  to: string;
-};
-
-export const ATLAS_RETIREMENTS: AtlasRetirement[] = [
-  // Mission Control → the Workspace node. Every one of its surfaces is on that node or a tab of it:
-  // the status strip and fleet controls (card 7b893d54), the stat counters (the KPI deck/strip), the
-  // review queue and attention queue (the Needs-you band, card c2968651), the plan-usage strip, the
-  // activity feed (the Pulse band, at the same `GLOBAL_ACTIVITY_CAP`), and wave replay plus the
-  // inactive-projects tier (the Replay tab, card ff6123de).
-  { from: "/", to: "/home" },
-  // Projects → the Workspace node, which is where its own primary pane went: the "All projects" rail
-  // is the tree's project tier (card 0d0c6cee) plus that node's Projects grid. Its other panes landed
-  // deeper — project lifecycle on the project node's Settings tab (card c9b78d80), the archived tier
-  // on the Workspace node's Settings tab (card baca1835), agent definition on the Agents node (card
-  // 318b5a21) — and project creation is the Platform node's guided setup wizard. The SHALLOWEST node
-  // that contains the pane a reader came for is the honest landing, which is the same "scope is depth"
-  // rule the tree itself follows.
-  { from: "/projects", to: "/home" },
-];
-
-/** Where an address lands under Atlas, or `undefined` for one Atlas still mounts as its own node. */
-export function atlasRetirementFor(path: string): AtlasRetirement | undefined {
-  return ATLAS_RETIREMENTS.find((r) => r.from === path);
-}
-
-// The source of truth for what the rail nav (Sidebar) and the Command Palette LIST show (both call this).
-// Every nav page is always listed and always reachable in the rail's grouped nav — there is no runtime nav
-// gating left. (The dev-vs-shipping edition split that used to hide a second "Platform" tab now lives
-// INSIDE the single Platform page, which picks its surface by edition; and Companion's old `primary`
-// promotion was vestigial once the rail shipped — the rail renders every destination grouped — so it was
-// removed with the `primary` flag.) Kept as a hook (rather than exporting NAV_PAGES to consumers directly)
-// so its return stays a stable seam the Command Palette + tests reference.
+// What the tree's workspace tier and the Command Palette LIST (both call this). Kept as a hook (rather
+// than exporting NAV_PAGES to consumers directly) so its return stays a stable seam those two + tests
+// reference.
 export function useVisibleNavPages(): NavPage[] {
   return NAV_PAGES;
 }

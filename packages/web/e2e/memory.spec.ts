@@ -121,8 +121,15 @@ test.describe("memory (per-project memory explorer)", () => {
     await expect(page.getByText(/hasn.t written any memory/)).toBeVisible();
   });
 
-  test("Memory is a primary header tab", async ({ page, loomDaemon }) => {
-    await page.goto(`${loomDaemon.baseURL}/`);
-    await expect(page.getByRole("link", { name: /Memory/ })).toBeVisible();
+  // The classic shell's header tab is gone (card acbb6df6); Memory is a tab on the project node, a real
+  // address that lands on the Memory page.
+  test("Memory is a project node tab", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`memory-tab-${Date.now()}`);
+    await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
+    await page.goto(`${loomDaemon.baseURL}/project`);
+    const tab = page.getByTestId("atlas-tab-memory");
+    await expect(tab).toBeVisible();
+    await tab.click();
+    await expect(page).toHaveURL(/\/memory$/);
   });
 });

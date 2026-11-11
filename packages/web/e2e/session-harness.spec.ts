@@ -31,7 +31,7 @@
 // to end — a real DB row, the real `/api/sessions` projection, the real component — only the session's
 // provenance is fabricated, never any part of the path under test.
 import { expect, test, type LoomDaemon } from "./fixtures/daemon";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 // Distinct 8-char prefixes: the UI shows `id.slice(0, 8)`, and the fixture's DEFAULT mint would make all
 // three rows read "e2e-live" on screen — indistinguishable, so a per-row assertion would be meaningless.
@@ -65,19 +65,23 @@ async function seedTrio(loomDaemon: LoomDaemon) {
   return { manager, claudeWorker, codexWorker };
 }
 
-/** Open Mission Control and expand the named project's fleet card into its managers→workers rows. */
-async function expandFleetCard(page: Page, baseURL: string, projectName: string) {
-  await page.goto(`${baseURL}/`);
-  const cardHeader = page.getByTitle(projectName, { exact: true }).locator("xpath=..");
-  await expect(cardHeader).toBeVisible();
-  await cardHeader.getByTitle("Expand").click();
+/** Open the project node and its "fleet" breakdown — the managers→workers FleetRows Mission Control's
+ *  expanded fleet card used to draw (card acbb6df6 deleted that page; the same `FleetRow` component, under
+ *  the node's own HarnessMixProvider, is this popover). Returns the popover, so callers scope to it. */
+async function expandFleetCard(page: Page, baseURL: string, projectId: string) {
+  await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
+  await page.goto(`${baseURL}/project`);
+  await page.getByTestId("atlas-brief-fleet").click();
+  const pop = page.getByTestId("atlas-brief-pop-fleet");
+  await expect(pop).toBeVisible();
+  return pop;
 }
 
 /** One FleetRow, located by the short id it renders — the row `<div>` holding that identity `<span>`. */
-const fleetRow = (page: Page, label: string) => page.getByText(label, { exact: true }).locator("xpath=..");
+const fleetRow = (scope: Page | Locator, label: string) => scope.getByText(label, { exact: true }).locator("xpath=..");
 
 test.describe("session harness in the fleet views", () => {
-  test("Mission Control names each row's own harness in a mixed view, and the unset row reads exactly like the claude one", async ({ page, loomDaemon }) => {
+  test("the fleet breakdown names each row's own harness in a mixed view, and the unset row reads exactly like the claude one", async ({ page, loomDaemon }) => {
     const { manager, claudeWorker, codexWorker } = await seedTrio(loomDaemon);
 
     // ── Fixture identity + the wire. All three rows must come back off /api/sessions carrying exactly the
@@ -91,13 +95,13 @@ test.describe("session harness in the fleet views", () => {
     // than being defaulted server-side — otherwise the UI could never make its own choice about it.
     expect(wire.get(manager.sessionId)?.harness ?? null).toBeNull();
 
-    await expandFleetCard(page, loomDaemon.baseURL, manager.projectName);
+    const pop = await expandFleetCard(page, loomDaemon.baseURL, manager.project.id);
 
     // All three rows are actually on screen — so a later "no tag" assertion cannot pass merely because the
     // row never rendered.
-    const mgrRow = fleetRow(page, `★ mgr ${MGR}`);
-    const claudeRow = fleetRow(page, `w:${CLAUDE}`);
-    const codexRow = fleetRow(page, `w:${CODEX}`);
+    const mgrRow = fleetRow(pop, `★ mgr ${MGR}`);
+    const claudeRow = fleetRow(pop, `w:${CLAUDE}`);
+    const codexRow = fleetRow(pop, `w:${CODEX}`);
     await expect(mgrRow).toBeVisible();
     await expect(claudeRow).toBeVisible();
     await expect(codexRow).toBeVisible();
@@ -111,9 +115,9 @@ test.describe("session harness in the fleet views", () => {
     // the collapse this spec has always pinned. What changed is only WHAT that identical render is.
     await expect(claudeRow.getByTestId("harness-tag")).toHaveText("claude");
     await expect(mgrRow.getByTestId("harness-tag")).toHaveText("claude");
-    // Exactly three tags on the whole view: one per row, none stray. A per-row check alone would not catch
-    // a tag rendered outside these three rows.
-    await expect(page.getByTestId("harness-tag")).toHaveCount(3);
+    // Exactly three tags in the breakdown: one per row, none stray. A per-row check alone would not catch a
+    // tag rendered outside these three rows.
+    await expect(pop.getByTestId("harness-tag")).toHaveCount(3);
   });
 
   // The same shared <HarnessTag> call, on the OTHER component it was added to: the terminal card's identity
@@ -127,16 +131,17 @@ test.describe("session harness in the fleet views", () => {
   test("the terminal card's identity line marks a codex session and not a claude one", async ({ page, loomDaemon }) => {
     const { claudeWorker, codexWorker } = await seedTrio(loomDaemon);
 
-    // `tile-identity` is the TILE's own identity node (card ad3157b9). Scoping to it rather than a
-    // page-wide `getByText` matters here: `SessionView.tsx:46` renders the same identity string in the
-    // PAGE header, so a page-wide match could be satisfied without the tile rendering anything.
+    // On the session node (the only /session/:id page since card acbb6df6) the terminal card's head is the
+    // node's own state cluster (`session-node-state`), which carries the same <HarnessTag>; the classic
+    // tile's identity line is not drawn there. The node is identified by its breadcrumb instead.
     await page.goto(`${loomDaemon.baseURL}/session/${codexWorker.sessionId}`);
-    await expect(page.getByTestId("tile-identity")).toContainText(new RegExp(`· ${CODEX}$`));
-    await expect(page.getByTestId("harness-tag").first()).toHaveText("codex");
+    await expect(page.getByTestId("atlas-breadcrumb")).toContainText(CODEX);
+    await expect(page.getByTestId("session-node-state").getByTestId("harness-tag")).toHaveText("codex");
 
     // Same page, same component, same everything except the stored harness.
     await page.goto(`${loomDaemon.baseURL}/session/${claudeWorker.sessionId}`);
-    await expect(page.getByTestId("tile-identity")).toContainText(new RegExp(`· ${CLAUDE}$`));
+    await expect(page.getByTestId("atlas-breadcrumb")).toContainText(CLAUDE);
+    await expect(page.getByTestId("session-node-state")).toBeVisible(); // positive control for the zero
     await expect(page.getByTestId("harness-tag")).toHaveCount(0);
   });
 
@@ -158,8 +163,14 @@ test.describe("session harness in the fleet views", () => {
     const codexWorker = await loomDaemon.seedLiveSession({ ...common, id: mintId(CODEX), harness: "codex" });
     const claudeWorker = await loomDaemon.seedLiveSession({ ...common, id: mintId(CLAUDE), harness: "claude" });
 
-    await page.setViewportSize({ width: 1280, height: 900 });
-    await page.goto(`${loomDaemon.baseURL}/terminals`);
+    // The Workspace node's Terminals grid (the classic /terminals page until card acbb6df6). Its content
+    // column sits beside the entity tree, so the classic 1280px window + Auto columns no longer reproduces
+    // the measured ~584px tile (Auto drops to one wide column there). Pin TWO columns explicitly, at a
+    // window wide enough to give each one that tile width — the fixture-identity bounds below still
+    // check the geometry rather than trusting these two numbers.
+    await page.setViewportSize({ width: 1470, height: 900 });
+    await page.goto(`${loomDaemon.baseURL}/workspace-terminals`);
+    await page.getByTestId("sessions-columns").selectOption("2");
     await page.locator("select").filter({ hasText: "All (" }).selectOption({ label: project.name });
     // Two tags, not one: the filtered grid holds both harnesses, so it is a MIXED view and names both
     // (@decision b8e52cfe). That makes the geometry below a STRICTER test than the original, not a weaker

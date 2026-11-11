@@ -43,7 +43,9 @@ test.describe("platform view (end-user edition)", () => {
     await expect(page.getByText("Operator session", { exact: true })).toBeVisible();
     await expect(page.getByText("Auditor session", { exact: true })).toBeVisible();
     // "Your board" section label carries an always-present descriptive span, so match that unique copy
-    // (an exact "Your board" match would miss — the label element's text is label + description).
+    // (an exact "Your board" match would miss — the label element's text is label + description). The
+    // board is the Platform node's own Board tab (the classic page stacked it under the agents).
+    await page.getByTestId("atlas-tab-board").click();
     await expect(page.getByText(/your setup checklist \+ Auditor suggestions/i)).toBeVisible();
 
     // Dev-only surfaces must NOT be present in this LOOM_DEV=0 boot (asserts the edition split holds).

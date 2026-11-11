@@ -313,30 +313,4 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     await expect(tree.getByTestId("atlas-project-node")).toHaveAttribute("aria-current", "true");
     await expect(tree.getByTestId("atlas-home-project")).toHaveCount(0);
   });
-
-  test("switch OFF: the classic Overview is untouched and nothing Atlas is mounted", async ({ page, loomDaemon }) => {
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    // Deliberately NO seedAtlasOn — off is the default, and seeding it off would re-clear the key on
-    // every navigation for a reason unrelated to the app (measured on P1-0).
-    await pinProject(page, seeded.project.id);
-    await page.goto(loomDaemon.baseURL + "/overview");
-
-    // PRESENCE first: the classic shell and the classic Overview's own board embed are really here.
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByText(seeded.inboxCard, { exact: true })).toBeVisible();
-    await expect(lanes(page)).toHaveCount(7);
-
-    // …and nothing this card built reached the shell a user who never opted in is looking at.
-    await expect(page.getByTestId("atlas-shell")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-node-tabs")).toHaveCount(0);
-    await expect(page.locator(".loom-kpi, .loom-projcard, .loom-bandpanel")).toHaveCount(0);
-
-    // The Atlas-only addresses are not mounted in the classic shell either (ATLAS_HOMES is the one
-    // declaration in nav.tsx LegacyShell deliberately does not map — @decision fd99b2d7).
-    await page.goto(loomDaemon.baseURL + "/project");
-    await expect(page.locator(".loom-rail")).toBeVisible();
-    await expect(page.getByTestId("atlas-kpi-deck")).toHaveCount(0);
-    await expect(page.getByTestId("atlas-board-embed")).toHaveCount(0);
-  });
 });

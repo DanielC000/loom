@@ -5,14 +5,10 @@
 // atlas-keyboard-shortcuts.spec.ts) did — so the identical keystroke saved on one surface and inserted
 // a newline on the other. Both now share lib/modEnter.ts, and this spec is the project editor's half.
 //
-// WHERE THE EDITOR IS REACHABLE — read off the code, not assumed, because it is EXACTLY ONE HOST PER
-// SWITCH STATE and they are DIFFERENT HOSTS:
-//   · switch OFF (classic): pages/Projects.tsx's own editor pane. `/agents` is an ATLAS_HOMES address
-//     (src/nav.tsx), which only AtlasShell mounts, so the Agents node does not exist in this shell.
-//   · switch ON (Atlas): the Agents node's `AgentEditDialog` (components/atlasAgents.tsx). `/projects`
-//     is in ATLAS_RETIREMENTS (card 5afd71bd) and redirects to `/home`, so the Projects pane is gone.
-// Each leg below therefore MEASURES the absence in its own state rather than citing that record, and
-// then drives the host that is actually there.
+// WHERE THE EDITOR IS REACHABLE — read off the code, not assumed: the Agents node's `AgentEditDialog`
+// (components/atlasAgents.tsx). It had a second host, the classic Projects page's editor pane, until card
+// acbb6df6 deleted that page; `/projects` now redirects to `/home`, which the leg MEASURES (no editor
+// there) rather than citing, and then drives the host that is actually there.
 //
 // HOW THE "BARE ENTER DOES NOT SAVE" CLAIM IS MADE FALSIFIABLE. A REST read taken straight after the
 // keypress races the save it is trying to disprove, and a fixed wait makes it unfalsifiable in one
@@ -100,28 +96,6 @@ function countSaves(page: Page, agentId: string): string[] {
 }
 
 const SURFACES = [
-  {
-    name: "switch OFF (classic) — the Projects page's own editor pane",
-    atlas: false,
-    /** The classic host. Also measures that the Atlas-only Agents node reached nothing here. */
-    async open(page: Page, baseURL: string, seeded: Awaited<ReturnType<typeof seedOne>>) {
-      await pinProject(page, seeded.project.id);
-
-      // `/agents` is an ATLAS_HOMES address, so in this shell it mounts no editor at all. Presence
-      // first (the shell really rendered), then the absence — a leading count-0 also passes on a page
-      // that has not rendered anything yet.
-      await page.goto(baseURL + "/agents");
-      await expect(rail(page)).toBeVisible();
-      await expect(anyEditor(page)).toHaveCount(0);
-      await expect(page.getByTestId("atlas-agent-editor")).toHaveCount(0);
-
-      await page.goto(baseURL + "/projects");
-      await expect(rail(page)).toBeVisible();
-      await expect(atlasShell(page)).toHaveCount(0);
-      await page.getByText(seeded.agent.name, { exact: true }).click();
-      return page.getByTestId(`agent-editor-${seeded.agent.id}`);
-    },
-  },
   {
     name: "switch ON (Atlas) — the Agents node's edit dialog",
     atlas: true,

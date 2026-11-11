@@ -11,7 +11,7 @@ import {
 import { bySessionActivity, byCreatedStable } from "../lib/sessions";
 import { EventRow, FleetRow, sessionStatus, worstContext } from "../components/fleet";
 import { HarnessMixProvider } from "../components/HarnessPicker";
-import Board from "./Board";
+import Board, { DONE_LANE_PAGE } from "./Board";
 import Terminals from "./Terminals";
 import AgentsNode from "./AgentsNode";
 import Repository from "./Repository";
@@ -32,6 +32,7 @@ import {
 import { AgentEditDialog, AgentsQuickSpawn } from "../components/atlasAgents";
 import { SessionTerminalList, type SessionListTestIds } from "../components/sessionTerminals";
 import { AttentionList, GateLaneList } from "./WorkspaceHome";
+import { MergeGateAttention, mergeGateAttentionCount, useMergeGateStatus } from "../components/mergeGate";
 import { splitRoster } from "../lib/atlasAgents";
 import { projectRunningSessions } from "../lib/workspaceSessions";
 import {
@@ -155,7 +156,15 @@ export default function ProjectHome() {
   const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
   const agentsQ = useQuery({ queryKey: ["agents", projectId], queryFn: ({ signal }) => api.agents(projectId, signal), enabled: !!projectId });
   const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
-  const boardQ = useQuery({ queryKey: ["board", projectId], queryFn: ({ signal }) => api.board(projectId, undefined, signal), enabled: !!projectId, staleTime: 30_000 });
+  // The SAME windowed read the Board tab makes while unfiltered — same `?doneLimit=`, same key — so the
+  // two share one cache entry and the node never fetches the whole done lane just to count it. The
+  // window still carries every count this page shows: every non-terminal lane in full, and `doneTotal`,
+  // the terminal lane's true length (`boardRollup` reads it). What it does NOT carry is the title of a
+  // done card older than the window; a session holding one falls back to its short id (rosterCardLabel).
+  //
+  // @decision a483cbec — never drop the `doneLimit` here: this node mounts under every Board-tab visit,
+  // so an unwindowed read here re-fetches the whole done set the window exists to avoid.
+  const boardQ = useQuery({ queryKey: ["board", projectId, DONE_LANE_PAGE], queryFn: ({ signal }) => api.board(projectId, DONE_LANE_PAGE, signal), enabled: !!projectId, staleTime: 30_000 });
   const archivedQ = useQuery({ queryKey: ["archive", projectId, 100], queryFn: ({ signal }) => api.archivedSessions(projectId, undefined, signal), enabled: !!projectId });
   // The two tab counts no existing read on this page already answers (card 25c08fba). Both reuse the
   // EXACT query key + fetcher their own tab body uses — ["projectMemory", id] in pages/Memory.tsx,
@@ -165,6 +174,10 @@ export default function ProjectHome() {
   // and the node has no reason to poll faster than the figure is read.
   const memoryQ = useQuery({ queryKey: ["projectMemory", projectId], queryFn: ({ signal }) => api.projectMemory(projectId, signal), enabled: !!projectId });
   const runsQ = useQuery({ queryKey: ["runs", projectId], queryFn: ({ signal }) => api.runs(projectId, signal), enabled: !!projectId });
+  // The merge gate's failed-periodic-gate alert (card acbb6df6, re-homed from the deleted classic
+  // Overview). Same hook + key the Settings tab's gate strip reads, so the two never disagree.
+  const mergeGate = useMergeGateStatus(projectId || null);
+  const gateAttention = mergeGateAttentionCount(mergeGate.data);
   // The node head's `<branch> <sha>` pill. The two EXISTING keys pages/Git.tsx reads — same keys,
   // same fetchers — so opening the Repository tab's Git pane issues no second request and the pill
   // and that pane can never disagree about where the repo's head is.
@@ -220,7 +233,7 @@ export default function ProjectHome() {
     agentProjectId: (id) => agentProjectIndex.get(id),
   }));
 
-  const board = boardRollup(boardQ.data?.columns, boardQ.data?.tasks);
+  const board = boardRollup(boardQ.data?.columns, boardQ.data?.tasks, boardQ.data?.doneTotal);
   const lanes = gateLanes(activeGatesQ.data, projectId || undefined);
   const merges = mergeThroughput(historyQ.data?.items);
   const wc = worstContext(live);
@@ -518,12 +531,18 @@ export default function ProjectHome() {
               </BriefTrailing>
             } />
 
-            <OverviewCard label="Needs you" count={projAttention.length}
+            <OverviewCard label="Needs you" count={projAttention.length + gateAttention}
               action={{ to: "/inbox", label: "Inbox" }} testId="atlas-band-needs">
+              {/* A failed periodic merge gate (the default branch is unverified and every merge stays
+                  gated). It never enters the shared attention feed, so it is mounted here directly and
+                  counted beside it, exactly as the classic Overview did. Renders nothing when healthy.
+                  @decision acbb6df6 — the alert lives HERE, never only on the Settings tab. */}
+              <MergeGateAttention status={mergeGate.data} />
               {/* The SAME list the `needs you` breakdown renders at both node levels, so the card and
                   the Inbox cannot disagree about what is waiting. `cap` is higher than the band's 6
-                  because this card is now a full-width row with the page's whole width to spend. */}
-              <AttentionList items={projAttention} cap={10} />
+                  because this card is now a full-width row with the page's whole width to spend. Its
+                  "nothing needs you" empty state is skipped while the gate alert above is showing. */}
+              {(projAttention.length > 0 || gateAttention === 0) && <AttentionList items={projAttention} cap={10} />}
             </OverviewCard>
 
             <OverviewCard label="Work in flight" count={`${live.length} live · ${working} working`}

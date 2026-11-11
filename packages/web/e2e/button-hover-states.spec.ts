@@ -11,9 +11,11 @@
 // `Button`'s inline chrome turns each `expect(hover).not.toBe(rest)` red on the property that variant's
 // own rule targets, which is the mechanism — not a shape failure.
 //
-// Why /settings: it is a LIGHT page (no live-terminal mount — see CLAUDE.md on the cockpit renderer) that
-// renders all four variants enabled at once, plus a disabled kit Button and a Button carrying a CALLER's
-// own inline style. Every selector below is an existing role/title/testid, not one this card added.
+// Why /settings: it is a LIGHT page (no live-terminal mount — see CLAUDE.md on the cockpit renderer). The
+// project Settings tab renders three of the four variants enabled at once; the primary one ("New connection")
+// sits on the Workspace node's Settings tab (`/home?tab=settings`) since card acbb6df6 made Atlas the only
+// shell and split the two scopes, so the first test visits both. The project tab also renders a disabled
+// kit Button and a Button carrying a CALLER's own inline style. Every selector below is an existing role/title/testid, not one this card added.
 import { expect, test } from "./fixtures/daemon";
 import type { Locator, Page } from "@playwright/test";
 import { cssColor } from "./helpers/themeToken";
@@ -98,7 +100,8 @@ test("every kit Button variant visibly changes on hover", async ({ page, loomDae
   const gh = await restThenHover(page, ghost);
   expect(gh.hover.color).not.toBe(gh.rest.color);
 
-  // ── primary: the connections "New connection" button.
+  // ── primary: the connections "New connection" button — a daemon-global section, on the Workspace node.
+  await page.goto(loomDaemon.baseURL + "/home?tab=settings");
   // A solid cobalt --loom-accent fill under an --loom-on-accent label at rest;
   // `.loom-btn-primary:not(:disabled):hover` steps the fill to --loom-accent-hover.
   const primary = page.getByRole("button", { name: "New connection" });
@@ -111,7 +114,8 @@ test("every kit Button variant visibly changes on hover", async ({ page, loomDae
   expect(pri.hover.background).not.toBe(pri.rest.background);
   await expect(primary).toHaveCSS("background-color", await cssColor(page, "--loom-accent-hover"));
 
-  // ── danger: the board ColumnManager's per-column delete.
+  // ── danger: the board ColumnManager's per-column delete — back on the project Settings tab.
+  await page.goto(loomDaemon.baseURL + "/settings");
   // `.loom-btn-danger:not(:disabled):hover` tints the background --loom-danger-soft.
   const danger = page.locator('button[title="Delete this column"]').first();
   await expect(danger).toBeVisible();
@@ -493,7 +497,7 @@ test("the SpawnControls spawn-role menu items hover (SpawnControls.tsx)", async 
   })).json();
   expect(agent.id, "the probe agent should be created").toBeTruthy();
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), project.id);
-  await page.goto(loomDaemon.baseURL + "/overview"); // `/` is Mission Control; the spawn cards are Overview's
+  await page.goto(loomDaemon.baseURL + "/agents"); // the Agents node's cards host SpawnControls (card acbb6df6)
 
   // FIXTURE IDENTITY: exactly one spawn card, and it is the agent this test created — so the menu opened
   // below belongs to this project and not to whatever a sibling spec left on the shared daemon.

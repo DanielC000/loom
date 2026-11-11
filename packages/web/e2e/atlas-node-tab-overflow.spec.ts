@@ -551,34 +551,4 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     // phone width" would be a claim nothing measured.
     expect(folded.length, "no node folded at 720 or 420, so the menu assertions above never ran").toBeGreaterThan(0);
   });
-
-  test("switch OFF: no overflow trigger or menu exists anywhere", async ({ page, loomDaemon }) => {
-    test.setTimeout(180_000);
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    // Deliberately NOT seedAtlasOn — off is the default. The project is still pinned so the classic
-    // project-scoped pages render their real content rather than a pick-a-project empty state.
-    await pinProject(page, seeded.project.id);
-
-    const offenders: string[] = [];
-    // The classic addresses behind the node tabs this card folds, at the three widths it measures.
-    const addresses = ["/overview", "/board", "/terminals", "/repository", "/memory", "/runs",
-      "/archive", "/settings", "/inbox", "/gates", "/automation", "/actors", "/usage", "/platform"];
-    for (const width of [1440, 720, 420]) {
-      await page.setViewportSize({ width, height: 900 });
-      for (const path of addresses) {
-        await page.goto(loomDaemon.baseURL + path);
-        // Presence first: an absence on a page still loading means nothing.
-        await expect(page.locator(".loom-rail")).toBeVisible();
-        const byTestId = await page.getByTestId("atlas-node-tabs-more").count()
-          + await page.getByTestId("atlas-node-tabs-menu").count();
-        // The classes too, because a trigger rendered without its testid is still the regression.
-        const byClass = await page.locator(".loom-atlas-tabmore, .loom-atlas-tabmenu, .loom-atlas-tabmore-slot").count();
-        if (byTestId !== 0 || byClass !== 0) offenders.push(`${width} ${path}: testid=${byTestId} class=${byClass}`);
-      }
-    }
-    expect(offenders, "the classic shell grows no overflow trigger at any width").toEqual([]);
-    // And nothing Atlas at all, so the absence above is the switch being off rather than a trigger
-    // that merely failed to render inside a mounted frame.
-    await expect(page.locator("[class^='loom-atlas-'], [class*=' loom-atlas-']")).toHaveCount(0);
-  });
 });

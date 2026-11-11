@@ -4,10 +4,9 @@ import { useQuery } from "@tanstack/react-query";
 import { useAttention, attentionKindLabel, attentionOpenTarget, isAnswerableRequest } from "../lib/attention";
 import { useOpenRequest } from "./requests";
 import {
-  ATLAS_HOMES, PROJECT_NODE_PATH, PROJECT_NODE_TABS, atlasRetirementFor, isRehomedProjectTab, projectTabPath,
+  ATLAS_HOMES, PROJECT_NODE_PATH, PROJECT_NODE_TABS, isRehomedProjectTab, projectTabPath,
   useVisibleNavPages, type NavPage,
 } from "../nav";
-import { useAtlasUi } from "../lib/atlasUi";
 import { useActiveProject } from "../lib/activeProject";
 import { useAllAgents } from "../lib/useAllAgents";
 import { api } from "../lib/api";
@@ -46,18 +45,7 @@ export function CommandPalette() {
   const openRequest = useOpenRequest();
   const { items: attention } = useAttention();
   const { projectId, setProjectId, projects } = useActiveProject();
-  // Gated nav list — the dev "Loom Platform" entry stays out for shipping users (see useVisibleNavPages).
-  const allNavPages = useVisibleNavPages();
-  // This palette is CROSS-CUTTING chrome: App.tsx mounts the one instance for BOTH shells. So it is the
-  // one place outside the shells themselves that has to know a destination was RETIRED under Atlas
-  // (card 5afd71bd) — otherwise ⌘K keeps offering "Mission Control", and picking it silently lands the
-  // reader on the Workspace node, which is a worse answer than not offering it: the row promised a
-  // destination that no longer exists.
-  //
-  // Read at the component's own entry, once, the way pages/Settings.tsx reads it to pick its sections —
-  // not inside the row-building map, and never by a row deciding its own visibility.
-  const [atlasOn] = useAtlasUi();
-  const navPages = atlasOn ? allNavPages.filter((p) => !atlasRetirementFor(p.to)) : allNavPages;
+  const navPages = useVisibleNavPages();
 
   // Both lists are caches other surfaces already fill (ActiveProjectProvider and the tree read
   // `["allSessions"]`; Settings and the schedule pickers read `["allAgents"]`). Fetched only while the
@@ -112,52 +100,41 @@ export function CommandPalette() {
     // Each carries the tier it lives on, which is what tells apart the rows that share a label (the
     // project's Settings tab and the workspace's Settings node; the two Homes).
     const pages: Row[] = [];
-    if (atlasOn) {
-      const projectTabFor = (to: string) =>
-        PROJECT_NODE_TABS.find((t) => isRehomedProjectTab(t) && projectTabPath(t) === to);
-      const atProjectDepth = (p: NavPage) => !!p.scoped || !!projectTabFor(p.to);
-      const home = (key: string) => ATLAS_HOMES.find((h) => h.key === key);
-      const ws = home("workspace");
-      if (ws) pages.push(pageRow(ws.to, ws.label, ws.to, WORKSPACE));
-      for (const p of navPages.filter((p) => !atProjectDepth(p))) pages.push(pageRow(p.to, p.label, p.to, WORKSPACE));
-      for (const key of ["workspace-terminals", "workspace-settings"]) {
-        const h = home(key);
-        if (h) pages.push(pageRow(h.to, h.label, h.to, WORKSPACE));
-      }
-      pages.push(pageRow("skills", "Skills", "/actors?tab=skills", WORKSPACE));
-      // The project tier, under the ACTIVE project's name. Listed with no project too (no context
-      // then): each of these pages has its own "no project yet" state, and hiding them would make the
-      // palette's page list depend on whether a project exists.
-      pages.push(pageRow(PROJECT_NODE_PATH, "Home", PROJECT_NODE_PATH, projectName));
-      // The node's tabs in its own order and under its own names ("Sessions", not "Terminals").
-      for (const t of PROJECT_NODE_TABS.filter((t) => t.to !== PROJECT_NODE_PATH)) {
-        pages.push(pageRow(t.to, t.label, t.to, projectName));
-      }
-      // `/overview` is still routed under Atlas and holds the classic Overview page, so it stays
-      // reachable here, scoped like every other project row.
-      for (const p of navPages.filter((p) => atProjectDepth(p) && !projectTabFor(p.to))) {
-        pages.push(pageRow(p.to, p.label, p.to, projectName));
-      }
-    } else {
-      for (const p of navPages) pages.push(pageRow(p.to, p.label, p.to, p.scoped ? projectName : undefined));
-      pages.push(pageRow("skills", "Skills", "/actors?tab=skills", undefined));
+    const projectTabFor = (to: string) =>
+      PROJECT_NODE_TABS.find((t) => isRehomedProjectTab(t) && projectTabPath(t) === to);
+    const atProjectDepth = (p: NavPage) => !!p.scoped || !!projectTabFor(p.to);
+    const home = (key: string) => ATLAS_HOMES.find((h) => h.key === key);
+    const ws = home("workspace");
+    if (ws) pages.push(pageRow(ws.to, ws.label, ws.to, WORKSPACE));
+    for (const p of navPages.filter((p) => !atProjectDepth(p))) pages.push(pageRow(p.to, p.label, p.to, WORKSPACE));
+    for (const key of ["workspace-terminals", "workspace-settings"]) {
+      const h = home(key);
+      if (h) pages.push(pageRow(h.to, h.label, h.to, WORKSPACE));
+    }
+    pages.push(pageRow("skills", "Skills", "/actors?tab=skills", WORKSPACE));
+    // The project tier, under the ACTIVE project's name. Listed with no project too (no context
+    // then): each of these pages has its own "no project yet" state, and hiding them would make the
+    // palette's page list depend on whether a project exists.
+    pages.push(pageRow(PROJECT_NODE_PATH, "Home", PROJECT_NODE_PATH, projectName));
+    // The node's tabs in its own order and under its own names ("Sessions", not "Terminals").
+    for (const t of PROJECT_NODE_TABS.filter((t) => t.to !== PROJECT_NODE_PATH)) {
+      pages.push(pageRow(t.to, t.label, t.to, projectName));
     }
 
     // ── Projects, live sessions, agents ───────────────────────────────────────────────────────────
     const projectRows: Row[] = projects.map((p) => ({
       key: `project:${p.id}`, kind: "project", label: p.name,
-      run: scopeAndGo(p.id, atlasOn ? PROJECT_NODE_PATH : "/overview"),
+      run: scopeAndGo(p.id, PROJECT_NODE_PATH),
     }));
     const sessionRows: Row[] = (sessionsQ.data ?? []).filter(isLiveSession).map((s) => ({
       key: `session:${s.id}`, kind: "session", label: s.agentName, context: s.projectName,
       tooltip: `${s.agentName}${s.role ? ` · ${s.role}` : ""} · ${s.projectName} · ${s.id.slice(0, 8)}`,
       run: scopeAndGo(s.projectId, `/session/${s.id}`),
     }));
-    // An agent opens its own editor on the Agents node. The classic shell has no such node, so there
-    // it lands on Projects, the page that edits a project's agents.
+    // An agent opens its own editor on the Agents node.
     const agentRows: Row[] = (agentsQ.data ?? []).filter((a) => knownProject.has(a.projectId)).map((a) => ({
       key: `agent:${a.id}`, kind: "agent", label: a.name, context: a.projectName,
-      run: scopeAndGo(a.projectId, atlasOn ? `/agents?agent=${encodeURIComponent(a.id)}` : "/projects"),
+      run: scopeAndGo(a.projectId, `/agents?agent=${encodeURIComponent(a.id)}`),
     }));
 
     // ── What needs you ─────────────────────────────────────────────────────────────────────────────
@@ -187,7 +164,7 @@ export function CommandPalette() {
     });
 
     return [...pages, ...projectRows, ...sessionRows, ...agentRows, ...attentionRows];
-  }, [open, atlasOn, navPages, projects, projectName, knownProject, sessionsQ.data, agentsQ.data, attention,
+  }, [open, navPages, projects, projectName, knownProject, sessionsQ.data, agentsQ.data, attention,
     navigate, openRequest, setProjectId]);
 
   const commands = useMemo(() => rankPaletteRows(rows, q), [rows, q]);

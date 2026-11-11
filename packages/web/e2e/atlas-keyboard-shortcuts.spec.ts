@@ -162,7 +162,6 @@ const composerBox = (page: Page) => page.getByPlaceholder("Send a turn to this s
 const sendTurn = (page: Page) => page.getByRole("button", { name: "Send turn" });
 
 const SHELLS = [
-  { name: "switch OFF (classic)", atlas: false },
   { name: "switch ON (Atlas)", atlas: true },
 ] as const;
 
