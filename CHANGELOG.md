@@ -21,6 +21,7 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 - **Capabilities and skills.** Capability provisioning status and a network badge show in Settings, with a `passEnv` editor; npm-pinned capabilities get a Loom-owned lock; a generic `loom-shadcn` skill ships bound to the seeded shadcn/ui MCP; capability-bound skills are delivered only to granted worktrees; the Skills UI discloses permission-widening constructs and tracks released skill copies you can re-adopt per project; and the orchestrate skill is split into a core loop plus on-demand references.
 - **Merge and orchestration controls.** `commitTrailers` and `commitLogBody` merge toggles (Settings); a manager can switch its project's checkout branch and deliberately re-stamp a worker's cut base; a merged card's record carries gate provenance; `daemon_restart` waits for live gate and merge ops; the policy cap on a project's `gateCommandTimeoutMs` is removed (it is now bounded only by Node's maximum timer delay, about 24.8 days; the default is unchanged); and confirmed clear/re-pin routes recover a stranded quarantine or commondir trust pin.
 - **Setup and agents.** Rename an agent from its editor, pin seeded home agents by id, add only the agents a project lacks from a workflow template, and see orphaned project work dirs left after a delete. Each project gets a Loom-managed work dir, and pristine seeded prompts refresh automatically.
+- **The running Loom version shows in Workspace → Settings → Interface.**
 - **Internal tooling.** `negative-control --mutant`, an `--fix` mode for the EOL guard, and similar contributor-facing additions (not otherwise listed).
 - **A Codex profile can point at your own model endpoint.** In Profiles, a profile on the Codex harness
   has a new "Model provider" field: pick Codex's built-in local `ollama` or `lmstudio`, or give a custom
@@ -98,6 +99,8 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 - **Companion.** Inbound messages are held during a recycle or upgrade, a failed replay tells the owner, `decision_get` returns the owner's answer, and escalation alerts name the right board.
 - **Vault paths.** Network, device-form and drive-less vault paths are refused before any vault git call, and a vault's git root is matched by canonical path.
 - **Web polish.** Many Atlas layout and copy fixes (narrow widths, light-theme contrast, keyboard focus, "saved" shown only after a real save, unsaved agent-prompt drafts kept), fleet-socket backoff and resync, and push-based updates in place of polling.
+- **Loom sessions no longer offer Claude Code's "Teach auto mode about your environment?" setup.** Loom turns off `/auto-mode-setup` in each session's own settings, so that an unattended session isn't offered a scan of your project and history plus a write to your `~/.claude/settings.json`. Your personal Claude Code settings are untouched. If the offer still appears, choose "Don't show again".
+- **Platform-config updates keep sibling fields.** A `PATCH` that sets one field of an integration (for example `integrations.codescape.memoryCeilingMb`) no longer wipes that integration's other fields; `null` clears just that one field.
 - **Many smaller internal reliability fixes** across git, orchestration, pty and gateway are not listed individually.
 
 ## [0.31.0] — 2026-10-13
