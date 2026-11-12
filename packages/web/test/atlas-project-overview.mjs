@@ -73,8 +73,8 @@ check("a running non-worker session — the Thought Partner's own role — IS li
 });
 
 check("a role-less plain terminal is listed too, not just the assistant role", () => {
-  const rows = rosterRows([], [], [S("plain1", null), S("op1", "operator"), S("run1", "run")]);
-  assert.deepEqual(rows.map((r) => r.session.id), ["plain1", "op1", "run1"]);
+  const rows = rosterRows([], [], [S("plain1", null), S("aud1", "auditor"), S("run1", "run")]);
+  assert.deepEqual(rows.map((r) => r.session.id), ["plain1", "aud1", "run1"]);
 });
 
 // The tail is appended AFTER the whole manager/worker hierarchy, orphan workers included — the

@@ -542,7 +542,7 @@ export const api = {
     // Optional — unlike setupHome below, this route doesn't send it (always undefined in practice); kept
     // on this type only so PlatformView's shared union access type-checks without a cast.
     resolvedLead?: { agentId: string | null; role: "platform" | "setup" | null };
-    seededAgentIds?: { workspaceAuditor: string | null; operator: string | null; companion: string | null };
+    seededAgentIds?: { workspaceAuditor: string | null; companion: string | null };
   }>("/api/platform/home", signal),
   // Setup Assistant E1-7 — discover the reserved "Getting Started" home (hidden from the ordinary
   // picker, like the Platform home) + its Setup Assistant agent(s), for the dedicated Setup page.
@@ -560,7 +560,7 @@ export const api = {
     liveSessions: { id: string; agentId: string; role: SessionRole | null; processState: string; busy: boolean; createdAt: string; lastActivity: string }[];
     resolvedLead: { agentId: string | null; role: "platform" | "setup" | null };
     // Card de790214: ids of the seeded standing agents (the daemon's id markers), null when unstamped.
-    seededAgentIds: { workspaceAuditor: string | null; operator: string | null; companion: string | null };
+    seededAgentIds: { workspaceAuditor: string | null; companion: string | null };
   }>("/api/setup/home", signal),
   // --- Guided onboarding & templates (onboarding C3/C5). HUMAN-only loopback REST mirror of the
   // agent-facing template_list/template_apply MCP tools — the setup wizard consumes these directly.

@@ -140,7 +140,7 @@ export function createAgentCore(
 
 // Least-privilege ROLE guard shared by every clone call site (incl. the human-only REST companion
 // auto-clone, gateway/server.ts): a clone carries the source agent's profileId through VERBATIM, so an
-// operator/platform/auditor source is refused here UNCONDITIONALLY — including for the Platform Lead's
+// platform/auditor source is refused here UNCONDITIONALLY — including for the Platform Lead's
 // own agent_clone/agent_clone_batch (mcp/platform.ts), which do NOT get the `allowElevatedRoles` opt-out
 // its sibling tools (agent_create/agent_update/profile_assign) do; see the 3de74275 record's own
 // "card c8f1d9b7" amendment for why clone stays deliberately stricter than those three on the same router.
@@ -156,12 +156,6 @@ export function clonedProfileRoleError(db: Db, sourceProfileId: string | null): 
   // A dangling profileId (its profile was since deleted) resolves to the plain backstop elsewhere —
   // nothing elevated to guard against.
   if (!profile) return null;
-  // Bucket 2b: "operator" gets its OWN explicit check — an operator rig is own-workspace-confined
-  // (unlike platform/auditor), so cloning one into ANOTHER project would defeat that confinement even
-  // though "operator" is not itself cross-project-exclusive.
-  if (profile.role === "operator") {
-    return `cannot clone agent: its profile role is "operator" — cloning the own-workspace-confined Elevated Operator rig into another project is never allowed`;
-  }
   if (isPlatformProfile(profile)) {
     return `cannot clone agent: its profile role is "${profile.role}" — cloning an elevated platform/auditor rig into another project is never allowed (this is stricter than assigning the same profile directly, which the Platform Lead's own agent_create/agent_update/profile_assign permit — see docs/decisions/3de74275)`;
   }

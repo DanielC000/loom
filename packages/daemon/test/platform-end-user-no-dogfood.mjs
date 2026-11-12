@@ -14,12 +14,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       runtime error strings — including a DEEPER validation error per tool family, not only a
 //       project-lookup-miss — on the NON-DEV surface.
 //   (e) card a2f2becc: EVERY OTHER shipped, end-user-reachable MCP router's rendered tool descriptions —
-//       OrchestrationMcpRouter (manager/worker/companion), TaskMcpRouter, SetupMcpRouter, OperatorMcpRouter,
+//       OrchestrationMcpRouter (manager/worker/companion), TaskMcpRouter, SetupMcpRouter,
 //       RunMcpRouter, WorkspaceAuditMcpRouter — scanned by TWO independent ratchets: the "decision/card id
 //       citation" pattern alone (ROUTER_ID_CITATION_ALLOWLIST, from a2f2becc) and, since card 0018c8ab,
 //       every OTHER DENY_PATTERNS entry too (ROUTER_NON_ID_HIT_ALLOWLIST — see that const's own header for
 //       why it's a separate table, never merged with the id-citation one).
-//       SetupMcpRouter/OperatorMcpRouter/RunMcpRouter are zero-tolerance on BOTH ratchets; the other three
+//       SetupMcpRouter/RunMcpRouter are zero-tolerance on BOTH ratchets; the other three
 //       carry a SIZED, exact-count backlog on the id-citation ratchet, and — after card 0018c8ab's cleanup
 //       — a small, FULLY REASONED (never backlog) set of entries on the non-id one. audit.ts
 //       (role==="auditor") is deliberately excluded — LOOM_DEV-only seed, unreachable on a real install.
@@ -351,7 +351,6 @@ const ROUTER_SOURCE_FILE_GROUPS = {
   OrchestrationMcpRouter: ["mcp/orchestration.ts", "companion/capabilities.ts"],
   TaskMcpRouter: ["mcp/server.ts", "mcp/decisions.ts"],
   SetupMcpRouter: ["mcp/setup.ts"],
-  OperatorMcpRouter: ["mcp/operator.ts"],
   RunMcpRouter: ["mcp/run.ts"],
   // repo-read.ts's literal registerTool() names are shared by its DEV (mcp/audit.ts, excluded below) and
   // END-USER (mcp/user-audit.ts) call sites under the SAME three names (repo_read_file/repo_grep/
@@ -553,7 +552,6 @@ const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { TaskMcpRouter } = await import("../dist/mcp/server.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
-const { OperatorMcpRouter } = await import("../dist/mcp/operator.js");
 const { RunMcpRouter } = await import("../dist/mcp/run.js");
 const { WorkspaceAuditMcpRouter } = await import("../dist/mcp/user-audit.js");
 const { WakeService } = await import("../dist/orchestration/wake.js");
@@ -970,14 +968,6 @@ const SHIPPED_END_USER_MCP_SURFACES = [
     render: async (fx) => {
       const sid = insertFakeSessionForRole(fx, "setup");
       const router = new SetupMcpRouter(fx.db, fx.svc);
-      return renderToolsViaRealClient(router.buildServer(sid));
-    },
-  },
-  {
-    label: "OperatorMcpRouter",
-    render: async (fx) => {
-      const sid = insertFakeSessionForRole(fx, "operator");
-      const router = new OperatorMcpRouter(fx.db, fx.svc);
       return renderToolsViaRealClient(router.buildServer(sid));
     },
   },

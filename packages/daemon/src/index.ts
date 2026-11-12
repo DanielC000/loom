@@ -22,7 +22,8 @@ import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.j
 import { seedDefaultCapabilities, migrateGithubCapabilityToBinary, migrateImageGenCapabilityToNpmPinned, migrateImageGenNpmPinnedVersionBump } from "./capabilities/seed.js";
 import { prewarmNpmPinnedForProfilesAtBoot } from "./capabilities/prewarm.js";
 import { seedPlatformHome, migratePlatformPrompts, refreshPlatformPromptsPristine, getPlatformHomePaths } from "./platform/seed.js";
-import { refreshSetupHomePromptsPristine, seedSetupHome,seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, seedOperatorAgent, migrateSetupHomeToLead, fileCredentialGrantFanoutNoticeOnce } from "./setup/seed.js";
+import { refreshSetupHomePromptsPristine, seedSetupHome,seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent, migrateSetupHomeToLead, fileCredentialGrantFanoutNoticeOnce } from "./setup/seed.js";
+import { retireOperatorRole } from "./setup/retire-operator.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
 import { backfillColumnRoles, migrateHumanHoldToHeld } from "./tasks/columns.js";
 import { prewarmMarkitdownForProfilesAtBoot, resolvePrewarmInterpreterPath, shouldPrewarmCompanionVoice } from "./python/prewarm.js";
@@ -44,7 +45,6 @@ import { PlatformMcpRouter } from "./mcp/platform.js";
 import { AuditMcpRouter } from "./mcp/audit.js";
 import { WorkspaceAuditMcpRouter } from "./mcp/user-audit.js";
 import { SetupMcpRouter } from "./mcp/setup.js";
-import { OperatorMcpRouter } from "./mcp/operator.js";
 import { RunMcpRouter } from "./mcp/run.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
@@ -347,13 +347,15 @@ async function main(): Promise<void> {
   // spawns NO session and writes NO companion_config; the rig stays invisible until a human provisions it.
   const seededCompanion = seedCompanionAgent(db);
   if (seededCompanion) console.log(`[boot] seeded companion agent: ${seededCompanion}`);
-  // Bucket 2b "Bounded Elevated Operator": seed the bundled Elevated Operator agent into the SAME
-  // reserved "Platform" setup home — FLAG-GATED (isOperatorEnabled, read LIVE), so a fresh install with
-  // platform.operatorEnabled off never grows this agent row. seed-if-absent BY ID MARKER within the
-  // reserved home (its one-shot name migration runs even with the flag off), mirroring the auditor/companion seeders above. NO first-run auto-launch — seeding the
-  // agent is not spawning a session (that stays human-REST-only via startOperator).
-  const seededOperatorAgent = seedOperatorAgent(db);
-  if (seededOperatorAgent) console.log(`[boot] seeded elevated operator agent: ${seededOperatorAgent}`);
+  // Card 7f6c1cbb: the Operator role was retired — migrate what an older install left behind (stored
+  // operatorEnabled key, seeded agent/profile, operator-role rows). Idempotent; a throw must NEVER gate boot.
+  // Runs BEFORE the pristine-prompt refresh and before any reconcile that reads session/profile roles.
+  try {
+    const retired = retireOperatorRole(db);
+    if (retired.changed) console.log(`[boot] retired the Operator role: ${JSON.stringify(retired)}`);
+  } catch (e) {
+    console.warn(`[boot] retireOperatorRole failed (non-fatal): ${(e as Error).message}`);
+  }
   // Pristine-only prompt refresh for the reserved setup home's bundled agents: a stored prompt byte-identical
   // to a PRIOR shipped value moves to the current text; a customized prompt is never touched. Marker-less and
   // idempotent (each future edit adds a prior entry). Best-effort: a throw must NEVER gate boot.
@@ -753,7 +755,7 @@ async function main(): Promise<void> {
       // Mid-turn context sampler (card c5b234aa): drop this session's incremental-reader cache — it never
       // ticks again once exited. Forward ref, same pattern as `usageSampler` above (and `sessions`/`orchMcp`).
       try { midTurnContextSampler.onSessionExit(sessionId); } catch { /* never disturb the exit path */ }
-      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); operatorMcp.dispose(sessionId); runMcp.dispose(sessionId);
+      mcp.dispose(sessionId); orchMcp.dispose(sessionId); platformMcp.dispose(sessionId); userAuditMcp.dispose(sessionId); setupMcp.dispose(sessionId); runMcp.dispose(sessionId);
     },
   }, {
     busyStaleMs: timeouts.busyStaleMs, coalesceAgentMessages: resolved.platform.coalesceAgentMessages, // BOOT-BOUND: from resolved platform config
@@ -1142,12 +1144,6 @@ async function main(): Promise<void> {
   // registry (structural/profile/read ops) AND SessionService (session_spawn). Deliberately gets NO
   // git-write timeouts: it has no git/vault/config-elevation/schedule/message tool, by design.
   const setupMcp = new SetupMcpRouter(db, sessions);
-  // Operator MCP (Bucket 2b "Bounded Elevated Operator") — the per-install, opt-in, own-workspace-
-  // confined surface (own-project git writers + vault_write, NO projectId argument — the target is
-  // always resolved server-side from the caller's own session). Threads the SAME boot-bound git-write
-  // timeouts as the Lead's P3 tools (platformMcp above), so an operator git op is bounded identically to
-  // both the human REST path and the Lead's elevated tools.
-  const operatorMcp = new OperatorMcpRouter(db, sessions, { gitLocalMs: timeouts.gitLocalMs, gitPushMs: timeouts.gitPushMs });
   // Run MCP (Agent Runs R2) — the ephemeral run's restricted submit_result surface. Needs the registry
   // (resolve session→run) AND SessionService (validate + record + teardown). Gets NO git/vault timeouts.
   const runMcp = new RunMcpRouter(db, sessions);
@@ -1265,7 +1261,7 @@ async function main(): Promise<void> {
   let openVaultBootGate: () => void = () => undefined;
   let vaultRescanChain: Promise<void> = new Promise<void>((resolve) => { openVaultBootGate = resolve; });
   const app = await buildServer({
-    db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, operatorMcp, runMcp, control, usageStatus,
+    db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus,
     schedulerEnabled,
     companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"),
     // daa5d02f: serialized (a second PATCH waits for the first) so one root is never started twice.

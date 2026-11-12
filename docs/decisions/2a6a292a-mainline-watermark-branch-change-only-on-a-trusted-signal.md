@@ -1,5 +1,7 @@
 # 2a6a292a — the mainline watermark's BRANCH changes only on a trusted signal, never on an observed checkout
 
+> **Retired by 7f6c1cbb (the operator caller only).** Every mention below of the operator's `git_checkout`/`git_create_branch` (`mcp/operator.ts`) describes a surface that no longer exists; `GitWriter`'s remaining callers are the human REST routes and the Platform Lead. The decision itself is unchanged.
+
 **Card `0b00aa6a` (test-only, no behavior change):** every `project-checkout-branch.mjs` reference below is
 historical — it names where each round's scenario lived AT THE TIME. That single file grew to ~7-10 min /
 299 checks and could never fit the advisory dist-importer check's per-file run under contention, so it was

@@ -25,15 +25,12 @@ export const HARNESS_ID_SCHEMA = z.enum(["claude", "codex"]);
 // (session-status, media-out, session-steer, session-spawn, authored-content-grant) — see
 // mcp/orchestration.ts's buildServer, role === "assistant" branch, for the real registration. The
 // ungated Setup operator still can't mint one (setupRoleError's allowlist omits it) — human REST / dev only.
-// "operator" (Bucket 2b "Elevated Operator") IS a valid, human-mintable profile role too — but the
-// SESSION role it ends up carrying is ALWAYS locked by the explicit caller role at startOperator
-// (resolveAgentSpawn), never by this profile field alone, and the ungated Setup operator still can't
-// mint/assign one (setupRoleError's allowlist omits it, exactly like "platform").
+// (The former "operator" role was retired by card 7f6c1cbb; a stored one is migrated to null at boot.)
 //
 // @decision 71bcb207 — "auditor"/"workspace-auditor" are in this enum so an edit to an already-
 // existing bundled profile of either role doesn't 400 on its own pre-existing value, but
 // `roleCarryForwardOnlyError` below still rejects any write that MINTS or REASSIGNS either role.
-export const PROFILE_ROLE_SCHEMA = z.enum(["manager", "worker", "platform", "setup", "assistant", "operator", "auditor", "workspace-auditor"]);
+export const PROFILE_ROLE_SCHEMA = z.enum(["manager", "worker", "platform", "setup", "assistant", "auditor", "workspace-auditor"]);
 
 /**
  * Every profile role except manager/worker — "locked" in the 4d70cc06 sense: an elevated or

@@ -36,7 +36,7 @@ export interface RosterRow {
  * ⭐ `others` IS THE REST OF THE FLEET, AND IT IS NOT OPTIONAL (card 6a9cb96a, an owner bug report:
  * a live Thought Partner session was listed nowhere on this card). A project's sessions are not
  * only managers and workers — an ideation/thought-partner rig and the Companion both run as
- * `role:"assistant"`, an elevated operator as `role:"operator"`, an Agent Run as `role:"run"`, and
+ * `role:"assistant"`, an Agent Run as `role:"run"`, and
  * a plain terminal carries no role at all. Every one of them is a session this project is running,
  * counted by the card's own head (`N live`), and before this card every one of them was dropped
  * here — so the head stated a population the table below it could not list, which is exactly the

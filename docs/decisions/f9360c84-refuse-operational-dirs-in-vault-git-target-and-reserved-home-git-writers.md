@@ -1,5 +1,7 @@
 # f9360c84 — refuse operational dirs in the shared vault git target resolver and reserved-home git writers
 
+> **Retired by 7f6c1cbb (the operator caller only).** The bounded Operator surface and its `operator-reserved-home-git-refusal.mjs` test were removed; the refusals still apply to the Platform Lead and human REST callers. The decision itself is unchanged.
+
 ## Narrative
 
 Follow-up from the Code Review of `68cc29db` (reviewer `74590101`) — read that record first; its own

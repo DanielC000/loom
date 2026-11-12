@@ -496,11 +496,11 @@ try {
     // same scope gate. Card ab3c965d: this used to use role:"manager" here, but a MANAGER now takes its
     // OWN dedicated path (handleManagerKickoffDropped — see manager-kickoff-giveup-dropped.mjs) rather
     // than this generic bail, so this scenario was moved to a role the carve-out doesn't touch at all —
-    // "operator" still proves the generic bail's scope gate for every OTHER non-worker/non-null role.
+    // "auditor" still proves the generic bail's scope gate for every OTHER non-worker/non-null role.
     {
       const top = `kge-top-${sfx}`, child = `kge-childop-${sfx}`;
       mkSession({ id: top, role: "manager" });
-      mkSession({ id: child, role: "operator", parentSessionId: top });
+      mkSession({ id: child, role: "auditor", parentSessionId: top });
       const pty = new PtyStub();
       pty.setLive(top);
       const sessions = new SessionService(db, pty, new OrchestrationControl());

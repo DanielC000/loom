@@ -284,9 +284,9 @@ check("(hardening) an agent's capabilities array naming a NON-reserved slug stil
 
 // ===================== card a6598c1e: loom-* first-party MCP server ids reserved as capability slugs =====================
 // Sourced from pty/tool-attribution.ts's own constants (never hand-typed) — see that file's own doc.
-check("(a6598c1e) LOOM_FIRST_PARTY_SERVER_IDS derives exactly the 8 ids the reviewer counted",
+check("(a6598c1e) LOOM_FIRST_PARTY_SERVER_IDS derives exactly the 7 ids that remain (loom-operator retired by 7f6c1cbb)",
   JSON.stringify([...LOOM_FIRST_PARTY_SERVER_IDS].sort()) === JSON.stringify(
-    ["loom-tasks", "loom-orchestration", "loom-platform", "loom-audit", "loom-user-audit", "loom-setup", "loom-operator", "loom-run"].sort()));
+    ["loom-tasks", "loom-orchestration", "loom-platform", "loom-audit", "loom-user-audit", "loom-setup", "loom-run"].sort()));
 check("(a6598c1e) RESERVED_CAPABILITY_SLUGS carries every first-party id ON TOP of the 2 pre-existing legacy slugs",
   LOOM_FIRST_PARTY_SERVER_IDS.every((id) => RESERVED_CAPABILITY_SLUGS.includes(id))
   && RESERVED_CAPABILITY_SLUGS.includes("browser-testing") && RESERVED_CAPABILITY_SLUGS.includes("document-conversion"));
@@ -320,7 +320,6 @@ const OWNING_ROLE_FOR_ID = {
   "loom-audit": "auditor",
   "loom-user-audit": "workspace-auditor",
   "loom-setup": "setup",
-  "loom-operator": "operator",
   // "loom-run" is the ONE role whose buildMcpServers call returns BEFORE the capability loop even runs
   // (the R2 early return) — so under its own role there is no capability loop to exploit at all. It's
   // still checked below (as "worker") to prove the guard also fires generically, independent of role.

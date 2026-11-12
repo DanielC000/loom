@@ -40,8 +40,6 @@ import type { PlatformMcpRouter } from "../mcp/platform.js";
 import type { AuditMcpRouter } from "../mcp/audit.js";
 import type { WorkspaceAuditMcpRouter } from "../mcp/user-audit.js";
 import type { SetupMcpRouter } from "../mcp/setup.js";
-import type { OperatorMcpRouter } from "../mcp/operator.js";
-import { isOperatorEnabled } from "../mcp/operator.js";
 import type { RunMcpRouter } from "../mcp/run.js";
 import { logInboundMcpRequest } from "../mcp/inbound-log.js";
 import { WATCHED_TOOL_NAMES, extractWatchedToolCalls, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, type ToolAttributionResult } from "../pty/tool-attribution.js";
@@ -107,8 +105,8 @@ import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
 import { resolveLivePlatformHome } from "../platform/seed.js";
-import { resolveLiveSetupHome, COMPANION_AGENT_NAME, seedOperatorAgent, agentNameScope, newAgentNameScope } from "../setup/seed.js";
-import { resolveSeededHomeAgent, SETUP_HOME_COMPANION_AGENT_ID_KEY, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, SETUP_HOME_OPERATOR_AGENT_ID_KEY } from "../projects/reserved-home-markers.js";
+import { resolveLiveSetupHome, COMPANION_AGENT_NAME, agentNameScope, newAgentNameScope } from "../setup/seed.js";
+import { resolveSeededHomeAgent, SETUP_HOME_COMPANION_AGENT_ID_KEY, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY } from "../projects/reserved-home-markers.js";
 import { resolveHomeLeadAgent, isSanctionedPlatformLeadAgent } from "../projects/live-lead-home.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
@@ -249,7 +247,6 @@ export interface GatewayDeps {
   auditMcp: AuditMcpRouter;
   userAuditMcp: WorkspaceAuditMcpRouter;
   setupMcp: SetupMcpRouter;
-  operatorMcp: OperatorMcpRouter;
   runMcp: RunMcpRouter;
   control: OrchestrationControl;
   usageStatus: UsageStatusPoller;
@@ -1097,18 +1094,6 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     logInboundMcpRequest("setup", sessionId, req.body, undefined, recordRepeatedCall, recordMcpSeen); // card 98c4a651; 2d8d2e42; d1521fca
     reply.hijack();
     await deps.setupMcp.handle(req.raw, reply.raw, sessionId, req.body);
-  });
-
-  // --- Operator MCP (Bucket 2b "Bounded Elevated Operator"; role-gated to 'operator' AND
-  // platform.operatorEnabled, both checked LIVE by the router's own resolveRole). A distinct route +
-  // router so an 'operator' session reaches ONLY its own-workspace-confined git/vault writers: it 404s on
-  // every other /mcp* route, and no agent/MCP path can mint an 'operator' session (human REST only,
-  // startOperator), so a non-operator session can never reach here. ---
-  app.all("/mcp-operator/:sessionId", async (req, reply) => {
-    const { sessionId } = req.params as { sessionId: string };
-    logInboundMcpRequest("operator", sessionId, req.body, undefined, recordRepeatedCall, recordMcpSeen); // card 98c4a651; 2d8d2e42; d1521fca
-    reply.hijack();
-    await deps.operatorMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });
 
   // --- Agent-Run MCP (role-gated to 'run'; the ephemeral run's ONLY tool is submit_result — R2). A
@@ -4623,7 +4608,6 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // the web identifies the Workspace Auditor by this instead of by its display name.
     const seededAgentIds = {
       workspaceAuditor: resolveSeededHomeAgent(deps.db, foundSetup, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY)?.id ?? null,
-      operator: resolveSeededHomeAgent(deps.db, foundSetup, SETUP_HOME_OPERATOR_AGENT_ID_KEY)?.id ?? null,
       companion: resolveSeededHomeAgent(deps.db, foundSetup, SETUP_HOME_COMPANION_AGENT_ID_KEY)?.id ?? null,
     };
     return { project, agents, liveSessions, resolvedLead, seededAgentIds };
@@ -6154,25 +6138,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // `setPlatformConfig` (the merge above always strips it back out first).
     const mv = validatePlatformConfigOverride(merged);
     if (!mv.ok) return reply.code(400).send({ error: `invalid platform config: ${mv.error}` });
-    const wasOperatorEnabled = isOperatorEnabled(deps.db);
     deps.db.setPlatformConfig(mv.value);
     // card db1e3503: record who/when/what changed. "human" is honest, not a placeholder — this PATCH is
     // platform_config's ONLY write surface (see platformConfigOverrideSchema's doc: no agent MCP tool
     // anywhere calls db.setPlatformConfig), so every write through here really is a human REST caller.
     // A no-op PATCH (nothing actually differed from `before`) records nothing — see the method's own doc.
     deps.db.recordPlatformConfigChange(before, mv.value, "human");
-    // Bucket 2b follow-up: a false→true flip should surface the bundled "Elevated Operator" convenience
-    // agent immediately, not just on the next boot seed (seedOperatorAgent is itself flag-gated + idempotent
-    // seed-if-absent-by-id-marker, so this is a safe no-op on every other transition). Best-effort — a seed
-    // failure must never fail the config write the human actually asked for.
-    if (!wasOperatorEnabled && isOperatorEnabled(deps.db)) {
-      try {
-        const seeded = seedOperatorAgent(deps.db);
-        if (seeded) console.log(`[platform-config] seeded elevated operator agent: ${seeded}`);
-      } catch (e) {
-        console.warn(`[platform-config] seedOperatorAgent failed after operatorEnabled flip: ${(e as Error).message}`);
-      }
-    }
     // daa5d02f: a changed human-only `sharedVaultRoots` list starts any boot-refused vault it now recognizes.
     // Best-effort — never fails the write the human asked for.
     if (deps.onSharedVaultRootsChanged && JSON.stringify(before.sharedVaultRoots ?? []) !== JSON.stringify(mv.value.sharedVaultRoots ?? [])) {
@@ -6960,19 +6931,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // surface. HUMAN-REST only (like startPlatformLead/startAuditor) — the session role is locked to
       // "setup" via callerRole regardless of the agent's profile role; a live setup session is reused.
       if (role === "setup") return deps.sessions.startSetup(id, { spawnHumanAuthorized: true });
-      // Bucket 2b "Elevated Operator": spawn the CREATE-ONLY, own-workspace-confined Operator on the
-      // curated loom-operator MCP surface. HUMAN-REST only (like setup/workspace-auditor) — the session
-      // role is locked to "operator" via callerRole regardless of the agent's profile role. FLAG-GATED:
-      // 403s (does not spawn) unless platform.operatorEnabled is on (read LIVE — the same isOperatorEnabled
-      // helper the router's own resolveRole uses), so a disabled install can never mint the surface even
-      // via a direct REST call.
-      if (role === "operator") {
-        if (!isOperatorEnabled(deps.db)) {
-          reply.code(403);
-          return { error: "the Elevated Operator is disabled — enable it in Settings first (platform.operatorEnabled)" };
-        }
-        return deps.sessions.startOperator(id, { spawnHumanAuthorized: true });
-      }
+      // The retired "operator" role (card 7f6c1cbb) is refused explicitly: an unknown role must never fall
+      // through to a plain startNew below.
+      if (role === "operator") { reply.code(400); return { error: "the 'operator' session role was retired" }; }
       // P3 force-plain override (web "Spawn → force plain"): a VANILLA session even in an agent with a
       // manager/platform profile — bypasses the profile entirely (role null, agent's own prompt, no allow
       // delta). Absent/undefined role = auto (the profile's role applies — P2 default).

@@ -1,5 +1,7 @@
 # 89d8e17d — the Bounded Elevated Operator is create-only, and gated at the caller, not internally
 
+> **Retired by 7f6c1cbb.** The Operator role, `startOperator`, `isOperatorEnabled` and the `loom-operator` router no longer exist; this record is kept as history only. See `7f6c1cbb-retire-the-operator-role.md`.
+
 ## Narrative
 
 `startOperator` starts a NEW ELEVATED OPERATOR session in an agent (Bucket 2b "Bounded Elevated Operator"). Shaped like `startSetup` but passes callerRole "operator" so the session is LOCKED to the curated, own-workspace-confined `loom-operator` MCP surface. Because an EXPLICIT caller role ALWAYS wins in `resolveAgentSpawn`, the session role is "operator" regardless of the agent's profile role — the gate is keyed off the SESSION role (+ the LIVE `platform.operatorEnabled` flag, re-checked by the router itself on every request), never the profile role.

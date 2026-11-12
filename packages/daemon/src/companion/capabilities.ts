@@ -219,7 +219,7 @@ export function resolveCompanionGrant(db: Db, sessionId: string, capability: str
 }
 
 /**
- * LIVE read of the `companion_lead_mode` row flag — mirrors `mcp/operator.ts`'s `isOperatorEnabled`: read
+ * LIVE read of the `companion_lead_mode` row flag — mirrors `paths.ts`'s `isLoomDev`: read
  * at CALL time, never spawn-pinned/boot-memoized, so toggling it off revokes the synthesized scope on the
  * very next `resolveCompanionGrant` call rather than waiting for a respawn (matches `vaultWrite`'s own
  * live-per-request posture, NOT `browserTesting`'s spawn-pinned one — see the session-capability-surface
@@ -2620,7 +2620,7 @@ const SESSION_SPAWN: CompanionCapability = {
       {
         description:
           "Spawn a NEW session into one of your act-granted projects, on behalf of the owner. `role` " +
-          "MUST be \"manager\" or \"plain\" ONLY — a platform/auditor/setup/operator/worker session can " +
+          "MUST be \"manager\" or \"plain\" ONLY — a platform/auditor/setup/worker session can" +
           "NEVER be spawned here (no self-elevation; any other role value is rejected outright). THE " +
           "single highest-risk tool you have: this ALWAYS requires a fresh owner confirmation, even " +
           "inside an otherwise-warm trust window — it does NOT spawn on the first call: " +
@@ -2755,7 +2755,7 @@ function pendingGitWriteKey(sessionId: string, route: CompanionRoute | null): st
  *  repo root (never raw `vaultPath` — see `resolveVaultGitTarget`'s own doc). `"repo"` resolves to
  *  `project.repoPath` directly — the SAME verbatim path `mcp/platform.ts`'s `git_commit`/`git_push`
  *  (`gitWriterFor(p.repoPath)`) already trust; an unset path is a structured error here (mirroring
- *  `mcp/operator.ts`'s own `!p.repoPath` check), and an actually-INVALID one (no repo there) surfaces as
+ *  `mcp/platform.ts`'s own `!p.repoPath` check), and an actually-INVALID one (no repo there) surfaces as
  *  `GitWriter`'s own structured git error the first time it's touched — never a throw. The `"repo"`
  *  branch also runs `GitWriter`'s own shared toplevel-probe helper (round 4), so a non-git DESCENDANT of
  *  `LOOM_HOME` is refused HERE, at pre-propose time, rather than only at confirm time.

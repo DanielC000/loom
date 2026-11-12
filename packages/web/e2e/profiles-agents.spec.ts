@@ -328,7 +328,6 @@ test.describe("profiles & agents", () => {
     // `workspace-auditor` are refused by roleCarryForwardOnlyError, so the direct-child sweep below is
     // what covers them — same reasoning as 921e06b0's own auditor note.)
     const setupRig = await seedProfile(loomDaemon.baseURL, { name: `Setup Rig ${Date.now()}`, role: "setup", icon: "⚙" });
-    const operatorRig = await seedProfile(loomDaemon.baseURL, { name: `Operator Rig ${Date.now()}`, role: "operator", icon: "▲" });
     // POSITIVE CONTROL: a genuinely spawnable rig, seeded the same way through the same route. Without it
     // an empty/mislocated dropdown would satisfy the "not a direct option" assertions for the wrong reason.
     const workerRig = await seedProfile(loomDaemon.baseURL, { name: `Worker Rig ${Date.now()}`, role: "worker", icon: "▸" });
@@ -349,20 +348,17 @@ test.describe("profiles & agents", () => {
     await expect(directOption(workerRig.name)).toHaveCount(1);
     await expect(groupedOption(workerRig.name)).toHaveCount(0);
 
-    // Both non-spawnable rigs are still OFFERED (not hidden — unlike the dev-layer pair) …
+    // The non-spawnable rig is still OFFERED (not hidden — unlike the dev-layer pair) …
     await expect(select.locator("option").filter({ hasText: setupRig.name })).toHaveCount(1);
-    await expect(select.locator("option").filter({ hasText: operatorRig.name })).toHaveCount(1);
     // … but under the group label, never as a plain top-level option.
     await expect(groupedOption(setupRig.name)).toHaveCount(1);
     await expect(directOption(setupRig.name)).toHaveCount(0);
-    await expect(groupedOption(operatorRig.name)).toHaveCount(1);
-    await expect(directOption(operatorRig.name)).toHaveCount(0);
 
-    // Sweep: NO direct option carries a non-spawnable role, so a bundled setup/operator/workspace-auditor
+    // Sweep: NO direct option carries a non-spawnable role, so a bundled setup/workspace-auditor
     // profile seeded outside this test can't slip through either. Nothing is bound yet, so the
     // always-keep-the-current-assignment rule has no exception in play here.
     for (const text of await select.locator(":scope > option").allTextContents()) {
-      expect(text).not.toMatch(/\((platform|auditor|workspace-auditor|setup|operator|run)\)/);
+      expect(text).not.toMatch(/\((platform|auditor|workspace-auditor|setup|run)\)/);
     }
 
     // EXERCISE the control, with an observable before/after on the inline disclosure. BEFORE: nothing is

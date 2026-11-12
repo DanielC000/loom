@@ -129,7 +129,7 @@ import { edgesAfterPatch, type EdgeBits, type EdgePatch } from "./tasks/edge-sta
 import { matchingCardPolicyIds } from "./tasks/title-guard.js";
 import type { MergeGateOutcomeEntry } from "@loom/shared";
 import { emptyMergeGateState, type MergeGateState } from "./orchestration/merge-gate-interval.js";
-import { unionConnections, unionCapabilities, SSH_APPROVAL_ACTION_PREFIX, parseCardPolicies } from "@loom/shared";
+import { unionConnections, unionCapabilities, SSH_APPROVAL_ACTION_PREFIX, parseCardPolicies, stripRetiredPlatformConfigKeys } from "@loom/shared";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio, maskSessionEnvRecord, redactAlertWebhookInConfig, isProjectMemoryExpired, projectedAttachmentKind } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
@@ -5384,9 +5384,22 @@ export class Db {
     const r = this.db.prepare("SELECT override_json FROM platform_config WHERE id = 1").get() as Row | undefined;
     if (!r) return {};
     try {
-      return (JSON.parse((r.override_json as string) || "{}") as PlatformConfigOverride) ?? {};
+      // Retired keys (e.g. `operatorEnabled`, card 7f6c1cbb) are dropped here so no caller ever sees one.
+      const parsed = (JSON.parse((r.override_json as string) || "{}") as PlatformConfigOverride) ?? {};
+      return typeof parsed === "object" ? stripRetiredPlatformConfigKeys(parsed) : {};
     } catch {
       return {};
+    }
+  }
+  /** The stored override blob WITHOUT the retired-key strip — for the boot migration only (card 7f6c1cbb); null when absent/unparseable. */
+  getPlatformConfigRaw(): Record<string, unknown> | null {
+    const r = this.db.prepare("SELECT override_json FROM platform_config WHERE id = 1").get() as Row | undefined;
+    if (!r) return null;
+    try {
+      const v = JSON.parse((r.override_json as string) || "{}") as unknown;
+      return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+    } catch {
+      return null;
     }
   }
   /** True when the singleton row EXISTS but its JSON does not parse to an object — `getPlatformConfig()`
@@ -7641,6 +7654,18 @@ export class Db {
     if (entries.length === 0) return;
     const set = entries.map((b) => `${b.column} = ?`).join(", ");
     this.db.prepare(`UPDATE profiles SET ${set} WHERE id = ?`).run(...entries.map((b) => b.value), id);
+  }
+  /**
+   * Card 7f6c1cbb: demote every stored `operator`-role session row to plain (NULL role). The role was
+   * retired and is no longer in `SESSION_ROLES`; the rows are history (the surface is gone), so plain is
+   * the only honest value. Returns the number of rows changed. Idempotent.
+   */
+  retireOperatorSessionRoles(): number {
+    return this.db.prepare("UPDATE sessions SET role = NULL WHERE role = 'operator'").run().changes;
+  }
+  /** Card 7f6c1cbb: ids of every profile still carrying the retired `operator` role (raw column read — the role is no longer a valid `SessionRole`). */
+  listProfileIdsWithRetiredOperatorRole(): string[] {
+    return (this.db.prepare("SELECT id FROM profiles WHERE role = 'operator'").all() as Row[]).map((r) => r.id as string);
   }
   /**
    * Delete a profile. SAFE for assigned agents: an agent whose profile_id now dangles resolves to the

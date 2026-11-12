@@ -163,7 +163,7 @@ export const PROFILE_FIELD_CONSUMERS: Record<string, FieldConsumption> = {
         file: "packages/daemon/src/pty/host.ts",
         region: "claude-create-pty",
         pattern: `opts.role === "manager" || opts.role === "worker" || opts.role === "assistant"`,
-        note: "createPty derives the MCP-surface wants (loom-orchestration/platform/audit/setup/run/operator) from opts.role.",
+        note: "createPty derives the MCP-surface wants (loom-orchestration/platform/audit/setup/run) from opts.role.",
       },
       {
         // Card 0770d916: the codex buildMcpServers() call became multi-line (browserTesting/

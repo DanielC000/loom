@@ -16,5 +16,5 @@
 export function spawnableRoleError(role: string): string | null {
   if (role === "manager" || role === "plain") return null;
   return `session_spawn refuses role "${role}" — only "manager" or "plain" may be spawned here. ` +
-    "A platform/auditor/setup/operator session is human-REST-only (no self-elevation) and a worker requires a manager parent + task (a manager's orchestration job).";
+    "A platform/auditor/setup session is human-REST-only (no self-elevation) and a worker requires a manager parent + task (a manager's orchestration job).";
 }

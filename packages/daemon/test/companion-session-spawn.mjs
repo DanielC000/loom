@@ -172,7 +172,7 @@ try {
 
   // ============ ROLE REFUSAL — the headline test ============
   {
-    const REJECTED_ROLES = ["platform", "auditor", "operator", "setup", "worker", "", "garbage"];
+    const REJECTED_ROLES = ["platform", "auditor", "setup", "worker", "", "garbage"];
     for (const role of REJECTED_ROLES) {
       const db = tmpDb();
       const proj = `proj-role-${role || "empty"}`;

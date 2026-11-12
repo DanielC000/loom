@@ -38,11 +38,10 @@ const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
 const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
 const { WorkspaceAuditMcpRouter } = await import("../dist/mcp/user-audit.js");
-const { OperatorMcpRouter } = await import("../dist/mcp/operator.js");
 const { RunMcpRouter } = await import("../dist/mcp/run.js");
 const { TaskMcpRouter } = await import("../dist/mcp/server.js");
 const {
-  PLATFORM_TOOLS, SETUP_TOOLS, AUDIT_TOOLS, USER_AUDIT_TOOLS, OPERATOR_TOOLS, RUN_TOOLS,
+  PLATFORM_TOOLS, SETUP_TOOLS, AUDIT_TOOLS, USER_AUDIT_TOOLS, RUN_TOOLS,
   ORCH_MANAGER_TOOLS, ORCH_WORKER_TOOLS, ORCH_ASSISTANT_TOOLS,
   TASKS_UNIVERSAL_TOOLS, TASKS_ASSISTANT_EXCLUDED_TOOLS,
 } = await import("../dist/agents/promptLint.js");
@@ -54,7 +53,7 @@ const db = new Db();
 db.insertProject({ id: "p1", name: "P", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertAgent({ id: "a1", projectId: "p1", name: "A", startupPrompt: "x", position: 0, profileId: null });
 
-const roles = ["manager", "worker", "assistant", "platform", "setup", "auditor", "workspace-auditor", "operator", "run"];
+const roles = ["manager", "worker", "assistant", "platform", "setup", "auditor", "workspace-auditor", "run"];
 for (const role of roles) {
   db.insertSession({
     id: `s-${role}`, projectId: "p1", agentId: "a1", engineSessionId: null, title: null, cwd: repo,
@@ -147,11 +146,6 @@ check("AUDIT_TOOLS matches the real loom-audit tool set", sameSet(auditActual, A
 const userAuditActual = await listToolNames(new WorkspaceAuditMcpRouter(db, {}).buildServer("s-workspace-auditor"));
 diff("user-audit", userAuditActual, USER_AUDIT_TOOLS);
 check("USER_AUDIT_TOOLS matches the real loom-user-audit tool set", sameSet(userAuditActual, USER_AUDIT_TOOLS));
-
-try { db.setPlatformConfig?.({ operatorEnabled: true }); } catch { /* best-effort — resolveRole gate, not buildServer */ }
-const operatorActual = await listToolNames(new OperatorMcpRouter(db, {}).buildServer("s-operator"));
-diff("operator", operatorActual, OPERATOR_TOOLS);
-check("OPERATOR_TOOLS matches the real loom-operator tool set", sameSet(operatorActual, OPERATOR_TOOLS));
 
 const runActual = await listToolNames(new RunMcpRouter(db, {}).buildServer("s-run"));
 diff("run", runActual, RUN_TOOLS);

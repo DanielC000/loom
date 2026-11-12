@@ -37,12 +37,11 @@ import { enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReaso
 // @decision 2a6a292a round 4 — see that record's "manager-checkout" section for the full rationale.
 //
 // Every caller REUSES this class verbatim, so its bounds/timeouts/identity guarantees hold everywhere.
-// The REST endpoints in gateway/server.ts, the platform git tools in mcp/platform.ts, and the operator
-// git tools in mcp/operator.ts (codex parity surface) call in too — four callers total, as of the
-// decision record's round 11.
+// The REST endpoints in gateway/server.ts and the platform git tools in mcp/platform.ts call in too —
+// three callers total since card 7f6c1cbb retired the operator (the record's round 11 counted four).
 //
 // @decision 59e53710 — `checkout()`/`createBranch()` both run `unsafeBranchNameShapeReason` THEMSELVES,
-// before any git call, so every one of the four callers refuses a name-shape bypass uniformly.
+// before any git call, so every caller refuses a name-shape bypass uniformly.
 
 /**
  * Per-op ceiling. Every git write runs BOUNDED + NON-INTERACTIVE: this repo has been bitten twice by

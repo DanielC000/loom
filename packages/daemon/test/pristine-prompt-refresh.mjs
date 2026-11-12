@@ -3,7 +3,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // setup/seed.ts and platform/seed.ts wiring). HERMETIC + CLAUDE-FREE + NETWORK-FREE: REAL Db handles over an
 // isolated short LOOM_HOME, no pty/daemon, no DB column or schema change.
 //
-// Proves, per seeded prompt (setup: Platform operator-Lead, Workspace Auditor, Elevated Operator, Companion;
+// Proves, per seeded prompt (setup: Platform operator-Lead, Workspace Auditor, Companion;
 // platform: Platform Lead, Platform Auditor):
 //   (1) PRISTINE: an agent whose stored prompt is byte-identical to a PRIOR shipped value moves to the
 //       current text;
@@ -57,13 +57,12 @@ const OLDER_PINS = [
   { label: "PLATFORM_AUDIT_PROMPT", sha: "85f4c1db", index: 3 },
 ];
 
-// ---- the six prompts under test ----
+// ---- the five prompts under test ----
 const SETUP_FILE = "packages/daemon/src/setup/seed.ts";
 const PLATFORM_FILE = "packages/daemon/src/platform/seed.ts";
 const PROMPTS = [
   { label: "PLATFORM_LEAD_OPERATOR_PROMPT", where: "setup", agent: setupSeed.SETUP_AGENT_NAME, current: setupSeed.PLATFORM_LEAD_OPERATOR_PROMPT, priors: setupSeed.PLATFORM_LEAD_OPERATOR_PROMPT_PRIOR_VALUES, file: SETUP_FILE },
   { label: "WORKSPACE_AUDITOR_PROMPT", where: "setup", agent: setupSeed.SETUP_AUDITOR_AGENT_NAME, current: setupSeed.WORKSPACE_AUDITOR_PROMPT, priors: setupSeed.WORKSPACE_AUDITOR_PROMPT_PRIOR_VALUES, file: SETUP_FILE },
-  { label: "OPERATOR_PROMPT", where: "setup", agent: setupSeed.OPERATOR_AGENT_NAME, current: setupSeed.OPERATOR_PROMPT, priors: setupSeed.OPERATOR_PROMPT_PRIOR_VALUES, file: SETUP_FILE },
   { label: "COMPANION_PROMPT", where: "setup", agent: setupSeed.COMPANION_AGENT_NAME, current: setupSeed.COMPANION_PROMPT, priors: setupSeed.COMPANION_PROMPT_PRIOR_VALUES, file: SETUP_FILE },
   { label: "PLATFORM_LEAD_PROMPT", where: "platform", agent: "Platform Lead", current: platformSeed.PLATFORM_LEAD_PROMPT, priors: platformSeed.PLATFORM_LEAD_PROMPT_PRIOR_VALUES, file: PLATFORM_FILE },
   { label: "PLATFORM_AUDIT_PROMPT", where: "platform", agent: "Platform Auditor", current: platformSeed.PLATFORM_AUDIT_PROMPT, priors: platformSeed.PLATFORM_AUDIT_PROMPT_PRIOR_VALUES, file: PLATFORM_FILE },
@@ -103,11 +102,6 @@ setupSeed.seedSetupHome(setupDb);
 setupSeed.seedSetupAuditorAgent(setupDb);
 setupSeed.seedCompanionAgent(setupDb);
 const setupHome = setupDb.getReservedProjectByName(setupSeed.SETUP_PROJECT_NAME);
-if (!setupDb.listAgents(setupHome.id).some((a) => a.name === setupSeed.OPERATOR_AGENT_NAME)) {
-  setupDb.insertAgent({ id: "elev-op", projectId: setupHome.id, name: setupSeed.OPERATOR_AGENT_NAME, startupPrompt: setupSeed.OPERATOR_PROMPT, position: 9, profileId: null, endpoint: false, ioSchema: null });
-  // Card de790214: the refresh matches the seeded agents by their id marker, as production boot stamps it.
-  setupDb.setMeta("setup.operatorAgentId", "elev-op");
-}
 
 process.env.LOOM_DEV = "1"; // the platform layer is dev-gated: seedPlatformHome and the refresh only exist here
 const platformDb = new Db(path.join(home, "platform.db"));
@@ -201,13 +195,13 @@ for (const [where, c, bundledNames] of [
     bundledNames.every(([, prior], i) => c.db.getAgent(`${pid}-${i}`).startupPrompt === prior));
 }
 
-// A prior text only matches under ITS OWN agent name: a Companion row carrying the Operator's prior is not refreshed.
+// A prior text only matches under ITS OWN agent name: a Companion row carrying the Workspace Auditor's prior is not refreshed.
 {
   const c = ctx.setup;
-  setPrompt(c, setupSeed.COMPANION_AGENT_NAME, setupSeed.OPERATOR_PROMPT_PRIOR_VALUES[0]);
+  setPrompt(c, setupSeed.COMPANION_AGENT_NAME, setupSeed.WORKSPACE_AUDITOR_PROMPT_PRIOR_VALUES[0]);
   c.run();
   check("a prior value of ANOTHER prompt under the wrong agent name is not refreshed",
-    agentOf(c, setupSeed.COMPANION_AGENT_NAME).startupPrompt === setupSeed.OPERATOR_PROMPT_PRIOR_VALUES[0]);
+    agentOf(c, setupSeed.COMPANION_AGENT_NAME).startupPrompt === setupSeed.WORKSPACE_AUDITOR_PROMPT_PRIOR_VALUES[0]);
   setPrompt(c, setupSeed.COMPANION_AGENT_NAME, setupSeed.COMPANION_PROMPT);
 }
 

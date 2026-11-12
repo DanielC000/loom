@@ -11,7 +11,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (D) profile_update's role-flip branch (mcp/platform.ts) — only ever checked a flip INTO "manager"
 //       (ced4285e); a flip into any OTHER locked role was completely unchecked.
 //   (E) agent_clone/agent_clone_batch -> cloneAgentCore -> clonedProfileRoleError (clone-core.ts) — that
-//       role check only ever covered "operator" and isPlatformProfile ("platform"/"auditor"); "setup"
+//       role check only ever covered the retired "operator" role and isPlatformProfile ("platform"/"auditor"); "setup"
 //       and "workspace-auditor" were never checked at all, so cloning one of those cross-project was
 //       completely unguarded.
 //
@@ -169,9 +169,9 @@ try {
   db.insertAgent({ id: "agentFlipBoundReserved", projectId: "pReserved", name: "Flip-Bound-Reserved", startupPrompt: "x", position: 1, profileId: "profFlipReserved" });
   db.insertAgent({ id: "agentFlipBoundAssistant", projectId: "pOrdinary", name: "Flip-Bound-Assistant", startupPrompt: "x", position: 2, profileId: "profFlipAssistant" });
 
-  const d1 = await call("profile_update", { profileId: "profFlipOrdinary", patch: { role: "operator" } });
-  check("(D1) profile_update REJECTS flipping role to operator while bound to an agent in a NON-reserved project",
-    typeof d1.error === "string" && /operator/i.test(d1.error) && /reserved/i.test(d1.error) &&
+  const d1 = await call("profile_update", { profileId: "profFlipOrdinary", patch: { role: "setup" } });
+  check("(D1) profile_update REJECTS flipping role to setup while bound to an agent in a NON-reserved project",
+    typeof d1.error === "string" && /setup/i.test(d1.error) && /reserved/i.test(d1.error) &&
     d1.error.includes("agentFlipBoundOrdinary") && d1.error.includes("pOrdinary"));
   check("(D1) the rejected role-flip left the profile's role UNCHANGED (still worker)", db.getProfile("profFlipOrdinary").role === "worker");
 
@@ -183,9 +183,9 @@ try {
   check("(D1b) an unrelated patch (name) to a DIFFERENT ordinary-bound profile still SUCCEEDS (not a blanket refusal, independent of D1)",
     d1b.name === "Flip Ordinary Renamed" && d1b.role === "worker");
 
-  const d2 = await call("profile_update", { profileId: "profFlipReserved", patch: { role: "operator" } });
-  check("(D2) profile_update SUCCEEDS flipping role to operator when bound only to an agent in a reserved project (control)",
-    d2.role === "operator" && db.getProfile("profFlipReserved").role === "operator");
+  const d2 = await call("profile_update", { profileId: "profFlipReserved", patch: { role: "setup" } });
+  check("(D2) profile_update SUCCEEDS flipping role to setup when bound only to an agent in a reserved project (control)",
+    d2.role === "setup" && db.getProfile("profFlipReserved").role === "setup");
 
   // Code Review follow-up: a profile ALREADY in a locked role (not "assistant"), bound to an agent in a
   // NON-reserved project through a route this guard never covers (a direct db write — simulating a row

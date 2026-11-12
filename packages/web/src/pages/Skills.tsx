@@ -339,7 +339,7 @@ function SkillEditor({
         {customized && <Badge tone="muted">customized</Badge>}
         {updateAvailable && <Badge tone="attn">update available</Badge>}
         {notTrusted && (
-          <span title="Not delivered to locked roles (Companion, Setup, Elevated Operator, Workspace Auditor…) under their deliver-all default — save it here to trust it.">
+          <span title="Not delivered to locked roles (Companion, Setup, Workspace Auditor…) under their deliver-all default — save it here to trust it.">
             <Badge tone="attn">not delivered to locked roles</Badge>
           </span>
         )}

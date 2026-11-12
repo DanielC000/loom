@@ -68,7 +68,6 @@ db.insertProfile({ id: "profPlatform", name: "Platform Rig", role: "platform", d
 db.insertProfile({ id: "profAuditor", name: "Auditor Rig", role: "auditor", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertProfile({ id: "profWorkspaceAuditor", name: "Workspace Auditor Rig", role: "workspace-auditor", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertProfile({ id: "profAssistant", name: "Companion Rig", role: "assistant", description: "", allowDelta: [], skills: null, model: null, icon: null, restrictedTools: true });
-db.insertProfile({ id: "profOperator", name: "Operator Rig", role: "operator", description: "", allowDelta: [], skills: null, model: null, icon: null });
 db.insertProfile({ id: "profSetup", name: "Setup Rig", role: "setup", description: "", allowDelta: [], skills: null, model: null, icon: null });
 
 // (b) non-elevated (worker) role, each carrying ONE human-only field.
@@ -105,7 +104,7 @@ try {
   for (const [id, label] of [
     ["profPlatform", "platform"], ["profAuditor", "auditor"],
     ["profWorkspaceAuditor", "workspace-auditor"], ["profAssistant", "assistant"],
-    ["profOperator", "operator"], ["profSetup", "setup"],
+    ["profSetup", "setup"],
   ]) {
     rejects(`assignAgentProfile REJECTS a "${label}"-role profile`,
       () => svc.assignAgentProfile("M", "aMine", id), new RegExp(label));

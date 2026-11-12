@@ -38,7 +38,7 @@ const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const seed = await import("../dist/setup/seed.js");
 const { resolveAgentName } = await import("../dist/agents/validate.js");
 const { applyWorkflowTemplate, findWorkflowTemplate } = await import("../dist/setup/templates.js");
-const { resolveSetupHome, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, SETUP_HOME_OPERATOR_AGENT_ID_KEY, SETUP_HOME_COMPANION_AGENT_ID_KEY } =
+const { resolveSetupHome, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, SETUP_HOME_COMPANION_AGENT_ID_KEY } =
   await import("../dist/projects/reserved-home-markers.js");
 const { slugifyAgentName } = await import("@loom/shared");
 
@@ -181,7 +181,6 @@ try {
   seed.seedSetupHome(db);
   seed.seedSetupAuditorAgent(db);
   seed.seedCompanionAgent(db);
-  seed.seedOperatorAgent(db);
   check("(1c) no seeder re-seeds a deleted Platform agent", !db.listAgents(home.id).some((a) => a.name === "Platform"));
 }
 
@@ -208,7 +207,6 @@ try {
 // ===================== (3) a re-seed never mints a name or slug twin =====================
 const SEEDERS = [
   { label: "auditor", fn: seed.seedSetupAuditorAgent, name: seed.SETUP_AUDITOR_AGENT_NAME, key: SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY },
-  { label: "operator", fn: seed.seedOperatorAgent, name: seed.OPERATOR_AGENT_NAME, key: SETUP_HOME_OPERATOR_AGENT_ID_KEY },
   { label: "companion", fn: seed.seedCompanionAgent, name: seed.COMPANION_AGENT_NAME, key: SETUP_HOME_COMPANION_AGENT_ID_KEY },
 ];
 let sn = 0;
@@ -217,7 +215,6 @@ for (const s of SEEDERS) {
     const sdb = new Db(path.join(tmpHome, `seed-${++sn}.db`));
     seedDefaultProfiles(sdb);
     seed.seedSetupHome(sdb);
-    sdb.setPlatformConfig({ operatorEnabled: true }); // the operator seeder is flag-gated
     const home = resolveSetupHome(sdb);
     s.fn(sdb);
     const gone = sdb.listAgents(home.id).find((a) => a.name === s.name);
@@ -240,7 +237,6 @@ for (const s of SEEDERS) {
   const cdb = new Db(path.join(tmpHome, `seed-${++sn}.db`));
   seedDefaultProfiles(cdb);
   seed.seedSetupHome(cdb);
-  cdb.setPlatformConfig({ operatorEnabled: true });
   const chome = resolveSetupHome(cdb);
   s.fn(cdb);
   const g = cdb.listAgents(chome.id).find((a) => a.name === s.name);

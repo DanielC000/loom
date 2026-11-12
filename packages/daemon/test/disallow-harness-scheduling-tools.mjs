@@ -32,9 +32,8 @@ for (const role of ["worker", "setup", "auditor", "workspace-auditor", "assistan
 // OUT of scope, each for its own stated reason (see HARNESS_SCHEDULING_TOOLS's own doc):
 //   platform  — the human-driven Platform Lead (owner-interactive, not Loom-driven)
 //   run       — an ephemeral, owner-triggered Agent Run with no idle boundary for a tick to collide with
-//   operator  — human-spawned-only; untouched by either existing disallow switch, a deliberate consistency call
 //   null/undef — a plain/role-less owner-interactive terminal, where /loop is a legitimate owner feature
-for (const role of ["platform", "run", "operator", null, undefined]) {
+for (const role of ["platform", "run", null, undefined]) {
   check(`role '${String(role)}': NO harness-scheduling tool disallowed (byte-identical on this dimension)`,
     HARNESS_SCHEDULING_TOOLS.every((t) => !disallowedToolsForRole(role).includes(t)));
 }
@@ -104,7 +103,7 @@ check("role 'platform': EXACTLY task-tracking (harness-scheduling deliberately e
 check("WORKER_UNUSED_HARNESS_TOOLS = Artifact + Workflow exactly",
   JSON.stringify([...WORKER_UNUSED_HARNESS_TOOLS]) === JSON.stringify(["Artifact", "Workflow"]));
 check("worker: Artifact + Workflow disallowed", WORKER_UNUSED_HARNESS_TOOLS.every((t) => disallowedToolsForRole("worker").includes(t)));
-for (const role of ["setup", "auditor", "workspace-auditor", "assistant", "manager", "platform", "run", "operator", null, undefined]) {
+for (const role of ["setup", "auditor", "workspace-auditor", "assistant", "manager", "platform", "run", null, undefined]) {
   check(`role '${String(role)}': NO worker-unused tool disallowed (byte-identical on this dimension)`,
     WORKER_UNUSED_HARNESS_TOOLS.every((t) => !disallowedToolsForRole(role).includes(t)));
 }

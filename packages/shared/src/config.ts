@@ -1331,15 +1331,6 @@ export interface PlatformConfig {
    */
   companionVoiceEnabled: boolean;
   /**
-   * Bucket 2b "Elevated Operator" gate (owner-approved spec): master switch for the `operator` session
-   * role's `loom-operator` MCP surface (own-workspace git writers + vault_write). Default OFF. Read LIVE
-   * at every gate (mirrors `paths.ts` `isLoomDev` — NOT boot-memoized like `coalesceAgentMessages`/
-   * `companionVoiceEnabled` above), so flipping it off revokes the surface on the very next request
-   * instead of waiting for a restart. DAEMON-GLOBAL (no per-project layer) + HUMAN-only, mirroring the
-   * rest of `PlatformConfig`.
-   */
-  operatorEnabled: boolean;
-  /**
    * Card 51a80b4d (owner wish: "allow users to turn off browser notifications for each specific
    * notification type. General toggles no project specific toggles") — the attention categories whose
    * desktop `Notification` the human has muted. A DENYLIST, so the default `[]` means every kind still
@@ -1368,7 +1359,7 @@ export interface PlatformConfig {
    * `question_ask` attachments (card 432765ab) are garbage-collected (`mcp/attachment-gc.ts`). Minimum 1;
    * default 30. DAEMON-GLOBAL (no per-project layer) + HUMAN-only, mirroring the rest of `PlatformConfig`
    * — there is no agent-facing platform-config WRITE surface at all, so this reaches an agent no
-   * differently than `operatorEnabled` does.
+   * differently than the other human-only keys do.
    *
    * @decision 6f27469b — a 0 or negative value is REJECTED, never a "disable GC" sentinel. An unread
    * notice has no age-based fallback terminal time — never borrow a fixed window for it.
@@ -1377,16 +1368,27 @@ export interface PlatformConfig {
 }
 
 /** Default for `PlatformConfig.attachmentRetentionDays` — a single named constant, mirroring
- *  `COMPANION_VOICE_ENABLED_DEFAULT`/`OPERATOR_ENABLED_DEFAULT`. 30 days past terminal transition. */
+ *  `COMPANION_VOICE_ENABLED_DEFAULT`. 30 days past terminal transition. */
 export const ATTACHMENT_RETENTION_DAYS_DEFAULT = 30;
 
 /** Default for `PlatformConfig.companionVoiceEnabled` — a single named constant so flipping the shipped
  *  default is a one-line change. OFF: companion voice provisioning is explicit human opt-in. */
 export const COMPANION_VOICE_ENABLED_DEFAULT = false;
 
-/** Default for `PlatformConfig.operatorEnabled` — a single named constant, mirroring
- *  `COMPANION_VOICE_ENABLED_DEFAULT`. OFF: the Elevated Operator surface is explicit human opt-in. */
-export const OPERATOR_ENABLED_DEFAULT = false;
+/**
+ * Retired platform-config keys: stripped on every read, persisted-stripped at boot, never re-validated.
+ *
+ * @decision 7f6c1cbb — a stored retired key must never reach the strict validators; do not drop the strip.
+ */
+export const RETIRED_PLATFORM_CONFIG_KEYS: readonly string[] = ["operatorEnabled"];
+
+/** Copy of `blob` without any {@link RETIRED_PLATFORM_CONFIG_KEYS}; returns `blob` itself when none present. */
+export function stripRetiredPlatformConfigKeys<T extends object>(blob: T): T {
+  if (!RETIRED_PLATFORM_CONFIG_KEYS.some((k) => k in blob)) return blob;
+  const out: Record<string, unknown> = { ...(blob as Record<string, unknown>) };
+  for (const k of RETIRED_PLATFORM_CONFIG_KEYS) delete out[k];
+  return out as T;
+}
 
 /**
  * Access-story Phase A — daemon-global remote-bind config. NOT per-project — like `backup`/`platform`,
@@ -1767,8 +1769,6 @@ export interface PlatformConfigOverride {
   coalesceAgentMessages?: boolean;
   /** See PlatformConfig.companionVoiceEnabled. */
   companionVoiceEnabled?: boolean;
-  /** See PlatformConfig.operatorEnabled. */
-  operatorEnabled?: boolean;
   /** See PlatformConfig.mutedBrowserNotifications. A submitted list REPLACES the stored one wholesale (it
    *  is not a `DEEP_MERGE_GROUPS` member in the PATCH handler) — the Settings panel always emits the full
    *  muted set, so there is no partial-list shape to merge. */
@@ -1852,7 +1852,7 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
 /**
  * The wire body for `PATCH /api/platform/config` (card fd55ac8a, widened by card ba9ccd75): identical to
  * `PlatformConfigOverride` except the top-level keys the Settings global-config form can blank back to
- * "inherit" — the 5 scalar toggles (`schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/
+ * "inherit" — the 4 scalar toggles (`schedulerEnabled`/`coalesceAgentMessages`/
  * `maxConcurrentGates`/`maxConcurrentManagers`) and the 3 ms-keyed sub-groups its field grid writes to
  * (`rateLimit`/`watchers`/`timeouts`) — also accept an explicit `null`. Whole-group `null` is the CLEAR sentinel: "delete this
  * key from the stored override, revert to the resolved default". Within a submitted group object, each
@@ -1866,7 +1866,7 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
  */
 export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
-  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "harness" | "remoteAccess" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs" | "mutedBrowserNotifications" | "sharedVaultRoots"
+  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "harness" | "remoteAccess" | "coalesceAgentMessages" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs" | "mutedBrowserNotifications" | "sharedVaultRoots"
 > & {
   rateLimit?: NullableFields<RateLimitConfig> | null;
   watchers?: NullableFields<WatcherConfig> | null;
@@ -1879,7 +1879,6 @@ export type PlatformConfigPatch = Omit<
    *  inside this object may be `null` (see the type doc above). */
   remoteAccess?: NullableFields<RemoteAccessConfig>;
   coalesceAgentMessages?: boolean | null;
-  operatorEnabled?: boolean | null;
   schedulerEnabled?: boolean | null;
   maxConcurrentGates?: number | null;
   maxConcurrentManagers?: number | null;
@@ -1951,8 +1950,6 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     coalesceAgentMessages: false,
     // Default OFF (COMPANION_VOICE_ENABLED_DEFAULT) — companion voice provisioning is explicit opt-in.
     companionVoiceEnabled: COMPANION_VOICE_ENABLED_DEFAULT,
-    // Default OFF (OPERATOR_ENABLED_DEFAULT) — the Bucket 2b Elevated Operator surface is explicit opt-in.
-    operatorEnabled: OPERATOR_ENABLED_DEFAULT,
     // Card 51a80b4d: nothing muted by default — every attention kind still fires its browser
     // Notification, so an unset override behaves exactly as it did before the toggles existed.
     mutedBrowserNotifications: [],
@@ -2361,7 +2358,6 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
     // which `resolveConfig()` returns to `packages/web` too. See `resolveCodescapeIntegrationPath`.
     coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,
     companionVoiceEnabled: po?.companionVoiceEnabled ?? d.companionVoiceEnabled,
-    operatorEnabled: po?.operatorEnabled ?? d.operatorEnabled,
     mutedBrowserNotifications: po?.mutedBrowserNotifications ?? d.mutedBrowserNotifications,
     sharedVaultRoots: po?.sharedVaultRoots ?? d.sharedVaultRoots,
     attachmentRetentionDays: po?.attachmentRetentionDays ?? d.attachmentRetentionDays,

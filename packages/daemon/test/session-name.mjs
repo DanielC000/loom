@@ -59,7 +59,6 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("role: auditor → audit", composeRoleSessionName("auditor", "Loom") === "loom-loom-audit");
   check("role: workspace-auditor → wsaudit", composeRoleSessionName("workspace-auditor", "Loom") === "loom-loom-wsaudit");
   check("role: run → run", composeRoleSessionName("run", "Loom") === "loom-loom-run");
-  check("role: operator → operator", composeRoleSessionName("operator", "Loom") === "loom-loom-operator");
   check("role: undefined (plain \"+New\") groups with run", composeRoleSessionName(undefined, "Loom") === "loom-loom-run");
   check("role: project name is slugified too", composeRoleSessionName("manager", "Fire Studio!") === "loom-fire-studio-mgr");
   check("role: prefix is always \"loom-\"", composeRoleSessionName("manager", "x").startsWith("loom-"));

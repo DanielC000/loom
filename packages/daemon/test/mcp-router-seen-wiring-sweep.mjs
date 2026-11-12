@@ -120,7 +120,7 @@ check(
 // Named per-router sanity (the 8 routers named in the card's own kickoff) — fails loud and names which
 // router's own call is gone, rather than only reporting an aggregate count, if a route is ever renamed
 // or removed without updating this list.
-const EXPECTED_ROUTER_NAMES = ["task", "orchestration", "platform", "audit", "user-audit", "setup", "operator", "run"];
+const EXPECTED_ROUTER_NAMES = ["task", "orchestration", "platform", "audit", "user-audit", "setup", "run"];
 for (const routerName of EXPECTED_ROUTER_NAMES) {
   const found = realCalls.some((call) => call.args.trimStart().startsWith(`"${routerName}"`));
   check(`a logInboundMcpRequest("${routerName}", ...) call exists and passes recordMcpSeen`,

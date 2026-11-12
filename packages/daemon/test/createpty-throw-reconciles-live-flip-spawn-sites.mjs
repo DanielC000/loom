@@ -3,12 +3,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // exercises the "live-flip then synchronous throw" invariant injects a PRE-pty throw (monkeypatching a
 // statement that runs BEFORE pty.spawn, e.g. resolveCodescapeInjectionStatus/stampProjectMemoryDigest).
 // None of them makes pty.spawn/createPty ITSELF throw — the real-world Windows `error code: 206` class
-// (card bc91e86c) the reconcileFailedSpawn helper's own doc names. For FIVE live-flip spawn sites —
-// startAuditor, startWorkspaceAuditor, startSetup, startOperator, startRun — the try wraps ONLY the
+// (card bc91e86c) the reconcileFailedSpawn helper's own doc names. For FOUR live-flip spawn sites —
+// startAuditor, startWorkspaceAuditor, startSetup, startRun — the try wraps ONLY the
 // pty.spawn call (plus, for startRun, composeRunStartupPrompt's own JSON.stringify/trim, which cannot
 // throw for the plain string/schema inputs used below): there is NO OTHER pre-pty statement a
 // "pre-pty-throw" test could monkeypatch, so a createPty-itself throw is the ONLY way to reach these
-// catches at all. This file drives all five through a seam host whose createPty() throws once per call.
+// catches at all. This file drives all four through a seam host whose createPty() throws once per call.
 //
 // recyclePlatformLead is DELIBERATELY NOT included here, despite being named in the card body's list of
 // six: platform-lead-recycle-prespawn-throw-restores-old.mjs (added in the SAME commit as this card's
@@ -89,7 +89,6 @@ db.insertProject({ id: "pX", name: "X", repoPath: repo, vaultPath: repo, config:
 db.insertAgent({ id: "agentAudit", projectId: "pX", name: "Audit", startupPrompt: "AUDIT", position: 0, profileId: null });
 db.insertAgent({ id: "agentWsAudit", projectId: "pX", name: "WsAudit", startupPrompt: "WSAUDIT", position: 1, profileId: null });
 db.insertAgent({ id: "agentSetup", projectId: "pX", name: "Setup", startupPrompt: "SETUP", position: 2, profileId: null });
-db.insertAgent({ id: "agentOperator", projectId: "pX", name: "Operator", startupPrompt: "OPERATOR", position: 3, profileId: null });
 db.insertAgent({ id: "agentRun", projectId: "pX", name: "Run", startupPrompt: "RUN_DOCTRINE", position: 4, profileId: null, endpoint: true, ioSchema: null });
 
 /** Drive one synchronous start* entry point through a forced createPty throw and return its session row. */
@@ -115,7 +114,6 @@ try {
   driveSyncEntry("startAuditor", "agentAudit", () => svc.startAuditor("agentAudit"));
   driveSyncEntry("startWorkspaceAuditor", "agentWsAudit", () => svc.startWorkspaceAuditor("agentWsAudit"));
   driveSyncEntry("startSetup", "agentSetup", () => svc.startSetup("agentSetup"));
-  driveSyncEntry("startOperator", "agentOperator", () => svc.startOperator("agentOperator"));
 
   // startRun is async and additionally owns a RUN row + a disposable snapshot dir (card 8b194419, item 4)
   // — neither of which reconcileFailedSpawn touches (it only knows about the SESSION row). A real
@@ -177,6 +175,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a synchronous createPty (not just a pre-pty statement) throw at startAuditor/startWorkspaceAuditor/startSetup/startOperator/startRun each reconciles their session row to 'exited' (not phantom-live); startRun additionally fails its run row immediately and GCs its snapshot dir instead of leaking both until next boot."
+  ? "\n✅ ALL PASS — a synchronous createPty (not just a pre-pty statement) throw at startAuditor/startWorkspaceAuditor/startSetup/startRun each reconciles their session row to 'exited' (not phantom-live); startRun additionally fails its run row immediately and GCs its snapshot dir instead of leaking both until next boot."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

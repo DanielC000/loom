@@ -401,7 +401,7 @@ const ROLE_DOCTRINE_SKILL: Partial<Record<SessionRole, string>> = {
 };
 
 /** The store skill name carrying `role`'s operating doctrine, or null when the role has none (run/plain/
- *  assistant/operator/null). The single source for both harnesses' role→doctrine mapping. */
+ *  assistant/null). The single source for both harnesses' role→doctrine mapping. */
 export function roleDoctrineSkillName(role: string | null | undefined): string | null {
   return (role && ROLE_DOCTRINE_SKILL[role as SessionRole]) || null;
 }

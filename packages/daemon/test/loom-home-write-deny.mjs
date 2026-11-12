@@ -156,7 +156,7 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
 // correction), the output is an EXACT map over BOTH registries unioned ---
 {
   const expected = new Set([...ruleForEntries(LOOM_HOME_WRITE_DENY_REGISTRY), ...ruleForEntries(LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY)]);
-  for (const role of ["worker", "manager", "setup", "auditor", "workspace-auditor", "assistant", "operator", "run"]) {
+  for (const role of ["worker", "manager", "setup", "auditor", "workspace-auditor", "assistant", "run"]) {
     const rules = loomHomeWriteDenyRules({ role, sessionId: "s1" });
     check(`[${role}] loomHomeWriteDenyRules returns EXACTLY one rule per entry across BOTH registries (${expected.size} expected, ${rules.length} actual)`,
       rules.length === expected.size && rules.every((r) => expected.has(r)));
@@ -201,7 +201,7 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
 // --- SCRATCH_ROOT_DIR, WORKSPACE_ROOT and RUNS_DIR: NEVER denied, for ANY role (round 2: structural
 // omission from the registry — no per-role logic left to exercise) ---
 {
-  for (const role of ["worker", "manager", "platform", "setup", "auditor", "workspace-auditor", "assistant", "operator", "run", null]) {
+  for (const role of ["worker", "manager", "platform", "setup", "auditor", "workspace-auditor", "assistant", "run", null]) {
     const rules = loomHomeWriteDenyRules({ role, sessionId: "s-excl" });
     check(`role '${String(role)}': scratch/ is never denied`, !rules.some((r) => r.includes(scratchNeverDeniedGlob)));
     check(`role '${String(role)}': workspaces/ is never denied`, !rules.some((r) => r.includes(workspacesNeverDeniedGlob)));
@@ -216,7 +216,7 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
 // LOOM_HOME, so exempting it reopened the exact cross-role escalation this registry exists to close). A
 // plain, human-driven session (role===null) stays exempt from the whole registry, unconditionally. ---
 {
-  const NON_EXEMPT = ["worker", "manager", "setup", "auditor", "workspace-auditor", "assistant", "operator", "run"];
+  const NON_EXEMPT = ["worker", "manager", "setup", "auditor", "workspace-auditor", "assistant", "run"];
   const EXEMPT = ["platform", null];
   for (const role of NON_EXEMPT) {
     const rules = loomHomeWriteDenyRules({ role, sessionId: "s1" });
@@ -240,7 +240,7 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
 // files — both are a separate, controversial, owner-gated question (see the 37310431 record's
 // "known, disclosed gaps" section, updated by this card). ---
 {
-  const NON_EXEMPT = ["worker", "manager", "setup", "auditor", "workspace-auditor", "assistant", "operator", "run"];
+  const NON_EXEMPT = ["worker", "manager", "setup", "auditor", "workspace-auditor", "assistant", "run"];
   const EXEMPT = ["platform", null];
   for (const role of NON_EXEMPT) {
     const rules = loomHomeWriteDenyRules({ role, sessionId: "s1" });
@@ -468,7 +468,7 @@ const ruleForEntries = (entries) => new Set(entries.map((e) => {
 // bare substring check a false positive. ---
 {
   const archiveSiblingPath = `${toClaudeAbsoluteGlob(LOOM_HOME_REAL)}/PLATFORM-LEAD-RESUME.md.archive`;
-  for (const role of ["worker", "manager", "platform", "setup", "auditor", "workspace-auditor", "assistant", "operator", "run", null]) {
+  for (const role of ["worker", "manager", "platform", "setup", "auditor", "workspace-auditor", "assistant", "run", null]) {
     const rules = loomHomeWriteDenyRules({ role, sessionId: "s1" });
     check(`[${String(role)}] the resume-doc rotation archive dir (PLATFORM-LEAD-RESUME.md.archive/) is never denied`,
       !rules.some((r) => r.includes(archiveSiblingPath)));

@@ -91,7 +91,6 @@ allow("platform", ["daemon_restart"], "SELF: card f437d4e9 C4 made platform-lead
 // Surfaces with no shipped doctrine skill — not checked (see header).
 const NO_DOCTRINE_SKILL = {
   "assistant (orchestration + loom-tasks)": "no assistant/companion doctrine skill ships under assets/skills",
-  "operator (loom-operator)": "opt-in, human-spawned; no doctrine skill ships",
   "run (loom-run)": "run sessions are prompt-driven; no doctrine skill ships",
 };
 

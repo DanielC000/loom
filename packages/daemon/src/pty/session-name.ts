@@ -111,7 +111,6 @@ const ROLE_TAG: Readonly<Partial<Record<SessionRole, string>>> = {
   auditor: "audit",
   "workspace-auditor": "wsaudit",
   run: "run",
-  operator: "operator",
 };
 
 /**

@@ -39,7 +39,7 @@ for (const [role, skill] of Object.entries(ROLE_SKILL)) {
 }
 
 // --- roles with no doctrine / worker / missing store file ------------------------------------------------
-for (const role of ["worker", "operator", "assistant", "run", null, undefined]) {
+for (const role of ["worker", "assistant", "run", null, undefined]) {
   check(`role ${String(role)}: no pointer`, doctrine.codexRoleDoctrinePointer(role) === null);
   // Card 2f1c7846: such a session may now get the by-name [loom:skills-note] paragraph (codex-skills-note.mjs owns
   // that); what this test pins is that it never gets a ROLE pointer and the kickoff body is left verbatim.

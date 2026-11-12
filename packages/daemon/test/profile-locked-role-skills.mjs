@@ -107,8 +107,8 @@ check("(B) role change into an UNLOCKED role (worker) with non-empty skills -> a
   roleChangeLockedSkillsCarryoverError("manager", "worker", ["x"]) === null);
 check("(B) role change into null -> allowed",
   roleChangeLockedSkillsCarryoverError("worker", null, ["x"]) === null);
-check("(B) a locked -> DIFFERENT locked flip (assistant -> operator) with non-empty skills -> REJECTED",
-  typeof roleChangeLockedSkillsCarryoverError("assistant", "operator", ["x"]) === "string");
+check("(B) a locked -> DIFFERENT locked flip (assistant -> setup) with non-empty skills -> REJECTED",
+  typeof roleChangeLockedSkillsCarryoverError("assistant", "setup", ["x"]) === "string");
 
 // ===================== DB + MCP test harness (mirrors profile-grant-reach.mjs) =====================
 function mkDb(name) {

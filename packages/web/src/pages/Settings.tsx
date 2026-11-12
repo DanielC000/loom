@@ -1633,8 +1633,6 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // Message-delivery behavior toggle (owner-directed 2026-07-03): a top-level boolean, not part of the
   // ms-keyed GLOBAL_FIELDS grid, so it gets its own tri-state seeded straight from the loaded override.
   const [coalesceAgentMsgs, setCoalesceAgentMsgs] = useState(triStr(override.coalesceAgentMessages));
-  // Bucket 2b "Elevated Operator" gate — same daemon-global tri-state pattern, own toggle (default OFF).
-  const [operatorEnabled, setOperatorEnabled] = useState(triStr(override.operatorEnabled));
   // Card 51a80b4d — the browser-notification mute set. Held as a Set of MUTED kinds (matching the stored
   // denylist shape exactly, so there is no on/off inversion to get wrong between here and the config),
   // while each checkbox reads and writes the INVERSE: checked = notify = NOT in this set.
@@ -1783,7 +1781,6 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
       (o as Record<string, unknown>).connections = entries;
     }
     o.coalesceAgentMessages = coalesceAgentMsgs === "inherit" ? null : coalesceAgentMsgs === "true";
-    o.operatorEnabled = operatorEnabled === "inherit" ? null : operatorEnabled === "true";
     // Card 51a80b4d: always emit the FULL muted set (the panel renders every kind, so its state is always
     // complete — the PATCH handler replaces this key wholesale, it is not deep-merged). Nothing muted
     // sends the `null` clear sentinel rather than `[]`, so an all-notifications-on config leaves no stored
@@ -2280,25 +2277,6 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             unit="h" bounds={PLATFORM_MS_BOUNDS.updateCheckIntervalMs}
             note="Takes effect after a daemon restart. How often the daemon polls the npm registry for a newer loomctl release (packaged installs only)." />
         </div>
-      </Panel>
-
-      <Panel>
-        <SectionLabel>Elevated Operator</SectionLabel>
-        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 560 }}>
-          <span style={fieldLabel}>Elevated Operator (off by default)</span>
-          <TriSelect value={operatorEnabled} set={setOperatorEnabled} def={defaults.operatorEnabled} />
-          <Hint>{effHint(resolved.operatorEnabled)}</Hint>
-          <Hint>
-            Turning this on lets you spawn an <em>operator</em> session that can act on its own
-            project&apos;s working tree on your behalf: (a) switch/create local branches and commit
-            changes, (b) write files into that project&apos;s vault, and (c) push its current branch to
-            its own remote (never a force-push). It is confined to the one project it&apos;s started in
-            and is spawned only by you. It can never: run host/deploy commands, send data to a webhook,
-            edit Loom&apos;s bundled skills, reach or act on other projects, create schedules, or spawn/
-            elevate other sessions. Leave this off unless you want an agent committing and pushing code
-            for you.
-          </Hint>
-        </label>
       </Panel>
 
       <Panel>

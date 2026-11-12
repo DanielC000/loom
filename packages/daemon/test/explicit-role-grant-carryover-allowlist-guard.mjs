@@ -4,7 +4,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // gated inside `resolveAgentSpawn`, sessions/service.ts). TWO independent total bypasses of that check
 // exist, and this guard scans BOTH:
 //   (A) `opts.spawnHumanAuthorized: true` — set ONLY by the human-REST session-start route
-//       (gateway/server.ts's `POST /api/agents/:id/sessions`, six start* calls).
+//       (gateway/server.ts's `POST /api/agents/:id/sessions`, five start* calls).
 //   (B) `opts.skipGrantCarryoverCheck: true` — set ONLY by the carry-forward callers that re-derive for
 //       an EXISTING session's already-pinned role (resume/forkSession/harnessDrainStatus's dry-run read/
 //       composeCompanionReinjectPrompt/upgradeCompanionCapabilities/startRun) and by the three recycle
@@ -136,7 +136,7 @@ function scanFor(baseDir, re) {
   return hits;
 }
 
-// `a.method` is optional: group (A)'s six gateway/server.ts sites each call a DISTINCT function name
+// `a.method` is optional: group (A)'s five gateway/server.ts sites each call a DISTINCT function name
 // (startManager/startPlatformLead/…) so the `mustContain` text alone is already unambiguous there, and
 // they sit inside a route handler, not a class method, so there is no enclosing method name to anchor to.
 function allowlistMatches(hit, a) {
@@ -158,7 +158,7 @@ function runAllowlistedScan({ label, re, allowlist, expectedCount }) {
   return hits;
 }
 
-// ── (A) opts.spawnHumanAuthorized: true — the human-REST session-start route, six sites ──────────────
+// ── (A) opts.spawnHumanAuthorized: true — the human-REST session-start route, five sites ──────────────
 // Deliberately a DIFFERENT flag name from the pre-existing `humanAuthorized` (3de74275's createAgentCore/
 // cloneAgentCore/applyWorkflowTemplate/checkRepoRebind opt-out) — the two mechanisms are unrelated, and a
 // shared name would make this scan's own hits collide with human-authorized-call-site-allowlist-guard.mjs's
@@ -170,9 +170,8 @@ const SPAWN_HUMAN_AUTHORIZED_ALLOWLIST = [
   { file: "gateway/server.ts", mustContain: "startAuditor(id" },
   { file: "gateway/server.ts", mustContain: "startWorkspaceAuditor(id" },
   { file: "gateway/server.ts", mustContain: "startSetup(id" },
-  { file: "gateway/server.ts", mustContain: "startOperator(id" },
 ];
-runAllowlistedScan({ label: "(A) spawnHumanAuthorized", re: SPAWN_HUMAN_AUTHORIZED_RE, allowlist: SPAWN_HUMAN_AUTHORIZED_ALLOWLIST, expectedCount: 6 });
+runAllowlistedScan({ label: "(A) spawnHumanAuthorized", re: SPAWN_HUMAN_AUTHORIZED_RE, allowlist: SPAWN_HUMAN_AUTHORIZED_ALLOWLIST, expectedCount: 5 });
 
 // ── (B) opts.skipGrantCarryoverCheck: true — every carry-forward caller, ten sites ──────────────────
 const SKIP_CHECK_RE = /\bskipGrantCarryoverCheck\s*:\s*true\b/;
@@ -326,6 +325,6 @@ check("(B) setup: ten distinct skipGrantCarryoverCheck sites were actually found
   new Set(skipHits.map((h) => h.line)).size === 10);
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — every LITERAL spawnHumanAuthorized:true grant resolves to the six human-REST start* calls, every LITERAL skipGrantCarryoverCheck:true grant resolves to the ten carry-forward/recycle call sites, the Scheduler's own computed (non-literal) site is named and still wired to scheduleCreatedByIsHuman, forwarding sites are correctly not counted as grants, and a synthetic extra site (or a comment-only mention) of either flag is correctly caught / correctly ignored. This proves the LITERAL-site surface only — see the header for what it cannot see."
+  ? "\n✅ ALL PASS — every LITERAL spawnHumanAuthorized:true grant resolves to the five human-REST start* calls, every LITERAL skipGrantCarryoverCheck:true grant resolves to the ten carry-forward/recycle call sites, the Scheduler's own computed (non-literal) site is named and still wired to scheduleCreatedByIsHuman, forwarding sites are correctly not counted as grants, and a synthetic extra site (or a comment-only mention) of either flag is correctly caught / correctly ignored. This proves the LITERAL-site surface only — see the header for what it cannot see."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

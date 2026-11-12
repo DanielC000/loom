@@ -153,6 +153,7 @@ export function resolveLiveSetupHome(db: Db): Project | undefined {
  * OWN operator agent keeps its pre-existing `SETUP_HOME_LEAD_AGENT_ID_KEY`.
  */
 export const SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY = "setup.workspaceAuditorAgentId";
+/** RETIRED (card 7f6c1cbb): the Elevated Operator's marker. Kept ONLY so `setup/retire-operator.ts` can find and clear it. */
 export const SETUP_HOME_OPERATOR_AGENT_ID_KEY = "setup.operatorAgentId";
 export const SETUP_HOME_COMPANION_AGENT_ID_KEY = "setup.companionAgentId";
 
@@ -174,13 +175,13 @@ export function resolveSeededHomeAgent(db: Db, home: Project, markerKey: string)
 export const seededMarkerMigratedKey = (markerKey: string): string => `${markerKey}.nameMigrated`;
 
 /**
- * ONE-SHOT per key, run at BOOT by each seeder (before the operator's flag check): an install that
+ * ONE-SHOT per key, run at BOOT by each seeder: an install that
  * pre-dates the marker may hold the seeded agent only as a name match (the name was still reserved then, so
  * a match really is the seeded agent). Pin the first in-home match (listAgents order — the agent row has no
  * createdAt) when the marker is absent, then record the sentinel WHETHER OR NOT anything matched. Once the
  * sentinel is set no lookup ever falls back to a name again, so an agent a human creates later under the
- * bundled name (now unreserved) can never be adopted as the seeded one, however long the key stays unstamped
- * (the operator flag defaults off). The stamp and the sentinel land together.
+ * bundled name (now unreserved) can never be adopted as the seeded one, however long the key stays unstamped.
+ * The stamp and the sentinel land together.
  */
 export function migrateSeededHomeAgentMarker(db: Db, home: Project, markerKey: string, name: string): void {
   const sentinel = seededMarkerMigratedKey(markerKey);

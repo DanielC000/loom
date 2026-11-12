@@ -41,7 +41,7 @@ const { buildServer } = await import("../dist/gateway/server.js");
 const { resolveAgentName, uniqueAgentName, AGENT_NAME_SUFFIX_LIMIT, resolveAgentRename } = await import("../dist/agents/validate.js");
 const { cloneAgentCore } = await import("../dist/agents/clone-core.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
-const { seedSetupHome, seedCompanionAgent, seedSetupAuditorAgent, seedOperatorAgent, COMPANION_AGENT_NAME, newAgentNameScope } = await import("../dist/setup/seed.js");
+const { seedSetupHome, seedCompanionAgent, seedSetupAuditorAgent, COMPANION_AGENT_NAME, newAgentNameScope } = await import("../dist/setup/seed.js");
 const { resolveSetupHome } = await import("../dist/projects/reserved-home-markers.js");
 const { applyWorkflowTemplate, WORKFLOW_TEMPLATES } = await import("../dist/setup/templates.js");
 const { slugifyAgentName } = await import("@loom/shared");
@@ -291,12 +291,10 @@ const connect = async (router, sessionId) => {
 {
   const snapshot = () => db.listAgents(setupHome.id).map((a) => a.name).sort().join("|");
   seedSetupAuditorAgent(db);
-  seedOperatorAgent(db);
   const once = snapshot();
   seedSetupHome(db);
   seedCompanionAgent(db);
   seedSetupAuditorAgent(db);
-  seedOperatorAgent(db);
   const twice = snapshot();
   check("(7) re-running every setup-home seeder mints no duplicate agent", once === twice);
   check("(7) ...and each reserved name is held by at most one agent",

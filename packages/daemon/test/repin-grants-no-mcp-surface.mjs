@@ -34,7 +34,6 @@ const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
 const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
 const { WorkspaceAuditMcpRouter } = await import("../dist/mcp/user-audit.js");
-const { OperatorMcpRouter } = await import("../dist/mcp/operator.js");
 const { RunMcpRouter } = await import("../dist/mcp/run.js");
 const { TaskMcpRouter } = await import("../dist/mcp/server.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -60,7 +59,7 @@ const db = new Db();
 db.insertProject({ id: "p1", name: "P", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
 db.insertAgent({ id: "a1", projectId: "p1", name: "A", startupPrompt: "x", position: 0, profileId: null });
 
-const roles = ["manager", "worker", "assistant", "platform", "setup", "auditor", "workspace-auditor", "operator", "run"];
+const roles = ["manager", "worker", "assistant", "platform", "setup", "auditor", "workspace-auditor", "run"];
 for (const role of roles) {
   db.insertSession({
     id: `s-${role}`, projectId: "p1", agentId: "a1", engineSessionId: null, title: null, cwd: repo,
@@ -84,7 +83,6 @@ try {
   const setup = new SetupMcpRouter(db, {});
   const audit = new AuditMcpRouter(db, {});
   const userAudit = new WorkspaceAuditMcpRouter(db, {});
-  const operator = new OperatorMcpRouter(db, {});
   const run = new RunMcpRouter(db, {});
   const tasks = new TaskMcpRouter(db, {});
 
@@ -99,7 +97,6 @@ try {
     ["setup", setup.buildServer("s-setup")],
     ["audit", audit.buildServer("s-auditor")],
     ["workspace-audit", userAudit.buildServer("s-workspace-auditor")],
-    ["operator", operator.buildServer("s-operator")],
     ["run", run.buildServer("s-run")],
     ["tasks/manager", tasks.buildServer("p1", "s-manager")],
     ["tasks/worker", tasks.buildServer("p1", "s-worker")],

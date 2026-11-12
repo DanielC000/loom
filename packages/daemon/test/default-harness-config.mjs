@@ -57,7 +57,7 @@ check("(1) per-field merge: project sets scope only, platform sets default only 
   (() => { const h = resolveHarnessConfig({ harness: { scope: "workers" } }, { harness: { default: "codex" } }); return h.default === "codex" && h.scope === "workers"; })());
 check("(1) harnessDefaultForRole: a codex default applies to worker", harnessDefaultForRole({ default: "codex", scope: "workers" }, "worker") === "codex");
 check("(1) harnessDefaultForRole: a claude default resolves to undefined (⇒ NULL column, byte-identical)", harnessDefaultForRole({ default: "claude", scope: "workers" }, "worker") === undefined);
-for (const role of ["manager", "platform", "auditor", "workspace-auditor", "setup", "run", "assistant", "operator", undefined]) {
+for (const role of ["manager", "platform", "auditor", "workspace-auditor", "setup", "run", "assistant", undefined]) {
   check(`(1) harnessDefaultForRole: a codex default does NOT apply to role ${role}`, harnessDefaultForRole({ default: "codex", scope: "workers" }, role) === undefined);
 }
 check("(1) harnessDefaultForRole ignores scope:'fleet' (fail-closed until card 4c4eb9af)", harnessDefaultForRole({ default: "codex", scope: "fleet" }, "manager") === undefined);

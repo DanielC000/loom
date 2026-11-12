@@ -149,7 +149,6 @@ const ROUTES = [
   { pattern: "/mcp-audit/:sessionId", depKey: "auditMcp" },
   { pattern: "/mcp-user-audit/:sessionId", depKey: "userAuditMcp" },
   { pattern: "/mcp-setup/:sessionId", depKey: "setupMcp" },
-  { pattern: "/mcp-operator/:sessionId", depKey: "operatorMcp" },
   { pattern: "/mcp-run/:sessionId", depKey: "runMcp" },
 ];
 const reachedCounts = {};

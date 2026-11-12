@@ -30,7 +30,7 @@ import { meetsMinVersion } from "./session-name.js";
 import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig, unlinkSessionMcpConfig, unlinkSessionSettings, mcpTokenRidesEnv, withSettingsDirDenyForSpawn, toCliPermissionMode, sessionSettingsPath, type CliPermissionMode } from "./claude-settings.js";
 import { ensureTrustedResilient, isClaudeConfigDirEnvKey } from "./claude-config.js";
-import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_OPERATOR_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
+import { ToolAttributionTracker, WATCHED_TOOL_NAMES, SubagentDriftTracker, LOOM_TASKS_SERVER_ID, LOOM_ORCHESTRATION_SERVER_ID, LOOM_PLATFORM_SERVER_ID, LOOM_AUDIT_SERVER_ID, LOOM_USER_AUDIT_SERVER_ID, LOOM_SETUP_SERVER_ID, LOOM_RUN_SERVER_ID, type ToolAttributionResult } from "./tool-attribution.js";
 import { RepeatedCallTracker, REPEATED_CALL_THRESHOLD } from "./repeated-call-tracker.js";
 import { injectSkills } from "../skills/inject.js";
 import { scanCwdSkillsForPermissionFrontmatter, CWD_SKILLS_SCAN_SCOPE, skillPermissionFindingPath, SKILL_PERMISSION_FIELD_LABEL } from "../skills/permission-scan.js";
@@ -72,7 +72,6 @@ export const CODEX_AUTO_APPROVE_MCP_SERVER_IDS: ReadonlySet<string> = new Set([
   LOOM_TASKS_SERVER_ID,
   LOOM_ORCHESTRATION_SERVER_ID,
   LOOM_SETUP_SERVER_ID,
-  LOOM_OPERATOR_SERVER_ID,
   LOOM_PLATFORM_SERVER_ID,
   LOOM_AUDIT_SERVER_ID,
   LOOM_USER_AUDIT_SERVER_ID,
@@ -2472,7 +2471,6 @@ export function buildMcpServers(o: {
   const wantsAudit = o.role === "auditor";
   const wantsUserAudit = o.role === "workspace-auditor";
   const wantsSetup = o.role === "setup";
-  const wantsOperator = o.role === "operator";
   // Card 3cc3b726: these two ids (LOOM_TASKS_SERVER_ID/LOOM_ORCHESTRATION_SERVER_ID) are shared with
   // gateway/server.ts's computeAttributions, which reconstructs the attribution queue's qualified key
   // from the SAME ids — one definition, not two independently-typed literal lists that could drift apart.
@@ -2511,14 +2509,6 @@ export function buildMcpServers(o: {
   // loom-tasks) — NEVER loom-platform/orchestration/audit. A tool not registered there can't be reached.
   if (wantsSetup) {
     mcpServers[LOOM_SETUP_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-setup/${o.sessionId}`, ...authHeaders };
-  }
-  // Bucket 2b Elevated Operator: an "operator" session gets ONLY the curated loom-operator surface (on
-  // top of loom-tasks) — NEVER loom-platform/orchestration/audit/setup. A tool not registered there can't
-  // be reached. The router ITSELF re-checks platform.operatorEnabled LIVE (isOperatorEnabled) on every
-  // request, so this mount alone is not the enforcement point — a flag flip to OFF 404s the surface even
-  // though the mount entry (an inert URL) still exists in this session's already-spawned argv.
-  if (wantsOperator) {
-    mcpServers[LOOM_OPERATOR_SERVER_ID] = { type: "http", url: `http://127.0.0.1:${o.port}/mcp-operator/${o.sessionId}`, ...authHeaders };
   }
   // Agent-tooling P4: ONE generalized loop over every resolved registry-capability grant (the bridged
   // legacy booleans + the new capabilities array). byte-identical-when-none: an empty resolved list is a
@@ -4560,7 +4550,7 @@ export const TASK_TRACKING_TOOLS: readonly string[] = ["TaskCreate", "TaskGet", 
  * task-tracking tools — see {@link TASK_TRACKING_TOOLS}, a disjoint concern with its own disallow scope).
  *
  * @decision 7a624213 — role scope (in {@link disallowedToolsForRole}) is worker/setup/auditor/
- * workspace-auditor/assistant/manager only, never run/platform/operator/plain-session, and never on the
+ * workspace-auditor/assistant/manager only, never run/platform/plain-session, and never on the
  * codex harness (no equivalent tool exists there, and `createCodexPty` has no per-tool lever to deny one).
  */
 export const HARNESS_SCHEDULING_TOOLS: readonly string[] = ["ScheduleWakeup", "CronCreate", "CronDelete", "CronList", "RemoteTrigger"];
@@ -9303,7 +9293,7 @@ export class PtyHost {
     // hiccup block a spawn, same posture as injectSkills itself.
     //
     // @decision 015fdb23 — CR round 3, finding 2: gated on `isLoomDrivenRole` so manager/platform/
-    // operator/plain sessions (the owner's own, interactive or already-watched) never get console noise
+    // plain sessions (the owner's own, interactive or already-watched) never get console noise
     // or an event about their own repo — see the decision record's "Round 3" section.
     if (isLoomDrivenRole(opts.role)) {
       try {
@@ -9343,7 +9333,6 @@ export class PtyHost {
     const wantsUserAudit = opts.role === "workspace-auditor";
     const wantsSetup = opts.role === "setup";
     const wantsRun = opts.role === "run";
-    const wantsOperator = opts.role === "operator";
     // A browser-testing session ALSO needs its Playwright MCP tools allowlisted — acceptEdits doesn't
     // auto-approve MCP tools (the §9 lesson), so without this the worker would hang on a permission
     // prompt the first time it calls a browser tool. Orthogonal to role (a browser session is a worker),
@@ -9355,7 +9344,6 @@ export class PtyHost {
       : wantsUserAudit ? ["mcp__loom-user-audit"]
       : wantsSetup ? ["mcp__loom-setup"]
       : wantsRun ? ["mcp__loom-run"]
-      : wantsOperator ? ["mcp__loom-operator"]
       : [];
     // A document-conversion session ALSO needs its markitdown MCP tool allowlisted (acceptEdits doesn't
     // auto-approve MCP tools — the §9 lesson), so it layers ON TOP of the role surface like browserTesting.
@@ -9451,7 +9439,7 @@ export class PtyHost {
     // all — deliberately NOT `opts.repoPath`, which is documented above as always the project's main
     // checkout and would disagree with what decision-records.mjs itself checks at runtime (it walks up
     // from the session's own cwd). See writeSessionSettings's own doc for the staleness window this implies.
-    // Card 015fdb23: every LOOM_DRIVEN_ROLES role, never manager/platform/operator/a plain session — see
+    // Card 015fdb23: every LOOM_DRIVEN_ROLES role, never manager/platform/a plain session — see
     // isLoomDrivenRole's own doc + the decision record for why `assistant` needs no special-casing here.
     const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath, opts.cwd, opts.docLint, isLoomDrivenRole(opts.role), isLoomDrivenRole(opts.role));
     // Card ed0757d6 Code Review fix, WIDENED by card a50b8afd's own Code Review: everything from HERE

@@ -50,7 +50,6 @@ try {
     "integrations", // REDACTED — dropped entirely (codescape path; see codescape-is-private-no-user-visible-surface)
     "coalesceAgentMessages",
     "companionVoiceEnabled",
-    "operatorEnabled",
     "sharedVaultRoots", // card 7c1d6dbf — human-only list of notes-vault root paths; READ-ONLY to agents via platform_config_get (host-path data like obsidian.path, no secret), deliberately passed through unredacted — the write side is human REST only
     "mutedBrowserNotifications", // card 51a80b4d — a list of UI attention-category ids the human muted browser Notifications for: plain operational tuning, no secret/host-path shape; passes through unredacted
     "attachmentRetentionDays", // card 6f27469b — a day-count retention window for attachment GC: plain operational tuning, no secret/host-path shape; passes through unredacted

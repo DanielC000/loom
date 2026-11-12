@@ -95,13 +95,13 @@ try {
 
   // (e) a human-written user skill reaches a locked role under the default — the owner's refinement: the
   // hole is agent-written skills, not human-written ones. Already exercised by (a)'s human-skill
-  // assertion; re-stated for a THIRD locked role (operator) to show it's not a fluke of "assistant".
-  const cwdOperator = path.join(root, "operator-cwd");
+  // assertion; re-stated for a THIRD locked role (workspace-auditor) to show it's not a fluke of "assistant".
+  const cwdOperator = path.join(root, "wsaudit-cwd");
   fs.mkdirSync(cwdOperator, { recursive: true });
-  injectSkills(cwdOperator, "sess-operator", null, "operator");
+  injectSkills(cwdOperator, "sess-wsaudit", null, "workspace-auditor");
   const deliveredOperator = readDelivered(cwdOperator);
-  check("(e) locked role (operator) default: human-written skill still delivered", deliveredOperator.includes("human-skill"));
-  check("(e) locked role (operator) default: agent-written skill still withheld", !deliveredOperator.includes("agent-skill"));
+  check("(e) locked role (workspace-auditor) default: human-written skill still delivered", deliveredOperator.includes("human-skill"));
+  check("(e) locked role (workspace-auditor) default: agent-written skill still withheld", !deliveredOperator.includes("agent-skill"));
 
   // (f) card 35099271 item 4 — the FORCE-INCLUDE of a locked role's own operating-doctrine skill must
   // respect the SAME provenance trust check as the deliver-all filter above, not bypass it. Simulate the

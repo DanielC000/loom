@@ -1,8 +1,8 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// The setup home's seeded Workspace Auditor / Elevated Operator / Companion agents are pinned by an id-keyed
+// The setup home's seeded Workspace Auditor / Companion agents are pinned by an id-keyed
 // app_meta marker, not found by name (card de790214). Before, a rename made the next boot seed a SECOND copy.
 //
-// Covers, per seeder (auditor, operator, companion):
+// Covers, per seeder (auditor, companion; the operator seeder was retired by card 7f6c1cbb):
 //   (1) boot twice: seeds once, stamps the marker, the second boot adds nothing.
 //   (2) rename then reboot: no duplicate, the renamed agent is still the pinned one.
 //   (3) migration of a pre-marker install (name match, NO marker): 0 matches seeds + stamps; 1 match stamps
@@ -36,7 +36,7 @@ const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { seedDefaultProfiles } = await import("../dist/profiles/seed.js");
 const seed = await import("../dist/setup/seed.js");
-const { resolveSetupHome, migrateSeededHomeAgentMarker, seededMarkerMigratedKey, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, SETUP_HOME_OPERATOR_AGENT_ID_KEY, SETUP_HOME_COMPANION_AGENT_ID_KEY } =
+const { resolveSetupHome, migrateSeededHomeAgentMarker, seededMarkerMigratedKey, SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, SETUP_HOME_COMPANION_AGENT_ID_KEY } =
   await import("../dist/projects/reserved-home-markers.js");
 
 let failures = 0;
@@ -44,17 +44,15 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const SEEDERS = [
   { label: "auditor", fn: seed.seedSetupAuditorAgent, name: seed.SETUP_AUDITOR_AGENT_NAME, key: SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY },
-  { label: "operator", fn: seed.seedOperatorAgent, name: seed.OPERATOR_AGENT_NAME, key: SETUP_HOME_OPERATOR_AGENT_ID_KEY },
   { label: "companion", fn: seed.seedCompanionAgent, name: seed.COMPANION_AGENT_NAME, key: SETUP_HOME_COMPANION_AGENT_ID_KEY },
 ];
 
 let n = 0;
-/** A fresh Db with profiles + the setup home seeded, and the operator flag ON (so all three seeders run). */
-function freshDb(opts = {}) {
+/** A fresh Db with profiles + the setup home seeded (so both remaining seeders run). */
+function freshDb() {
   const db = new Db(path.join(tmpHome, `idpin-${++n}.db`));
   seedDefaultProfiles(db);
   seed.seedSetupHome(db);
-  if (opts.operatorOn !== false) db.setPlatformConfig({ operatorEnabled: true });
   return { db, home: resolveSetupHome(db) };
 }
 const named = (db, home, name) => db.listAgents(home.id).filter((a) => a.name === name);
@@ -154,38 +152,8 @@ for (const s of SEEDERS) {
   }
 }
 
-// (5) operator flag-off behaviour
-{
-  const { db, home } = freshDb({ operatorOn: false });
-  insert(db, home.id, "op-pre", seed.OPERATOR_AGENT_NAME); // a pre-card operator, before the first post-card boot
-  check("(5) flag off, pre-marker operator: pinned (stamp-only)", seed.seedOperatorAgent(db) === null && db.getMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY) === "op-pre");
-  db.updateAgent("op-pre", { name: "My Operator" });
-  db.setPlatformConfig({ operatorEnabled: true });
-  const before = db.listAgents(home.id).length;
-  check("(5) ...renamed while the flag was off, then flag on: no second operator", seed.seedOperatorAgent(db) === null && db.listAgents(home.id).length === before);
-  db.close();
-}
-{
-  const { db, home } = freshDb({ operatorOn: false });
-  check("(5) flag off, no agent: nothing seeded and no marker written", seed.seedOperatorAgent(db) === null && !db.getMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY) && named(db, home, seed.OPERATOR_AGENT_NAME).length === 0);
-  db.close();
-}
-
 // (8) the name migration is ONE-SHOT per key: an agent a human creates under a bundled name AFTER the first
-// post-card boot is never adopted, however long the key stays unstamped (the operator flag defaults off).
-{
-  const { db, home } = freshDb({ operatorOn: false });
-  for (const s of SEEDERS) s.fn(db); // the first post-card boot: auditor + companion seed, operator stays off
-  check("(8) fixture: the operator key is unstamped (flag off, nothing seeded)", !db.getMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY));
-  insert(db, home.id, "human-op", seed.OPERATOR_AGENT_NAME, 80); // created later, via a path that no longer reserves the name
-  for (const s of SEEDERS) s.fn(db); // a reboot with the flag still off
-  check("(8) operator: a reboot with the flag off does not adopt the later same-named agent", !db.getMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY));
-  db.setPlatformConfig({ operatorEnabled: true });
-  check("(8) operator: flipping the flag seeds the bundled operator (under a free name)", seed.seedOperatorAgent(db) === `${seed.OPERATOR_AGENT_NAME} 2`);
-  check("(8) ...the marker is the NEW agent, not the human's", db.getMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY) !== "human-op" && !!db.getAgent(db.getMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY)));
-  check("(8) ...and a reboot after that still leaves the human's agent alone", seed.seedOperatorAgent(db) === null && db.getAgent("human-op")?.name === seed.OPERATOR_AGENT_NAME);
-  db.close();
-}
+// post-card boot is never adopted, however long the key stays unstamped.
 for (const s of SEEDERS) {
   const { db, home } = freshDb();
   // The first post-card boot's migration found nothing under the name (sentinel set, marker unstamped)...

@@ -65,7 +65,6 @@ export const LOOM_PLATFORM_SERVER_ID = "loom-platform";
 export const LOOM_AUDIT_SERVER_ID = "loom-audit";
 export const LOOM_USER_AUDIT_SERVER_ID = "loom-user-audit";
 export const LOOM_SETUP_SERVER_ID = "loom-setup";
-export const LOOM_OPERATOR_SERVER_ID = "loom-operator";
 export const LOOM_RUN_SERVER_ID = "loom-run";
 
 /** Card a6598c1e: every MCP server id `buildMcpServers` can mint, for `capabilities/registry.ts`'s
@@ -77,7 +76,6 @@ export const LOOM_FIRST_PARTY_SERVER_IDS: readonly string[] = [
   LOOM_AUDIT_SERVER_ID,
   LOOM_USER_AUDIT_SERVER_ID,
   LOOM_SETUP_SERVER_ID,
-  LOOM_OPERATOR_SERVER_ID,
   LOOM_RUN_SERVER_ID,
 ];
 

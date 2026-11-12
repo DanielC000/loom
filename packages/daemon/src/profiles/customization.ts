@@ -192,6 +192,21 @@ function threeVersions(
 }
 
 /**
+ * Whether profile `id` still equals its OWN stored seed snapshot on every mergeable field (the same
+ * normalize/compare `profileCustomizationState` uses), independent of whether a bundled definition for its
+ * name still ships. False when the profile or its snapshot is missing (callers treat that as "customized").
+ * Used by the retired-Operator migration (card 7f6c1cbb), whose bundled definition no longer exists.
+ */
+export function profileEqualsOwnBaseSnapshot(db: Db, id: string): boolean {
+  const mine = db.getProfile(id);
+  const snap = db.getProfileBaseSnapshot(id);
+  if (!mine || !snap) return false;
+  const nb = normalizeFields(JSON.parse(snap) as Partial<Profile>);
+  const nm = normalizeFields(mine);
+  return MERGEABLE_PROFILE_FIELDS.every((f) => fieldEqual(f, nm[f], nb[f]));
+}
+
+/**
  * The computed customization state surfaced on list/get for a profile — `bundled` for every profile,
  * `customized`/`updateAvailable` ONLY for bundled-by-name ones (NEVER persisted). A user-created profile
  * returns `{ bundled: false }` (no flags), exactly like a non-bundled skill.

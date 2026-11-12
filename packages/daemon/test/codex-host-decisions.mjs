@@ -372,16 +372,16 @@ check(
 // guard that must be updated, in the SAME commit, whenever this set changes — loosening it to make a diff
 // pass defeats its entire point.
 check(
-  "CODEX_AUTO_APPROVE_MCP_SERVER_IDS: exactly all 8 first-party ids (loom-tasks/loom-orchestration/loom-setup/loom-operator/loom-platform/loom-audit/loom-user-audit/loom-run) — never a capability-catalog/playwright/markitdown/codescape server",
+  "CODEX_AUTO_APPROVE_MCP_SERVER_IDS: exactly all 7 first-party ids (loom-tasks/loom-orchestration/loom-setup/loom-platform/loom-audit/loom-user-audit/loom-run) — never a capability-catalog/playwright/markitdown/codescape server",
   CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-tasks")
     && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-orchestration")
     && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-setup")
-    && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-operator")
+    && !CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-operator") // retired (7f6c1cbb)
     && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-platform")
     && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-audit")
     && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-user-audit")
     && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.has("loom-run")
-    && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.size === 8,
+    && CODEX_AUTO_APPROVE_MCP_SERVER_IDS.size === 7,
 );
 const workerArgsAutoApproved = mcpServersToCodexArgs(workerServers, { autoApproveServerIds: CODEX_AUTO_APPROVE_MCP_SERVER_IDS });
 check(
@@ -410,7 +410,6 @@ check(
 // proportionality re-derivation — cea3cec6 was the card that added the last three to this loop).
 for (const [role, serverId, mountPath] of [
   ["setup", "loom-setup", "/mcp-setup/"],
-  ["operator", "loom-operator", "/mcp-operator/"],
   ["platform", "loom-platform", "/mcp-platform/"],
   ["auditor", "loom-audit", "/mcp-audit/"],
   ["workspace-auditor", "loom-user-audit", "/mcp-user-audit/"],

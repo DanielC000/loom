@@ -6292,7 +6292,6 @@ export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/give-up-exhausted-durable.mjs",
   "packages/daemon/test/inert-skip-branch-capture-order-guard.mjs",
   "packages/daemon/test/log-message-content-gate.mjs",
-  "packages/daemon/test/operator-surface.mjs",
   "packages/daemon/test/orchestration-mcp-role-guard.mjs",
   "packages/daemon/test/pty-codex-agnostic-methods.mjs",
   "packages/daemon/test/redelivery-parked-notice-suppression.mjs",

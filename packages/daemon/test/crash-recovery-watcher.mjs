@@ -507,32 +507,9 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// ============================ (13) OPERATOR role is RECOVERABLE (card a933613e) ============================
-// Same shape as (10)'s assistant fix: RECOVERABLE_ROLES excluded "operator" with no comment ever
-// mentioning it — it was added to SESSION_ROLES a month after this list was authored, and the array type
-// (SessionRole[]) permitted the now-stale subset with zero diagnostics. Prove it now behaves exactly like
-// a worker/manager/assistant death, PLUS gets its own nudge copy — not the manager/platform "continue
-// orchestrating" branch, which would misroute (an operator has no workers and isn't an orchestrator).
-{
-  const e = makeEnv();
-  seedSession(e, "op-13a", { role: "operator" });
-  const wrote = recordUnexpectedExit(e.db, "op-13a", /*intended*/ false);
-  check("(13) an unexpected operator death records ONE session_died (operator is now recoverable)",
-    wrote === true && evKinds(e, "op-13a", "session_died").length === 1);
-  cleanup(e);
-}
-{
-  const e = makeEnv();
-  seedSession(e, "op-13b", { role: "operator" });
-  die(e, "op-13b", NOW);
-  e.watcher.tick(at(100));
-  check("(13) a dead operator session IS auto-resumed on tick", e.resumes.includes("op-13b"));
-  check("(13) the resume attempt is recorded for the operator session", evKinds(e, "op-13b", "session_resume_attempt").length === 1);
-  const nudge = e.durableCalls.find((x) => x.id === "op-13b");
-  check("(13) the operator gets its OWN auto-recovered nudge, not the manager/platform 'continue orchestrating' copy",
-    !!nudge && /auto-recovered/.test(nudge.text) && !/re-check your workers|continue orchestrating/i.test(nudge.text));
-  cleanup(e);
-}
+// (13) was the operator role's recoverability proof (card a933613e); the role was retired by card 7f6c1cbb.
+// The structural guard against a role silently falling out of RECOVERABLE_ROLE_MAP is its
+// Record<SessionRole, boolean> type, which the daemon build enforces.
 
 // ==================== (14) EVERY SessionRole has an EXPLICIT, ASSERTED disposition (card a933613e) ========
 // The structural guard (RECOVERABLE_ROLE_MAP, a Record<SessionRole, boolean> in the source) is enforced by
@@ -547,7 +524,7 @@ function cleanup(e) {
 // one place so the full table (not just the roles this card happened to touch) stays pinned.
 {
   const EXPECTED_RECOVERABLE = {
-    manager: true, worker: true, platform: true, assistant: true, operator: true,
+    manager: true, worker: true, platform: true, assistant: true,
     auditor: false, setup: false, "workspace-auditor": false, run: false,
   };
   check("(14) EXPECTED_RECOVERABLE covers every current SESSION_ROLES member (fixture itself is complete, not stale)",

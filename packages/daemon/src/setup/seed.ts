@@ -3,7 +3,6 @@ import type { Agent, Project, Task } from "@loom/shared";
 import { resolveConfig, columnKeyForRole } from "@loom/shared";
 import { LOOM_HOME, isLoomDev } from "../paths.js";
 import type { Db, CredentialGrantFanoutSummary } from "../db.js";
-import { isOperatorEnabled } from "../mcp/operator.js";
 import { resolveHomeLeadAgent } from "../projects/live-lead-home.js";
 import { refreshPristinePrompts, type PristinePromptSpec } from "./pristine-prompt-refresh.js";
 import {
@@ -14,7 +13,6 @@ import {
   SETUP_AGENT_NAME,
   SETUP_HOME_LEAD_AGENT_ID_KEY,
   SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY,
-  SETUP_HOME_OPERATOR_AGENT_ID_KEY,
   SETUP_HOME_COMPANION_AGENT_ID_KEY,
   resolveSeededHomeAgent,
   migrateSeededHomeAgentMarker,
@@ -674,70 +672,6 @@ export function seedSetupAuditorAgent(db: Db): string | null {
   return agent.name;
 }
 
-/** The bundled profile the Elevated Operator agent runs under (seeded ungated by seedDefaultProfiles). */
-const OPERATOR_PROFILE_NAME = "Elevated Operator";
-
-/**
- * The seeded Elevated Operator agent's DISPLAY name — DISTINCT from the other reserved-home agent names
- * (SETUP_AGENT_NAME "Platform" / SETUP_AUDITOR_AGENT_NAME "Workspace Auditor") so they never collide.
- */
-export const OPERATOR_AGENT_NAME = "Elevated Operator";
-
-/** The default startup prompt shipped for the Elevated Operator agent (user-editable after seed). */
-export const OPERATOR_PROMPT = `You are the **Elevated Operator** — a bounded operator a human spawns deliberately to act on THEIR CURRENT PROJECT's working tree: switch/create local branches, commit changes, write notes into that project's vault, and push its current branch to its own remote. You are confined to the one project you're started in; you can never reach another project, run host/deploy commands, send data to a webhook, edit Loom's bundled skills, create schedules, or spawn/elevate other sessions.
-
-Act only on the explicit task the human gives you this session. Confirm before an irreversible or ambiguous step. When you're done, say plainly what you changed (branch/commit/push/vault write) so the human can verify.`;
-
-/** Historical shipped values of OPERATOR_PROMPT, byte-exact, oldest first (see PLATFORM_LEAD_OPERATOR_PROMPT_PRIOR_VALUES). */
-export const OPERATOR_PROMPT_PRIOR_VALUES: readonly string[] = [
-  `You are the **Elevated Operator** — a bounded, own-workspace-confined operator a human spawns deliberately to act on THEIR CURRENT PROJECT's working tree: switch/create local branches, commit changes, write notes into that project's vault, and push its current branch to its own remote. You are confined to the one project you're started in; you can never reach another project, run host/deploy commands, send data to a webhook, edit Loom's bundled skills, create schedules, or spawn/elevate other sessions.
-
-Act only on the explicit task the human gives you this session. Confirm before an irreversible or ambiguous step. When you're done, say plainly what you changed (branch/commit/push/vault write) so the human can verify.`,
-];
-
-/**
- * Bucket 2b "Bounded Elevated Operator" — seed the bundled Elevated Operator agent into the SAME reserved
- * "Platform" setup home as the operator/auditor/companion agents, SEED-IF-ABSENT BY ID MARKER, mirroring
- * seedSetupAuditorAgent/seedCompanionAgent, run at boot AFTER seedSetupHome.
- *
- * @decision sha:afd3bf5b — FLAG-GATED (seeds only while platform.operatorEnabled is on, read live)
- * but PERSISTS across a later flag-off; deliberately NO first-run auto-launch — session creation
- * stays human-REST-only via startOperator. See record for the full narrative.
- *
- * Scoped to the reserved home resolved via resolveSetupHome (gotcha #1, see
- * docs/decisions/aecc6551-reserved-home-agent-seeder-pattern.md — amended by card a47dd144), never a
- * name-agnostic reserved lookup. Bound to the bundled "Elevated Operator" profile (looked up by name;
- * profileId null backstop if absent so the seed never throws). Returns the seeded name, or null when it
- * no-ops (home missing, flag off, or already present).
- */
-export function seedOperatorAgent(db: Db): string | null {
-  const home = resolveSetupHome(db);
-  if (!home) return null; // no setup home yet — seedSetupHome (run first) creates it; nothing to attach to
-  // Migrate (one-shot, recorded even with no match) BEFORE the flag check: the flag defaults off, and an
-  // unstamped key with the name migration still armed would later adopt a human's same-named agent when the
-  // flag flips on (card de790214). An operator seeded earlier and renamed while the flag is off is pinned here.
-  migrateSeededHomeAgentMarker(db, home, SETUP_HOME_OPERATOR_AGENT_ID_KEY, OPERATOR_AGENT_NAME);
-  if (resolveSeededHomeAgent(db, home, SETUP_HOME_OPERATOR_AGENT_ID_KEY)) return null; // already present — idempotent
-  if (!isOperatorEnabled(db)) return null; // flag off — never seed the agent row at all
-  const agents = db.listAgents(home.id);
-
-  const profile = db.listProfiles().find((p) => p.name === OPERATOR_PROFILE_NAME);
-  const agent: Agent = {
-    id: randomUUID(),
-    projectId: home.id,
-    name: freeSeededAgentName(db, home, OPERATOR_AGENT_NAME),
-    startupPrompt: OPERATOR_PROMPT,
-    position: agents.length,
-    profileId: profile?.id ?? null, // plain backstop if the bundled profile is unexpectedly absent
-    endpoint: false, ioSchema: null, // not an API endpoint
-  };
-  db.runInTransaction(() => {
-    db.insertAgent(agent);
-    db.setMeta(SETUP_HOME_OPERATOR_AGENT_ID_KEY, agent.id);
-  });
-  return agent.name;
-}
-
 /** The bundled profile the Companion agent runs under (seeded ungated by seedDefaultProfiles). */
 const COMPANION_PROFILE_NAME = "Companion";
 
@@ -816,7 +750,6 @@ When a request is ambiguous, make a sensible assumption and say what you assumed
 const SETUP_PRISTINE_SPECS: readonly PristinePromptSpec[] = [
   { agentName: SETUP_AGENT_NAME, current: PLATFORM_LEAD_OPERATOR_PROMPT, priorValues: PLATFORM_LEAD_OPERATOR_PROMPT_PRIOR_VALUES },
   { agentName: SETUP_AUDITOR_AGENT_NAME, markerKey: SETUP_HOME_WORKSPACE_AUDITOR_AGENT_ID_KEY, current: WORKSPACE_AUDITOR_PROMPT, priorValues: WORKSPACE_AUDITOR_PROMPT_PRIOR_VALUES },
-  { agentName: OPERATOR_AGENT_NAME, markerKey: SETUP_HOME_OPERATOR_AGENT_ID_KEY, current: OPERATOR_PROMPT, priorValues: OPERATOR_PROMPT_PRIOR_VALUES },
   { agentName: COMPANION_AGENT_NAME, markerKey: SETUP_HOME_COMPANION_AGENT_ID_KEY, current: COMPANION_PROMPT, priorValues: COMPANION_PROMPT_PRIOR_VALUES },
 ];
 

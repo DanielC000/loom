@@ -235,7 +235,7 @@ export function writeSessionSettings(
   // that doesn't thread it (see the test population) stays byte-identical.
   docLint?: boolean,
   // Card 015fdb23: true for a LOOM_DRIVEN_ROLES session (see host.ts's isLoomDrivenRole), never for
-  // manager/platform/operator/a plain session. OMITTED/false ⇒ the settings object carries no such key,
+  // manager/platform/a plain session. OMITTED/false ⇒ the settings object carries no such key,
   // byte-identical to before this param existed.
   disableSkillShellExecution?: boolean,
   // Card da1a4a1b: same LOOM_DRIVEN_ROLES signal as above — wires the PreToolUse(Bash) guard that refuses a

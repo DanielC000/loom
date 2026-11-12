@@ -181,5 +181,4 @@ export const sessionRoleTone: Record<NonNullable<SessionRole>, Tone> = {
   "workspace-auditor": "muted",
   run: "muted",
   assistant: "muted",
-  operator: "muted",
 };

@@ -8,7 +8,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (a) agent_clone provisions a clone of a source agent into a target project via the SAME
 //       createAgentCore path agent_create uses — name/startupPrompt/profileId carry over, nameOverride
 //       and promptPatch REPLACE their field when given, project/agent 404s match agent_create's.
-//   (b) LEAST-PRIVILEGE: cloning an agent whose profile role is operator/platform/auditor is REJECTED
+//   (b) LEAST-PRIVILEGE: cloning an agent whose profile role is platform/auditor is REJECTED
 //       (clone's own narrower role check, clonedProfileRoleError) — STRICTER than assigning the same
 //       profile directly (which (d) below proves agent_create/agent_update/profile_assign permit; see
 //       docs/decisions/3de74275's "card c8f1d9b7" amendment for why clone stays stricter) — and creates
@@ -79,9 +79,6 @@ db.insertProject({ id: "pReserved", name: "Reserved Home", repoPath: repo, vault
 db.insertProfile({ id: "profQA", name: "QA Tester", role: "worker", description: "qa rig", allowDelta: [], skills: null, model: null, icon: "🧪", browserTesting: true });
 db.insertProfile({ id: "profPlatform", name: "Platform Rig", role: "platform", description: "elevated rig", allowDelta: [], skills: null, model: null, icon: "🛡️" });
 db.insertProfile({ id: "profAuditor", name: "Auditor Rig", role: "auditor", description: "elevated rig", allowDelta: [], skills: null, model: null, icon: "🔎" });
-// Card c8f1d9b7: clonedProfileRoleError's OTHER elevated-role branch (operator, own-workspace-confined) —
-// previously untested here even though the code has always rejected it.
-db.insertProfile({ id: "profOperator", name: "Operator Rig", role: "operator", description: "elevated rig", allowDelta: [], skills: null, model: null, icon: "🛠️" });
 // Card a06650d2: a NON-elevated (worker) role that still carries a human-only field — the shared
 // agentAssignableProfileError predicate's FIELD check applies regardless of role or allowElevatedRoles.
 db.insertProfile({ id: "profVaultWrite", name: "Vault Rig", role: "worker", description: "vault-write rig", allowDelta: [], skills: null, model: null, icon: "📓", vaultWrite: true });
@@ -89,14 +86,13 @@ db.insertProfile({ id: "profVaultWrite", name: "Vault Rig", role: "worker", desc
 // here — see clone-core-field-check.mjs for exhaustive coverage of all 4 including harness/allowDelta).
 db.insertProfile({ id: "profDocConversion", name: "DocConversion Rig", role: "worker", description: "doc-conversion rig", allowDelta: [], skills: null, model: null, icon: "📄", documentConversion: true });
 
-// The source agents to clone: a plain one, one with an ordinary (worker) profile, three with an
-// elevated (platform/auditor/operator) profile, and one with a non-elevated-but-field-bearing
+// The source agents to clone: a plain one, one with an ordinary (worker) profile, two with an
+// elevated (platform/auditor) profile, and one with a non-elevated-but-field-bearing
 // (vaultWrite) profile — the escalation-reject fixtures.
 db.insertAgent({ id: "agentPlain", projectId: "pSrc", name: "Web Designer", startupPrompt: "You build UI for {{site}}.", position: 0, profileId: null });
 db.insertAgent({ id: "agentQA", projectId: "pSrc", name: "QA", startupPrompt: "You test {{site}}.", position: 1, profileId: "profQA" });
 db.insertAgent({ id: "agentPlatform", projectId: "pSrc", name: "Lead-ish", startupPrompt: "elevated", position: 2, profileId: "profPlatform" });
 db.insertAgent({ id: "agentAuditor", projectId: "pSrc", name: "Audit-ish", startupPrompt: "elevated", position: 3, profileId: "profAuditor" });
-db.insertAgent({ id: "agentOperator", projectId: "pSrc", name: "Operator-ish", startupPrompt: "elevated", position: 6, profileId: "profOperator" });
 db.insertAgent({ id: "agentVaultWrite", projectId: "pSrc", name: "Vault-ish", startupPrompt: "vault-write", position: 4, profileId: "profVaultWrite" });
 db.insertAgent({ id: "agentDocConversion", projectId: "pSrc", name: "DocConversion-ish", startupPrompt: "doc-conversion", position: 5, profileId: "profDocConversion" });
 
@@ -136,8 +132,8 @@ try {
   const agentCloneBatchDesc = toolList.find((t) => t.name === "agent_clone_batch")?.description ?? "";
   check("agent_clone description no longer claims to mirror a direct-assign guard", !/mirrors the guard/i.test(agentCloneDesc));
   check("agent_clone description states it is STRICTER than direct-assign", /stricter/i.test(agentCloneDesc));
-  check("agent_clone description lists operator alongside platform/auditor as refused", /operator\/platform\/auditor/i.test(agentCloneDesc));
-  check("agent_clone_batch description lists operator alongside platform/auditor as refused", /operator\/platform\/auditor/i.test(agentCloneBatchDesc));
+  check("agent_clone description lists platform/auditor as refused (and no longer the retired operator)", /platform\/auditor/i.test(agentCloneDesc) && !/operator/i.test(agentCloneDesc));
+  check("agent_clone_batch description lists platform/auditor as refused (and no longer the retired operator)", /platform\/auditor/i.test(agentCloneBatchDesc) && !/operator/i.test(agentCloneBatchDesc));
 
   // ===================== (a) agent_clone — the happy path =====================
   const nAgentsBefore = db.listAgents("pA").length;
@@ -184,9 +180,6 @@ try {
     !/mirrors the least-privilege guard/i.test(cloneElevPlatform.error) && !/mirrors the least-privilege guard/i.test(cloneElevAuditor.error));
   check("(b) platform/auditor rejection text instead states clone is stricter than direct-assign",
     /stricter/i.test(cloneElevPlatform.error) && /agent_create/i.test(cloneElevPlatform.error));
-  const cloneElevOperator = await call("agent_clone", { sourceAgentId: "agentOperator", targetProjectId: "pA" });
-  check("(b) agent_clone REJECTS cloning an operator-role-profiled agent (clonedProfileRoleError's other branch)",
-    typeof cloneElevOperator.error === "string" && /operator/i.test(cloneElevOperator.error) && !cloneElevOperator.id);
   // Card a06650d2: the FIELD check applies to clone too, even for a NON-elevated (worker) role — this
   // agent-facing tool checks the source profile's fields itself (cloneSourceFieldError), skipRoleCheck,
   // since role is clonedProfileRoleError's own job.

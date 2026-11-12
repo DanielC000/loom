@@ -65,10 +65,6 @@ export const USER_AUDIT_TOOLS: readonly string[] = [
   "skill_read", "transcript_read",
 ];
 
-export const OPERATOR_TOOLS: readonly string[] = [
-  "end_me", "git_checkout", "git_commit", "git_create_branch", "git_push", "my_project", "vault_write",
-];
-
 export const RUN_TOOLS: readonly string[] = ["submit_result"];
 
 // loom-orchestration: ONE router, THREE very different per-role surfaces (see orchestration.ts).
@@ -133,7 +129,7 @@ const ORCHESTRATION_ROLES: ReadonlySet<SessionRole> = new Set(["manager", "worke
 /** The full universe of known Loom bare tool names — used to recognize a candidate token as a REAL
  *  tool reference before checking it against a resolved surface (never flags an arbitrary word). */
 export const ALL_KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set([
-  ...PLATFORM_TOOLS, ...SETUP_TOOLS, ...AUDIT_TOOLS, ...USER_AUDIT_TOOLS, ...OPERATOR_TOOLS,
+  ...PLATFORM_TOOLS, ...SETUP_TOOLS, ...AUDIT_TOOLS, ...USER_AUDIT_TOOLS,
   ...RUN_TOOLS, ...ORCH_MANAGER_TOOLS, ...ORCH_WORKER_TOOLS, ...ORCH_ASSISTANT_TOOLS,
   ...TASKS_UNIVERSAL_TOOLS, ...COMPANION_APPROX_ALLOW,
   TASKS_VAULT_WRITE_TOOL, TASKS_AUTHENTICATED_REQUEST_TOOL, TASKS_SSH_EXEC_TOOL, DOCUMENT_CONVERSION_TOOL,
@@ -180,7 +176,6 @@ export function resolveKnownToolSurface(profile: ToolSurfaceProfile): Set<string
   else if (role === "auditor") for (const t of AUDIT_TOOLS) surface.add(t);
   else if (role === "workspace-auditor") for (const t of USER_AUDIT_TOOLS) surface.add(t);
   else if (role === "setup") for (const t of SETUP_TOOLS) surface.add(t);
-  else if (role === "operator") for (const t of OPERATOR_TOOLS) surface.add(t);
 
   if (role != null && ORCHESTRATION_ROLES.has(role)) {
     for (const t of COMPANION_APPROX_ALLOW) surface.add(t);

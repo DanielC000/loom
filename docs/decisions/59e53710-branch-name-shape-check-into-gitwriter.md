@@ -1,5 +1,7 @@
 # 59e53710 — move the no-legitimate-use branch-name shape checks into `GitWriter` itself
 
+> **Retired by 7f6c1cbb (the operator caller only).** The operator `git_checkout`/`git_create_branch` caller and its `operator-branch-name-shape-refusal.mjs` test were removed; the shape check in `GitWriter` still covers the Platform Lead and human REST callers. The decision itself is unchanged.
+
 Follow-up to `4fabafd1`/`2a6a292a` (round 10 of that card's own decision record introduced
 `unsafeBranchNameReason`, see `docs/decisions/2a6a292a-mainline-watermark-branch-change-only-on-a-trusted-signal.md`).
 A Code Review of commit `4fabafd1` found that function was opt-in PER CALLER rather than enforced at the

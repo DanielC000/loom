@@ -12,17 +12,14 @@ import { computeWakeImpact } from "./wake-impact.js";
  * Session roles the crash-recovery watchdog covers — coordination/work sessions worth auto-recovering.
  * Managers are IN scope: the motivating incident was a dead manager. `assistant` (an isolated Companion
  * session) is IN scope too: an unresumed dead Companion sits silently dark with no Mission Control signal
- * until a full daemon restart — see recordUnexpectedExit. `operator` (card a933613e) is IN scope for the
- * SAME reason: startOperator (sessions/service.ts) runs it at `cwd: project.repoPath` with no
- * `parentSessionId` — a standing session structurally identical to manager/platform/assistant, not to the
- * fire-once/ephemeral roles below, so the assistant argument above transfers verbatim. EXCLUDES plain
+ * until a full daemon restart — see recordUnexpectedExit. EXCLUDES plain
  * (role null), ephemeral `run` (never resume — a restart fails it clean), `auditor` (a fire-once
  * read-and-file session), `setup`, and `workspace-auditor`.
  *
  * STRUCTURAL GUARD: expressed as a `Record<SessionRole, boolean>`, not a bare array, so a FUTURE
  * `SessionRole` addition to `SESSION_ROLES` (shared/src/types.ts) fails to COMPILE here until this map
  * picks a disposition for it — the array below is DERIVED from the map, never hand-edited.
- * @decision a933613e — do not revert this to a bare `SessionRole[]` array (that let `operator` go
+ * @decision a933613e — do not revert this to a bare `SessionRole[]` array (that let a role go
  * unrecovered for a month with zero diagnostics) and never hand-edit RECOVERABLE_ROLES — it must stay
  * DERIVED from this map, or the compile-time exhaustiveness check is defeated.
  *
@@ -37,7 +34,6 @@ const RECOVERABLE_ROLE_MAP: Record<SessionRole, boolean> = {
   worker: true,
   platform: true,
   assistant: true,
-  operator: true,
   auditor: false,
   setup: false,
   "workspace-auditor": false,
@@ -496,16 +492,11 @@ export class CrashRecoveryWatcher {
       // resumeFleetOnBoot's per-role continuation nudges. Ready-gated (host.ts queues it until the resumed
       // TUI boots, then drains). Best-effort — the resume itself is the recovery; the nudge just re-engages it.
       if (started && (pty || enqueueDurableNudge)) {
-        if (s.role === "worker" || s.role === "assistant" || s.role === "operator") {
-          // Worker/assistant/operator nudges stay UNCONDITIONAL w.r.t. the stake-aware silencing below
-          // (card c9e51581 scopes THAT to manager/platform only — none of the three has a board/idle-nudge
-          // concept to classify against). `operator` joins here for the SAME reason (card a933613e, the
-          // RECOVERABLE_ROLES fix): it has no workers and isn't an orchestrator, so falling into the
-          // manager/platform branch below would misroute "re-check your workers... continue orchestrating"
-          // copy — and worse, hasPendingBoardWork reads the PROJECT's board regardless of role, so an
-          // operator could get a FULL nudge (or stay silent) based on board state it has nothing to do
-          // with. (The `worker` sub-branch below is a SEPARATE, report-state-aware condition — see card
-          // 24ed1edc just below — not a contradiction of "unconditional" here.)
+        if (s.role === "worker" || s.role === "assistant") {
+          // Worker/assistant nudges stay UNCONDITIONAL w.r.t. the stake-aware silencing below
+          // (card c9e51581 scopes THAT to manager/platform only — neither has a board/idle-nudge
+          // concept to classify against). (The `worker` sub-branch below is a SEPARATE, report-state-aware
+          // condition — see card 24ed1edc just below — not a contradiction of "unconditional" here.)
           // Card 24ed1edc — ruling 2 (db05e657) reaches this path too: a worker resume nudge must not tell
           // a still-`awaitingReview` worker to "continue your assigned task" (it structurally can't — see
           // that ruling's doc in report-resolution.ts). Reuse the SAME shared predicate the boot-time path

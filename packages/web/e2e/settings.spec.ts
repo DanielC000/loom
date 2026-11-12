@@ -329,7 +329,7 @@ test("editing maxConcurrentAuditors (sweep G2): blank inherits, a set value pers
 });
 
 test("editing a message-delivery toggle (coalesceAgentMessages): set persists, clearing back to inherit CLEARS the override (card fd55ac8a)", async ({ page, loomDaemon }) => {
-  // The tri-state toggles (coalesceAgentMessages/operatorEnabled/schedulerEnabled) share the same
+  // The tri-state toggles (coalesceAgentMessages/schedulerEnabled) share the same
   // clear-to-inherit fix as maxConcurrentGates above — selecting "— inherit" and saving must actually
   // DELETE the persisted key, not just omit it from the PATCH while the last-saved boolean survives
   // underneath. Exercised here on coalesceAgentMessages (default OFF); the other two toggles share the

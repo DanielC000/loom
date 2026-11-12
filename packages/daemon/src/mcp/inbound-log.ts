@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
  * own `handle()` — mirrors the existing `deps.pty.markMcpSeen(sessionId)` call on `/mcp-orch`, which
  * records contact before dispatch for the same "count what arrived, not just what succeeded" reason.
  * One shared function so all routers (there are now EIGHT — /mcp, /mcp-orch, /mcp-platform, /mcp-setup,
- * plus /mcp-audit, /mcp-user-audit, /mcp-operator, /mcp-run added after this card was filed) log the
+ * plus /mcp-audit, /mcp-user-audit, /mcp-run added after this card was filed) log the
  * SAME shape from ONE definition, instead of four-plus independent, driftable call sites.
  *
  * Cheap by construction: no I/O beyond the one `console.log`, and the JSON.stringify of `arguments` (for

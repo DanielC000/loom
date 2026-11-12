@@ -135,7 +135,7 @@ check("[negative control] hasAdjacentCArg returns false against the auto-approve
 // self-concealing regression is pinning the wiring HERE, against a real spawned argv, not just against
 // the pure mcpServersToCodexArgs unit coverage in codex-host-decisions.mjs. --------------------------------
 for (const [role, serverId] of [
-  ["setup", "loom-setup"], ["operator", "loom-operator"], ["platform", "loom-platform"],
+  ["setup", "loom-setup"], ["platform", "loom-platform"],
   ["auditor", "loom-audit"], ["workspace-auditor", "loom-user-audit"], ["run", "loom-run"],
 ]) {
   const argv = await spawnAndCaptureArgv(`codex-argv-${role}`, { role });

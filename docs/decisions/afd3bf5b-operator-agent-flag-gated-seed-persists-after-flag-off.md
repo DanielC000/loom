@@ -1,5 +1,7 @@
 # afd3bf5b — the Elevated Operator agent row is flag-gated at seed time, but persists once seeded
 
+> **Retired by 7f6c1cbb.** `seedOperatorAgent` and the flag are gone; a pristine seeded agent is deleted at boot and a customized one is kept (`setup/retire-operator.ts`). This record is kept as history only. See `7f6c1cbb-retire-the-operator-role.md`.
+
 ## Narrative
 
 `seedOperatorAgent` (Bucket 2b "Bounded Elevated Operator", `packages/daemon/src/setup/seed.ts`)

@@ -15,7 +15,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (b) lead mode OFF is byte-identical to today: zero grants ⇒ null, exactly as pre-card.
 //   (c) toggling lead mode back OFF reverts to the pre-existing grant rows, which were NEVER mutated by
 //       having been superseded.
-//   (d) session-steer under lead mode reaches an INFRASTRUCTURE-role session (platform/operator/setup) —
+//   (d) session-steer under lead mode reaches an INFRASTRUCTURE-role session (platform/setup) —
 //       NO role exclusion (Option B, "session-steer reaches EVERY session incl. infrastructure").
 //   (e) NO MCP path can set `companion_lead_mode` — grep-provable (exactly two source call sites: the
 //       db.ts setter's own definition + the gateway/server.ts REST handler, nothing under mcp/**), plus a
@@ -225,11 +225,9 @@ try {
     seedSession(db, sess, proj, "assistant");
     db.setCompanionLeadMode(sess, true);
 
-    // Infrastructure-role targets — platform/operator/setup, exactly the roles Option B refused to exclude.
+    // Infrastructure-role targets — platform/setup, exactly the roles Option B refused to exclude.
     const platformSess = `plat-${randomUUID()}`;
     seedSession(db, platformSess, proj, "platform");
-    const operatorSess = `op-${randomUUID()}`;
-    seedSession(db, operatorSess, proj, "operator");
     const setupSess = `setup-${randomUUID()}`;
     seedSession(db, setupSess, proj, "setup");
 
@@ -247,12 +245,12 @@ try {
       spawn(opts) { this.live.add(opts.sessionId); }
     }
     const pty = new PtyStub();
-    pty.live.add(sess); pty.live.add(platformSess); pty.live.add(operatorSess); pty.live.add(setupSess);
+    pty.live.add(sess); pty.live.add(platformSess); pty.live.add(setupSess);
     const sessions = new SessionService(db, pty, new OrchestrationControl());
     const orch = new OrchestrationMcpRouter(db, sessions, {}, pty);
     const client = await connect(orch.buildServer(sess, "assistant"));
 
-    for (const [label, targetId] of [["platform", platformSess], ["operator", operatorSess], ["setup", setupSess]]) {
+    for (const [label, targetId] of [["platform", platformSess], ["setup", setupSess]]) {
       const res = await call(client, "session_message", { target: targetId, message: "hello from lead mode" });
       check(`(d) session_message reaches the ${label} infrastructure session — no role exclusion`, !res.error && res.deliveryStatus === "delivered-live");
     }
