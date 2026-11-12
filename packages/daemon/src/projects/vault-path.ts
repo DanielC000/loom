@@ -243,6 +243,56 @@ export interface ForeignRepoContext {
   sharedVaultRoots: readonly string[];
   /** The project being written's STORED vaultPath (absent on create). Re-asserting it unchanged (e.g. a rename whose Save always resends vaultPath) adds no new hazard, so the check is skipped. */
   storedVaultPath?: string;
+  /** Non-empty vaultPaths owned by OTHER projects (card 4b2ef44d, the symmetric half). Absent ⇒ the reverse check is skipped. */
+  vaultPaths?: readonly string[];
+  /** The project being written's STORED repoPath + repos[] paths (absent on create). A written repo path canonically equal to one of these is unchanged and not re-judged. */
+  storedRepoPaths?: readonly string[];
+}
+
+/**
+ * Card 4b2ef44d — the symmetric half of {@link checkVaultForeignRepoContainment}: refuse a repo path
+ * (primary `repoPath` or a `repos[]` entry) that EQUALS or CONTAINS another project's existing vaultPath,
+ * because that project's vault auto-committer would then be governed by this repo. Same exemption as the
+ * vault direction, applied to the repo being WRITTEN: its git TOPLEVEL must be a listed shared vault root
+ * ({@link isSharedVaultRoot}) AND the repo path canonically at-or-under that toplevel. Never a second
+ * signal. A repo path canonically equal to one the project already stores is skipped (a rename resave).
+ *
+ * @decision 4b2ef44d — one shared check, run from the triple check on every surface; never exempt by
+ * layout inference or on the raw repo path, and never re-judge an unchanged stored repo path.
+ */
+export async function checkRepoForeignVaultContainment(repoPaths: readonly string[], foreign: ForeignRepoContext): Promise<VaultPathContainmentCheck> {
+  const vaults = foreign.vaultPaths ?? [];
+  if (vaults.length === 0 || repoPaths.length === 0) return { ok: true };
+  for (const repoPath of repoPaths) {
+    if (!repoPath) continue;
+    if (foreign.storedRepoPaths?.some((s) => canonicallyPaired(repoPath, s))) continue;
+    const repoResult = canonicalizeForContainment(repoPath);
+    if (!repoResult.ok) return repoResult; // an unsafe own form (UNC alias etc.) can't be compared: refuse, never skip
+    const repoKey = comparisonKey(repoResult.value);
+    for (const vaultPath of vaults) {
+      const vaultResult = canonicalizeForContainment(vaultPath);
+      if (!vaultResult.ok) continue; // a foreign row's own unsafe form never blocks THIS write
+      const vaultKey = comparisonKey(vaultResult.value);
+      const equal = repoKey === vaultKey;
+      if (!equal && !isProperlyUnder(vaultKey, repoKey)) continue;
+      const top = await gitToplevel(repoPath);
+      if (top && isSharedVaultRoot(top, foreign.sharedVaultRoots)) {
+        const topResult = canonicalizeForContainment(top);
+        if (topResult.ok) {
+          const topKey = comparisonKey(topResult.value);
+          if (repoKey === topKey || isProperlyUnder(repoKey, topKey)) break; // exempt this repo path entirely
+        }
+      }
+      const hint = "(if it is a shared notes vault, add its git root under Settings → Platform → Shared vault roots)";
+      return {
+        ok: false,
+        error: equal
+          ? `repo path ${repoPath} equals another project's vault at ${vaultPath} — that project's vault auto-committer would be governed by this repo ${hint}`
+          : `repo path ${repoPath} would contain another project's vault at ${vaultPath} — that project's vault auto-committer would be governed by this repo ${hint}`,
+      };
+    }
+  }
+  return { ok: true };
 }
 
 /**
@@ -331,7 +381,11 @@ export async function checkVaultRepoTripleContainment(
   triple: { repoPath: string; vaultPath: string; repos: RepoRegistryEntry[] },
   opts: { pairingIsIntentional?: boolean; foreign?: ForeignRepoContext } = {},
 ): Promise<VaultPathContainmentCheck> {
-  if (!triple.vaultPath) return { ok: true }; // no vault bound — nothing to protect
+  // Card 4b2ef44d — the repo-side cross-project check runs even when THIS project binds no vault: a repo
+  // written over another project's vault is the hazard regardless of this project's own vault.
+  if (!triple.vaultPath) {
+    return opts.foreign ? checkRepoForeignVaultContainment([triple.repoPath, ...triple.repos.map((r) => r.path)], opts.foreign) : { ok: true };
+  }
   const pairedCheck = pathsCanonicallyEqual(triple.vaultPath, triple.repoPath);
   if (!pairedCheck.ok) return pairedCheck;
   const exemptRepoPath = !!opts.pairingIsIntentional && pairedCheck.value;
@@ -343,7 +397,10 @@ export async function checkVaultRepoTripleContainment(
     const own = checkVaultPathRepoContainment(triple.vaultPath, repoPaths);
     if (!own.ok) return own;
   }
-  return opts.foreign ? checkVaultForeignRepoContainment(triple.vaultPath, opts.foreign) : { ok: true };
+  if (!opts.foreign) return { ok: true };
+  const foreignVault = await checkVaultForeignRepoContainment(triple.vaultPath, opts.foreign);
+  if (!foreignVault.ok) return foreignVault;
+  return checkRepoForeignVaultContainment([triple.repoPath, ...triple.repos.map((r) => r.path)], opts.foreign);
 }
 
 /** Result of {@link checkVaultPathUpdate}. `value: undefined` means "no change requested" (the caller's

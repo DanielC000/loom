@@ -15,12 +15,15 @@ import type { ForeignRepoContext } from "./vault-path.js";
  * toplevel — never a second signal.
  */
 export function foreignRepoContext(
-  db: Pick<Db, "listForeignRepoPaths" | "getPlatformConfig" | "getProject">,
+  db: Pick<Db, "listForeignRepoPaths" | "listForeignVaultPaths" | "getPlatformConfig" | "getProject">,
   excludeProjectId: string | undefined,
 ): ForeignRepoContext {
+  const own = excludeProjectId ? db.getProject(excludeProjectId) : undefined;
   return {
     paths: db.listForeignRepoPaths(excludeProjectId),
+    vaultPaths: db.listForeignVaultPaths(excludeProjectId),
+    storedRepoPaths: own ? [own.repoPath, ...own.repos.map((r) => r.path)].filter(Boolean) : undefined,
     sharedVaultRoots: resolveConfig(undefined, db.getPlatformConfig()).platform.sharedVaultRoots ?? [],
-    storedVaultPath: excludeProjectId ? db.getProject(excludeProjectId)?.vaultPath || undefined : undefined,
+    storedVaultPath: own?.vaultPath || undefined,
   };
 }

@@ -4206,6 +4206,19 @@ export class Db {
     }
     return [...paths];
   }
+  /**
+   * Every non-empty `vaultPath` owned by a project OTHER than `excludeProjectId`, live AND archived,
+   * reserved homes excluded (same population rules as {@link listForeignRepoPaths}). Feeds the symmetric
+   * cross-project check: a repoPath/repos[] entry may not equal or contain another project's vault. Deduped.
+   */
+  listForeignVaultPaths(excludeProjectId?: string): string[] {
+    const paths = new Set<string>();
+    for (const project of [...this.listAllProjects(), ...this.listArchivedProjects()]) {
+      if (project.reserved || project.id === excludeProjectId) continue;
+      if (project.vaultPath) paths.add(project.vaultPath);
+    }
+    return [...paths];
+  }
   /** True iff ANY reserved/system project exists (name-agnostic). Prefer the NAME-SCOPED checks below as
    * the per-home idempotency gate now that more than one reserved home can coexist (see below). */
   hasReservedProject(): boolean {

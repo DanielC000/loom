@@ -412,7 +412,7 @@ try {
 
   // 8-char id-PREFIX resolution for list_all_sessions (card 7097f3fb) — mirrors project_get: a full id OR
   // an unambiguous 8-char prefix resolves the SAME rows; unknown is an EXPLICIT error, never a silent [].
-  db.insertProject({ id: "cafe1234-full-uuid-form", name: "Prefixed", repoPath: repo, vaultPath: repo, config: {}, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
+  db.insertProject({ id: "cafe1234-full-uuid-form", name: "Prefixed", repoPath: repo, vaultPath: `${repo}-pfx-vault`, config: {}, createdAt: new Date().toISOString(), archivedAt: null, reserved: false });
   db.insertAgent({ id: "agentPfx", projectId: "cafe1234-full-uuid-form", name: "Pfx", startupPrompt: "PFX", position: 0, profileId: null });
   db.insertSession({
     id: "SPFX", projectId: "cafe1234-full-uuid-form", agentId: "agentPfx", engineSessionId: null, title: null, cwd: repo,

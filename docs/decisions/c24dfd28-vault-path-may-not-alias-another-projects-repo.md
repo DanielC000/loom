@@ -22,6 +22,6 @@
 - Do not make `foreign` required-but-defaulted inside the check; a surface that omits it silently loses the check, which is why the source scan exists.
 - `project_init` (both routers) never runs the shared check: its target is a fresh dir under the workspace base, so a collision is near-impossible. Out of scope here.
 
-Residual (not closed here): a repo being WRITTEN (create, or repoPath/repos rebind) that swallows another project's EXISTING vault (the reverse direction) is not checked; the runtime backstop is `checkCodeRepoCollision` (the auto-committer's code-repo-collision refusal). Filed as its own card by the manager.
+The reverse direction (a repo being WRITTEN that swallows another project's EXISTING vault) is closed by `4b2ef44d-repo-path-may-not-contain-another-projects-vault.md`; the runtime backstop remains `checkCodeRepoCollision`.
 
 Residual: the check is path containment + one `git rev-parse --show-toplevel` per colliding foreign path; a vault-only foreign project's plain notes folder counts as a "repo path" like any other (that is what makes the unlisted shared-vault layout refused).
