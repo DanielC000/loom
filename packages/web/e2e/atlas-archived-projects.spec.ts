@@ -182,6 +182,7 @@ test.describe("Atlas archived projects on the Workspace node (card baca1835)", (
     expect(asked, "the delete confirm no longer states the cascade").toMatch(/PERMANENTLY delete/);
     expect(asked, "the delete confirm no longer lists what goes with it").toMatch(/agents, sessions, tasks/);
     expect(asked, "the delete confirm no longer says it cannot be undone").toMatch(/CANNOT be undone/);
+    expect(asked, "the delete confirm no longer says a backup is taken first").toMatch(/backup is taken first/);
     // ⭐ THE WITNESS, and it must come before the two absence claims below. The mismatch notice is the
     // one observable that fires on the REFUSAL branch and only on it, so polling for it is what makes
     // "nothing was destroyed" falsifiable — a build that drops the name comparison never reaches this

@@ -1362,8 +1362,8 @@ CREATE TABLE IF NOT EXISTS connections (
   -- and the resolution seams in connections/request.ts + index.ts's resolveConnectionSecret) — fail-closed:
   -- a cross-project session whose profile allowlists this id resolves NOTHING. Added to existing DBs by
   -- migrateConnections() below (fresh installs already have it via this CREATE TABLE). No FK (matches
-  -- companion_capability_grants.project_id) — a deleted project simply orphans its scoped connections as
-  -- unreachable rather than needing a cascade.
+  -- companion_capability_grants.project_id) — deleteProject deletes the project's scoped connections itself
+  -- (one a poll job of another project's agent still references is kept, FK-safe).
   project_id TEXT,
   -- SSH connection type (design record a3d5c7f4) — NON-SECRET columns only; an 'ssh' row's secret_blob
   -- holds the envelope-encrypted, PASSPHRASE-FREE private key (the same column every other scheme's
@@ -5228,6 +5228,30 @@ export class Db {
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
       }
       for (const aid of agentIds) this.db.prepare("DELETE FROM schedules WHERE agent_id = ?").run(aid);
+      // Project/agent-keyed children with an ENFORCED FK to projects(id)/agents(id) that the cascade above
+      // never reached — any one of them made the final DELETE throw SQLITE_CONSTRAINT_FOREIGNKEY for a
+      // project that had ever used event triggers, webhooks, polling, memory, links or a config change.
+      // (Standing configs, unlike a session's targets, die WITH their owning project/agent.)
+      for (const aid of agentIds) {
+        this.db.prepare("DELETE FROM webhook_deliveries WHERE endpoint_id IN (SELECT id FROM webhook_endpoints WHERE agent_id = ?)").run(aid);
+        this.db.prepare("DELETE FROM webhook_endpoints WHERE agent_id = ?").run(aid);
+        this.db.prepare("DELETE FROM poll_jobs WHERE agent_id = ?").run(aid);
+        this.db.prepare("DELETE FROM event_triggers WHERE agent_id = ?").run(aid);
+      }
+      this.db.prepare("DELETE FROM event_triggers WHERE project_id = ?").run(id);
+      // A project-scoped connection goes with it unless a poll job elsewhere still references it (FK).
+      this.db.prepare("DELETE FROM connections WHERE project_id = ? AND id NOT IN (SELECT connection_id FROM poll_jobs)").run(id);
+      this.db.prepare("DELETE FROM project_config_history WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM project_memory_history WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM project_memory WHERE project_id = ?").run(id); // fts rows follow via its delete trigger
+      this.db.prepare("DELETE FROM project_links WHERE project_a_id = ? OR project_b_id = ?").run(id, id);
+      this.db.prepare("DELETE FROM questions WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM card_policy_matches WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)").run(id);
+      this.db.prepare("DELETE FROM card_policy_waivers WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)").run(id);
+      this.db.prepare("DELETE FROM card_policy_matches_v2 WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM card_policy_waivers_v2 WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM session_usage_samples WHERE project_id = ?").run(id);
+      this.db.prepare("DELETE FROM companion_capability_grants WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM run_events WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM runs WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM api_keys WHERE project_id = ?").run(id);
@@ -5276,9 +5300,38 @@ export class Db {
     for (const sid of sessionIds) this.notifySessionChanged(sid);
     return { sessionIds };
   }
-  /** Count of a project's sessions still in processState 'live' — the archive/delete guard ("stop the fleet first"). */
+  /**
+   * What a purge of this project would remove, as ordered {kind,count} pairs — read-only, the figures the
+   * purge confirmation names. Counts rows by the same keys deleteProject deletes by.
+   */
+  projectPurgePreview(id: string): Array<{ kind: string; count: number }> {
+    const n = (sql: string, ...args: unknown[]): number => (this.db.prepare(sql).get(...args) as { c: number }).c;
+    const agents = "(SELECT id FROM agents WHERE project_id = ?)";
+    const sessions = "(SELECT id FROM sessions WHERE project_id = ?)";
+    return [
+      { kind: "agents", count: n("SELECT COUNT(*) AS c FROM agents WHERE project_id = ?", id) },
+      { kind: "sessions", count: n("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ?", id) },
+      { kind: "worktree rows", count: n("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ? AND worktree_path IS NOT NULL", id) },
+      { kind: "tasks", count: n("SELECT COUNT(*) AS c FROM tasks WHERE project_id = ?", id) },
+      { kind: "orchestration events", count: n(`SELECT COUNT(*) AS c FROM orchestration_events WHERE manager_session_id IN ${sessions} OR worker_session_id IN ${sessions}`, id, id) },
+      { kind: "schedules", count: n(`SELECT COUNT(*) AS c FROM schedules WHERE agent_id IN ${agents}`, id) },
+      { kind: "runs", count: n("SELECT COUNT(*) AS c FROM runs WHERE project_id = ?", id) },
+      { kind: "api keys", count: n("SELECT COUNT(*) AS c FROM api_keys WHERE project_id = ?", id) },
+      { kind: "memory notes", count: n("SELECT COUNT(*) AS c FROM project_memory WHERE project_id = ?", id) },
+      { kind: "event triggers", count: n(`SELECT COUNT(*) AS c FROM event_triggers WHERE project_id = ? OR agent_id IN ${agents}`, id, id) },
+      { kind: "webhook endpoints", count: n(`SELECT COUNT(*) AS c FROM webhook_endpoints WHERE agent_id IN ${agents}`, id) },
+      { kind: "poll jobs", count: n(`SELECT COUNT(*) AS c FROM poll_jobs WHERE agent_id IN ${agents}`, id) },
+      { kind: "questions", count: n("SELECT COUNT(*) AS c FROM questions WHERE project_id = ?", id) },
+      // Only the project-scoped connections deleteProject really removes: one still used by a poll job of
+      // ANOTHER project's agent is kept (FK), so it is not counted.
+      { kind: "connections", count: n(`SELECT COUNT(*) AS c FROM connections WHERE project_id = ? AND id NOT IN (SELECT connection_id FROM poll_jobs WHERE agent_id IS NULL OR agent_id NOT IN ${agents})`, id, id) },
+      { kind: "project links", count: n("SELECT COUNT(*) AS c FROM project_links WHERE project_a_id = ? OR project_b_id = ?", id, id) },
+    ];
+  }
+  /** Count of a project's sessions in processState 'live' or 'starting' — the archive/delete/purge guard
+   *  ("stop the fleet first"); widened to 'starting' the same way countLiveSessionsForAgent was (0368c784). */
   countLiveSessionsInProject(id: string): number {
-    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ? AND process_state = 'live'").get(id) as { c: number }).c;
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ? AND process_state IN ('live', 'starting')").get(id) as { c: number }).c;
   }
   /**
    * A project's LIVE sessions that occupy a worktree (worktree_path set) — the repoPath-rebind guard's
@@ -7905,6 +7958,12 @@ export class Db {
     this.db.prepare("UPDATE webhook_endpoints SET target_session_id = NULL WHERE target_session_id = ?").run(sessionId);
     this.purgeBoardReadSnapshots(sessionId); // card 15bdb031
     this.db.prepare("DELETE FROM mcp_call_log WHERE session_id = ?").run(sessionId); // no FK on that table; swept here so a deleted session leaves no call rows
+    // Session-keyed companion rows: no FK, but a deleted session's id must never keep a binding / allowed
+    // sender / config / voice pref / pairing code (a companion recycle keeps the SAME session id and never
+    // reaches deleteSession, so nothing relies on these outliving it).
+    for (const t of ["companion_bindings", "companion_allowed_senders", "companion_config", "companion_voice_prefs", "companion_pairing_codes"]) {
+      this.db.prepare(`DELETE FROM ${t} WHERE session_id = ?`).run(sessionId);
+    }
   }
 
   /**

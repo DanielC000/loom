@@ -2,7 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import Database from "better-sqlite3";
 import { resolveConfig, type BackupConfig, type PlatformConfigOverride } from "@loom/shared";
-import { DB_PATH, AUTO_BACKUP_DIR } from "../paths.js";
+import { DB_PATH, AUTO_BACKUP_DIR, PRE_PURGE_BACKUP_DIR } from "../paths.js";
 
 /**
  * Automatic SQLite DB backup service, giving durable, automatic recovery for ANY cause of DB loss.
@@ -90,6 +90,15 @@ export async function takeBackup(opts: {
   } finally {
     try { conn?.close(); } catch { /* best-effort */ }
   }
+}
+
+/**
+ * The mandatory snapshot taken right before an irreversible project delete. Written to `backups/pre-purge/`
+ * (outside the rotated `auto/` dir) with `keep: 0` (no rotation at all), so it is never auto-pruned.
+ * Resolves the snapshot path, or `null` on any failure — the caller must then refuse the delete.
+ */
+export function takePrePurgeBackup(opts: { srcDbPath?: string; destDir?: string } = {}): Promise<string | null> {
+  return takeBackup({ reason: "pre-purge", keep: 0, srcDbPath: opts.srcDbPath, destDir: opts.destDir ?? PRE_PURGE_BACKUP_DIR });
 }
 
 /**

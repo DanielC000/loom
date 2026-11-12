@@ -781,7 +781,12 @@ check("the exact read/write split is unchanged by card 66b9e590's fail-closed fi
   // human-only loopback REST, no MCP path): 242→243 total, 139→140 writes, reads unchanged.
   // Card 20ff76de added ONE WRITE member, `releaseModalHold` (POST /api/sessions/:id/modal-hold/release, human-only
   // loopback REST, no MCP path): 243→244 total, 140→141 writes, reads unchanged.
-  assert.equal(API_MEMBERS.total, 244, `api.ts now has ${API_MEMBERS.total} members, not 244`);
+  // The archived-project purge added ONE READ (`projectPurgePreview`, GET /api/projects/:id/purge-preview) and ONE
+  // WRITE (`purgeProject`, POST /api/projects/:id/purge), human-only loopback REST, no MCP path:
+  // 244→246 total, 103→104 reads, 141→142 writes.
+  assert.equal(API_MEMBERS.total, 246, `api.ts now has ${API_MEMBERS.total} members, not 246`);
+  assert.ok(API_MEMBERS.reads.has("projectPurgePreview"), "api.projectPurgePreview must classify as a READ");
+  assert.ok(API_MEMBERS.writes.has("purgeProject"), "api.purgeProject must classify as a WRITE");
   assert.ok(API_MEMBERS.writes.has("releaseModalHold"), "api.releaseModalHold must classify as a WRITE (card 20ff76de)");
   assert.ok(API_MEMBERS.writes.has("repinSshHostKey"), "api.repinSshHostKey must classify as a WRITE (card 7b812c18)");
   assert.ok(API_MEMBERS.reads.has("mcpCalls"), "api.mcpCalls must classify as a READ (card d4d3481e)");
@@ -791,8 +796,8 @@ check("the exact read/write split is unchanged by card 66b9e590's fail-closed fi
   assert.ok(API_MEMBERS.writes.has("repinSessionGrants"), "api.repinSessionGrants must classify as a WRITE (card 158cb01a)");
   assert.ok(API_MEMBERS.writes.has("dismissNotices"), "api.dismissNotices must classify as a WRITE (card f549a0ae)");
   assert.ok(API_MEMBERS.writes.has("updateConnection"), "api.updateConnection must classify as a WRITE (card 923dfc9d)");
-  assert.equal(API_MEMBERS.reads.size, 103, `api.ts now has ${API_MEMBERS.reads.size} reads, not 103`);
-  assert.equal(API_MEMBERS.writes.size, 141, `api.ts now has ${API_MEMBERS.writes.size} writes, not 141`);
+  assert.equal(API_MEMBERS.reads.size, 104, `api.ts now has ${API_MEMBERS.reads.size} reads, not 104`);
+  assert.equal(API_MEMBERS.writes.size, 142, `api.ts now has ${API_MEMBERS.writes.size} writes, not 142`);
   assert.ok(API_MEMBERS.writes.has("addAgentConnection"), "api.addAgentConnection must classify as a WRITE (card b1df40f2)");
   // Card 61d32daf, pinned by name: the two reads are Tier-1 routes (gateway/trust-tier.ts) and the waiver pair is
   // the human-only escape from a card policy. A flipped verdict means re-reviewing that route's trust posture.

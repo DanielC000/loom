@@ -10,9 +10,10 @@ import { POLICY_REQUIREMENT_KINDS, resolveConfig, resolveMergeGateCadence, resol
 import { FleetHub } from "./fleet-hub.js";
 import { WS_CLOSE_TRY_AGAIN_LATER, closeSlowSocket } from "./slow-socket.js";
 import { GatewayTokenSocketRegistry } from "./token-sockets.js";
-import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, questionAttachmentDir } from "../paths.js";
+import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, questionAttachmentDir, PRE_PURGE_BACKUP_DIR } from "../paths.js";
 import { QUESTION_ID_RE, ATTACHMENT_ID_RE, attachmentServeContentType, resolveStoredAttachmentFile, attachmentContentDisposition, deriveAttachmentKind, sanitizeBasename } from "../mcp/attachments.js";
 import { deleteProjectWorkDir } from "../projects/work-dir.js";
+import { takePrePurgeBackup } from "../orchestration/db-backup.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import { buildServedStatusAsync, currentWebBundle } from "../served-status.js";
 import type { UpdateStatus } from "../update/check.js";
@@ -235,6 +236,9 @@ const validatePresetField = (name: string, v: unknown, max: number): string | nu
 };
 
 export interface GatewayDeps {
+  /** Test seam only: replaces the pre-delete DB snapshot the purge and permanent-delete routes take
+   *  (resolves its path, or null on failure). Production leaves it unset. */
+  takePurgeBackup?: () => Promise<string | null>;
   db: Db;
   pty: PtyHost;
   sessions: SessionService;
@@ -5856,19 +5860,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // its agents/sessions/tasks/schedules/keys/runs + their on-disk transcript snapshots. The strong
   // type-the-name confirm is the web's job; this just enforces the guards then executes. GUARD: refuse
   // the reserved home; refuse while any session is live.
-  app.delete("/api/projects/:id/permanent", async (req, reply) => {
-    const id = (req.params as { id: string }).id;
-    const p = deps.db.getProject(id);
-    if (!p) return reply.code(404).send({ error: "project not found" });
-    if (p.reserved) return reply.code(400).send({ error: "cannot delete a reserved/system project (your platform home board)" });
-    const live = deps.db.countLiveSessionsInProject(id);
-    if (live > 0) return reply.code(400).send({ error: `cannot delete a project with live sessions — stop the fleet first (${live} still live)` });
-    // Card 5eace211: the "no live session" guard above does not, by itself, rule out a still-running gate
-    // (e.g. a daemon-initiated deploy/landing-check op) that may still be reading/writing this project's
-    // shared work dir — check the live GateSemaphore registry explicitly before removing it.
-    if (deps.sessions.hasLiveGateForProject(id)) {
-      return reply.code(400).send({ error: "cannot delete a project with a gate still running or queued for it — wait for it to settle first" });
-    }
+  // The ONE irreversible-delete sequence shared by this route and the archived-project purge below: a
+  // mandatory DB snapshot first, then the guards RE-RUN synchronously (the snapshot is awaited, and a
+  // restore / session start / gate can land during it), then deleteProject with NO await in between.
+  // A changed state is a 409 and the snapshot is kept.
+  type Refusal = { code: number; error: string } | null;
+  const backedUpDelete = async (id: string, recheck: () => Refusal) => {
+    const backup = await (deps.takePurgeBackup ?? takePrePurgeBackup)();
+    if (!backup) return { ok: false as const, code: 500, error: "could not take the pre-delete database backup — nothing was deleted" };
+    const changed = recheck();
+    if (changed) return { ok: false as const, code: 409, error: `${changed.error} (the project changed while the backup was being taken — nothing was deleted; the backup was kept at ${backup})` };
     const { sessionIds } = deps.db.deleteProject(id);
     // Card 5eace211 Code Review MAJOR / card c2fc8d84: both removals below are ASYNC + bounded (killable
     // child processes, never the libuv threadpool) and awaited SEQUENTIALLY, deliberately not
@@ -5877,7 +5878,65 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // @decision c2fc8d84 — keep these two awaits sequential; do not parallelize them "for speed".
     await deleteProjectArchives(id); // best-effort: drop the whole LOOM_HOME/archives/<id> snapshot dir
     await deleteProjectWorkDir(id);
-    return { ok: true, deleted: { project: id, agents: true, sessions: sessionIds.length } };
+    return { ok: true as const, backup, sessionIds };
+  };
+  const permanentRefusal = (id: string): Refusal => {
+    const p = deps.db.getProject(id);
+    if (!p) return { code: 404, error: "project not found" };
+    if (p.reserved) return { code: 400, error: "cannot delete a reserved/system project (your platform home board)" };
+    const live = deps.db.countLiveSessionsInProject(id);
+    if (live > 0) return { code: 400, error: `cannot delete a project with live sessions — stop the fleet first (${live} still live)` };
+    // Card 5eace211: the "no live session" guard above does not, by itself, rule out a still-running gate
+    // (e.g. a daemon-initiated deploy/landing-check op) that may still be reading/writing this project's
+    // shared work dir — check the live GateSemaphore registry explicitly before removing it.
+    if (deps.sessions.hasLiveGateForProject(id)) return { code: 400, error: "cannot delete a project with a gate still running or queued for it — wait for it to settle first" };
+    return null;
+  };
+  app.delete("/api/projects/:id/permanent", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const refused = permanentRefusal(id);
+    if (refused) return reply.code(refused.code).send({ error: refused.error });
+    const r = await backedUpDelete(id, () => permanentRefusal(id));
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    return { ok: true, backup: r.backup, deleted: { project: id, agents: true, sessions: r.sessionIds.length } };
+  });
+
+  // PURGE an ARCHIVED project — the confirm-first, backed-up sibling of the permanent delete above, which
+  // the archived list uses. HUMAN-only loopback REST, deliberately no MCP twin on any router. Refuses
+  // (server-side, not just in the UI) anything that is not archived, any reserved home, a live fleet and
+  // a running gate; GET previews the per-kind counts the confirmation dialog shows.
+  const purgeRefusal = (id: string): { code: number; error: string; name?: undefined } | { name: string; code?: undefined } => {
+    const p = deps.db.getProject(id);
+    if (!p) return { code: 404, error: "project not found" };
+    if (p.reserved) return { code: 400, error: "cannot purge a reserved/system project (your platform home board)" };
+    if (!p.archivedAt) return { code: 400, error: "only an ARCHIVED project can be purged — archive it first" };
+    const live = deps.db.countLiveSessionsInProject(id);
+    if (live > 0) return { code: 400, error: `cannot purge a project with live sessions — stop the fleet first (${live} still live)` };
+    if (deps.sessions.hasLiveGateForProject(id)) return { code: 400, error: "cannot purge a project with a gate still running or queued for it — wait for it to settle first" };
+    return { name: p.name };
+  };
+  app.get("/api/projects/:id/purge-preview", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const r = purgeRefusal(id);
+    if (r.name === undefined) return reply.code(r.code).send({ error: r.error });
+    return { project: { id, name: r.name }, items: deps.db.projectPurgePreview(id), backupDir: PRE_PURGE_BACKUP_DIR };
+  });
+  app.post("/api/projects/:id/purge", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const r = purgeRefusal(id);
+    if (r.name === undefined) return reply.code(r.code).send({ error: r.error });
+    const confirmName = (req.body as { confirmName?: unknown } | null)?.confirmName;
+    if (confirmName !== r.name) return reply.code(400).send({ error: "confirmName must equal the project name exactly" });
+    const items = deps.db.projectPurgePreview(id);
+    // The snapshot is MANDATORY (it ignores `backup.enabled`) and lives in backups/pre-purge/, which the
+    // auto-backup rotation never touches; a failed snapshot refuses the purge.
+    const out = await backedUpDelete(id, () => {
+      const again = purgeRefusal(id);
+      if (again.name === undefined) return again;
+      return confirmName === again.name ? null : { code: 400, error: "confirmName must equal the project name exactly" };
+    });
+    if (!out.ok) return reply.code(out.code).send({ error: out.error });
+    return { ok: true, backup: out.backup, removed: { project: id, sessions: out.sessionIds.length, items } };
   });
 
   // PERMANENTLY delete an agent (CASCADE its sessions + their wakes/snapshots, its schedules, its runs).

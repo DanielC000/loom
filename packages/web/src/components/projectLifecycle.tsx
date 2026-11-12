@@ -64,7 +64,15 @@ export function useProjectLifecycleWrites(
     mutationFn: (id: string) => api.deleteProjectPermanent(id),
     onSuccess: (_r, id) => { hooks.onDeleted?.(id); invalidateLists(); },
   });
-  return { update, archive, restore, remove };
+  // The archived list's delete: archived-only, backed-up purge (server refuses anything else).
+  // A refusal AFTER the preview (state changed, backup failed) is rendered inline by ArchivedProjectsPanel
+  // from `purge.error`, so it opts out of the global alert.
+  const purge = useMutation({
+    meta: { inlineError: true },
+    mutationFn: (v: { id: string; name: string }) => api.purgeProject(v.id, v.name),
+    onSuccess: (_r, v) => { hooks.onDeleted?.(v.id); invalidateLists(); },
+  });
+  return { update, archive, restore, remove, purge };
 }
 
 // The strong-confirm body for a PERMANENT project delete — names the irreversible cascade and asks the
@@ -72,8 +80,14 @@ export function useProjectLifecycleWrites(
 // frames. (`ProjectManage` below states the same cascade in its own INLINE reveal instead, because it
 // has a panel to render one in; an archived row does not.) Exported so a spec can assert the copy
 // rather than re-typing it.
-export function deletePrompt(name: string): string {
-  return `PERMANENTLY delete "${name}" and ALL of it — its agents, sessions, tasks, schedules, API keys, runs and saved transcripts. This CANNOT be undone.\n\nType the project name (${name}) to confirm:`;
+export function deletePrompt(name: string, items: ReadonlyArray<{ kind: string; count: number }> = [], backupDir?: string): string {
+  // A SUMMARY of the per-kind counts the server found (zero rows are dropped, so the list stays short; it is
+  // not an exhaustive inventory of every table). A DB backup is always taken first and kept, so the prompt
+  // says so and, when the server named it, where it will be written.
+  const counts = items.filter((i) => i.count > 0).map((i) => `${i.count} ${i.kind}`).join(", ");
+  const list = counts ? `\n\nIncluding: ${counts}.` : "";
+  const where = backupDir ? ` in ${backupDir}` : "";
+  return `PERMANENTLY delete "${name}" and ALL of it — its agents, sessions, tasks, schedules, API keys, runs and saved transcripts. This CANNOT be undone.${list}\n\nA database backup is taken first and kept${where}.\n\nType the project name (${name}) to confirm:`;
 }
 
 // Per-project management: rename + edit vaultPath (Save), soft-archive (reversible "delete"), and a
@@ -219,15 +233,19 @@ export function ProjectManage(
 // forbids, and the one that drifts is the one nobody is looking at.
 export function ArchivedProjects(
   { projects, onRestore, onDelete, collapsible = true }:
-  { projects: Project[]; onRestore: (id: string) => void; onDelete: (id: string) => void; collapsible?: boolean },
+  { projects: Project[]; onRestore: (id: string) => void; onDelete: (id: string, name: string) => void; collapsible?: boolean },
 ) {
   const [open, setOpen] = useState(!collapsible);
   // The gate: type the project's name back, exactly. A MISMATCH is told so, because silently doing
   // nothing is indistinguishable from a delete that failed; a dismissed prompt (null) is a cancel and
-  // deserves no message at all.
-  const confirmDelete = (p: Project) => {
-    const typed = window.prompt(deletePrompt(p.name));
-    if (typed === p.name) onDelete(p.id);
+  // deserves no message at all. The prompt first asks the server what the purge would remove, so the
+  // human confirms against real counts; a refusal (live fleet, not archived) surfaces instead of a prompt.
+  const confirmDelete = async (p: Project) => {
+    let preview: Awaited<ReturnType<typeof api.projectPurgePreview>>;
+    try { preview = await api.projectPurgePreview(p.id); }
+    catch (e) { window.alert(errorText(e)); return; }
+    const typed = window.prompt(deletePrompt(p.name, preview.items, preview.backupDir));
+    if (typed === p.name) onDelete(p.id, p.name);
     else if (typed !== null) window.alert("name did not match — not deleted");
   };
   // The empty line is only reachable in the un-collapsed frame: the classic rail mounts this component

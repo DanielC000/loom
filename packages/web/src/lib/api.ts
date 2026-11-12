@@ -605,6 +605,12 @@ export const api = {
   // the bare archive. The strong type-the-name confirm is the web's job; the server just runs the guards.
   deleteProjectPermanent: (id: string) =>
     delErr<{ ok: boolean; deleted: { project: string; sessions: number } }>(`/api/projects/${id}/permanent`),
+  // PURGE of an ARCHIVED project: the preview names what goes (per-kind counts), the purge takes a DB backup
+  // first and refuses a live / reserved / non-archived project server-side. HUMAN-only, no MCP twin.
+  projectPurgePreview: (id: string, signal?: AbortSignal) =>
+    getErr<{ project: { id: string; name: string }; items: Array<{ kind: string; count: number }>; backupDir: string }>(`/api/projects/${id}/purge-preview`, signal),
+  purgeProject: (id: string, confirmName: string) =>
+    postErr<{ ok: boolean; backup: string }>(`/api/projects/${id}/purge`, { confirmName }),
   // Permanently delete an agent (cascade its sessions). 400s while any of its sessions is live.
   deleteAgent: (id: string) => delErr<{ ok: boolean; deleted: { agent: string; sessions: number } }>(`/api/agents/${id}`),
   // --- Project config override (the human/REST path: full schema, gateCommand editable). The list

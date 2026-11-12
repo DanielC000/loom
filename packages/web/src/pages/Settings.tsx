@@ -498,7 +498,7 @@ function ProjectLifecyclePanel({ project }: { project: Project | null }) {
 // asserts a section's own label appears exactly ONCE inside its wrapper.
 function ArchivedProjectsPanel() {
   const archived = useQuery({ queryKey: ["archivedProjects"], queryFn: ({ signal }) => api.archivedProjects(signal) });
-  const { restore, remove } = useProjectLifecycleWrites();
+  const { restore, purge } = useProjectLifecycleWrites();
   return (
     <Panel>
       <p style={{ color: color.text3, fontSize: fs.sm, margin: "0 0 2px", lineHeight: 1.5 }}>
@@ -507,7 +507,10 @@ function ArchivedProjectsPanel() {
       </p>
       <ArchivedProjects collapsible={false} projects={archived.data ?? []}
         onRestore={(id) => restore.mutate(id)}
-        onDelete={(id) => remove.mutate(id)} />
+        onDelete={(id, name) => purge.mutate({ id, name })} />
+      {purge.isError && (
+        <span role="alert" style={{ fontSize: fs.sm, color: color.danger, lineHeight: 1.5 }}>{errorText(purge.error)}</span>
+      )}
     </Panel>
   );
 }
