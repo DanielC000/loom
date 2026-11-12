@@ -93,8 +93,15 @@ check("(1) positive control: the case list itself contains both a TRUE and a FAL
   // Positive control: the "real git.exe" scenario must actually resolve to the planted path on BOTH
   // sides — proving this isn't vacuously passing because both sides always return null.
   const resolvedBoth = assetsMod.resolveAbsoluteGitExePath(`${dirWithoutGit};${dirWithGit}`);
-  check("(2) positive control: the planted git.exe scenario actually resolves (not vacuously null on both sides)",
-    resolvedBoth !== null && path.resolve(resolvedBoth) === path.resolve(path.join(dirWithGit, "git.exe")));
+  if (assetsMod.isAbsoluteWindowsExePath(dirWithGit)) {
+    check("(2) positive control: the planted git.exe scenario actually resolves (not vacuously null on both sides)",
+      resolvedBoth !== null && path.resolve(resolvedBoth) === path.resolve(path.join(dirWithGit, "git.exe")));
+  } else {
+    // A POSIX temp dir (`/tmp/...`) is not a drive/UNC-absolute path, so this resolver correctly refuses it
+    // even with a git.exe planted there — the "resolves to the planted path" control only holds where the
+    // OS temp dir is itself Windows-absolute. Assert the POSIX-host truth instead, so this stays a real check.
+    check("(2) POSIX host: a planted git.exe in a non-Windows-absolute dir is refused, never resolved", resolvedBoth === null);
+  }
 }
 
 // ── 3. resolveWin32GitBinary() / resolveGitBinaryForSpawn() — no override; both modules read the SAME

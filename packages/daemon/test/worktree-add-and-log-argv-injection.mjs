@@ -130,7 +130,7 @@ try {
     check("(A) no worktree directory was created before the guard refused",
       !fs.existsSync(worktreePath));
     check("(A) no branch was created in the repo before the guard refused",
-      git(repo, "branch --list --format=%(refname:lstrip=2)").split("\n").map((s) => s.trim()).filter(Boolean)
+      git(repo, `branch --list "--format=%(refname:lstrip=2)"`).split("\n").map((s) => s.trim()).filter(Boolean)
         .every((b) => b !== branch));
 
     // POSITIVE CONTROL — the SAME taskId, guard restored to the real function: ordinary cut still works.
@@ -158,7 +158,7 @@ try {
   execSync(`git branch -D wali-rogue-tmp`, { cwd: argvRepo }); // the rogue ref survives via refs/loom-rogue/x
 
   check("(PRECONDITION) neither loom/legit nor loom/victim is a real branch (both read as \"gone\")",
-    git(argvRepo, "branch --list --format=%(refname:lstrip=2)").split("\n").map((s) => s.trim()).filter(Boolean)
+    git(argvRepo, `branch --list "--format=%(refname:lstrip=2)"`).split("\n").map((s) => s.trim()).filter(Boolean)
       .every((b) => b !== "loom/legit" && b !== "loom/victim"));
   check("(PRECONDITION) `git log --all` still finds the rogue commit (the orphan ref keeps it reachable)",
     git(argvRepo, `log --all -F --grep="Loom-Worker-Branch: loom/victim" --format=%H`) === shaRogue);
