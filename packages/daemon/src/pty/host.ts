@@ -11307,8 +11307,8 @@ export class PtyHost {
     // Card 20ff76de: a composer entry is NOT proof the modal was resolved (the composer is not the terminal):
     // while held it is REFUSED with the readable reason (shown by the composer UI), never queued silently and
     // never a release. Only raw terminal input (writeStdin) releases.
-    // Every enqueue on a blocked session engages the episode (hold + escalation + midSessionModalSince): a candidate
-    // is an episode as soon as anything arrives. Only a human composer entry is refused outright (the 409 keeps the draft).
+    // Every enqueue on a blocked session engages the episode (hold + escalation + midSessionModalSince), except while the
+    // candidate's dismissal is settling (see engageMidSessionModalHold). Only a human composer entry is refused outright (the 409 keeps the draft).
     const modalBlocked = this.modalBlockedEngaging(sessionId, live);
     if (source === "human" && modalBlocked) return { delivered: false, reason: "modal-held", message: MODAL_HOLD_REFUSAL, queued: false, deliveryState: "dropped" };
     // @decision 2400d0bc — resolved HERE (not above) so a fresh mint reads `live`'s own counter; an
@@ -12512,6 +12512,9 @@ export class PtyHost {
     if (!this.isPastBoot(live)) return false;
     const signature = live.modalCandidate?.signature ?? null; // the frozen snapshot only: a cleared one never re-detects off the stale tail
     if (signature === null) return false;
+    // @decision 20ff76de — a SETTLING dismissal (`dismissSince` set) is not an episode: engaging it deadlocks (only a hook/human
+    // releases, and the refused write is what would produce the hook). The ONE place this lives; the reset branch re-engages.
+    if (live.modalCandidate?.dismissSince != null) return false;
     const escalateTimer = setTimeout(() => this.escalateMidSessionModal(sessionId, live), MODAL_HOLD_ESCALATE_MS);
     live.midSessionModal = { signature, since: Date.now(), parkedGen, parkedAttempt, escalateTimer };
     if (parkedGen !== null) live.modalParkedChainGen = parkedGen;
@@ -12573,6 +12576,9 @@ export class PtyHost {
       } else if (c.dismissSince !== null) {
         if (c.settleTimer) clearTimeout(c.settleTimer);
         c.dismissSince = null; c.settleTimer = null;
+        // The modal came back while a delivery was waiting out the settle window: that is the episode's start (same condition as
+        // candidate creation below), so the PROMPT HELD row + escalation fire now rather than on some later write attempt.
+        if (live.pending.length > 0 || (live.busy && this.parkedGenNow(live) !== null)) this.modalBlockedEngaging(sessionId, live);
       }
       return; // a candidate that exists is never replaced by a new snapshot
     }
@@ -12581,8 +12587,8 @@ export class PtyHost {
     const signature = detectMidSessionModal(live.modalTail ?? "", { echoText: live.lastPrompt });
     if (signature === null) return;
     live.modalCandidate = { tail: live.modalTail ?? "", signature, after: "", frameReset: false, shown: true, recent: "", dismissSince: null, settleTimer: null };
-    // A candidate is an episode: with anything pending or an unconfirmed turn outstanding it engages at once
-    // (otherwise it engages on the first blocked attempt, see modalBlockedEngaging).
+    // A candidate blocks writes; the episode starts at engagement: with anything pending or an unconfirmed turn outstanding it
+    // engages at once (otherwise on the first blocked attempt, see modalBlockedEngaging; never while a dismissal is settling).
     if (this.modalWriteBlocked(live) && (live.pending.length > 0 || (live.busy && this.parkedGenNow(live) !== null))) this.modalBlockedEngaging(sessionId, live);
   }
 
@@ -12600,9 +12606,10 @@ export class PtyHost {
 
   /** @decision 20ff76de — the ONE predicate behind every surface (chokepoint, drain gate, composer 409, interrupt/
    *  flush/redirect refusals): true when a Loom write must not happen; engages the episode (hold + escalation +
-   *  `midSessionModalSince`) on the first blocked attempt of a candidate-only session. */
+   *  `midSessionModalSince`) on the first blocked attempt of a candidate-only session, unless its dismissal is settling. */
   private modalBlockedEngaging(sessionId: string, live: Live): boolean {
     if (!this.modalWriteBlocked(live)) return false;
+    // A blocked write on a candidate whose dismissal is settling is refused but is not an episode (see engageMidSessionModalHold).
     if (!live.midSessionModal) this.engageMidSessionModalHold(sessionId, live, this.parkedGenNow(live));
     return true;
   }
@@ -13014,8 +13021,12 @@ export class PtyHost {
     // @decision 20ff76de — THE chokepoint: while held on a mid-session modal, every LOOM-originated write
     // is dropped here. Human keystrokes (`human`) and stop's Ctrl-C / Ctrl-L repaint are the only exceptions.
     // A refused write on a candidate-only session (a modal Loom currently detects) ENGAGES the hold, parking
-    // the delivery that tried to write, so no path (drain/requeue/heal/retry/kickoff) can type into it.
-    if (!human && !MODAL_HOLD_EXEMPT_TAGS.has(tag) && this.modalWriteBlocked(live)) {
+    // the delivery that tried to write (unless the candidate's dismissal is settling: refused, not engaged), so no path
+    // (drain/requeue/heal/retry/kickoff) can type into it.
+    // @decision 20ff76de — once a generation's body paste was refused, EVERY later write of that generation is refused too, even if the
+    // settle already dropped the candidate: a torn body, a stray Enter into the empty composer or a duplicate otherwise. Cleared per new generation.
+    const bodyRefused = live.modalBodyRefusedGen != null && live.modalBodyRefusedGen === live.submitGeneration;
+    if (!human && !MODAL_HOLD_EXEMPT_TAGS.has(tag) && (this.modalWriteBlocked(live) || bodyRefused)) {
       if (tag === "bracket-start") live.modalBodyRefusedGen = live.submitGeneration;
       this.modalBlockedEngaging(sessionId, live);
       // eslint-disable-next-line no-console
@@ -13208,6 +13219,7 @@ export class PtyHost {
     // it's stale and bails instead of acting on this turn's `enterConfirmed`/`busy` state (CR-caught
     // overlap, card 9549e322 review — see the field doc on `Live.submitGeneration`).
     const gen = ++live.submitGeneration;
+    live.modalBodyRefusedGen = null; // a new generation starts clean (see ptyWrite's bodyRefused refusal)
     // @decision 2ff893f3 — the ONLY site that sets this; never touched by a retry or by
     // flushComposer's re-entry into fireEnterAndVerify — see the field's own doc.
     live.generationStartedAt = Date.now();
@@ -13605,6 +13617,18 @@ export class PtyHost {
       // Card 20ff76de: unconfirmed + a modal on the CURRENT tail → park this chain (no retry Enter, no
       // give-up requeue); the release path resumes it. Never answers the modal.
       if (this.engageMidSessionModalHold(sessionId, l, gen, attempt)) return;
+      // The body paste was refused at the chokepoint (a dismissed dialog still settling, so no hold engaged): nothing is in the
+      // composer, and an Enter into it could submit a human draft. Stop the chain and requeue the content as a no-write generation.
+      if (l.modalBodyRefusedGen === gen) {
+        l.modalBodyRefusedGen = null;
+        this.setBusy(sessionId, false, "modal-body-refused-chain-stop");
+        const hadOrigin = (l.giveUpOrigin?.length ?? 0) > 0; // a direct submit() (no drained origin) has nothing for the requeue to restore
+        this.requeueGiveUpOrigin(sessionId, gen, true);
+        if (!hadOrigin && l.lastPrompt != null) {
+          this.enqueueStdin(sessionId, l.lastPrompt, "system", undefined, l.lastPromptRoute ?? undefined, l.lastPromptKind, undefined, l.lastPromptOwnerText ?? undefined, l.lastPromptProactive, l.lastPromptSenderId, { ownerTextSeq: l.lastPromptOwnerTextSeq });
+        }
+        return;
+      }
       if (attempt < SUBMIT_MAX_ATTEMPTS) {
         // eslint-disable-next-line no-console
         console.log(`[submit] ${sessionId} Enter attempt ${attempt} NOT confirmed within ${SUBMIT_VERIFY_TIMEOUT_MS}ms — retrying`);
@@ -14760,7 +14784,8 @@ export class PtyHost {
     // lastPromptProactive so a rate-limited heartbeat/reminder/alert turn's replayed chat_reply is still
     // tagged as proactive.
     if (live.lastPrompt != null && !live.busy) {
-      const blocked = live.stopping || live.drainHeld;
+      // @decision 20ff76de — a replay straight into a pane showing a modal (or a boot dialog) would type into it: queue instead.
+      const blocked = live.stopping || live.drainHeld || this.isBlockedOnUnresolvedBootDialog(live);
       if (blocked) {
         // @decision 2400d0bc — pass the ORIGINAL `lastPromptOwnerTextSeq` through the tail object so the
         // held-and-later-drained replay re-attributes with its true (pre-race) rank, not a fresh one

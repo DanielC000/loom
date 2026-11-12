@@ -143,10 +143,80 @@ try {
     const f3 = spawnOne("sess-k3");
     f3.feed(REAL_FIRST_SCREEN_RAW);
     f3.feed(ERASE + COMPOSER_BOX);
+    check("(K3) setup: the dismissal evidence started a settle window", liveOf("sess-k3").modalCandidate?.dismissSince != null);
     host.submit("sess-k3", "delivery inside the settle window");
-    check("(K3) a delivery inside the settle window is refused at the chokepoint and ENGAGES the hold", f3.writes.length === 0 && liveOf("sess-k3").midSessionModal != null && midEvents("sess-k3").length === 1);
+    // Dismissal settling: the write is refused but does NOT engage (an engaged hold is released only by a hook/human, and the
+    // refused write is what would produce that hook — a just-dismissed boot dialog would deadlock).
+    check("(K3) a delivery inside the settle window is refused at the chokepoint and does NOT engage the hold yet", f3.writes.length === 0 && liveOf("sess-k3").midSessionModal == null && midEvents("sess-k3").length === 0);
     f3.feed(REAL_FIRST_SCREEN_RAW);
+    check("(K3) the modal re-appearing resets the settle evidence (dismissSince null)", liveOf("sess-k3").modalCandidate?.dismissSince === null);
+    host.submit("sess-k3", "next write attempt after the modal came back");
+    check("(K3) ...and the NEXT write attempt engages the full hold exactly as before, with zero writes", f3.writes.length === 0 && liveOf("sess-k3").midSessionModal != null && midEvents("sess-k3").length === 1);
     check("(K3) ZERO writes over the stable window (paired with a control)", await writesStable("(K3) no write after the frame re-appears", "sess-k3", 0));
+
+    // K4 — the deadlock this guard exists for: a dismissal that DOES settle. Zero writes inside the window, no hold, then the
+    // queued delivery drains on its own once the settle drops the candidate.
+    const f4 = spawnOne("sess-k4");
+    f4.feed(REAL_FIRST_SCREEN_RAW);
+    f4.feed(ERASE + COMPOSER_BOX);
+    host.enqueueStdin("sess-k4", "queued during the settle window", "system");
+    check("(K4) zero Loom writes and no hold between the dismiss signal and settle", f4.writes.length === 0 && liveOf("sess-k4").midSessionModal == null && liveOf("sess-k4").modalCandidate != null);
+    check("(K4) the settle drops the candidate and the queued delivery drains without any hook or human release",
+      await pollUntil(() => liveOf("sess-k4").modalCandidate == null && f4.writes.length > 0, { timeoutMs: SETTLE_MS * 10, intervalMs: 5 }) && liveOf("sess-k4").midSessionModal == null && midEvents("sess-k4").length === 0);
+
+    // K5 — the modal comes BACK while a delivery waits out the settle window: the hold must engage at that moment (event +
+    // escalation), not on some later write attempt, with zero writes throughout.
+    const f5 = spawnOne("sess-k5");
+    f5.feed(REAL_FIRST_SCREEN_RAW);
+    f5.feed(ERASE + COMPOSER_BOX);
+    host.enqueueStdin("sess-k5", "queued during the settle window", "system");
+    check("(K5) setup: queued inside the settle window, no hold, no write", liveOf("sess-k5").midSessionModal == null && f5.writes.length === 0 && liveOf("sess-k5").pending.length > 0);
+    f5.feed(ERASE + REAL_FIRST_SCREEN_RAW);
+    check("(K5) the modal re-appearing engages the hold itself (one mid-session event) with zero writes", liveOf("sess-k5").midSessionModal != null && midEvents("sess-k5").length === 1 && f5.writes.length === 0);
+    check("(K5) ZERO writes over the stable window (paired with a control)", await writesStable("(K5) no write after the modal re-appeared", "sess-k5", 0));
+
+    // K6 — a DIRECT submit inside the settle window: its body paste is refused, so the Enter-verify chain must stop and requeue
+    // the content instead of retrying an Enter into the just-dismissed composer (which could hold a human draft).
+    const f6 = spawnOne("sess-k6");
+    f6.feed(REAL_FIRST_SCREEN_RAW);
+    f6.feed(ERASE + COMPOSER_BOX);
+    host.submit("sess-k6", "direct submit inside the settle window");
+    check("(K6) setup: the body was refused inside the window (no hold, no write)", f6.writes.length === 0 && liveOf("sess-k6").midSessionModal == null);
+    check("(K6) the delivery eventually lands via the requeue once the candidate settles away",
+      await pollUntil(() => f6.writes.some((w) => w.includes("direct submit inside the settle window")), { timeoutMs: SETTLE_MS * 20, intervalMs: 5 }));
+    const firstWrite = f6.writes[0] ?? "";
+    check("(K6) the FIRST write after the settle is the body paste, never a stray Enter into the empty composer", firstWrite.includes("\x1b[200~") && (f6.writes.indexOf("\r") === -1 || f6.writes.indexOf("\r") > f6.writes.findIndex((w) => w.includes("direct submit inside the settle window"))));
+    check("(K6) no hold was ever engaged for it", liveOf("sess-k6").midSessionModal == null && midEvents("sess-k6").length === 0);
+
+    // K7 — resumeAfterRateLimit replays lastPrompt: onto a pane showing a modal it must QUEUE (enqueueStdin), never submit()
+    // directly (a direct submit starts a new generation and types into the modal).
+    const f7 = spawnOne("sess-k7");
+    f7.feed(ORDINARY);
+    host.submit("sess-k7", "the turn a rate limit killed");
+    const l7 = liveOf("sess-k7");
+    l7.busy = false; l7.rateLimited = true;
+    f7.feed(MODAL);
+    f7.feed(ERASE + COMPOSER_BOX); // the dialog was just dismissed: settling, so the queued replay is not parked by an engaged hold
+    const gen7 = l7.submitGeneration, writes7 = f7.writes.length;
+    host.resumeAfterRateLimit("sess-k7");
+    check("(K7) the replay on a modal pane is queued, not submitted: no new generation, no new write, one pending entry", l7.submitGeneration === gen7 && f7.writes.length === writes7 && l7.pending.length === 1);
+    check("(K7) the queued replay DRAINS once the candidate settles away (no strand)",
+      await pollUntil(() => f7.writes.slice(writes7).some((w) => w.includes("the turn a rate limit killed")), { timeoutMs: SETTLE_MS * 20, intervalMs: 5 }) && l7.pending.length === 0);
+
+    // K8 — the settle fires BETWEEN a refused bracket-start and the delayed attempt-1 Enter (the settle drops the candidate, so only
+    // the per-generation refusal can stop that Enter reaching an empty composer). Settle is invoked directly in the gap.
+    const f8 = spawnOne("sess-k8");
+    f8.feed(REAL_FIRST_SCREEN_RAW);
+    f8.feed(ERASE + COMPOSER_BOX);
+    host.submit("sess-k8", "body whose Enter follows the settle");
+    const l8 = liveOf("sess-k8");
+    check("(K8) setup: body refused (no write yet), candidate still settling", f8.writes.length === 0 && l8.modalCandidate?.dismissSince != null);
+    host.settleModalDismissal("sess-k8", l8, l8.modalCandidate); // the settle fires in the bracket-start -> Enter gap
+    check("(K8) the settle dropped the candidate", l8.modalCandidate == null);
+    await pollUntil(() => f8.writes.some((w) => w.includes("body whose Enter follows the settle")), { timeoutMs: SETTLE_MS * 20, intervalMs: 5 });
+    const bodyIdx8 = f8.writes.findIndex((w) => w.includes("body whose Enter follows the settle"));
+    check("(K8) NO write (stray Enter, torn body) of the refused generation precedes the requeued, whole delivery", bodyIdx8 !== -1 && f8.writes.slice(0, bodyIdx8).every((w) => w === "\x1b[200~") && f8.writes.slice(0, bodyIdx8).length <= 1);
+    check("(K8) the content is delivered exactly once", f8.writes.filter((w) => w.includes("body whose Enter follows the settle")).length === 1);
   }
 
   // ============ L) the chokepoint, per write tag ============

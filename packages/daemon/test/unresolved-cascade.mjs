@@ -69,6 +69,7 @@ const ptyStub = {
   getComposerDirtyLen() { return null; },
   getComposerDirtyLenBelieved() { return null; },
   getPendingConfirmMs() { return null; },
+  getMidSessionModalSince() { return null; },
   getLastMismatchNoticeSuppressed() { return null; },
   getLastPasteTripwireGiveUp() { return null; },
   // b5e121da added this as a SEPARATE field (lastMismatchPastedContentWrapReplay) read unconditionally

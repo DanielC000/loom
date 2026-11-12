@@ -68,6 +68,7 @@ class PtyStub {
   getLastOutputAt() { return null; }
   getComposerDirtyLenBelieved() { return null; }
   getPendingConfirmMs() { return null; }
+  getMidSessionModalSince() { return null; }
   getPendingQueueDepth() { return null; }
   getCurrentTurnBusyForMs() { return null; }
   getCodexBootStuck() { return null; }

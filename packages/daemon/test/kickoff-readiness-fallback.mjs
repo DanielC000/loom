@@ -72,6 +72,9 @@ process.env.LOOM_FIRST_TURN_STALE_MS = "100";
 // Card e29923e3, scenario (5) only: the MCP-dialog variant needs its deferred single-Esc write to fire
 // well inside this file's own short timeouts — mirrors claude-boot-dialog-stuck.mjs's own pin.
 process.env.LOOM_MCP_DISMISS_INITIAL_DELAY_MS = "20";
+// Card 20ff76de: the modal chokepoint keeps a dismissed boot dialog's frozen snapshot blocking writes for this long after the
+// composer box repaints (default 1500ms). Shrink it so the dialog-resolves scenarios below converge inside their waits.
+process.env.LOOM_MODAL_DISMISS_SETTLE_MS = "60";
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -89,7 +92,8 @@ const AUTO_FOOTER = "auto mode on (shift+tab to cycle)";
 const DIALOG_TEXT = "Allow external CLAUDE.md file imports?\n❯ No, disable external imports\n  Yes, allow external imports\nEnter to confirm · Esc to cancel";
 // Card e29923e3, scenario (5): the MCP-enable-prompt signature — same text claude-boot-dialog-stuck.mjs
 // uses — and the ESC key its single deferred dismiss write (dismissMcpPrompt) sends.
-const MCP_PROMPT_TEXT = "2 new MCP servers found\n❯ Enable\n  Reject all";
+const COMPOSER_BOX = `\n${"─".repeat(120)}\n❯ \n${"─".repeat(120)}\n  [Opus 5.5] 📁 loom | 🌿 main`;
+const MCP_PROMPT_TEXT ="2 new MCP servers found\n❯ Enable\n  Reject all";
 const ESC_KEY = "\x1b";
 
 const fakes = [];
@@ -276,6 +280,7 @@ try {
     check("(3a) ready, but NOTHING written for the kickoff while stuck on the dialog (scheduleKickoffGuarantee's direct submit is held)", noWriteC);
 
     host.deliverHook(C, { hook_event_name: "SessionStart", session_id: "eng-C" }); // the dialog resolves
+    fc.feed(COMPOSER_BOX); // card 20ff76de: a real dismissed dialog repaints the composer box — that is the dismissal evidence that lets the modal chokepoint's frozen snapshot settle away
     // Nothing auto-redrains this: scheduleKickoffGuarantee's own gated branch routed the kickoff through
     // enqueueStdin, whose own immediate-submit gate also required `!live.busy` — and `live.busy` has been
     // true since spawn (the optimistic startupPrompt set) with NO submit() ever run to clear it via the
@@ -318,6 +323,7 @@ try {
     check("(3a') the queued entry's text never landed either", !writtenOf(ff).includes(QUEUED_ENTRY));
 
     host.deliverHook(F, { hook_event_name: "SessionStart", session_id: "eng-F" }); // the dialog resolves
+    ff.feed(COMPOSER_BOX); // see (3b)'s same line: the dismissal's composer-box repaint
     host.reconcile(); // the production periodic backstop — live.busy was never set here, so one tick suffices
     await waitUntil(() => countIn(ff, PASTE_START) >= 1, { label: "(3b') the queued entry delivers once SessionStart resolves the dialog", timeoutMs: 3000 });
     check("(3b') exactly ONE delivery of the queued entry once SessionStart resolves the dialog", countIn(ff, PASTE_START) === 1);
@@ -391,6 +397,7 @@ try {
     check("(3d) ready, but NOTHING written for a MANAGER's kickoff while stuck on the dialog (card e2a3c613 extends the hold to manager/platform)", noWriteE);
 
     host.deliverHook(E, { hook_event_name: "SessionStart", session_id: "eng-E" }); // the dialog resolves
+    fe.feed(COMPOSER_BOX); // see (3b)'s same line: the dismissal's composer-box repaint
     await waitUntil(() => { host.reconcile(); return countIn(fe, PASTE_START) >= 1; },
       { label: "(3e) delivery proceeds once SessionStart resolves the dialog, for a manager too", timeoutMs: 3000 });
     check("(3e) exactly ONE kickoff delivery once SessionStart resolves the dialog (manager)", countIn(fe, PASTE_START) === 1);
@@ -427,6 +434,7 @@ try {
     check("(3f) ready, but the queued continuation note is NEVER drained while a RESUMED manager is stuck on the dialog", noWriteF2);
 
     host.deliverHook(F2, { hook_event_name: "SessionStart", session_id: "eng-F2-new" }); // the RESUMED engine's own fresh SessionStart
+    ff2.feed(COMPOSER_BOX); // see (3b)'s same line: the dismissal's composer-box repaint
     check("(3g) a fresh SessionStart on RESUME reaches isPastBoot the same way a fresh spawn's does (sessionStartObserved flips true, dialogStuckScan clears)",
       host.live.get(F2).sessionStartObserved === true && host.live.get(F2).dialogStuckScan === "");
     host.reconcile();
@@ -479,6 +487,7 @@ try {
     // `startupCycleInFlight` must hold the kickoff through it (isBlockedOnUnresolvedBootDialog alone
     // already reads false the instant this hook runs, so it can no longer explain any further hold).
     host.deliverHook(G, { hook_event_name: "SessionStart", session_id: "eng-G" });
+    fg.feed(COMPOSER_BOX); // see (3b)'s same line: the dismissal's composer-box repaint
 
     const noWriteDuringCycle = await assertNeverWithControl({
       label: "(4b) nothing written while the mode cycle itself is mid-flight (startupCycleInFlight holds it)",
@@ -560,6 +569,7 @@ try {
     check("(4'b) still nothing written — busy cleared, but still held by isBlockedOnUnresolvedBootDialog (dialog still on screen, SessionStart not yet observed)", countIn(fh, PASTE_START) === 0);
 
     host.deliverHook(H, { hook_event_name: "SessionStart", session_id: "eng-H" }); // the dialog resolves; the real mode cycle starts
+    fh.feed(COMPOSER_BOX); // see (3b)'s same line: the dismissal's composer-box repaint
     check("(4'c) nothing written the instant SessionStart fires — the cycle has not pressed its first Shift+Tab yet", countIn(fh, PASTE_START) === 0 && countShiftTabs(fh) === 0);
 
     fh.feed(ACCEPT_EDITS_FOOTER);
