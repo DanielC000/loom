@@ -370,9 +370,13 @@ function nestedRepo(parentDir, subdirName, tag) {
   // branch must divert (mustDivert), calling divertRaiseEntry to merge the pending S twin with R's fold.
   const rFile = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kr)}.json`);
   fs.writeFileSync(rFile, fs.readFileSync(sFile, "utf8"));
-  execSync(`icacls "${rFile}" /deny "${process.env.USERNAME}:(R)"`, { stdio: "ignore" });
+  // Make the file transiently unreadable (EACCES): an ACL deny on win32, mode 000 on POSIX (icacls does
+  // not exist there, and USERNAME is unset).
+  if (process.platform === "win32") execSync(`icacls "${rFile}" /deny "${process.env.USERNAME}:(R)"`, { stdio: "ignore" });
+  else fs.chmodSync(rFile, 0o000);
   enterMergeQuarantine(r, "r-branch", "critical1-divert r genuine raise");
-  execSync(`icacls "${rFile}" /remove:d "${process.env.USERNAME}"`, { stdio: "ignore" });
+  if (process.platform === "win32") execSync(`icacls "${rFile}" /remove:d "${process.env.USERNAME}"`, { stdio: "ignore" });
+  else fs.chmodSync(rFile, 0o644);
 
   check("(critical1-divert precondition) R is folded in as a contributor", !!activeMergeQuarantineFor(s)?.contributorRepoPaths?.some((c) => directPathIdentity(c) === directPathIdentity(r)));
   check("(critical1-divert precondition) R is genuinely blocked before any clear", assertRepoNotQuarantined(r).ok === false);

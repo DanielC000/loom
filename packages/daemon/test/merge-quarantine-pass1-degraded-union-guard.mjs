@@ -793,7 +793,11 @@ try {
 
     const x = path.join(os.tmpdir(), `loom-mqp1dug-x2-never-exists-${freshSfx()}`);
     fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
-    const xHash = createHash("sha256").update(x).digest("hex").slice(0, 24);
+    // X's file is deliberately filed under a name that is NOT the hash of X's own identity (a stale-key
+    // filing). Hashing the raw `x` only happened to be non-matching on win32, where the identity is
+    // lowercased; on POSIX raw === identity, so X's file was CORRECTLY named and the clear legitimately
+    // took the (different) relocate-and-disclose path this scenario does not test.
+    const xHash = createHash("sha256").update(`${x}#stale-filing`).digest("hex").slice(0, 24);
     fs.writeFileSync(path.join(MERGE_QUARANTINE_DIR, `${xHash}.json`), JSON.stringify({
       repoPath: x, branch: "x-branch", reason: "X's own manufactured resolvedKey collision with Y",
       enteredAt: Date.now() - 60_000, tokens: ["x-token"], resolvedKey: ky,

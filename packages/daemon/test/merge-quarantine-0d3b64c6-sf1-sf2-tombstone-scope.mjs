@@ -57,6 +57,15 @@ function tryVolumeGuidJunction(link, target) {
   }
 }
 
+/**
+ * Removes a directory LINK (junction on win32, symlink elsewhere) without touching its target. `rmdirSync`
+ * removes a junction on Windows but fails ENOTDIR on a POSIX symlink, where `unlinkSync` is the call.
+ */
+function removeDirLink(p) {
+  if (process.platform === "win32") fs.rmdirSync(p);
+  else fs.unlinkSync(p);
+}
+
 fs.mkdirSync(MERGE_QUARANTINE_DIR, { recursive: true });
 
 function freshRepo(tag) {
@@ -137,7 +146,7 @@ function freshRepo(tag) {
   const t1 = enterMergeQuarantine(y, "s2-b1", "s2-r1");
   clearMergeQuarantineByToken(y, t1); // t1 is the ONLY token -> fully LIFTS the entry (no leftover), tombstoned under realpath(y)'s identity while the junction is still live
   check("(s2 precondition) the sole-token clear fully lifted the entry (no leftover active record to collide with the placeholder below)", !activeMergeQuarantineFor(y));
-  fs.rmdirSync(y); // the junction goes away; the target directory is untouched
+  removeDirLink(y); // the junction goes away; the target directory is untouched
   const idAfter = directPathIdentity(y);
   const kAfter = canonicalRepoLockKey(y);
   note(`(s2) idBefore=${idBefore}`);
@@ -243,7 +252,7 @@ function freshRepo(tag) {
   clearMergeQuarantineByToken(p4, yTok4);
   check("(s4 precondition) Y fully lifted at t1", !activeMergeQuarantineFor(p4));
 
-  fs.rmdirSync(p4);
+  removeDirLink(p4);
   fs.symlinkSync(tx4, p4, "junction");
   note(`(s4) direct(P)@t2=${directPathIdentity(p4)} (t1 was ${ty4.toLowerCase()})`);
 
@@ -330,7 +339,7 @@ function driftRoute(route) {
   }
   check(`(s6 ${route} precondition) lifted at t1`, !activeMergeQuarantineFor(y6));
 
-  fs.rmdirSync(y6);
+  removeDirLink(y6);
   const kAfter6 = canonicalRepoLockKey(y6);
   const t2 = `s6-${route}-t2-${freshSfx()}`;
   const fin6 = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(kAfter6)}.json`);
@@ -401,7 +410,7 @@ for (const route of ["token", "identity", "recorded-path", "key", "active-id", "
   clearMergeQuarantineByToken(p7, yTok7);
   check("(s7 precondition) Y fully lifted at t1 (xTok7 tombstoned under direct(TY)/literal(P))", !activeMergeQuarantineFor(p7));
 
-  fs.rmdirSync(p7);
+  removeDirLink(p7);
   fs.symlinkSync(tx7, p7, "junction"); // P re-pointed at TX
   fs.rmdirSync(tx7); // TX itself removed -> P is now a DANGLING junction (lstat ok, realpath ENOENT)
   note(`(s7) direct(P) after dangling re-point: ${(() => { try { return directPathIdentity(p7); } catch (e) { return `<throws ${e.code}>`; } })()}`);
@@ -551,7 +560,7 @@ for (const route of ["token", "identity", "recorded-path", "key", "active-id", "
   clearMergeQuarantineByToken(leaf11, yTok11);
   check("(s11 precondition) Y fully lifted at t1 (xTok11 tombstoned under direct(TY/sub)/literal(P/sub), TY/sub stored)", !activeMergeQuarantineFor(leaf11));
 
-  fs.rmdirSync(p11);
+  removeDirLink(p11);
   fs.symlinkSync(tx11, p11, "junction"); // P re-pointed at TX (no "sub" under TX)
   fs.rmdirSync(tx11); // TX removed -> P is a DANGLING junction; P\sub fails to even lstat
   note(`(s11) lstat(P) isSymbolicLink after dangling re-point: ${fs.lstatSync(p11).isSymbolicLink()}; lstat(P\\sub) throws: ${(() => { try { fs.lstatSync(leaf11); return "no"; } catch (e) { return e.code; } })()}`);
