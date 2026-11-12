@@ -29,7 +29,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distGitDir = path.join(__dirname, "..", "dist", "git");
 const mergeQuarantineModuleUrl = pathToFileURL(path.join(distGitDir, "merge-quarantine.js")).href;
 const {
-  enterMergeQuarantine, activeMergeQuarantineFor, listActiveMergeQuarantines, clearMergeQuarantine,
+  enterMergeQuarantine: enterMergeQuarantineRaw, activeMergeQuarantineFor, listActiveMergeQuarantines, clearMergeQuarantine,
   clearMergeQuarantineReporting, clearMergeQuarantineByRecordedPath, assertRepoNotQuarantined,
   setActiveQuarantineTestOnly, reenterMergeQuarantinesAtBootTestOnly, pushPendingQuarantineTestOnly,
   findPendingIndexByIdentityTestOnly, clearMergeQuarantineByToken, MERGE_QUARANTINE_DIR, directPathIdentity,
@@ -40,6 +40,25 @@ const { canonicalRepoLockKey } = await import(repoLockModuleUrl);
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+// Two entries raised back to back can get the SAME `enteredAt` millisecond on a fast filesystem (Linux CI;
+// win32's slower fs hid it). `unionQuarantineEntries` picks the winner by `a.enteredAt <= b.enteredAt`, so a
+// tie flips which of R/sub becomes the union's identity and which is the folded-in contributor — every
+// "sub is a contributor of R" fixture below silently inverts. Make each fixture's `enteredAt` strictly
+// later than the previous one by spinning on the clock itself (no fixed sleep).
+let lastEnteredAtMs = 0;
+function freshMs() {
+  let t = Date.now();
+  while (t <= lastEnteredAtMs) t = Date.now();
+  lastEnteredAtMs = t;
+  return t;
+}
+function enterMergeQuarantine(...args) {
+  freshMs();
+  const token = enterMergeQuarantineRaw(...args);
+  lastEnteredAtMs = Math.max(lastEnteredAtMs, Date.now());
+  return token;
+}
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 function freshDir(tag) {
@@ -395,7 +414,7 @@ function rebootThenCollapseAndClearInChildProcess(R, sub, tag) {
   check("(twin precondition) sub's fresh key is R's own key", canonicalRepoLockKey(sub) === canonicalRepoLockKey(R));
 
   const k2 = "loom-mq3b1944b6-twin-synthetic-secondary-key";
-  const p = { repoPath: sub, branch: "twin-p", reason: "sub's own degraded twin (twin)", enteredAt: Date.now(), tokens: ["twin-token"], armedKeys: [k2] };
+  const p = { repoPath: sub, branch: "twin-p", reason: "sub's own degraded twin (twin)", enteredAt: freshMs(), tokens: ["twin-token"], armedKeys: [k2] };
   setActiveQuarantineTestOnly(k2, p);
   pushPendingQuarantineTestOnly(p, "pending-twin-test.json");
   check("(twin precondition) sub's ONLY active match is the degraded twin at k2", listActiveMergeQuarantines().filter((e) => e.repoPath === sub).length === 1);
@@ -437,7 +456,7 @@ function rebootThenCollapseAndClearInChildProcess(R, sub, tag) {
   const sub = path.join(R, "sub");
   fs.mkdirSync(sub, { recursive: true }); // no own .git — sub's fresh key is R's own key (foreign)
 
-  const p = { repoPath: sub, branch: "fs-p", reason: "sub's own PENDING-only record, sourceFile forced to collide with R's final basename (file-safety)", enteredAt: Date.now(), tokens: ["fs-token"] };
+  const p = { repoPath: sub, branch: "fs-p", reason: "sub's own PENDING-only record, sourceFile forced to collide with R's final basename (file-safety)", enteredAt: freshMs(), tokens: ["fs-token"] };
   pushPendingQuarantineTestOnly(p, rFinalBasename); // forced collision, via the test-only seam only
 
   activeMergeQuarantineFor(R); // trigger absorption explicitly for a clean pre-reduce snapshot
@@ -650,7 +669,7 @@ function rebootThenCollapseAndDoubleClearInChildProcess(R, sub, tag) {
   fs.mkdirSync(sub, { recursive: true }); // no own .git, ever — sub's fresh key IS R's own key (foreign)
 
   const k2 = "loom-mq3b1944b6-round4twin-synthetic-secondary-key";
-  const p = { repoPath: sub, branch: "r3twin-p", reason: "sub's own degraded twin (round4-twin)", enteredAt: Date.now(), tokens: ["r3twin-token"], armedKeys: [k2] };
+  const p = { repoPath: sub, branch: "r3twin-p", reason: "sub's own degraded twin (round4-twin)", enteredAt: freshMs(), tokens: ["r3twin-token"], armedKeys: [k2] };
   setActiveQuarantineTestOnly(k2, p);
   pushPendingQuarantineTestOnly(p, "pending-round4twin-test.json");
 
