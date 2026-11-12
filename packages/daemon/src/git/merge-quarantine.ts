@@ -1718,6 +1718,11 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
   const bIsPlaceholder = isPlaceholderEntryShape(b);
   const [older, newer] = aIsPlaceholder !== bIsPlaceholder
     ? (aIsPlaceholder ? [b, a] : [a, b])
+    // Same-millisecond tie (routine on fast Linux filesystems): the FIRST argument (`a`) wins, by design
+    // and in both argument orders — callers pass the already-standing/accumulated entry first (e.g.
+    // `armQuarantineKey`'s `prior`, the running `acc` of a reduce, a pending sub ahead of the fresh raiser)
+    // and `armQuarantineKey`'s loser-stamp depends on that (a symmetric content tie-break flips the winner
+    // to an unresolvable identity and drops the stamp). Keep `<=`; never use `<`.
     : (a.enteredAt <= b.enteredAt ? [a, b] : [b, a]);
   const orphanLatchFiles = older.orphanLatchFiles || newer.orphanLatchFiles
     ? [...new Set([...(older.orphanLatchFiles ?? []), ...(newer.orphanLatchFiles ?? [])])]
@@ -1776,6 +1781,11 @@ function unionQuarantineEntries(a: MergeQuarantineEntry, b: MergeQuarantineEntry
   );
   const resolvedKeys = resolvedKeysRaw.length > 0 ? resolvedKeysRaw : undefined;
   return { ...older, tokens: [...new Set([...older.tokens, ...newer.tokens])], orphanLatchFiles, armedKeys, contributorRepoPaths, reducedContributorRepoPaths, genuineContributorKeys, provenanceUnknown, provenanceTracked, resolvedKey, resolvedKeys };
+}
+
+/** Test seam: the pure union, so a same-millisecond tie can be forced in both argument orders. */
+export function unionQuarantineEntriesTestOnly(a: MergeQuarantineEntry, b: MergeQuarantineEntry): MergeQuarantineEntry {
+  return unionQuarantineEntries(a, b);
 }
 
 /**
