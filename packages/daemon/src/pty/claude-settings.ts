@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { PermissionPolicy } from "@loom/shared";
-import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT, DECISION_RECORDS_DEDUPE_DIR, COMMENT_ANCHOR_LINT_SCRIPT, PORT } from "../paths.js";
+import { LOOM_HOME, BASH_LOOM_HOME_GUARD_SCRIPT, SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT, DECISION_RECORDS_DEDUPE_DIR, COMMENT_ANCHOR_LINT_SCRIPT, PORT } from "../paths.js";
 import { WATCHED_TOOLS } from "./tool-attribution.js";
 import { canonicalizeExistingPath, comparisonKey } from "../projects/repos.js";
 
@@ -238,6 +238,9 @@ export function writeSessionSettings(
   // manager/platform/operator/a plain session. OMITTED/false ⇒ the settings object carries no such key,
   // byte-identical to before this param existed.
   disableSkillShellExecution?: boolean,
+  // Card da1a4a1b: same LOOM_DRIVEN_ROLES signal as above — wires the PreToolUse(Bash) guard that refuses a
+  // command naming the real LOOM_HOME's DB/backups/secret.key. OMITTED/false ⇒ byte-identical to before.
+  guardLoomHomeFromBash?: boolean,
 ): string {
   const hookCmd = {
     hooks: [{ type: "command", command: `node "${RELAY_SCRIPT}" ${sessionId} ${PORT} ${hookToken}` }],
@@ -264,6 +267,17 @@ export function writeSessionSettings(
     // doc: "does not support blocking").
     InstructionsLoaded: [hookCmd],
   };
+  if (guardLoomHomeFromBash) {
+    // Blocking (exit 2), unlike the observational PreToolUse group above — a separate group so the
+    // attribution matcher stays untouched.
+    //
+    // @decision da1a4a1b — string-based interim layer, not a sandbox; never extend the attribution group.
+    (hooks.PreToolUse as unknown[]).push({
+      matcher: "Bash",
+      // b64: so no path character (trailing backslash, `$`, `%`, quote) can break the shell quoting into a silent fail-open.
+      hooks: [{ type: "command", command: `node "${BASH_LOOM_HOME_GUARD_SCRIPT}" b64:${Buffer.from(path.resolve(LOOM_HOME), "utf8").toString("base64url")}` }],
+    });
+  }
   const postToolUse: unknown[] = [];
   // Card 5244adc2: wire the decision-records Read hook only when this project could possibly have
   // anything for it to find — `repoPath` omitted (pre-5244adc2 callers) keeps the old always-wired

@@ -6030,6 +6030,9 @@ export const ASSET_READING_TEST_REPO_PATHS = [
   // resolver the two shipped session hooks import) stays behaviorally identical to its dist/git/bounded.js
   // counterpart. Direct reader (route (1)): editing git-resolve.mjs changes what this test asserts.
   "packages/daemon/test/git-resolve-assets-parity.mjs",
+  // Card da1a4a1b: direct reader (route (1)) — spawns the real assets/bash-loom-home-guard.mjs and imports its
+  // matcher; editing that asset changes what this test observes.
+  "packages/daemon/test/bash-loom-home-guard.mjs",
   "packages/daemon/test/kickoff-real-spawn.mjs",
   "packages/daemon/test/manager-context-block.mjs",
   "packages/daemon/test/merge-orphaned-to-main.mjs",
@@ -6231,6 +6234,9 @@ export const ASSET_READING_TEST_REPO_PATHS = [
  */
 export const CHANGED_TS_TEXT_SCANNER_REPO_PATHS = [
   "packages/daemon/test/agent-runs-keys.mjs",
+  // Card da1a4a1b: its last assertion regex-scans real src/pty/host.ts TEXT for the writeSessionSettings
+  // guard-flag argument (whitespace-tolerant, but a comment spliced between the args would still flip it).
+  "packages/daemon/test/bash-loom-home-guard.mjs",
   "packages/daemon/test/event-trigger-mcp-absence.mjs",
   "packages/daemon/test/gateway-token.mjs",
   // Card 8ef582d0: raw-reads real src/mcp/*.ts + src/index.ts SOURCE (comment-stripped) for the

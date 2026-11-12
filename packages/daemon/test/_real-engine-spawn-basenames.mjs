@@ -37,6 +37,7 @@ export const REAL_ENGINE_SPAWN_BASENAMES = [
   // --only=/--only-file= either (discoverHermeticTests excludes them from the discovered set entirely).
   "disallow-harness-scheduling-tools-real-spawn",
   "loom-home-write-deny-real-spawn",
+  "bash-loom-home-guard-real-spawn",
   "claude-md-external-import-dialog-real-spawn",
   "instructions-loaded-real-spawn",
   "env-isolation-real-spawn",

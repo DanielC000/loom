@@ -9453,7 +9453,7 @@ export class PtyHost {
     // from the session's own cwd). See writeSessionSettings's own doc for the staleness window this implies.
     // Card 015fdb23: every LOOM_DRIVEN_ROLES role, never manager/platform/operator/a plain session — see
     // isLoomDrivenRole's own doc + the decision record for why `assistant` needs no special-casing here.
-    const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath, opts.cwd, opts.docLint, isLoomDrivenRole(opts.role));
+    const settingsPath = writeSessionSettings(opts.sessionId, { ...permission, mode: bootMode }, hookToken ?? "", opts.vaultPath, opts.cwd, opts.docLint, isLoomDrivenRole(opts.role), isLoomDrivenRole(opts.role));
     // Card ed0757d6 Code Review fix, WIDENED by card a50b8afd's own Code Review: everything from HERE
     // (not just from the eventual node-pty spawn call) can throw — in particular `writeSessionMcpConfig`
     // below (a Windows renameSync EPERM, a real documented footgun) — and a throw anywhere in this whole

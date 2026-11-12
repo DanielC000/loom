@@ -432,6 +432,10 @@ export const NPM_PINNED_LOCKS_DIR = path.join(__dirname, "..", "assets", "npm-pi
  * daemon restart needed for an edit to this script to take effect (see decision-records.mjs's own doc).
  */
 export const DECISION_RECORDS_SCRIPT = path.join(__dirname, "..", "assets", "decision-records.mjs");
+/** PreToolUse(Bash) guard script, wired for Loom-driven roles only.
+ *
+ *  @decision da1a4a1b — string-based interim layer, NOT a sandbox: never rely on it as the boundary. */
+export const BASH_LOOM_HOME_GUARD_SCRIPT = path.join(__dirname, "..", "assets", "bash-loom-home-guard.mjs");
 /**
  * Per-session dedupe state for decision-records.mjs — one small JSON file per session (`<sessionId>.json`,
  * a flat array of already-injected record ids) so a repeated `Read` over the same anchored region doesn't
