@@ -377,7 +377,10 @@ function PlatformAgentsSection({
   return (
     <section>
       <SectionLabel>{edition.copy.agentsLabel}</SectionLabel>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(360px, 1fr))", gap: 12 }}>
+      {/* `min(100%, …)` so the 360px floor can never exceed a phone-width column — the same guard the
+          terminal grid uses (lib/terminalLayout.ts). Unguarded, the cards overflowed their column at 390px. */}
+      <div data-testid="platform-agents-grid"
+        style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 360px), 1fr))", gap: 12 }}>
         <AgentControl edition={edition} agent={operator} role={operatorSpawnRole} card={edition.copy.operatorCard}
           session={operatorLive} liveCount={liveCountFor(operator?.id)} showLiveCount={!edition.operatorSingleton}
           gate={operatorSpawnDisabled} previewDisabled={previewOnly} roleUnknown={operatorRoleUnknown} />
