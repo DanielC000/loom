@@ -35,9 +35,9 @@ const CASES = [
   ["⏵⏵automodeon(shift+tabtocycle)·←foragents", "auto"],
   // ── bypassPermissions (token lock; not in 2.1.163's default cycle, but the label must classify) ──
   ["⏵⏵ bypass permissions on (shift+tab to cycle)", "bypassPermissions"],
-  // ── default/normal: cycle hint present, NO "<x> on" label (the +3 mode the probe saw unlabeled) ──
-  ["❯ Try \"how does <filepath> work?\" ──────────── (shift+tab to cycle) · ← for agents", "default"],
-  ["something (shift+tabocycle)", "default"], // tolerant of the dropped char
+  // ── default: the REAL footer is the labeled `manual mode on` (claude 2.1.322) — asserted from the raw fixture below ──
+  ["⏸manualmodeon·←foragents", "default"],
+  ["something (shift+tabocycle)", "default"], // legacy unlabeled-hint fallback (older engines), tolerant of the dropped char
   // ── unknown: no footer read yet (still booting / no cycle hint, no label) ──
   ["", "unknown"],
   ["✳ Claude Code v2.1.163  Opus 4.8 (1M context) · Claude Max  Initializing…", "unknown"],
@@ -56,6 +56,20 @@ for (const [input, expected] of CASES) {
 check("matchedToken is the label for a labeled mode", detectPermissionMode("⏵⏵accepteditson(shift+tabtocycle)").matchedToken === "accepteditson");
 check("matchedToken is null for default", detectPermissionMode("x (shift+tab to cycle)").matchedToken === null);
 check("matchedToken is null for unknown", detectPermissionMode("").matchedToken === null);
+// ── REAL raw bytes (claude 2.1.322, card 13ab48c5): the three footer repaints of a real acceptEdits→plan→auto→default climb ──
+const { detectPermissionModeSince } = await import("../dist/pty/host.js");
+const real = JSON.parse(fs.readFileSync(new URL("./fixtures/13ab48c5-real-default-footer-claude-2.1.322.json", import.meta.url), "utf8")).repaints;
+for (const mode of ["plan", "auto", "default"]) {
+  check(`real ${mode} repaint → detectPermissionMode = ${mode}`, detectPermissionMode(real[mode]).mode === mode);
+  check(`real ${mode} repaint → detectPermissionModeSince = ${mode}`, detectPermissionModeSince(real[mode]).mode === mode);
+}
+// The real default footer is LABELED and carries no cycle hint — the old unlabeled-hint shape was wrong.
+check("real default repaint has no '(shift+tab to cycle)' hint", !/shift\+tab/.test(real.default));
+// Post-press window semantics: a default press after an auto footer reads default (last wins); a dropped press still reads auto.
+check("auto repaint then default repaint → default (post-press window)", detectPermissionModeSince(real.auto + real.default).mode === "default");
+check("default repaint then auto repaint → auto", detectPermissionModeSince(real.default + real.auto).mode === "auto");
+// Fail toward unknown: a truncated default label is never read as default.
+check("truncated real default label → unknown", detectPermissionModeSince(real.default.replace("manual mode on", "manual mo")).mode === "unknown");
 // never throws on odd input
 check("does not throw on non-footer garbage", (() => { try { detectPermissionMode("\x00[junk￿"); return true; } catch { return false; } })());
 

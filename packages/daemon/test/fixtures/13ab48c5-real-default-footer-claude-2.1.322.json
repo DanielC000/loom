@@ -1,0 +1,9 @@
+{
+  "_about": "RAW pty bytes of the three steady footer repaints claude 2.1.322 emitted while a real spawn was Shift+Tab-climbed acceptEdits -> plan -> auto -> default (startupModeCycles 3), captured 2026-11-12 by a real-engine run (card 13ab48c5). Only the OSC-8 /rc link id+session URL was redacted; every footer byte is verbatim. NOTE the real default footer is LABELED `manual mode on` and carries no `(shift+tab to cycle)` hint.",
+  "claudeVersion": "2.1.322",
+  "repaints": {
+    "plan": "\u001b[?25l\u001b[10;104H\u001b[12X\u001b[38;2;78;186;101m\u001b]8;id=REDACTED;https://claude.ai/code/session_REDACTED?from=cli\u001b\\\u001b[12C/rc\u001b[38;2;72;150;140m\u001b]8;;\u001b\\\u001b[11;3H⏸ plan mode on \u001b[38;2;153;153;153m(shift+tab \u001b[1Co cycle) · ←\u001b[1Cfor\u001b[1Cagents\u001b[K\u001b[7;3H\u001b[?25h",
+    "auto": "\u001b[?25l\u001b[38;2;255;193;7m\u001b[11;3H⏵⏵ auto mode on \u001b[38;2;153;153;153m(shift+tab to cycle) · ← for agents\u001b[7;3H\u001b[?25h",
+    "default": "\u001b[?2026h\u001b[?2026l\u001b[?25l\u001b[38;2;153;153;153m\u001b[11;3H⏸ manual mode on · ← for agents\u001b[K\u001b[7;3H\u001b[?25h"
+  }
+}

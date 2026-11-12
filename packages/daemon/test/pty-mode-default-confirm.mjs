@@ -46,7 +46,9 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // ── (a) pure table ──
 const TAIL = "(shift+tab to cycle) · ← for agents";
-// SYNTHETIC default footer (not a raw capture): composer-line context, then the hint + tail, no label.
+// The REAL default footer (captured, card 13ab48c5): labeled `manual mode on`, no cycle hint.
+const REAL_DEFAULT_REPAINT = JSON.parse(fs.readFileSync(new URL("./fixtures/13ab48c5-real-default-footer-claude-2.1.322.json", import.meta.url), "utf8")).repaints.default;
+// SYNTHETIC unlabeled legacy shape (older engines only, NOT captured): composer-line context, then the hint + tail, no label.
 const DEFAULT_FULL = "❯ Try \"how does <filepath> work?\" ──────────── " + TAIL;
 const T = [
   ["complete default footer", "❯ Try \"x\"\n" + DEFAULT_FULL, "default"],
@@ -130,7 +132,7 @@ try {
   // (b) full climb confirmed default despite stale auto labels in the ring
   const fb = spawnDefault("dc-full");
   await climbToAuto(fb);
-  fb.feed(DEFAULT_FULL);
+  fb.feed(REAL_DEFAULT_REPAINT); // the REAL claude 2.1.322 default footer bytes (labeled `manual mode on`), not the synthetic shape
   check("(b) cycle logs `reached` (positively confirmed default)",
     await waitUntil(() => cycleLines.some((l) => l.includes("dc-full") && l.includes("reached") && l.includes("mode=default")), 2000));
   check("(b) no mismatch filed for a confirmed default climb", mismatchFor("dc-full").length === 0);

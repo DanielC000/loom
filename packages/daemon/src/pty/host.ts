@@ -1577,6 +1577,10 @@ const MODE_TOKENS: { mode: LandedMode; token: string }[] = [
   { mode: "acceptEdits", token: "accepteditson" },
   { mode: "auto", token: "automodeon" },
   { mode: "bypassPermissions", token: "bypasspermissionson" },
+  // The REAL `default` footer (captured, claude 2.1.322) is LABELED `⏸ manual mode on · ← for agents` — no
+  // `(shift+tab to cycle)` hint at all.
+  // @decision d0c1e76d — keep `default` a LABELED token; never revert to inferring it from a hint.
+  { mode: "default", token: "manualmodeon" },
 ];
 
 /**
@@ -1613,7 +1617,9 @@ export function detectPermissionMode(recentOutput: string): { mode: LandedMode; 
  * preceding text must exist in the window (a hint+tail alone is a partial repaint), and the ~24 collapsed chars
  * before the hint must hold NO label residue (a ⏵/⏸ glyph, "mode", "edits", "permission", or ending in "on" —
  * which also rejects corrupted forms like `automdeon`). Anything else — a hint fragment, the wrap-dropped
- * `tabocycle` variant, a spinner, unrelated output, nothing — is `unknown`. The shape is SYNTHETIC, not captured.
+ * `tabocycle` variant, a spinner, unrelated output, nothing — is `unknown`.
+ * The REAL `default` footer (claude 2.1.322, captured) is the LABELED `manualmodeon` token in MODE_TOKENS and needs
+ * none of this; the unlabeled hint+tail rule is retained ONLY for older engines and its shape is still SYNTHETIC.
  */
 const DEFAULT_FOOTER_RE = /\(shift\+tabtocycle\)·←foragents/g;
 const LABEL_RESIDUE_RE = /[⏵⏸]|mode|edits|permission|on$/;
