@@ -21,6 +21,7 @@ import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/pr
 import { validateAgentProjectConfigOverride, mergeConfigOverride, AGENT_CONFIG_TOP_LEVEL_KEYS, isHumanSetPermissionMode, humanSetPermissionModeRejectionMessage } from "./platform.js";
 import { ensureVaultRoot } from "../vault/writer.js";
 import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
+import { foreignRepoContext } from "../projects/foreign-repos.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
@@ -238,7 +239,7 @@ export class SetupMcpRouter {
           vault = vaultPath ?? "";
           // Card 5ba4412d (+ review follow-up): the SHARED containment check on the full {repoPath,
           // vaultPath, repos} triple — this surface never accepts `repos`, so it's always [] here.
-          const tripleCheck = await checkVaultRepoTripleContainment({ repoPath: repo, vaultPath: vault, repos: [] });
+          const tripleCheck = await checkVaultRepoTripleContainment({ repoPath: repo, vaultPath: vault, repos: [] }, { foreign: foreignRepoContext(db, undefined) });
           if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
           // Scaffold the vault root so it's writable immediately (a vault_write against an uncreated
           // root otherwise looks like a path escape) — only when a real vaultPath was actually given.
@@ -251,6 +252,10 @@ export class SetupMcpRouter {
           if (!isExistingDir(vaultPath)) return ok({ error: `vaultPath is not an existing directory: ${vaultPath}` });
           repo = vaultPath;
           vault = vaultPath;
+          // Card c24dfd28: this branch never ran the triple check; run it so the vault can't alias/nest in
+          // ANOTHER project's repo (the pairing is intentional by construction, so only the foreign half bites).
+          const tripleCheck = await checkVaultRepoTripleContainment({ repoPath: repo, vaultPath: vault, repos: [] }, { pairingIsIntentional: true, foreign: foreignRepoContext(db, undefined) });
+          if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
         }
         const projectId = randomUUID();
         // @decision 3a5c5d4a (round 6, S-2/S-3) — pin-conflict pre-flight before anything is written;
@@ -454,7 +459,7 @@ export class SetupMcpRouter {
         if (vaultPath !== undefined) {
           const tripleCheck = await checkVaultRepoTripleContainment(
             { repoPath: project.repoPath, vaultPath, repos: project.repos },
-            { pairingIsIntentional: project.vaultOnly },
+            { pairingIsIntentional: project.vaultOnly, foreign: foreignRepoContext(db, project.id) },
           );
           if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
         }

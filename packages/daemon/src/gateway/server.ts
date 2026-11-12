@@ -87,6 +87,7 @@ import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
 import { validateProjectCreateInput } from "../projects/create-input.js";
+import { foreignRepoContext } from "../projects/foreign-repos.js";
 import { gateCommandFieldWarnings } from "../orchestration/gate-runner.js";
 import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
@@ -5770,7 +5771,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (repoPath !== undefined || vaultPath !== undefined || repos !== undefined) {
       const tripleCheck = await checkVaultRepoTripleContainment(
         { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath, repos: repos ?? p.repos },
-        { pairingIsIntentional: p.vaultOnly },
+        { pairingIsIntentional: p.vaultOnly, foreign: foreignRepoContext(deps.db, p.id) },
       );
       if (!tripleCheck.ok) return reply.code(400).send({ error: tripleCheck.error });
     }

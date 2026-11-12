@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import type { RepoRegistryEntry } from "@loom/shared";
 import { expandTilde } from "../paths.js";
-import { isGitRepo } from "../git/reader.js";
+import { isGitRepo, gitToplevel } from "../git/reader.js";
+import { isSharedVaultRoot } from "../vault/shared-roots.js";
 import { comparisonKey } from "./repos.js";
 
 /** Result of {@link validateVaultPath}. `ok:false` names the offending value. */
@@ -234,6 +235,61 @@ export function checkVaultPathRepoContainment(candidate: string, repoPaths: stri
   return { ok: true };
 }
 
+/** Cross-project input to {@link checkVaultForeignRepoContainment}; built by `foreignRepoContext` (foreign-repos.ts). */
+export interface ForeignRepoContext {
+  /** Repo paths owned by OTHER projects (the project being written is already excluded). */
+  paths: readonly string[];
+  /** The human-only platform `sharedVaultRoots` list (card 7c1d6dbf). */
+  sharedVaultRoots: readonly string[];
+  /** The project being written's STORED vaultPath (absent on create). Re-asserting it unchanged (e.g. a rename whose Save always resends vaultPath) adds no new hazard, so the check is skipped. */
+  storedVaultPath?: string;
+}
+
+/**
+ * Card c24dfd28 — refuse a `vaultPath` that EQUALS or lies INSIDE another project's repo path, because the
+ * vault auto-committer would then commit into that project's repo. Skipped when the candidate canonically
+ * equals the project's own stored vaultPath. Exempt: a foreign repo whose GIT TOPLEVEL is a human-listed
+ * shared vault root AND whose own path is canonically at-or-under that toplevel — the same rule as
+ * `isRecognizedVaultRoot` (vault/versioner.ts): the toplevel must be listed via {@link isSharedVaultRoot},
+ * and a listed SUBFOLDER never vouches (only a toplevel can match). Never a second signal. A repo whose
+ * reported toplevel is not an ancestor of it (e.g. a planted core.worktree) is not exempt. Only equals/inside
+ * is checked (a vault that merely CONTAINS a foreign repo is not refused here).
+ *
+ * @decision c24dfd28 — never exempt by layout inference or on the raw repoPath; only a listed git toplevel
+ * that contains the foreign repoPath exempts. Archived projects' repos count as foreign; reserved homes' do not.
+ */
+export async function checkVaultForeignRepoContainment(candidate: string, foreign: ForeignRepoContext): Promise<VaultPathContainmentCheck> {
+  if (foreign.paths.length === 0) return { ok: true };
+  if (foreign.storedVaultPath && canonicallyPaired(candidate, foreign.storedVaultPath)) return { ok: true };
+  const candidateResult = canonicalizeForContainment(candidate);
+  if (!candidateResult.ok) return candidateResult;
+  const candidateKey = comparisonKey(candidateResult.value);
+  for (const repoPath of foreign.paths) {
+    const repoResult = canonicalizeForContainment(repoPath);
+    if (!repoResult.ok) continue; // a foreign row's own unsafe form can't be compared; it never blocks THIS write
+    const repoKey = comparisonKey(repoResult.value);
+    const equal = candidateKey === repoKey;
+    if (!equal && !isProperlyUnder(candidateKey, repoKey)) continue;
+    const top = await gitToplevel(repoPath);
+    if (top && isSharedVaultRoot(top, foreign.sharedVaultRoots)) {
+      const topResult = canonicalizeForContainment(top);
+      if (topResult.ok) {
+        const topKey = comparisonKey(topResult.value);
+        if (repoKey === topKey || isProperlyUnder(repoKey, topKey)) continue;
+      }
+    }
+    const named = top ?? repoPath;
+    const hint = "(if it is a shared notes vault, add its git root under Settings → Platform → Shared vault roots)";
+    return {
+      ok: false,
+      error: equal
+        ? `vaultPath equals another project's repo at ${named} — the vault auto-committer would commit into that project's repo ${hint}`
+        : `vaultPath is inside another project's repo at ${named} — the vault auto-committer would commit into that project's repo ${hint}`,
+    };
+  }
+  return { ok: true };
+}
+
 /**
  * The SHARED containment check on the FULL, EFFECTIVE post-write `{repoPath, vaultPath, repos}` triple —
  * the ONE call site every create AND update surface (REST, manager, setup, platform) runs, regardless of
@@ -273,7 +329,7 @@ export function checkVaultPathRepoContainment(candidate: string, repoPaths: stri
  */
 export async function checkVaultRepoTripleContainment(
   triple: { repoPath: string; vaultPath: string; repos: RepoRegistryEntry[] },
-  opts: { pairingIsIntentional?: boolean } = {},
+  opts: { pairingIsIntentional?: boolean; foreign?: ForeignRepoContext } = {},
 ): Promise<VaultPathContainmentCheck> {
   if (!triple.vaultPath) return { ok: true }; // no vault bound — nothing to protect
   const pairedCheck = pathsCanonicallyEqual(triple.vaultPath, triple.repoPath);
@@ -282,8 +338,12 @@ export async function checkVaultRepoTripleContainment(
   const repoPaths: string[] = [];
   if (!exemptRepoPath && await isGitRepo(triple.repoPath)) repoPaths.push(triple.repoPath);
   for (const entry of triple.repos) repoPaths.push(entry.path);
-  if (repoPaths.length === 0) return { ok: true };
-  return checkVaultPathRepoContainment(triple.vaultPath, repoPaths);
+  // The project's OWN repos are judged first (their more specific message wins), then other projects'.
+  if (repoPaths.length > 0) {
+    const own = checkVaultPathRepoContainment(triple.vaultPath, repoPaths);
+    if (!own.ok) return own;
+  }
+  return opts.foreign ? checkVaultForeignRepoContainment(triple.vaultPath, opts.foreign) : { ok: true };
 }
 
 /** Result of {@link checkVaultPathUpdate}. `value: undefined` means "no change requested" (the caller's

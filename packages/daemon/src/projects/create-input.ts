@@ -4,6 +4,7 @@ import { validateReferenceRepos } from "./reference-repos.js";
 import { validateDenyGlobs } from "./deny-globs.js";
 import { validateRepoRegistry } from "./repos.js";
 import { checkVaultRepoTripleContainment } from "./vault-path.js";
+import { foreignRepoContext } from "./foreign-repos.js";
 import { validateProjectConfigOverride } from "../mcp/platform.js";
 import { resolveWrittenCardPolicyIds } from "../orchestration/card-policy.js";
 
@@ -83,7 +84,7 @@ export async function validateProjectCreateInput(
   if (!idsResolved.ok) return { ok: false, status: 400, error: `invalid config: ${idsResolved.error}` };
   const tripleCheck = await checkVaultRepoTripleContainment(
     { repoPath: ctx.repoPath, vaultPath: ctx.vaultPath, repos },
-    { pairingIsIntentional: ctx.pairingIsIntentional },
+    { pairingIsIntentional: ctx.pairingIsIntentional, foreign: foreignRepoContext(db, ctx.projectId) },
   );
   if (!tripleCheck.ok) return { ok: false, status: 400, error: tripleCheck.error };
   const pinCheck = db.checkCommondirPinConflicts(ctx.projectId, [

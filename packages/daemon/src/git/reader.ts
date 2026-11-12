@@ -50,6 +50,21 @@ export async function isGitRepo(repoPath: string, deps: ReaderGitDeps = {}): Pro
   }
 }
 
+/**
+ * The git TOPLEVEL governing `repoPath` (`git rev-parse --show-toplevel`), or `null` when it is not inside a
+ * repo / the path is missing / any git error. Read-only, bounded, never throws.
+ */
+export async function gitToplevel(repoPath: string, deps: ReaderGitDeps = {}): Promise<string | null> {
+  try {
+    if (!repoPath || !fs.existsSync(repoPath) || !fs.statSync(repoPath).isDirectory()) return null;
+    const { git, timeoutMs } = boundedReaderGit(repoPath, deps);
+    const root = (await withTimeout(git.revparse(["--show-toplevel"]), timeoutMs, "git rev-parse --show-toplevel")).trim();
+    return root || null;
+  } catch {
+    return null;
+  }
+}
+
 /** The result of asserting a commit identity at project bind (see {@link checkCommitIdentity}). */
 export interface CommitIdentityResult {
   /** Both user.name AND user.email resolve (from any scope: local/global/system) — a commit won't fail. */

@@ -4189,6 +4189,23 @@ export class Db {
     }
     return [...paths];
   }
+  /**
+   * Every registered code-repo path (primary `repoPath` + `repos[]`) owned by a project OTHER than
+   * `excludeProjectId`, across live AND archived projects (an archived project's repo is still foreign
+   * territory — consistent with the shared-vault seed's disqualifier). RESERVED/system homes are excluded:
+   * their dirs are Loom-operational (inside LOOM_HOME), guarded separately. Feeds the cross-project
+   * vaultPath containment check (`projects/foreign-repos.ts`). Deduped.
+   */
+  listForeignRepoPaths(excludeProjectId?: string): string[] {
+    const paths = new Set<string>();
+    for (const project of [...this.listAllProjects(), ...this.listArchivedProjects()]) {
+      if (project.reserved || project.id === excludeProjectId) continue;
+      for (const repoPath of [project.repoPath, ...project.repos.map((r) => r.path)]) {
+        if (repoPath) paths.add(repoPath);
+      }
+    }
+    return [...paths];
+  }
   /** True iff ANY reserved/system project exists (name-agnostic). Prefer the NAME-SCOPED checks below as
    * the per-home idempotency gate now that more than one reserved home can coexist (see below). */
   hasReservedProject(): boolean {

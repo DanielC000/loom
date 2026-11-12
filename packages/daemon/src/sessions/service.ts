@@ -45,6 +45,7 @@ import { GitWriter, unsafeBranchNameReason } from "../git/writer.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { comparisonKey } from "../projects/repos.js";
 import { checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
+import { foreignRepoContext } from "../projects/foreign-repos.js";
 import { isLoomHomeOrAncestor, OPERATIONAL_HOME_GIT_WRITE_ERROR } from "../vault/versioner.js";
 import { sessionScratchDir, isCodescapeEnabled, CODESCAPE_PROMPT_BLOCK_ASSET, readCodescapePromptBlockAsset, isLogMessageContentEnabled, isLoomDev, WORKTREES_DIR, projectWorkDirEnv, projectWorkDir } from "../paths.js";
 import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
@@ -19734,7 +19735,7 @@ export class SessionService {
     if (vaultPath !== undefined) {
       const tripleCheck = await checkVaultRepoTripleContainment(
         { repoPath: project.repoPath, vaultPath, repos: project.repos },
-        { pairingIsIntentional: project.vaultOnly },
+        { pairingIsIntentional: project.vaultOnly, foreign: foreignRepoContext(this.db, project.id) },
       );
       if (!tripleCheck.ok) throw new Error(tripleCheck.error);
     }

@@ -164,7 +164,9 @@ try {
   const boundForgejo = await call("project_create", { name: "ForgejoProj", repoPath: repoForgejo });
   check("(2e) project_create: surfaces the host-rule warning (noreply on self-hosted)", typeof boundForgejo.identityWarning === "string" && /self-hosted|unroutable/i.test(boundForgejo.identityWarning));
   // A VAULT-ONLY bind (no repoPath) takes no commits → never an identityWarning, even if the folder is a repo.
-  const vaultOnly = await call("project_create", { name: "VaultOnly", vaultPath: repoCleanLocal });
+  // A notes folder of its OWN: pointing it at repoCleanLocal would alias another project's repo (c24dfd28).
+  const vaultOnlyDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-bindid-vaultonly-"));
+  const vaultOnly = await call("project_create", { name: "VaultOnly", vaultPath: vaultOnlyDir });
   check("(2e) project_create(vault-only): no identityWarning (notes folder takes no commits)", !!vaultOnly.id && vaultOnly.identityWarning === undefined);
 
   await client.close();

@@ -26,6 +26,7 @@ import { isForbiddenAllowedHost, canonicalHost, canonicalTrustedProxyOrigin } fr
 import { checkRepoRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
 import { validateVaultPath, checkVaultPathUpdate, checkVaultRepoTripleContainment, checkVaultOnlyOnUpdate } from "../projects/vault-path.js";
+import { foreignRepoContext } from "../projects/foreign-repos.js";
 import { validateRepoRegistry } from "../projects/repos.js";
 import { resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { GitWriter } from "../git/writer.js";
@@ -1449,7 +1450,7 @@ export class PlatformMcpRouter {
         }
         // Card 5ba4412d (+ review follow-up): the SHARED containment check on the full {repoPath,
         // vaultPath, repos} triple — this surface never accepts `repos`, so it's always [] here.
-        const tripleCheck = await checkVaultRepoTripleContainment({ repoPath, vaultPath: vault, repos: [] });
+        const tripleCheck = await checkVaultRepoTripleContainment({ repoPath, vaultPath: vault, repos: [] }, { foreign: foreignRepoContext(db, undefined) });
         if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
         // Scaffold the vault root so it's writable immediately (a vault_write against an uncreated root
         // otherwise looks like a path escape) — only when a real vaultPath was actually given (mirrors
@@ -2941,7 +2942,7 @@ export class PlatformMcpRouter {
         if (repoPath !== undefined || vaultPath !== undefined) {
           const tripleCheck = await checkVaultRepoTripleContainment(
             { repoPath: repoPath ?? project.repoPath, vaultPath: vaultPath ?? project.vaultPath, repos: repos ?? project.repos },
-            { pairingIsIntentional: project.vaultOnly },
+            { pairingIsIntentional: project.vaultOnly, foreign: foreignRepoContext(db, project.id) },
           );
           if (!tripleCheck.ok) return ok({ error: tripleCheck.error });
         }
