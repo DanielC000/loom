@@ -6941,6 +6941,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return deps.sessions.startNew(id, { deployStaleness: await deps.sessions.preReadDeployStalenessForAgent(id) });
     } catch (e) {
       if (e instanceof SecondLiveManagerError) return reply.code(409).send({ error: e.message, holderSessionId: e.holderSessionId });
+      // An unknown agent id is a 404, never a generic 500 (every start* method throws this same message).
+      if (e instanceof Error && e.message === "agent not found") return reply.code(404).send({ error: e.message });
       throw e;
     }
   });
@@ -6961,6 +6963,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card af165ec7: resume() now refuses a second live-or-starting manager too — same honest-4xx shape
       // as the /api/agents/:id/sessions route's own SecondLiveManagerError mapping above.
       if (e instanceof SecondLiveManagerError) return reply.code(409).send({ error: e.message, holderSessionId: e.holderSessionId });
+      // A missing session is a 404; a session that cannot be resumed (no engine id / transcript gone /
+      // worktree gone) is a 409 carrying resume()'s own reason — never a generic 500.
+      if (e instanceof Error) {
+        if (e.message === "session not found") return reply.code(404).send({ error: e.message });
+        if (e.message === "session has no engine id to resume" || e.message.startsWith("session is no longer resumable")) {
+          return reply.code(409).send({ error: e.message });
+        }
+      }
       throw e;
     }
   });
@@ -6977,6 +6987,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // f437d4e9 Decision 6 added a third one (PLATFORM_SESSION_FORK_BARRED_ERROR, non-dev install).
       if (e instanceof Error && (e.message === MANAGER_SESSION_BARRED_ERROR || e.message === SETUP_SESSION_FORK_BARRED_ERROR || e.message === PLATFORM_SESSION_FORK_BARRED_ERROR)) {
         return reply.code(409).send({ error: e.message });
+      }
+      // Same twin-path treatment as /resume: unknown source → 404; a source with nothing to fork from → 409.
+      if (e instanceof Error) {
+        if (e.message === "session not found") return reply.code(404).send({ error: e.message });
+        if (
+          e.message.startsWith("session has no engine context to fork") ||
+          e.message.startsWith("cannot fork a busy session") ||
+          e.message.startsWith("source conversation transcript is missing") ||
+          e.message.startsWith("source session's worktree/cwd is missing")
+        ) {
+          return reply.code(409).send({ error: e.message });
+        }
       }
       throw e;
     }
