@@ -925,7 +925,7 @@ function checkGate(label, result, expected) {
   const leaf = path.join(p, "sub");
   const realCaseDiffering = synth("check-ii-case-diff", "camelcasedir"); // SAME ancestor, different case -- a case-preserving filesystem's own realpath spelling
   const r = classifyLiteralGateFromFs(leaf, mockOps({ enoentPaths: new Set([leaf]), realpathRedirects: new Map([[p, realCaseDiffering]]) }));
-  checkGate("round 8: a case-differing realpath spelling of the SAME ancestor normalizes to a match (never a false redirect) -- pins the lowercase step (M10)", r, "open");
+  checkGate("round 8: a case-differing realpath spelling of the SAME ancestor normalizes to a match (never a false redirect) -- pins the lowercase step (M10)", r, process.platform === "win32" ? "open" : "direct-only"); // the normalizer lowercases on win32 only; elsewhere paths are case-sensitive, so a differing case IS a real redirect
 }
 {
   const p = "\\\\?\\Volume{11111111-1111-1111-1111-111111111111}\\p"; // a genuine vol-GUID-spelled ancestor
