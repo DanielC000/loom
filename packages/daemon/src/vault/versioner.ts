@@ -11,6 +11,7 @@ import { validateVaultPath, isUnsafeToCanonicalize, canonicalizeForContainment }
 import { comparisonKey } from "../projects/repos.js";
 import { withTimeout, boundedSimpleGit, localReadGitEnv, isNotAGitRepositoryError, stripRepoLocationEnv, killableCanonicalRaw, treeDeathUnconfirmed, resolveGitBinaryForSpawn, FALLBACK_GIT_IDENTITY, resolveGitIdentityFallbackArgs, buildGitIdentityFallbackEnv, isGitIdentityUnresolvedError } from "../git/bounded.js";
 import { assertRepoNotQuarantined, enterMergeQuarantine, clearMergeQuarantineByToken, unconfirmedKillReason } from "../git/merge-quarantine.js";
+import { isSharedVaultRoot, canonicalSharedRootKey } from "./shared-roots.js";
 import { canonicalRepoLockKey, withCanonicalIndexLock, RepoQuarantinedError, CanonicalIndexLockPresentError, resolveGitToplevelSync, resolveGitMainCheckoutRootSync } from "../git/repo-lock.js";
 
 /**
@@ -674,6 +675,9 @@ export interface CodeRepoGuardEntry {
  */
 export interface CodeRepoGuard {
   snapshot: () => CodeRepoGuardEntry[];
+  /** The human-only `PlatformConfig.sharedVaultRoots`, read LIVE per check (never cached). Absent ⇒ `[]`
+   *  ⇒ no repo is ever exempt (fail closed). */
+  sharedVaultRoots?: () => string[];
   /** File the durable audit event for a refusal — the caller supplies only the detail payload; this
    *  callback owns the real `db.appendEvent({..., kind:"vault_autocommit_refused_code_repo", ...})` call
    *  (versioner.ts has no `Db` import of its own outside `startVaultVersioners`'s parameter type). */
@@ -755,62 +759,17 @@ function collidesByToplevelOrCommonDir(
 }
 
 /**
- * @decision a09b81a0 — round 3, owner ruling on request `8d6fea89` (option A): a repo that is itself some
- * project's vault root is exempt from the collision refusal below, EVEN IF it is also registered as some
- * OTHER project's own `repoPath`.
+ * @decision 7c1d6dbf — exempt ONLY when the governing root EQUALS an entry of the human-only
+ * `sharedVaultRoots` list ({@link isSharedVaultRoot}); never layout inference (that was gameable).
  *
- * ⚠️ **KNOWN HOLE, NOT YET FIXED — a THIRD party can grant this exemption for a code repo it has nothing
- * to do with.** Given `P = {repoPath: C, vaultPath: C/docs}` (the ORIGINAL bug shape) and an UNRELATED
- * `Q = {repoPath: D, vaultPath: C/q-notes}` (Q's own code lives at `D`, entirely outside `C`), `Q` vouches
- * for `C` — its own code is not at risk there — and `commitVault(C)` then auto-commits `C`'s real source.
- * Verified directly with real git: `committed:true`, `C`'s commit count increments. The predicate below
- * CANNOT tell this apart from Parallax's shape; geometry alone is not a sufficient discriminator for "is
- * this really just notes." Two further degenerate variants of the SAME hole, also verified: a voucher
- * entry with `repoPath: ""` vouches for ANY `key` unconditionally (its `ownCandidates` list is empty after
- * `.filter(Boolean)`, so `.some(...)` is vacuously `false`); a voucher whose `repoPath` is an ANCESTOR of
- * `key` (rather than at-or-under it) also vouches, since `isCanonicallyAtOrUnder` only checks one
- * direction. **The owner is choosing the real discriminator — an explicit per-project flag or a platform
- * list of recognized vault roots — do not extend or "harden" this geometric predicate in the meantime.**
- * See `vault-commit-code-repo-guard.mjs`'s dedicated tests (14)/(14b)/(14c) for this hole — now green
- * tripwires pinning today's known-wrong behavior (request `f7cc5951` pending, tracked by card `7c1d6dbf`),
- * not deliberately-red assertions.
- *
- * Is `key` (an already-canonicalized {@link canonicalRepoLockKey} result for an already-RESOLVED governing
- * repo root) a NOTES repo — "some project's vault root" — rather than a code repo? The shared Obsidian
- * vault is the motivating case: Parallax/Shahnameh/Federalist/Menu Visualizer all bind `repoPath` to it,
- * while ~20 unrelated code projects' `vaultPath` lives under it as a subfolder.
- *
- * **The predicate:** `key` is a recognized vault root iff some registered entry's `vaultPath` is
- * canonically at-or-under `key` AND that SAME entry's own code candidates (`repoPath` + every `repos[]`
- * entry) are NOT themselves at-or-under `key`. The second half excludes SELF-vouching only — it does NOT
- * close the third-party hole above, which is a DIFFERENT entry vouching for a key it has no stake in.
- *
- * **What self-exclusion DOES close.** `vaultPath` nested inside `repoPath` is EXACTLY the shape of the
- * original bug — geometrically indistinguishable, from a single entry's own two fields, from Parallax's
- * shape. Excluding an entry from vouching for a `key` its OWN code is also at risk under is what keeps
- * that SAME entry from exempting itself, and what keeps the monorepo-subdir shape (round 2, Finding 1:
- * `repoPath=mono/pkg`, `vaultPath=mono/notes`, siblings under `mono`) from self-exempting — that project's
- * OWN `repoPath` is at-or-under `mono`, so it can never vouch for `mono` either, and the collision below
- * still fires. It is a genuinely useful, correct narrowing — it just is not, on its own, sufficient; the
- * third-party hole above is a SEPARATE gap self-exclusion was never meant to address.
- *
- * Cheap and git-free, like {@link isCanonicallyAtOrUnder} itself — pure path comparison over the SAME
- * snapshot `checkCodeRepoCollision` already holds, never a per-candidate git-toplevel probe.
+ * A repo that is some project's registered `repoPath` is exempt too if listed. Empty or unwired list ⇒ no exemption (fail closed). The list is read LIVE via the provider on every
+ * check, never cached, so a Settings edit applies to the very next commit.
  */
-function isRecognizedVaultRoot(key: string, keyCommon: string | null, entries: CodeRepoGuardEntry[]): boolean {
-  for (const entry of entries) {
-    if (!entry.vaultPath) continue;
-    const vaultKey = canonicalRepoLockKey(entry.vaultPath);
-    if (!isCanonicallyAtOrUnder(vaultKey, key)) continue; // this entry's vault isn't even located at/under `key`
-    const ownCandidates = [entry.repoPath, ...entry.repos.map((r) => r.path)].filter(Boolean);
-    // @decision cc684616 — ALSO at risk when a candidate is a different WORKTREE of the SAME physical
-    // repo `commitPath` resolves to (common-dir match), not just toplevel-at-or-under — see
-    // collidesByToplevelOrCommonDir. `keyCommon` is the caller's already-hoisted commitPath common-dir key.
-    const ownCodeAtRisk = ownCandidates.some((c) => collidesByToplevelOrCommonDir(c, canonicalRepoLockKey(c), key, keyCommon));
-    if (ownCodeAtRisk) continue; // this project's OWN code (if any) is ALSO under `key` — can't vouch for it
-    return true; // a genuinely separate project's real vault lives at/under `key` — safe to treat as notes
-  }
-  return false;
+export function isRecognizedVaultRoot(commitPath: string): boolean {
+  // Only a commitPath that IS its own walked git toplevel can match: on a rev-parse failure the fallback
+  // commitPath is the vault SUBFOLDER, and a listed subfolder must never exempt the repo `git add -A` stages.
+  if (canonicalSharedRootKey(commitPath) !== canonicalSharedRootKey(resolveGitToplevelSync(commitPath))) return false;
+  return isSharedVaultRoot(commitPath, codeRepoGuard?.sharedVaultRoots?.());
 }
 
 /**
@@ -841,7 +800,7 @@ function checkCodeRepoCollision(commitPath: string): CodeRepoCollision | null {
   // it ONCE, never per-candidate — see the decision record for the UNC/SMB-share cost this avoids.
   const keyCommon = canonicalCommonDirKey(commitPath);
   const entries = codeRepoGuard.snapshot();
-  if (isRecognizedVaultRoot(key, keyCommon, entries)) return null;
+  if (isRecognizedVaultRoot(commitPath)) return null;
   for (const entry of entries) {
     const candidates = [entry.repoPath, ...entry.repos.map((r) => r.path)];
     for (const candidate of candidates) {

@@ -1355,6 +1355,15 @@ export interface PlatformConfig {
    */
   mutedBrowserNotifications: BrowserNotificationKind[];
   /**
+   * Absolute paths of git repos that are PURE NOTES vaults shared by several projects (e.g. an Obsidian
+   * vault). The vault auto-committer exempts a repo from its code-repo-collision refusal ONLY when its
+   * governing root EQUALS (canonically — case/junction/trailing slash) an entry here; a listed root
+   * vouches for itself, never for a subfolder or a parent. Default `[]` = no exemption (fail closed).
+   * DAEMON-GLOBAL + HUMAN-only (a trust boundary like gateCommand: listing a code repo here makes Loom
+   * auto-commit its files). Never an agent write path; agents may read it via `platform_config_get`.
+   */
+  sharedVaultRoots: string[];
+  /**
    * Retention window, in whole days, past a request's TERMINAL-state transition before its stored
    * `question_ask` attachments (card 432765ab) are garbage-collected (`mcp/attachment-gc.ts`). Minimum 1;
    * default 30. DAEMON-GLOBAL (no per-project layer) + HUMAN-only, mirroring the rest of `PlatformConfig`
@@ -1764,6 +1773,8 @@ export interface PlatformConfigOverride {
    *  is not a `DEEP_MERGE_GROUPS` member in the PATCH handler) — the Settings panel always emits the full
    *  muted set, so there is no partial-list shape to merge. */
   mutedBrowserNotifications?: BrowserNotificationKind[];
+  /** See PlatformConfig.sharedVaultRoots. A submitted list REPLACES the stored one wholesale. HUMAN-only. */
+  sharedVaultRoots?: string[];
   /** See PlatformConfig.attachmentRetentionDays. */
   attachmentRetentionDays?: number;
   /** See RemoteAccessConfig. Deep-partial: `tls`/`rateLimit` replace whole when present. */
@@ -1855,7 +1866,7 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
  */
 export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
-  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "harness" | "remoteAccess" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs" | "mutedBrowserNotifications"
+  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "harness" | "remoteAccess" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs" | "mutedBrowserNotifications" | "sharedVaultRoots"
 > & {
   rateLimit?: NullableFields<RateLimitConfig> | null;
   watchers?: NullableFields<WatcherConfig> | null;
@@ -1880,6 +1891,8 @@ export type PlatformConfigPatch = Omit<
    *  the clear sentinel rather than an empty array, so an all-on config leaves no stored key behind at
    *  all. A submitted non-null list replaces the stored one wholesale (shallow, not deep-merged). */
   mutedBrowserNotifications?: BrowserNotificationKind[] | null;
+  /** See PlatformConfig.sharedVaultRoots. Nullable: `null` clears the stored list (back to `[]`). */
+  sharedVaultRoots?: string[] | null;
 };
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -1943,6 +1956,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     // Card 51a80b4d: nothing muted by default — every attention kind still fires its browser
     // Notification, so an unset override behaves exactly as it did before the toggles existed.
     mutedBrowserNotifications: [],
+    sharedVaultRoots: [],
     // Card 6f27469b: attachment GC retention window, 30 days past terminal transition.
     attachmentRetentionDays: ATTACHMENT_RETENTION_DAYS_DEFAULT,
   },
@@ -2349,6 +2363,7 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
     companionVoiceEnabled: po?.companionVoiceEnabled ?? d.companionVoiceEnabled,
     operatorEnabled: po?.operatorEnabled ?? d.operatorEnabled,
     mutedBrowserNotifications: po?.mutedBrowserNotifications ?? d.mutedBrowserNotifications,
+    sharedVaultRoots: po?.sharedVaultRoots ?? d.sharedVaultRoots,
     attachmentRetentionDays: po?.attachmentRetentionDays ?? d.attachmentRetentionDays,
   };
 }

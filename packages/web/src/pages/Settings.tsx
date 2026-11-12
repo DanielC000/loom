@@ -1643,6 +1643,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     if (next.has(kind)) next.delete(kind); else next.add(kind);
     return next;
   });
+  // Card 7c1d6dbf — shared notes-vault roots: one absolute path per line. Blank = none (sends the `null`
+  // clear sentinel); the daemon validator 400s a relative entry with a readable reason.
+  const [sharedVaultRoots, setSharedVaultRoots] = useState((override.sharedVaultRoots ?? []).join("\n"));
   // Pillar-B cron Scheduler gate (§19b) — daemon-global (one shared daemon), same tri-state pattern.
   // Boot-time-gated by design: a flip here needs a daemon restart to start/stop the ticker (see the
   // banner above and the Schedules page hint).
@@ -1785,6 +1788,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     o.mutedBrowserNotifications = mutedNotifications.size === 0
       ? null
       : BROWSER_NOTIFICATION_KINDS.filter((k) => mutedNotifications.has(k));
+    // Card 7c1d6dbf: the full list is always emitted (the PATCH replaces it wholesale); empty clears it.
+    const rootLines = sharedVaultRoots.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "");
+    o.sharedVaultRoots = rootLines.length === 0 ? null : rootLines;
     o.schedulerEnabled = schedulerEnabled === "inherit" ? null : schedulerEnabled === "true";
     // Number("") would be 0 (a deadlocking cap), so blank must send the clear sentinel, not 0. A
     // non-numeric entry is routed through as the ORIGINAL STRING rather than Number()'s NaN — NaN
@@ -2103,6 +2109,23 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             );
           })}
         </div>
+      </Panel>
+
+      {/* Card 7c1d6dbf — the human-only list of shared NOTES vault roots the vault auto-committer may commit
+          into even though a project also registers that repo. Seeded once at boot for an existing install. */}
+      <Panel>
+        <SectionLabel>Shared vault roots</SectionLabel>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: "68ch" }}>
+          <span style={fieldLabel}>Shared notes vaults (one absolute path per line)</span>
+          <textarea data-testid="shared-vault-roots" rows={4} value={sharedVaultRoots} spellCheck={false}
+            onChange={(e) => setSharedVaultRoots(e.target.value)}
+            style={{ fontFamily: "var(--font-mono, monospace)", fontSize: fs.body, padding: 8, resize: "vertical" }} />
+          <Hint style={{ lineHeight: 1.6 }}>
+            Only list pure notes vaults; a listed repo&apos;s files are auto-committed by Loom. A repo is only
+            exempt from the &quot;registered code repo&quot; auto-commit refusal when its root EQUALS an entry here
+            (a subfolder or parent does not count). Leave blank for none. Changes apply to the next commit, no restart.
+          </Hint>
+        </label>
       </Panel>
 
       <Panel>

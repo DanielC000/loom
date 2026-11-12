@@ -850,3 +850,43 @@ test("timeout fields state their bound in seconds and block an over-limit entry 
     })
     .toBe(300_000);
 });
+
+test("shared vault roots (card 7c1d6dbf): a human-edited list persists, a relative path is rejected readably, blank clears it", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`settings-svr-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
+
+  const box = page.getByTestId("shared-vault-roots");
+  await expect(box).toBeVisible();
+  // The warning copy is part of the contract: the owner must be told listing a repo makes Loom auto-commit it.
+  await expect(page.getByText("Only list pure notes vaults; a listed repo's files are auto-committed by Loom.")).toBeVisible();
+  const globalSave = page.getByTestId("settings-section-global-daemon").getByRole("button", { name: "Save", exact: true });
+  const readRoots = async (): Promise<string[] | null> => {
+    const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+    const body = (await res.json()) as { override?: { sharedVaultRoots?: string[] } };
+    return body?.override?.sharedVaultRoots ?? null;
+  };
+
+  // A relative entry is rejected by the daemon validator and nothing is stored.
+  await box.fill("not/absolute");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect(page.getByText(/sharedVaultRoots/).first()).toBeVisible();
+  await expect.poll(readRoots).toBeNull();
+
+  // Two absolute paths (one per line, blank lines ignored) persist, and survive a reload.
+  const isWin = process.platform === "win32";
+  const a = isWin ? "C:\\notes\\vault-a" : "/notes/vault-a";
+  const b = isWin ? "C:\\notes\\vault-b" : "/notes/vault-b";
+  await box.fill(`${a}\n\n${b}\n`);
+  await globalSave.click();
+  await expect.poll(readRoots).toEqual([a, b]);
+  await page.reload();
+  await expect(page.getByTestId("shared-vault-roots")).toHaveValue(`${a}\n${b}`);
+
+  // Blank clears the stored key entirely (the null sentinel), not an empty array.
+  await page.getByTestId("shared-vault-roots").fill("");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect.poll(readRoots).toBeNull();
+});

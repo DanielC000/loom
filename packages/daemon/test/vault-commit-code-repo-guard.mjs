@@ -53,18 +53,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       independent proof — discriminates only if an unlocked sequence would complete inside the test's own
 //       window (see that test's comments). Also: exact-match merge-eligibility has a known pre-existing gap
 //       for a project bound to a no-.git SUBDIRECTORY of an exempt root (see isCommitPathMergeEligible's doc).
-//  (14)/(14b)/(14c) ⚠️ Round-3 delta review, ROUND 4 rewrite: KNOWN HOLE (request f7cc5951 pending,
-//       follow-up card 7c1d6dbf), now a GREEN TRIPWIRE, not a red test. A THIRD party can grant
-//       isRecognizedVaultRoot's exemption for a code repo it has nothing to do with — a voucher whose own
-//       vaultPath is nested INSIDE the bug project's code repo (14), a voucher with repoPath:"" that
-//       vouches unconditionally (14b), or a voucher whose repoPath is an ANCESTOR of the key (14c).
-//       Geometry cannot distinguish any of these from Parallax's shape. These checks used to encode the
-//       CORRECT (refused) behavior and were deliberately red — but a committed test with a deliberate red
-//       assertion turns the merge gate red, and this project's merge gate is not always fully gated
-//       (interval-based reduced gating), so a red test risked landing straight onto main. They now instead
-//       PIN TODAY'S (WRONG) behavior — the voucher IS honoured, the source IS auto-committed — and MUST
-//       FLIP back to asserting refusal once 7c1d6dbf implements the owner's answer. Do not "fix" the
-//       underlying predicate by touching the geometry — that decision belongs to 7c1d6dbf, not here.
+//  (14)/(14b)/(14c) Card 7c1d6dbf FLIPPED these from a green "KNOWN HOLE" tripwire to asserting REFUSAL: a
+//       third party can no longer grant the shared-vault exemption for a code repo it has nothing to do
+//       with (a voucher whose vaultPath is nested inside the bug project's code repo (14), one with
+//       repoPath:"" (14b), one whose repoPath is an ANCESTOR of the key (14c)). The exemption is now ONLY
+//       "the governing root EQUALS an entry of the human-only platform sharedVaultRoots list"; (11)/(13)
+//       wire that list, and (14d) pins the equality-only / canonicalization semantics.
 // Run after build: node test/vault-commit-code-repo-guard.mjs
 import fs from "node:fs";
 import path from "node:path";
@@ -450,12 +444,19 @@ function toEntry(p) {
 
   const notesTopicProject = { id: "p-notes-topic", repoPath: sharedVault, vaultPath: topicDir, vaultOnly: false, repos: [] };
   const realCodeProject = { id: "p-real-code-11", repoPath: codeRepo11, vaultPath: realCodeVaultPath, vaultOnly: false, repos: [] };
-  setCodeRepoGuardProvider({ snapshot: () => [notesTopicProject, realCodeProject].map(toEntry), recordEvent: () => {} });
+  // Card 7c1d6dbf: the exemption is the human-only platform list, not layout — wire the shared vault into it.
+  setCodeRepoGuardProvider({ snapshot: () => [notesTopicProject, realCodeProject].map(toEntry), sharedVaultRoots: () => [sharedVault], recordEvent: () => {} });
 
   fs.writeFileSync(path.join(topicDir, "note.md"), "# genuine shared-vault content\n");
   const before = commitCount(sharedVault);
   const result = await commitVault(sharedVault, "loom: auto-commit (shared vault root, should still commit)");
-  check("(11) a repo that is some project's vault root is exempt even with vaultPath only NESTED (not equal), because a SEPARATE real-code project's own vault genuinely lives under it", result.committed === true && commitCount(sharedVault) === before + 1);
+  check("(11) a repo LISTED in sharedVaultRoots is exempt even though it is also a notes project's registered repoPath", result.committed === true && commitCount(sharedVault) === before + 1);
+  // Negative control for the same fixture: with the list absent the SAME layout is refused (layout alone no longer exempts).
+  setCodeRepoGuardProvider({ snapshot: () => [notesTopicProject, realCodeProject].map(toEntry), recordEvent: () => {} });
+  fs.writeFileSync(path.join(topicDir, "note2.md"), "# second edit\n");
+  const before11n = commitCount(sharedVault);
+  const result11n = await commitVault(sharedVault, "loom: auto-commit (no list — must be refused)");
+  check("(11) ...and the SAME layout with NO list entry is REFUSED (layout inference no longer exempts)", result11n.committed === false && result11n.blockedReason === "code-repo-collision" && commitCount(sharedVault) === before11n);
 }
 
 // ===================== (12) Round 3 anti-gaming: a project's OWN vaultPath nested in its OWN repoPath is NEVER exempted, even when a genuine voucher exists elsewhere =====================
@@ -485,7 +486,8 @@ function toEntry(p) {
   const bugProject = { id: "p-bug-12", repoPath: codeRepo12, vaultPath: subdirVault12, vaultOnly: false, repos: [] };
   const voucherNotesProject = { id: "p-voucher-notes-12", repoPath: unrelatedSharedVault, vaultPath: unrelatedTopic, vaultOnly: false, repos: [] };
   const voucherCodeProject = { id: "p-voucher-code-12", repoPath: unrelatedCode, vaultPath: unrelatedCodeVaultPath, vaultOnly: false, repos: [] };
-  setCodeRepoGuardProvider({ snapshot: () => [bugProject, voucherNotesProject, voucherCodeProject].map(toEntry), recordEvent: () => {} });
+  // An UNRELATED root is LISTED — it must not leak an exemption onto a different repo.
+  setCodeRepoGuardProvider({ snapshot: () => [bugProject, voucherNotesProject, voucherCodeProject].map(toEntry), sharedVaultRoots: () => [unrelatedSharedVault], recordEvent: () => {} });
 
   fs.writeFileSync(path.join(subdirVault12, "note.md"), "# a real vault edit\n");
   const before = commitCount(codeRepo12);
@@ -511,7 +513,7 @@ function toEntry(p) {
 
   const notesProject13 = { id: "p-notes-13", repoPath: sharedRepo13, vaultPath: topic13, vaultOnly: false, repos: [] };
   const voucherProject13 = { id: "p-voucher-13", repoPath: voucherCode13, vaultPath: voucherVaultPath13, vaultOnly: false, repos: [] };
-  setCodeRepoGuardProvider({ snapshot: () => [notesProject13, voucherProject13].map(toEntry), recordEvent: () => {} });
+  setCodeRepoGuardProvider({ snapshot: () => [notesProject13, voucherProject13].map(toEntry), sharedVaultRoots: () => [sharedRepo13], recordEvent: () => {} });
 
   let mergeStarted;
   const mergeStartedPromise = new Promise((resolve) => { mergeStarted = resolve; });
@@ -553,18 +555,14 @@ function toEntry(p) {
 }
 
 // =====================================================================================================
-// (14)/(14b)/(14c) ⚠️ KNOWN HOLE (request f7cc5951 pending, follow-up card 7c1d6dbf) — round-3 delta review
-// (reviewer, 2026-10-01), rewritten round 4 into a GREEN TRIPWIRE. A THIRD party can grant
-// isRecognizedVaultRoot's exemption for a code repo it has nothing to do with. Geometry alone cannot
-// distinguish this from Parallax's shape; the owner is choosing the real discriminator (an explicit
-// per-project flag or a platform list of recognized vault roots) — see versioner.ts's own
-// isRecognizedVaultRoot doc for the full writeup. These three checks used to encode the CORRECT, desired
-// behavior (refused) and were DELIBERATELY RED against the current predicate — but a committed test with a
-// deliberate red assertion turns the merge gate red, and this project's merge gate is not always fully
-// gated, so a red test risked landing on main ungated. They now instead PIN TODAY'S (WRONG) behavior — do
-// not "fix" the predicate by touching the geometry; that decision belongs to card 7c1d6dbf. A future round
-// implementing 7c1d6dbf's fix should find these three checks need to FLIP back to asserting refusal.
+// (14)/(14b)/(14c) Third-party vouching (round-3 delta review): formerly a green KNOWN-HOLE tripwire pinning
+// the wrong behaviour; card 7c1d6dbf flipped them to assert REFUSAL now that the exemption is an explicit
+// human-only list (equality against `sharedVaultRoots`), not layout inference.
 // =====================================================================================================
+
+// A NON-EMPTY list naming an UNRELATED root (as (12) does) must never leak an exemption onto C14/C14b/C14c.
+const unrelatedListed = path.join(root, "unrelated-listed-14");
+fs.mkdirSync(unrelatedListed, { recursive: true });
 
 // ===================== (14) third-party vouching: an UNRELATED project's vaultPath nested in P's own code repo lets Q vouch for P's repo =====================
 {
@@ -584,20 +582,16 @@ function toEntry(p) {
 
   const P14 = { id: "p-c14", repoPath: C14, vaultPath: docsDir14, vaultOnly: false, repos: [] };
   const Q14 = { id: "q-d14", repoPath: D14, vaultPath: qNotesDir14, vaultOnly: false, repos: [] };
-  setCodeRepoGuardProvider({ snapshot: () => [P14, Q14].map(toEntry), recordEvent: () => {} });
+  setCodeRepoGuardProvider({ snapshot: () => [P14, Q14].map(toEntry), sharedVaultRoots: () => [unrelatedListed], recordEvent: () => {} });
 
   fs.writeFileSync(path.join(docsDir14, "note.md"), "# real vault edit\n");
   const before14 = commitCount(C14);
-  const result14 = await commitVault(C14, "loom: auto-commit (KNOWN HOLE — should be refused, C14 is a real code repo)");
-  // KNOWN HOLE (request f7cc5951 pending, follow-up card 7c1d6dbf): these two assertions PIN TODAY'S
-  // (wrong) behaviour — Q's vaultPath nested inside P's code repo wrongly vouches for P, so P's real
-  // source DOES get auto-committed. This is a tripwire, not a red test: it must FLIP to assert refusal
-  // (committed:false, no new commit) once the owner's answer on f7cc5951 is implemented and 7c1d6dbf lands.
+  const result14 = await commitVault(C14, "loom: auto-commit (should be refused, C14 is a real code repo)");
   check(
-    "(14) KNOWN HOLE (f7cc5951 pending): an unrelated project's vaultPath nested in P's own code repo WRONGLY vouches for it today",
-    result14.committed === true,
+    "(14) an unrelated project's vaultPath nested in P's own code repo does NOT vouch for it — refused",
+    result14.committed === false && result14.blockedReason === "code-repo-collision",
   );
-  check("(14) KNOWN HOLE: ...so P14's real source IS auto-committed today (must become NO new commit once fixed)", commitCount(C14) === before14 + 1);
+  check("(14) ...and P14's real source is NOT auto-committed (no new commit)", commitCount(C14) === before14);
 }
 
 // ===================== (14b) degenerate variant: a voucher with repoPath:"" vouches for ANY key unconditionally =====================
@@ -618,19 +612,16 @@ function toEntry(p) {
   const P14b = { id: "p-c14b", repoPath: C14b, vaultPath: docsDir14b, vaultOnly: false, repos: [] };
   const QEmpty14b = { id: "q-empty-14b", repoPath: "", vaultPath: path.join(C14b, "empty-voucher-notes"), vaultOnly: false, repos: [] };
   fs.mkdirSync(QEmpty14b.vaultPath, { recursive: true });
-  setCodeRepoGuardProvider({ snapshot: () => [P14b, QEmpty14b].map(toEntry), recordEvent: () => {} });
+  setCodeRepoGuardProvider({ snapshot: () => [P14b, QEmpty14b].map(toEntry), sharedVaultRoots: () => [unrelatedListed], recordEvent: () => {} });
 
   fs.writeFileSync(path.join(docsDir14b, "note.md"), "# real vault edit\n");
   const before14b = commitCount(C14b);
-  const result14b = await commitVault(C14b, "loom: auto-commit (KNOWN HOLE — empty-repoPath voucher)");
-  // KNOWN HOLE (request f7cc5951 pending, follow-up card 7c1d6dbf): pins today's (wrong) behaviour — a
-  // voucher entry with repoPath:"" unconditionally vouches for any key. Tripwire, not a red test: must
-  // FLIP to refusal once f7cc5951 is answered and 7c1d6dbf lands.
+  const result14b = await commitVault(C14b, "loom: auto-commit (empty-repoPath voucher — must be refused)");
   check(
-    "(14b) KNOWN HOLE (f7cc5951 pending): a voucher entry with repoPath:\"\" WRONGLY vouches for any key today",
-    result14b.committed === true,
+    "(14b) a voucher entry with repoPath:\"\" does NOT vouch for any key — refused",
+    result14b.committed === false && result14b.blockedReason === "code-repo-collision",
   );
-  check("(14b) KNOWN HOLE: ...so P14b's real source IS auto-committed today (must become NO new commit once fixed)", commitCount(C14b) === before14b + 1);
+  check("(14b) ...and P14b's real source is NOT auto-committed (no new commit)", commitCount(C14b) === before14b);
 }
 
 // ===================== (14c) degenerate variant: a voucher whose repoPath is an ANCESTOR of the key also vouches =====================
@@ -651,19 +642,95 @@ function toEntry(p) {
 
   const P14c = { id: "p-c14c", repoPath: C14c, vaultPath: docsDir14c, vaultOnly: false, repos: [] };
   const QAbove14c = { id: "q-above-14c", repoPath: ancestorRoot14c, vaultPath: qVaultDir14c, vaultOnly: false, repos: [] };
-  setCodeRepoGuardProvider({ snapshot: () => [P14c, QAbove14c].map(toEntry), recordEvent: () => {} });
+  setCodeRepoGuardProvider({ snapshot: () => [P14c, QAbove14c].map(toEntry), sharedVaultRoots: () => [unrelatedListed], recordEvent: () => {} });
 
   fs.writeFileSync(path.join(docsDir14c, "note.md"), "# real vault edit\n");
   const before14c = commitCount(C14c);
-  const result14c = await commitVault(C14c, "loom: auto-commit (KNOWN HOLE — voucher repoPath ABOVE the key)");
-  // KNOWN HOLE (request f7cc5951 pending, follow-up card 7c1d6dbf): pins today's (wrong) behaviour — a
-  // voucher whose repoPath is an ANCESTOR of the key vouches for it. Tripwire, not a red test: must FLIP
-  // to refusal once f7cc5951 is answered and 7c1d6dbf lands.
+  const result14c = await commitVault(C14c, "loom: auto-commit (voucher repoPath ABOVE the key — must be refused)");
   check(
-    "(14c) KNOWN HOLE (f7cc5951 pending): a voucher whose repoPath is an ANCESTOR of the key WRONGLY vouches for it today",
-    result14c.committed === true,
+    "(14c) a voucher whose repoPath is an ANCESTOR of the key does NOT vouch for it — refused",
+    result14c.committed === false && result14c.blockedReason === "code-repo-collision",
   );
-  check("(14c) KNOWN HOLE: ...so P14c's real source IS auto-committed today (must become NO new commit once fixed)", commitCount(C14c) === before14c + 1);
+  check("(14c) ...and P14c's real source is NOT auto-committed (no new commit)", commitCount(C14c) === before14c);
+}
+
+// ===================== (14d) equality-only + canonicalization of the list (card 7c1d6dbf) =====================
+{
+  const C14d = path.join(root, "C14d-listed");
+  initRepo(C14d);
+  fs.writeFileSync(path.join(C14d, "src.ts"), "export const x = 1;\n");
+  git(C14d, "add src.ts");
+  git(C14d, "commit -m init");
+  const docs14d = path.join(C14d, "docs");
+  fs.mkdirSync(docs14d);
+  const P14d = { id: "p-c14d", repoPath: C14d, vaultPath: docs14d, vaultOnly: false, repos: [] };
+  const withList = (list) => setCodeRepoGuardProvider({ snapshot: () => [toEntry(P14d)], sharedVaultRoots: () => list, recordEvent: () => {} });
+  const attempt = async (label, list, expectCommitted) => {
+    withList(list);
+    fs.writeFileSync(path.join(docs14d, `n-${label}.md`), `# ${label}\n`);
+    const before = commitCount(C14d);
+    const r = await commitVault(C14d, `loom: auto-commit (${label})`);
+    check(`(14d) ${label}: committed=${expectCommitted}`, r.committed === expectCommitted && commitCount(C14d) === before + (expectCommitted ? 1 : 0));
+  };
+  // Subfolder of the repo listed — a listed root vouches ONLY for itself, never for the repo above it.
+  await attempt("listed SUBFOLDER does not exempt its repo", [docs14d], false);
+  // A listed PARENT of the repo does not exempt it either.
+  await attempt("listed PARENT does not exempt the repo", [root], false);
+  // A relative / blank entry never matches.
+  await attempt("relative and blank entries never match", ["C14d-listed", "", "   "], false);
+  // The exact root, with a trailing slash, DOES.
+  await attempt("exact root with trailing slash", [C14d + path.sep], true);
+  if (process.platform === "win32") await attempt("case variant of the root (win32)", [C14d.toUpperCase()], true);
+  // A junction/symlink to the root DOES (same physical dir), a junction to a DIFFERENT repo does not.
+  const link14d = path.join(root, "C14d-link");
+  fs.symlinkSync(C14d, link14d, "junction");
+  await attempt("junction to the root", [link14d], true);
+  const otherRepo14d = path.join(root, "C14d-other");
+  initRepo(otherRepo14d);
+  const otherLink14d = path.join(root, "C14d-other-link");
+  fs.symlinkSync(otherRepo14d, otherLink14d, "junction");
+  await attempt("junction to a DIFFERENT repo does not exempt", [otherLink14d], false);
+  await attempt("empty list never exempts", [], false);
+  // Card 7c1d6dbf review: commitVault called with the vault SUBFOLDER as commitPath (the rev-parse-failure
+  // fallback shape) while that SUBFOLDER is listed: a non-toplevel commitPath must never match, or `git add -A`
+  // would stage the whole code repo.
+  // The exemption unit itself. A commitPath that is a SUBFOLDER (the rev-parse-failure fallback shape:
+  // resolveVaultRepoContext keeps commitPath = the vault subfolder) must never be recognized, even when that
+  // exact subfolder is listed. Called directly: a bare commitVault(subfolder) re-resolves the real root first,
+  // and flushSync's GIT_DIR pin already fails a subfolder, so neither reaches this on its own.
+  const { isRecognizedVaultRoot } = await import("../dist/vault/versioner.js");
+  withList([docs14d, C14d]);
+  check("(14d) isRecognizedVaultRoot(listed SUBFOLDER) is false — a non-toplevel commitPath never matches", isRecognizedVaultRoot(docs14d) === false);
+  check("(14d) (positive control) isRecognizedVaultRoot(the listed toplevel) is true on the same list", isRecognizedVaultRoot(C14d) === true);
+  // Defense in depth, the real fallback shape end-to-end: a VaultVersioner whose start() rev-parse fails keeps
+  // commitPath = the vault SUBFOLDER; its flushSync must not commit the repo (passes pre-fix too, by the
+  // GIT_DIR pin — it pins that this path stays closed).
+  withList([docs14d]);
+  const { VaultVersioner } = await import("../dist/vault/versioner.js");
+  const { boundedSimpleGit } = await import("../dist/git/bounded.js");
+  const revparseFailsGitFactory = (repoPath, blockTimeoutMs) => {
+    const real = boundedSimpleGit(repoPath, blockTimeoutMs);
+    return {
+      checkIsRepo: (...a) => real.checkIsRepo(...a),
+      revparse: async (args, ...a) => {
+        if (Array.isArray(args) && args[0] === "--show-toplevel") throw new Error("simulated rev-parse failure");
+        return real.revparse(args, ...a);
+      },
+      init: (...a) => real.init(...a), raw: (...a) => real.raw(...a), status: (...a) => real.status(...a),
+      commit: (...a) => real.commit(...a), add: (...a) => real.add(...a),
+    };
+  };
+  const vv = new VaultVersioner(docs14d, 60_000, undefined, { gitFactory: revparseFailsGitFactory });
+  await vv.start();
+  try {
+    check("(14d) precondition: the simulated rev-parse failure left commitPath at the vault SUBFOLDER", path.resolve(vv.commitRoot).toLowerCase() === path.resolve(docs14d).toLowerCase());
+    fs.writeFileSync(path.join(C14d, "uncommitted-code.ts"), "export const leaked = true;\n"); // would be swept in by `git add -A`
+    fs.writeFileSync(path.join(docs14d, "n-subfolder-fallback.md"), "# fallback\n");
+    const beforeFb = commitCount(C14d);
+    const flushed = vv.flushSync();
+    check("(14d) a LISTED SUBFOLDER as the fallback commitPath is NOT exempt: flushSync refuses, no new commit, code file not swept in",
+      flushed === false && commitCount(C14d) === beforeFb && !git(C14d, "log --all --name-only --pretty=format:").includes("uncommitted-code.ts"));
+  } finally { await vv.stop(); }
 }
 
 // ===================== (15) card cc684616: a vault inside a LINKED WORKTREE of the registered repo's own MAIN checkout =====================

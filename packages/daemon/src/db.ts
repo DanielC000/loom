@@ -5306,6 +5306,18 @@ export class Db {
       return {};
     }
   }
+  /** True when the singleton row EXISTS but its JSON does not parse to an object — `getPlatformConfig()`
+   *  reads that as `{}`, so a caller about to WRITE over it (the one-shot seed) must check this first. */
+  isPlatformConfigCorrupt(): boolean {
+    const r = this.db.prepare("SELECT override_json FROM platform_config WHERE id = 1").get() as Row | undefined;
+    if (!r) return false;
+    try {
+      const v = JSON.parse((r.override_json as string) || "{}") as unknown;
+      return v === null || typeof v !== "object" || Array.isArray(v);
+    } catch {
+      return true;
+    }
+  }
   /** Upsert the singleton platform override blob (validated by the caller); stamps updated_at. */
   setPlatformConfig(override: PlatformConfigOverride): void {
     this.db.prepare(

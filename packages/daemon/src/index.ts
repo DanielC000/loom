@@ -81,6 +81,7 @@ import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
 import { startNulFilledScan, recoverCrashOrphanedWorkersWithNulScan } from "./orchestration/nul-scan-boot.js";
 import { readAndClearMergeDangerLatches, describeMergeDangerLatchAtBoot } from "./git/merge-danger-latch.js";
 import { reenterMergeQuarantinesAtBoot, partitionQuarantinesByRegistration, setRegisteredRepoPathsProvider } from "./git/merge-quarantine.js";
+import { seedSharedVaultRootsOnce } from "./vault/shared-roots-seed.js";
 import { computeCanonicalRepoPaths } from "./projects/canonical-repo-paths.js";
 import { runGracefulTeardown, computeFlushVaultsStepBudgetMs, reportAndConsumeHardShutdownWatchdogRecord } from "./graceful-teardown.js";
 
@@ -183,11 +184,26 @@ async function main(): Promise<void> {
       [...db.listAllProjects(), ...db.listArchivedProjects()].map((p) => ({
         id: p.id, repoPath: p.repoPath, repos: p.repos, vaultOnly: p.vaultOnly, vaultPath: p.vaultPath,
       })),
+    // Card 7c1d6dbf: the human-only shared-notes-vault list, read LIVE (a Settings edit applies to the next
+    // commit with no restart). `resolveConfig`'s resolver, not an ad-hoc read, per the one-mechanism rule.
+    sharedVaultRoots: () => resolveConfig(undefined, db.getPlatformConfig()).platform.sharedVaultRoots,
     recordEvent: (detail) => db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "",
       kind: "vault_autocommit_refused_code_repo", detail,
     }),
   });
+  // Card 7c1d6dbf: one-shot seed of the human-only shared-notes-vault list, BEFORE any versioner starts so
+  // the install's existing shared vault stays exempt across the switch from layout inference to the list.
+  // Best-effort: never gates boot; marker stamped only on a final outcome (ambiguous/none retry next boot).
+  try {
+    const seeded = seedSharedVaultRootsOnce(db);
+    if (seeded.outcome === "seeded") console.log(`[boot] seeded sharedVaultRoots with ${seeded.root} (${seeded.vouchers} distinct project vault paths live there) — review it under Settings → Platform; recorded in the platform-config history`);
+    else if (seeded.outcome === "ambiguous") console.warn(`[boot] sharedVaultRoots NOT seeded: ${seeded.candidates.length} candidate roots (${seeded.candidates.join(", ")}) — the seed is one-shot and will not run again; add the right one under Settings`);
+    else if (seeded.outcome === "none") console.warn("[boot] sharedVaultRoots NOT seeded: no shared notes-vault root found — the seed is one-shot and will not run again; add one under Settings if you use a shared vault");
+    else if (seeded.outcome === "config-corrupt") console.warn("[boot] sharedVaultRoots seed SKIPPED: the stored platform config is unreadable — nothing was written; it will retry on a later boot once the config is fixed");
+  } catch (err) {
+    console.warn(`[boot] sharedVaultRoots seed failed (continuing boot): ${(err as Error).message}`);
+  }
   // Card 14f14d92: snapshot every project's resume doc BEFORE anything below can spawn/resume an agent
   // that might touch it — the resume doc is load-bearing (injected into every manager spawn) and had no
   // backup at all; `rotation-check.ts` only ever VERIFIED an archive a caller claimed to have written, it

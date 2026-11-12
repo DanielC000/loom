@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID, createHash } from "node:crypto";
 import { isIP as netIsIP } from "node:net";
+import nodePath from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -1103,7 +1104,16 @@ const codescapeIntegrationOverride = z.object({
 const integrationsOverride = z.object({
   codescape: codescapeIntegrationOverride.optional(),
 }).strict();
+// Shared notes-vault roots (card 7c1d6dbf). Each entry must be an ABSOLUTE path: the vault auto-committer
+// compares it canonically (equality only) against a governing git root, so a relative entry would be
+// cwd-dependent and meaningless. Listing a repo here makes Loom auto-commit its files, so this is a
+// trust boundary: HUMAN-only exactly like gateCommand — it lives ONLY in the platform schemas (no agent
+// variant anywhere, and no agent MCP tool calls db.setPlatformConfig); agents may READ it via
+// platform_config_get (sanitizePlatformConfigForAgent passes it through, like obsidian.path).
+const sharedVaultRootEntry = z.string().min(1).max(1024).refine((p) => nodePath.isAbsolute(p), { message: "must be an absolute path" });
+const sharedVaultRootsList = z.array(sharedVaultRootEntry).max(64);
 const platformConfigOverrideSchema = z.object({
+  sharedVaultRoots: sharedVaultRootsList.optional(),
   rateLimit: rateLimitOverride.optional(),
   watchers: watchersOverride.optional(),
   timeouts: timeoutsOverride.optional(),
@@ -1262,6 +1272,8 @@ const remoteAccessPatchOverride = z.object(nullableShape(remoteAccessOverride.sh
  * treatment here first if that ever changes.
  */
 const platformConfigPatchSchema = z.object({
+  // Card 7c1d6dbf — HUMAN-only; a submitted list replaces the stored one wholesale, `null` clears it.
+  sharedVaultRoots: sharedVaultRootsList.nullable().optional(),
   rateLimit: rateLimitPatchOverride.nullable().optional(),
   watchers: watchersPatchOverride.nullable().optional(),
   timeouts: timeoutsPatchOverride.nullable().optional(),
