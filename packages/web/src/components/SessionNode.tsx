@@ -12,6 +12,7 @@ import { RepinGrantsControl } from "./RepinGrants";
 import { HeadPill } from "./atlasHome";
 import { TerminalCard, type TerminalTabs } from "./TerminalCard";
 import { ReviewSurface } from "./ReviewSurface";
+import { WorkerLaneRail } from "./WorkerLaneRail";
 import { EventRow } from "./fleet";
 import { HarnessTag } from "./HarnessPicker";
 import { Meter, Panel, StatusPill } from "./ui";
@@ -221,6 +222,11 @@ export function SessionNode({ session, tab = "terminal" }: {
         tab,
         hrefFor: (t) => sessionNodeTabHref(session.id, t),
         tabCount: { diff: diffCount },
+        // Only a manager dispatches workers (worker_spawn is on its router alone), so only a manager's
+        // node gets the lane rail (card dd5c8724). Every other role renders byte-identically to before.
+        rail: session.role === "manager"
+          ? <WorkerLaneRail managerId={session.id} projectId={session.projectId} />
+          : undefined,
       }}
     />
   );

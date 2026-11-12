@@ -87,6 +87,10 @@ export interface TerminalAtlasNode {
   hrefFor: (tab: TerminalTab) => string;
   /** Extra content for the tab row's trailing slot (e.g. a Diff tab's file count). */
   tabCount?: Partial<Record<TerminalTab, ReactNode>>;
+  /** A standing column beside the tabs, panes and strips — a manager's worker lane rail (card dd5c8724).
+   *  Absent ⇒ the node is the single flowing column it always was. On a narrow node it moves ABOVE the
+   *  tab row (global.css, `.loom-atlas-sessionsplit`). */
+  rail?: ReactNode;
 }
 
 export interface TerminalSubPanels {
@@ -523,7 +527,15 @@ export function TerminalCard({
   // queue ledger, the composer. Observed by the budget measurement (belowRef) so a queued turn / opened
   // large editor re-measures even when the card is already at its height cap. flexShrink:0 keeps the
   // composer + strips at natural height — the terminal is the element that gives up space.
-  const belowStrip = (
+  // The session's Loom MCP activity (card a9a7140c): the session page only, so the Overview grid's tiles
+  // and the classic cards keep their height. Keyed so a reused node never shows A's filters or open rows
+  // under B. A node with a RAIL renders it below the split, full width, instead (see `atlasBody`).
+  const mcpSection = atlasNode ? (
+    <section className="loom-atlas-nodesec" data-testid="session-node-mcp" aria-label="Loom MCP activity">
+      <McpActivity key={session.id} sessionId={session.id} harness={session.harness} busy={!!session.busy} />
+    </section>
+  ) : null;
+  const belowStrip = (withMcp: boolean) => (
     <div ref={belowRef} style={{ flexShrink: 0 }} className={atlasNode ? "loom-atlas-nodesections" : undefined}>
       {atlasNode && task && (
         <section className="loom-atlas-nodesec" data-testid="session-node-task">
@@ -548,14 +560,7 @@ export function TerminalCard({
           {composerNode}
         </section>
       ) : composerNode}
-      {/* The session's Loom MCP activity (card a9a7140c): the session page only, so the Overview grid's
-          tiles and the classic cards keep their height. Keyed so a reused node never shows A's filters
-          or open rows under B. */}
-      {atlasNode && (
-        <section className="loom-atlas-nodesec" data-testid="session-node-mcp" aria-label="Loom MCP activity">
-          <McpActivity key={session.id} sessionId={session.id} harness={session.harness} busy={!!session.busy} />
-        </section>
-      )}
+      {withMcp && mcpSection}
     </div>
   );
 
@@ -586,7 +591,7 @@ export function TerminalCard({
       )}
       {tabs && activeTab === "timeline" && tabs.timeline}
       {diffPane}
-      {belowStrip}
+      {belowStrip(true)}
     </>
   );
 
@@ -594,7 +599,7 @@ export function TerminalCard({
   // a FLOWING column instead of a fixed-height card: the Atlas content column is what scrolls, so the
   // terminal takes a bounded box of its own and the review surface below it runs to whatever length the
   // diff actually has, rather than being squeezed into a card's leftover space.
-  const atlasBody = () => (
+  const atlasMain = () => (
     <>
       {tabBarNode}
       <div className="loom-atlas-nodepanes">
@@ -616,7 +621,20 @@ export function TerminalCard({
         )}
         {diffPane}
       </div>
-      {belowStrip}
+      {belowStrip(atlasNode?.rail == null)}
+    </>
+  );
+  // With a rail the column above becomes the split's main track. The rail is a sibling, never inside
+  // `.loom-atlas-nodepanes`, so it cannot change the pane height the composer is pinned against. The MCP
+  // strip leaves the narrowed track and runs full width below the split: squeezed beside a 372px rail it
+  // crossed its own 700px container breakpoint and dropped its duration column (card dd5c8724).
+  const atlasBody = () => atlasNode?.rail == null ? atlasMain() : (
+    <>
+      <div className="loom-atlas-sessionsplit">
+        <div className="loom-atlas-sessionmain">{atlasMain()}</div>
+        <div className="loom-atlas-sessionrail">{atlasNode.rail}</div>
+      </div>
+      {mcpSection}
     </>
   );
 
@@ -656,7 +674,7 @@ export function TerminalCard({
   // inline, so the de-duplication can never flicker a second identity onto the screen.
   if (atlasNode) {
     return (
-      <div className="loom-atlas-sessionnode" data-testid="session-node"
+      <div className={`loom-atlas-sessionnode${atlasNode.rail != null ? " has-rail" : ""}`} data-testid="session-node"
         style={{ "--loom-atlas-queue-h": `${atlasQueueH}px` } as CSSProperties}>
         {atlasNode.headerSlot ? createPortal(header, atlasNode.headerSlot) : null}
         {body(false)}
