@@ -87,7 +87,7 @@ const SHIFT_TAB = "\x1b[Z";
 const ACCEPT_EDITS_FOOTER = "accept edits on (shift+tab to cycle)";
 const PLAN_FOOTER = "plan mode on (shift+tab to cycle)";
 const AUTO_FOOTER = "auto mode on (shift+tab to cycle)";
-const DEFAULT_FOOTER = "(shift+tab to cycle)"; // no mode label — the unlabeled "default" state
+const DEFAULT_FOOTER = "(shift+tab to cycle) · ← for agents"; // no mode label — the COMPLETE unlabeled "default" footer (card d0c1e76d: a bare hint fragment no longer reads `default`)
 // detectPermissionMode reads only the trailing 8192 bytes of the ring and picks the LAST labeled token —
 // transitioning TO the unlabeled "default" state emits no label of its own, so a stale earlier label still
 // sitting in that trailing window would otherwise win. Pad the ring past that window first so the read

@@ -1602,6 +1602,51 @@ export function detectPermissionMode(recentOutput: string): { mode: LandedMode; 
   return { mode: "unknown", matchedToken: null };
 }
 
+/**
+ * @decision d0c1e76d — read the mode a Shift+Tab press produced from ONLY the bytes written AFTER the press,
+ * and fail toward `unknown`: a `default` reading needs the NARROW positive evidence below, never "no label
+ * seen". Never widen it to a bare hint fragment or to a whole-ring read (the ring still holds the older label).
+ *
+ * Rule: collapse the window; the LAST of {a mode label token, a COMPLETE unlabeled default footer} wins.
+ * A complete default footer = `(shift+tabtocycle)` (the exact, line-wrap-intact hint, parens included) immediately
+ * followed by `·←foragents` (the footer line's own tail), AND positive absence of a label before it: some
+ * preceding text must exist in the window (a hint+tail alone is a partial repaint), and the ~24 collapsed chars
+ * before the hint must hold NO label residue (a ⏵/⏸ glyph, "mode", "edits", "permission", or ending in "on" —
+ * which also rejects corrupted forms like `automdeon`). Anything else — a hint fragment, the wrap-dropped
+ * `tabocycle` variant, a spinner, unrelated output, nothing — is `unknown`. The shape is SYNTHETIC, not captured.
+ */
+const DEFAULT_FOOTER_RE = /\(shift\+tabtocycle\)·←foragents/g;
+const LABEL_RESIDUE_RE = /[⏵⏸]|mode|edits|permission|on$/;
+export function detectPermissionModeSince(windowOutput: string): { mode: LandedMode; matchedToken: string | null } {
+  const flat = collapseFooter(windowOutput).toLowerCase();
+  let best: { mode: LandedMode; idx: number; token: string | null } | null = null;
+  for (const { mode, token } of MODE_TOKENS) {
+    const idx = flat.lastIndexOf(token);
+    if (idx >= 0 && (best === null || idx > best.idx)) best = { mode, idx, token };
+  }
+  for (const m of flat.matchAll(DEFAULT_FOOTER_RE)) {
+    const before = flat.slice(Math.max(0, m.index! - 24), m.index!);
+    if (before.length === 0 || LABEL_RESIDUE_RE.test(before)) continue;
+    if (best === null || m.index! > best.idx) best = { mode: "default", idx: m.index!, token: null };
+  }
+  return best ? { mode: best.mode, matchedToken: best.token } : { mode: "unknown", matchedToken: null };
+}
+
+/**
+ * The `[loom:mode-unconfirmed]` notice body (card d0c1e76d). Direction-aware: a landing MORE permissive than the
+ * target (e.g. `auto`/`acceptEdits` when `default` was configured) says so, instead of the old "blocked from
+ * writes" advice that only fits a less-permissive landing. PURE + exported for the hermetic test.
+ */
+const PERMISSIVENESS: Partial<Record<LandedMode, number>> = { plan: 0, default: 1, acceptEdits: 2, auto: 3, bypassPermissions: 4 };
+export function modeUnconfirmedNotice(landed: LandedMode, target: LandedMode): string {
+  const l = PERMISSIVENESS[landed], t = PERMISSIVENESS[target];
+  const head = `[loom:mode-unconfirmed] Your permission mode settled at "${landed}" rather than the configured "${target}" after boot — the mode-cycle's confirmation may have been dropped under host load, not necessarily a choice you made.`;
+  if (l !== undefined && t !== undefined && l > t) {
+    return `${head} "${landed}" is MORE permissive than "${target}": you may be running with fewer approval prompts than configured. Press Shift+Tab to cycle to "${target}" unless you chose this mode deliberately.`;
+  }
+  return `${head} If you're unexpectedly blocked from writes/tools, press Shift+Tab (or call ExitPlanMode) to cycle to your working mode.`;
+}
+
 /** Cycle order Shift+Tab walks from the gate-free `acceptEdits` boot mode, AS OBSERVED (card f05e4897;
  *  re-verified card 8c60c068 — the real CLI handler is a conditional state machine, correct here only
  *  when `auto` is available).
@@ -3199,7 +3244,8 @@ interface Live {
    *  time for a resume/fork, before THIS attempt's own SessionStart has fired). See record. */
   sessionStartObserved: boolean;
   engineSessionId: string | null;
-  ring: { chunks: Buffer[]; bytes: number };
+  /** `total` = monotonic count of every byte ever appended (never shrinks on rotation); see `detectPermissionModeSince`. */
+  ring: { chunks: Buffer[]; bytes: number; total: number };
   subscribers: Set<Subscriber>;
   alive: boolean;
   // Card bb3d9005 (S1): flips true SYNCHRONOUSLY at the same moment `live.pty.kill()` is issued — NOT
@@ -3719,6 +3765,9 @@ interface Live {
   // and could settle on EITHER cycle's target, observed as worker_set_mode landing on the boot default
   // ("auto") regardless of what was requested). Always resolved (never rejects) so the chain can't wedge.
   modeCycleChain: Promise<void>;
+  /** The last `runCycleToMode` outcome on this Live (card d0c1e76d): the cycle's own post-press reading, which
+   *  `logLandedMode` prefers over its whole-ring read for a `default` target (the ring still holds the older label). */
+  lastModeCycle?: { target: LandedMode; landed: LandedMode; reason: string };
   // One-shot guard: recognizes the plugin-MCP enable-prompt and schedules the SINGLE Esc dismiss write
   // (dismissMcpPrompt) at most once per session (card e29923e3 round 3: one Esc, never a retry loop —
   // this flag only guards re-detection/re-starting for the SAME dialog).
@@ -6924,7 +6973,7 @@ export class PtyHost {
       // A fork carries its PRE-ASSIGNED engine id (forkSessionId); a plain resume reuses resumeId;
       // a brand-new session has none yet (captured on SessionStart).
       engineSessionId: opts.forkSessionId ?? opts.resumeId ?? null,
-      ring: { chunks: [], bytes: 0 },
+      ring: { chunks: [], bytes: 0, total: 0 },
       subscribers: new Set(),
       alive: true,
       killed: false,
@@ -7278,7 +7327,7 @@ export class PtyHost {
       anyHookObserved: true, // a shell has no hook relay; inert placeholder, same convention as sessionStartObserved
       instructionsLoadedKeys: new Set(), // a shell never reaches deliverHook; inert placeholder, same convention
       engineSessionId: null,
-      ring: { chunks: [], bytes: 0 },
+      ring: { chunks: [], bytes: 0, total: 0 },
       subscribers: new Set(),
       alive: true,
       killed: false,
@@ -8608,7 +8657,7 @@ export class PtyHost {
       anyHookObserved: true, // a canned entry has no hook relay; inert placeholder, same convention as sessionStartObserved
       instructionsLoadedKeys: new Set(), // a canned entry never reaches deliverHook; inert placeholder, same convention
       engineSessionId: null,
-      ring: { chunks: [], bytes: 0 },
+      ring: { chunks: [], bytes: 0, total: 0 },
       subscribers: new Set(),
       alive: true,
       killed: false,
@@ -14975,7 +15024,26 @@ export class PtyHost {
       finished = true;
       // eslint-disable-next-line no-console
       console.log(`[resume-mode] ${sessionId} cycle→${target}: ${reason} after ${presses} press(es) (mode=${mode})`);
+      // @decision d0c1e76d — a `default` target is only SUCCESS on a positive `default` reading; any other end
+      // state (a dropped press, an unreadable post-press footer = `unknown`) files the durable mismatch.
+      if (reason !== "killed" && reason !== "pty-gone" && reason !== "respawned") {
+        startLive.lastModeCycle = { target, landed: mode, reason };
+        if (target === "default" && mode !== "default") {
+          // eslint-disable-next-line no-console
+          console.error(`[resume-mode] ${sessionId} MODE MISMATCH — cycle→default ended ${reason} with landed=${mode} (no positive default footer read)`);
+          this.reportModeMismatch(sessionId, startLive, target, mode);
+        }
+      }
       onDone();
+    };
+    // Post-press reads (card d0c1e76d): only bytes written after the press count; see detectPermissionModeSince.
+    let pressMark = 0;
+    const readSincePress = (live: Live): LandedMode => {
+      const total = live.ring.total ?? live.ring.bytes; // `??`: a hand-built test fixture has no counter
+      const since = Math.min(Math.max(total - pressMark, 0), live.ring.bytes);
+      if (since === 0) return "unknown";
+      const buf = Buffer.concat(live.ring.chunks);
+      return detectPermissionModeSince(buf.subarray(buf.length - since).toString("utf8")).mode;
     };
     // Decide on a freshly-read, settled mode: at the target → stop; out of presses → stop (leave as-is);
     // else press one Shift+Tab and wait for the footer to change before the next decision.
@@ -15008,6 +15076,7 @@ export class PtyHost {
         return;
       }
       presses++;
+      pressMark = live.ring.total ?? live.ring.bytes;
       this.ptyWrite(sessionId, live, SHIFT_TAB, "shift-tab");
       setTimeout(() => awaitChange(cur, 0), RESUME_MODE_READ_POLL_MS);
     };
@@ -15018,10 +15087,17 @@ export class PtyHost {
       const live = this.live.get(sessionId);
       if (!live?.alive) { finish("pty-gone", prev); return; }
       if (live !== startLive) { finish("respawned", prev); return; }
-      const cur = this.readFooterMode(live);
+      // @decision d0c1e76d — for a NON-default target a post-press `default` may advance the cycle ONLY when `default` is
+      // the legitimate next step (prev === "auto": auto → default, the intermediate of a worker_set_mode to plan/acceptEdits);
+      // anywhere else it is a misread that would overshoot, so it keeps polling like `unknown` and ends `footer-unchanged` at prev.
+      const read = readSincePress(live);
+      const cur = target !== "default" && read === "default" && prev !== "auto" ? "unknown" : read;
       if (cur !== "unknown" && cur !== prev) { decide(cur); return; }
       if (polls < RESUME_MODE_CHANGE_MAX_POLLS) { setTimeout(() => awaitChange(prev, polls + 1), RESUME_MODE_READ_POLL_MS); return; }
-      finish("footer-unchanged", cur);
+      // No definite NEW mode after the press. A repaint of the SAME labeled mode, or no repaint at all, means the
+      // press is unconfirmed: report the last positively-read mode (`prev`), never a guess; an unreadable window
+      // after a press that DID change something stays `unknown`.
+      finish("footer-unchanged", cur === "unknown" ? prev : cur);
     };
     // Initial: the footer may still be painting when SessionStart fires — poll until it's readable, then
     // make the first decision off the real boot mode (never press blindly on an "unknown" read).
@@ -15442,7 +15518,17 @@ export class PtyHost {
       }
       attempts++;
       const recent = Buffer.concat(l.ring.chunks).toString("utf8").slice(-8192);
-      const { mode, matchedToken } = detectPermissionMode(recent);
+      const ringRead = detectPermissionMode(recent);
+      // @decision d0c1e76d — for a `default` target the whole-ring read cannot confirm `default` (the ring still holds the
+      // older label). Prefer the cycle's own post-press outcome ONLY when it is DEFINITE (`matched=-`: not ring-derived);
+      // otherwise fall back to the ring read restricted to a LABELED result (an unlabeled ring `default` is unconfirmable).
+      const cycleOutcome = healTarget === "default" && l.lastModeCycle?.target === "default" && l.lastModeCycle.landed !== "unknown"
+        ? l.lastModeCycle : undefined;
+      const { mode, matchedToken }: { mode: LandedMode; matchedToken: string | null } = cycleOutcome
+        ? { mode: cycleOutcome.landed, matchedToken: null }
+        : healTarget === "default" && ringRead.matchedToken === null && ringRead.mode === "default"
+          ? { mode: "unknown", matchedToken: null }
+          : ringRead;
       // Keep polling only while we still can't read a footer at all (still booting). A definite read —
       // incl. the unlabeled "default" — is final. Stop at the cap or once the pty is gone.
       if (mode === "unknown" && attempts < MODE_LOG_MAX_ATTEMPTS && l.alive) {
@@ -15459,7 +15545,7 @@ export class PtyHost {
       const snippet = collapseFooter(recent).slice(-160); // short, ANSI-free evidence for the log
       // eslint-disable-next-line no-console
       console.log(`[resume-mode] ${sessionId} kind=${isResume ? "resume" : "fresh"} mode=${mode} matched=${matchedToken ?? "-"} footer=${redactedExcerpt(snippet)}`);
-      if (!noCyclingConfigured && healTarget != null && mode !== healTarget && HEALABLE_MODES.has(mode) && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
+      if (!noCyclingConfigured && healTarget != null && mode !== healTarget && (HEALABLE_MODES.has(mode) || (healTarget === "default" && mode === "auto")) && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
         // eslint-disable-next-line no-console
         console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in ${mode} (ExitPlanMode disallowed) — cycling to ${healTarget}`);
         this.cycleToMode(sessionId, healTarget, onSettled);
@@ -15472,12 +15558,12 @@ export class PtyHost {
       //
       // One-shot: `live.modeLogged` above already guards this whole function to fire once per (re)spawn,
       // so this never repeats mid-session.
-      if (!noCyclingConfigured && healTarget != null && mode !== healTarget && HEALABLE_MODES.has(mode) && l.alive && !disallowedToolsForRole(role).includes("ExitPlanMode")) {
+      if (!noCyclingConfigured && healTarget != null && mode !== healTarget && (HEALABLE_MODES.has(mode) || (healTarget === "default" && mode === "auto")) && l.alive && !disallowedToolsForRole(role).includes("ExitPlanMode")) {
         // eslint-disable-next-line no-console
         console.log(`[resume-mode] ${sessionId} mode-mismatch-notice: role=${role ?? "-"} landed in ${mode}, configured target is ${healTarget} — notifying (no auto-correct for this role)`);
         this.enqueueStdin(
           sessionId,
-          `[loom:mode-unconfirmed] Your permission mode settled at "${mode}" rather than the configured "${healTarget}" after boot — the mode-cycle's confirmation may have been dropped under host load, not necessarily a choice you made. If you're unexpectedly blocked from writes/tools, press Shift+Tab (or call ExitPlanMode) to cycle to your working mode.`,
+          modeUnconfirmedNotice(mode, healTarget),
           "system", undefined, undefined, "warning",
         );
       }
@@ -16319,6 +16405,9 @@ export class PtyHost {
   }
 
   private appendRing(live: Live | CodexLive, buf: Buffer): void {
+    // `total` exists on a Live's ring only (a codex ring never reads it); the `??` tolerates a hand-built test fixture.
+    const ring = live.ring as { chunks: Buffer[]; bytes: number; total?: number };
+    ring.total = (ring.total ?? ring.bytes) + buf.length;
     live.ring.chunks.push(buf);
     live.ring.bytes += buf.length;
     while (live.ring.bytes > RING_CAP_BYTES && live.ring.chunks.length > 1) {
