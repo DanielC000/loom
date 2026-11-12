@@ -84,6 +84,8 @@ function WizardBody({ onClose }: { onClose: () => void }) {
     .map((r) => (r.gateCommand === undefined ? { key: r.key, path: r.path } : r));
   const [created, setCreated] = useState<{ projectId: string; projectName: string; result: TemplateApplyResult | null } | null>(null);
   const narrow = useNarrowViewport();
+  // Below this width the centered rail (552px full, ~230px compact) reaches the brand or close corner.
+  const stackHeader = useNarrowViewport(820);
 
   const templatesQ = useQuery({ queryKey: ["setupTemplates"], queryFn: ({ signal }) => api.setupTemplates(signal) });
   const profilesQ = useQuery({ queryKey: ["profiles"], queryFn: ({ signal }) => api.profiles(signal) });
@@ -175,9 +177,11 @@ function WizardBody({ onClose }: { onClose: () => void }) {
         overflowY: "auto", overflowX: "hidden",
       }}
     >
-      {/* Top bar: brand at the left, the horizontal stepper centered, a close affordance at the right. */}
-      <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px 24px 30px" }}>
-        <span style={{ position: "absolute", left: 24, top: 20, display: "inline-flex", alignItems: "center", gap: 9, color: color.live }}>
+      {/* Top bar: brand at the left, the horizontal stepper centered, a close affordance at the right. On phone and
+          tablet widths the centered stepper is wider than the gap between brand and close, so a taller top
+          padding drops it onto its own row below them instead of drawing step 1 over the wordmark (card 999b12a7). */}
+      <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "center", padding: stackHeader ?"60px 16px 24px" : "20px 24px 30px" }}>
+        <span data-testid="setup-wizard-brand" style={{ position: "absolute", left: 24, top: 20, display: "inline-flex", alignItems: "center", gap: 9, color: color.live }}>
           <LogoMark size={20} />
           <span style={{ fontFamily: font.ui, fontWeight: 600, fontSize: fs.lg, letterSpacing: "0.12em", color: color.text }}>loom</span>
         </span>
@@ -270,7 +274,7 @@ function Stepper({ step, compact }: { step: Step; compact?: boolean }) {
   const connW = compact ? 10 : 48;
   const bub = compact ? 26 : 30;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 0 }}>
+    <div data-testid="setup-wizard-stepper" style={{ display: "flex", alignItems: "center", gap: 0 }}>
       {STEP_CAPS.map((cap, i) => {
         const n = (i + 1) as Step;
         const state: "done" | "current" | "todo" = n < step ? "done" : n === step ? "current" : "todo";
