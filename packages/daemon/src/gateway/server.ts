@@ -276,6 +276,9 @@ export interface GatewayDeps {
    * SIGINT/SIGTERM handlers use — Windows has no real SIGTERM, so the CLI can't signal a detached
    * daemon into the graceful path; this endpoint is how it reaches it cross-platform. */
   requestShutdown: () => void;
+  /** Called (awaited, best-effort) after a platform-config PATCH that changed `sharedVaultRoots`, so a vault
+   *  refused at boot can start without a restart. Wired by index.ts; optional (absent ⇒ no-op). */
+  onSharedVaultRootsChanged?: () => Promise<void>;
   /** Epic 2c-2 — the daemon's current npm "update available" status (read-only), served by
    *  GET /api/update-status. Optional so existing partial-stub tests still build a server; a missing
    *  accessor degrades to a safe `packaged:false` default (banner hidden). */
@@ -6169,6 +6172,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       } catch (e) {
         console.warn(`[platform-config] seedOperatorAgent failed after operatorEnabled flip: ${(e as Error).message}`);
       }
+    }
+    // daa5d02f: a changed human-only `sharedVaultRoots` list starts any boot-refused vault it now recognizes.
+    // Best-effort — never fails the write the human asked for.
+    if (deps.onSharedVaultRootsChanged && JSON.stringify(before.sharedVaultRoots ?? []) !== JSON.stringify(mv.value.sharedVaultRoots ?? [])) {
+      try { await deps.onSharedVaultRootsChanged(); } catch (e) { console.warn(`[platform-config] vault rescan after sharedVaultRoots change failed: ${(e as Error).message}`); }
     }
     return { ok: true, override: mv.value };
   });

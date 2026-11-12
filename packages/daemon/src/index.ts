@@ -1259,10 +1259,26 @@ async function main(): Promise<void> {
   if (orphanedQuarantines.length > 0) {
     console.warn(`[boot] ${orphanedQuarantines.length} merge-quarantine latch(es) found for repo(s) that are not (or no longer) a registered Loom project — harmless (no merge can ever target them) but will keep re-arming on every boot until cleared: GET /internal/merge-quarantine/list to see them, POST /internal/merge-quarantine/clear-by-path to clear each by repoPath or id.`);
   }
+  // daa5d02f: declared BEFORE buildServer so the PATCH-triggered rescan hook below can close over them. The chain
+  // starts as a gate that the boot start opens once it has pushed its versioners, so a rescan always waits for boot.
+  const vaultVersioners: VaultVersioner[] = [];
+  let openVaultBootGate: () => void = () => undefined;
+  let vaultRescanChain: Promise<void> = new Promise<void>((resolve) => { openVaultBootGate = resolve; });
   const app = await buildServer({
     db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, operatorMcp, runMcp, control, usageStatus,
     schedulerEnabled,
     companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"),
+    // daa5d02f: serialized (a second PATCH waits for the first) so one root is never started twice.
+    onSharedVaultRootsChanged: async () => {
+      vaultRescanChain = vaultRescanChain.then(async () => {
+        const fresh = await startVaultVersioners(db, { rescan: { watched: vaultVersioners } });
+        if (fresh.length > 0) {
+          vaultVersioners.push(...fresh);
+          console.log(`[vault] sharedVaultRoots changed: started ${fresh.length} previously refused vault auto-committer(s)`);
+        }
+      }, () => undefined);
+      await vaultRescanChain;
+    },
     updateStatus: () => updateCheck.current(), beginSelfUpdate,
     // Access-story Phase B (card 56ffe50a): verify a presented gateway token against the real
     // gateway_tokens store — fail-closed (any non-"ok" reason, incl. malformed/unknown/bad-secret/
@@ -1766,12 +1782,13 @@ async function main(): Promise<void> {
   // external auto-committer owns its history); a bare vault folder with no repo is git-inited. Best-effort.
   // The code-repo-collision guard provider is wired much earlier now, right after `db` opens — see that
   // site's own comment (card a09b81a0 round 2).
-  let vaultVersioners: VaultVersioner[] = [];
   try {
-    vaultVersioners = await startVaultVersioners(db);
+    vaultVersioners.push(...await startVaultVersioners(db));
     console.log(`[boot] vault auto-committer on (${vaultVersioners.length} unique vault(s))`);
   } catch (err) {
     console.warn(`[boot] vault auto-committer start failed (continuing boot): ${(err as Error).message}`);
+  } finally {
+    openVaultBootGate();
   }
 
   // Card d671f1b8: shared shutdown-cleanup — vault flush + codescape-supervisor stop — factored into ONE
@@ -1819,10 +1836,10 @@ async function main(): Promise<void> {
   //
   // Card 347b3584 round 2: this step's own hard-exit-watchdog budget, derived from versioner.ts's REAL
   // timeout constants (never a copied number) and how many vaults THIS process actually flushes —
-  // `vaultVersioners.length` is fixed by this point in boot. Fixed once here and threaded to both call
-  // sites below (gracefulShutdown's own `step()` call, and `requestDaemonRestart`'s analogous one via
-  // `setShutdownCleanup`) so the two never drift onto different figures.
-  const flushVaultsStepBudgetMs = computeFlushVaultsStepBudgetMs(vaultVersioners.length);
+  // `vaultVersioners.length` is read LIVE at shutdown (a sharedVaultRoots rescan can start vaults after boot).
+  // One getter is threaded to both call sites (gracefulShutdown's own `step()` call, and
+  // `requestDaemonRestart`'s analogous one via `setShutdownCleanup`) so the two never drift onto different figures.
+  const flushVaultsStepBudgetMs = (): number => computeFlushVaultsStepBudgetMs(vaultVersioners.length);
   sessions.setShutdownCleanup(flushVaultsAndStopCodescape, flushVaultsStepBudgetMs);
 
   // Vault push-status visibility (task f48ee77d): the auto-committer above is commit-only BY DESIGN —
@@ -2087,10 +2104,10 @@ async function main(): Promise<void> {
       try { const n = sessions.snapshotAllLive(); if (n > 0) console.log(`[shutdown] snapshotted ${n} live transcript(s)`); } catch { /* never block the exit */ }
       // Vault flush + codescape-supervisor stop: shared with `daemon_restart`'s exit path — see
       // flushVaultsAndStopCodescape's own doc above for why this is factored out and what each half does.
-      // Card 347b3584 round 2: this step gets its OWN derived budget (flushVaultsStepBudgetMs, computed
-      // once above), never the watchdog's flat per-step default — a healthy multi-minute flush must not
+      // Card 347b3584 round 2: this step gets its OWN derived budget (flushVaultsStepBudgetMs, read live
+      // from the current vault count), never the watchdog's flat per-step default — a healthy multi-minute flush must not
       // be killed mid `git commit`.
-      step("flushVaultsAndStopCodescape", flushVaultsStepBudgetMs);
+      step("flushVaultsAndStopCodescape", flushVaultsStepBudgetMs());
       await flushVaultsAndStopCodescape();
       // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
       // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).

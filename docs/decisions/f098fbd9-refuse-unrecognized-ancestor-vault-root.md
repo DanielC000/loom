@@ -21,4 +21,4 @@ Refusal is fail-closed and simple. A pathspec-scoped `git add <subfolder>` would
 - Do not add a second "is this ancestor OK" signal (layout, project count, an `.obsidian` marker); reuse `isRecognizedVaultRoot` only.
 - Do not move the seed after `startVaultVersioners`, or the provider registration after either.
 - Do not drop the `flushSync` or the boot check on the theory that `commit()` covers them; each stages at `commitPath` independently.
-- Do not turn a boot-time refusal into a permanent state: the check is re-run live on every `commit()`, so a Settings edit applies without a restart for a vault that did start. A vault skipped at boot (never watched) needs a daemon restart after the list is edited.
+- Do not turn a boot-time refusal into a permanent state: the check is re-run live on every `commit()`, so a Settings edit applies without a restart for a vault that did start. A vault skipped at boot (never watched) is started live when the list is saved (`daa5d02f`), no restart.

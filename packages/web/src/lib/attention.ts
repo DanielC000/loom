@@ -685,11 +685,11 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     items.push({
       key: `var-${e.id}`, tone: "danger", notify: "vault-lock-stuck", kind: "VAULT NOT COMMITTING",
       dismissKey: `var:${e.id}`,
-      dismissHint: "Hide this alert — it returns if the daemon refuses this vault again after a restart. Nothing is committed until the root is listed.",
+      dismissHint: "Hide this alert — it returns if the daemon refuses this vault again. Nothing is committed until the root is listed.",
       projectId: detail.projectId ?? null,
       text: `${detail.vaultPath ?? "a vault"} sits inside git repo ${detail.commitPath ?? "(unknown)"}, which Loom will not auto-commit ` +
         `(it would stage that whole repo). If it is your shared notes vault, add ${detail.commitPath ?? "that repo"} to Settings → Platform → ` +
-        `shared vault roots, then RESTART the daemon.`,
+        `shared vault roots; saving the list starts it and clears this alert (no restart needed).`,
       hoverText: vaultAncestor.seedNote === "none"
         ? "The one-time boot seed of shared vault roots found no shared notes vault, so the list is empty."
         : vaultAncestor.seedNote === "ambiguous"

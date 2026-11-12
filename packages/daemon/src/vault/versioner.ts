@@ -901,6 +901,12 @@ function isUnrecognizedAncestorRoot(vaultPath: string, commitPath: string): bool
 /** One warn + one durable event per (vaultPath, commitPath) per process, like {@link refuseCodeRepoCollision}. */
 const warnedAncestorRootRefusals = new Set<string>();
 
+/** @decision daa5d02f — a filed `-cleared` must drop that vault's refusal dedupe keys, or a re-refusal is silent. */
+function forgetAncestorRootRefusals(vaultPath: string): void {
+  const prefix = `${canonicalSharedRootKey(vaultPath)}::`;
+  for (const k of [...warnedAncestorRootRefusals]) if (k.startsWith(prefix)) warnedAncestorRootRefusals.delete(k);
+}
+
 function refuseUnrecognizedAncestorRoot(
   vaultPath: string,
   commitPath: string,
@@ -914,7 +920,7 @@ function refuseUnrecognizedAncestorRoot(
     `[vault-versioner] ${vaultPath} is governed by ${commitPath}, an ancestor git repo that is neither the vault ` +
     `itself nor listed under Settings → Platform → sharedVaultRoots — refusing to auto-commit (it would stage ` +
     `that whole repo). If it really is a shared notes vault, add ${commitPath} to sharedVaultRoots (Settings → Platform) ` +
-    `and RESTART the daemon (a vault refused at boot is not started live).`,
+    `(a vault refused at boot starts as soon as the list is saved; no restart needed).`,
   );
   try {
     codeRepoGuard?.recordEvent({
@@ -2283,9 +2289,20 @@ export const OPERATIONAL_HOME_GIT_WRITE_ERROR =
  *
  * Returns the started versioners so the caller can `flushSync()`/`stop()` them on shutdown.
  */
-export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number }): Promise<VaultVersioner[]> {
+export async function startVaultVersioners(
+  db: Db,
+  opts?: {
+    debounceMs?: number;
+    /** RESCAN mode (run after a `sharedVaultRoots` edit): only projects with an OPEN ancestor refusal, skips
+     *  roots already in `watched`, files no new refusal, returns only newly started versioners.
+     *  @decision daa5d02f — never start a still-unrecognized ancestor; never double-start a watched root. */
+    rescan?: { watched: readonly VaultVersioner[] };
+  },
+): Promise<VaultVersioner[]> {
   const started: VaultVersioner[] = [];
+  const rescan = opts?.rescan;
   const seen = new Set<string>();
+  if (rescan) for (const w of rescan.watched) seen.add(w.commitRoot.replace(/\\/g, "/"));
   // @decision f098fbd9 — vaults whose LATEST durable ancestor-refusal event is still "refused" (a later
   // "-cleared" event supersedes it); one passing boot files the clear so the owner's item goes away.
   const openAncestorRefusals = new Set<string>();
@@ -2303,6 +2320,7 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
     if (project.archivedAt) continue;
     const vaultPath = project.vaultPath?.trim();
     if (!vaultPath) continue;
+    if (rescan && !openAncestorRefusals.has(canonicalSharedRootKey(vaultPath))) continue;
     // A vaultPath that fails `validateVaultPath` (card 78dc99e3: a non-absolute LEGACY row that predates
     // the write-time guard, card 96c4b245; or card b709113e: a win32 drive-less rooted path like "/tmp",
     // which a pre-existing row can carry regardless of what create/rebind rejects today) resolves
@@ -2351,15 +2369,19 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
       if (!ctx.externallyManaged && isUnrecognizedAncestorRoot(vaultPath, ctx.commitPath)) {
         const rootKey = canonicalSharedRootKey(ctx.commitPath);
         const rootIsAnotherVault = db.listAllProjects().some((o) => o.id !== project.id && !o.archivedAt && !!o.vaultPath?.trim() && canonicalSharedRootKey(o.vaultPath.trim()) === rootKey);
-        if (!rootIsAnotherVault) refuseUnrecognizedAncestorRoot(vaultPath, ctx.commitPath, "boot", project.id);
+        if (!rootIsAnotherVault && !rescan) refuseUnrecognizedAncestorRoot(vaultPath, ctx.commitPath, "boot", project.id);
         continue;
       }
-      if (!ctx.externallyManaged && openAncestorRefusals.has(canonicalSharedRootKey(vaultPath))) {
+      // The clear is filed only once the vault is really covered (started below, or already watched), so a
+      // throwing start() never clears the owner's alert. It also re-arms the refusal dedupe for this vault.
+      const fileClear = (): void => {
+        if (ctx.externallyManaged || !openAncestorRefusals.has(canonicalSharedRootKey(vaultPath))) return;
         openAncestorRefusals.delete(canonicalSharedRootKey(vaultPath));
+        forgetAncestorRootRefusals(vaultPath);
         try { codeRepoGuard?.recordEvent({ projectId: project.id, reason: "unrecognized-ancestor-root-cleared", vaultPath, commitPath: ctx.commitPath, source: "boot" }); } catch { /* best-effort audit */ }
-      }
+      };
       const key = ctx.commitPath.replace(/\\/g, "/");
-      if (seen.has(key)) continue; // already watching this repo root
+      if (seen.has(key)) { fileClear(); continue; } // already watching this repo root
       seen.add(key);
       if (ctx.externallyManaged) continue; // Obsidian-Git owns this history — no loom watcher/commit
       // Card 227d9f0b — threads db + the owning project's id through so a stale-lock alert this instance
@@ -2368,6 +2390,7 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
       const versioner = new VaultVersioner(vaultPath, opts?.debounceMs, undefined, undefined, undefined, { db, projectId: project.id });
       await versioner.start();
       started.push(versioner);
+      fileClear();
     } catch (err) {
       console.warn(`[vault-versioner] project ${project.id} vault (${vaultPath}) failed to start (${(err as Error).message}); skipping — other projects' versioners still start.`);
     }

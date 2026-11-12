@@ -3729,8 +3729,9 @@ export class SessionService {
    * round 2) defaults to the watchdog's own flat per-step default — real boot always passes its derived
    * figure explicitly; the default here only keeps every existing test call (one arg) unchanged.
    */
-  setShutdownCleanup(fn: () => void | Promise<void>, flushVaultsStepBudgetMs: number = GRACEFUL_TEARDOWN_HARD_EXIT_MS): void {
-    this.shutdownCleanup = { run: fn, flushVaultsStepBudgetMs };
+  setShutdownCleanup(fn: () => void | Promise<void>, flushVaultsStepBudgetMs: number | (() => number) = GRACEFUL_TEARDOWN_HARD_EXIT_MS): void {
+    // A getter is read at exit time, so a vault started after boot (a sharedVaultRoots rescan) is counted.
+    this.shutdownCleanup = { run: fn, get flushVaultsStepBudgetMs() { return typeof flushVaultsStepBudgetMs === "function" ? flushVaultsStepBudgetMs() : flushVaultsStepBudgetMs; } };
   }
 
   // @decision 0e4a859a — MUST stay presence-gated on purpose (codescape is a private product), mirroring

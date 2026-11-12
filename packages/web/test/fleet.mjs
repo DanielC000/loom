@@ -683,10 +683,10 @@ check("activeVaultAncestorRefusals: legacy code-repo-collision rows (no reason) 
   const noPath = arEv("unrecognized-ancestor-root", { commitPath: "/h" });
   assert.equal(activeVaultAncestorRefusals([legacy, noPath]).alerts.length, 0);
 });
-check("useAttention builds the VAULT NOT COMMITTING item from activeVaultAncestorRefusals (source wiring + restart wording)", () => {
+check("useAttention builds the VAULT NOT COMMITTING item from activeVaultAncestorRefusals (source wiring + no-restart wording)", () => {
   const att = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "attention.ts"), "utf8");
   assert.ok(att.includes("activeVaultAncestorRefusals(vaultAncestorEventsQuery.data"), "query result feeds the helper");
-  assert.ok(att.includes('kind: "VAULT NOT COMMITTING"') && att.includes("RESTART the daemon"), "item present and tells the owner to restart");
+  assert.ok(att.includes('kind: "VAULT NOT COMMITTING"') && !att.includes("RESTART the daemon") && att.includes("no restart needed"), "item present and no longer tells the owner to restart");
 });
 
 check("activeVaultLockAlerts: an unrelated event kind is ignored", () => {

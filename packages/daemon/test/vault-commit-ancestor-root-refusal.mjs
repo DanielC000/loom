@@ -221,7 +221,7 @@ async function startedVersioner(vault) {
   }
 }
 
-// ===================== (8) the refusal text tells the owner to restart =====================
+// ===================== (8) the refusal text no longer tells the owner to restart =====================
 {
   const warns = [];
   const origWarn = console.warn;
@@ -231,7 +231,152 @@ async function startedVersioner(vault) {
   const v = await startedVersioner(vault);
   await v.commit();
   console.warn = origWarn;
-  check("(8) the refusal warning names the list and says a DAEMON RESTART is needed", warns.some((w) => w.includes("sharedVaultRoots") && w.includes("RESTART the daemon")));
+  check("(8) the refusal warning names the list and does NOT demand a daemon restart", warns.some((w) => w.includes("sharedVaultRoots") && w.includes("no restart needed")) && !warns.some((w) => /RESTART the daemon/i.test(w)));
+}
+
+// ===================== (9) daa5d02f: a PATCH listing a boot-refused root starts it live =====================
+{
+  const { buildServer } = await import("../dist/gateway/server.js");
+  const now = new Date().toISOString();
+  const proj = (id, vaultPath) => ({ id, name: id, repoPath: "", vaultPath, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: false });
+  const a = ancestorLayout("resc-a");
+  const b = ancestorLayout("resc-b");
+  const db = new Db(path.join(root, "resc.db"));
+  const evs = () => db.listRecentEventsByKinds(["vault_autocommit_refused_code_repo"]).map((e) => e.detail);
+  const reasonsFor = (vaultPath, reason) => evs().filter((d) => d.vaultPath === vaultPath && d.reason === reason).length;
+  setCodeRepoGuardProvider({
+    snapshot: () => [], sharedVaultRoots: () => db.getPlatformConfig().sharedVaultRoots ?? [],
+    recordEvent: (detail) => db.appendEvent({ id: `e-${Math.random().toString(36).slice(2)}`, ts: new Date().toISOString(), managerSessionId: "", kind: "vault_autocommit_refused_code_repo", detail }),
+  });
+  db.insertProject(proj("rescA", a.vault));
+  db.insertProject(proj("rescB", b.vault));
+  const versioners = await startVaultVersioners(db, { debounceMs: 60_000 });
+  check("(9) both unlisted ancestor vaults are refused at boot (no watcher, one durable refusal each)", versioners.length === 0 && reasonsFor(a.vault, "unrecognized-ancestor-root") === 1 && reasonsFor(b.vault, "unrecognized-ancestor-root") === 1);
+
+  let rescans = 0;
+  let chain = Promise.resolve();
+  const stub = {};
+  const app = await buildServer({
+    db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub,
+    // Same shape as index.ts's wiring: serialized, rescan against the live watched list.
+    onSharedVaultRootsChanged: async () => {
+      rescans++;
+      chain = chain.then(async () => { versioners.push(...await startVaultVersioners(db, { debounceMs: 60_000, rescan: { watched: versioners } })); }, () => undefined);
+      await chain;
+    },
+  });
+  try {
+    // An unrelated PATCH (sharedVaultRoots unchanged) must not trigger a rescan.
+    const noop = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { watchers: { wakeMs: 120000 } } });
+    check("(9) a PATCH that leaves sharedVaultRoots alone does not rescan", noop.statusCode === 200 && rescans === 0 && versioners.length === 0);
+
+    // Listing only A's root: A starts, B (still unlisted) stays refused.
+    const before = commitCount(a.home);
+    const res = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { sharedVaultRoots: [a.home] } });
+    check("(9) the PATCH listing A's root succeeds and rescans exactly once", res.statusCode === 200 && rescans === 1);
+    check("(9) A's boot-refused vault now has a versioner on A's root (no restart); B's is NOT started", versioners.length === 1 && path.resolve(versioners[0].commitRoot) === path.resolve(a.home));
+    check("(9) the -cleared event is filed for A exactly once and never for B", reasonsFor(a.vault, "unrecognized-ancestor-root-cleared") === 1 && reasonsFor(b.vault, "unrecognized-ancestor-root-cleared") === 0);
+    check("(9) B's still-unlisted refusal is NOT re-filed by the rescan", reasonsFor(b.vault, "unrecognized-ancestor-root") === 1);
+    await versioners[0].commit();
+    check("(9) A's vault actually COMMITS after the PATCH (real git commit landed, vault note tracked)", commitCount(a.home) === before + 1 && git(a.home, "ls-files").includes("notes/n.md"));
+    check("(9) B's repo was never staged or committed", git(b.home, "status --porcelain").includes("?? notes/") && commitCount(b.home) === 1);
+
+    // No double start: a second PATCH re-listing A (plus B) starts only B, never A again.
+    const res2 = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { sharedVaultRoots: [a.home, b.home] } });
+    check("(9) a later PATCH listing B starts B only — A is not double-started", res2.statusCode === 200 && versioners.length === 2 && new Set(versioners.map((v) => path.resolve(v.commitRoot))).size === 2);
+    // Re-running the rescan with everything watched starts nothing and files no second clear.
+    const again = await startVaultVersioners(db, { debounceMs: 60_000, rescan: { watched: versioners } });
+    check("(9) a rescan with every root already watched starts nothing and files no second clear", again.length === 0 && reasonsFor(a.vault, "unrecognized-ancestor-root-cleared") === 1 && reasonsFor(b.vault, "unrecognized-ancestor-root-cleared") === 1);
+
+    // Removing a root does NOT stop the running watcher; its per-tick commit() refuses instead.
+    await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { sharedVaultRoots: [b.home] } });
+    fs.writeFileSync(path.join(a.vault, "after-removal.md"), "# x\n");
+    const cA = commitCount(a.home);
+    await versioners.find((v) => path.resolve(v.commitRoot) === path.resolve(a.home)).commit();
+    check("(9) removing A's root leaves its watcher running but its next commit() REFUSES", versioners.length === 2 && commitCount(a.home) === cA);
+  } finally {
+    await app.close();
+    for (const v of versioners) await v.stop();
+    db.close();
+    setCodeRepoGuardProvider({ snapshot: () => [], sharedVaultRoots: () => sharedRoots, recordEvent: (d) => events.push(d) });
+  }
+}
+
+// ===================== (10) daa5d02f review round: re-refusal cycle, throwing start, boot interleave, flush budget =====================
+{
+  const now = new Date().toISOString();
+  const proj = (id, vaultPath) => ({ id, name: id, repoPath: "", vaultPath, config: {}, createdAt: now, archivedAt: null, reserved: false, repos: [], vaultOnly: false });
+  const db = new Db(path.join(root, "round2.db"));
+  const dbRoots = [];
+  setCodeRepoGuardProvider({
+    snapshot: () => [], sharedVaultRoots: () => dbRoots,
+    recordEvent: (detail) => db.appendEvent({ id: `e-${Math.random().toString(36).slice(2)}`, ts: new Date().toISOString(), managerSessionId: "", kind: "vault_autocommit_refused_code_repo", detail }),
+  });
+  const count = (vaultPath, reason, source) => db.listRecentEventsByKinds(["vault_autocommit_refused_code_repo"]).filter((e) => e.detail?.vaultPath === vaultPath && e.detail?.reason === reason && (!source || e.detail?.source === source)).length;
+  const L = ancestorLayout("round2-a");
+  db.insertProject(proj("r2", L.vault));
+  const watched = [];
+
+  // (10a) a start() that THROWS must not file the -cleared event (the alert stays); a later good start does.
+  await startVaultVersioners(db, { debounceMs: 60_000 });
+  check("(10a) boot refusal filed", count(L.vault, "unrecognized-ancestor-root", "boot") === 1);
+  dbRoots.push(L.home);
+  const realStart = VaultVersioner.prototype.start;
+  VaultVersioner.prototype.start = async function () { throw new Error("injected start failure"); };
+  const origWarn10 = console.warn; console.warn = () => {};
+  const failed = await startVaultVersioners(db, { debounceMs: 60_000, rescan: { watched } });
+  console.warn = origWarn10;
+  VaultVersioner.prototype.start = realStart;
+  check("(10a) a throwing start() starts nothing AND files NO -cleared event", failed.length === 0 && count(L.vault, "unrecognized-ancestor-root-cleared") === 0);
+  watched.push(...await startVaultVersioners(db, { debounceMs: 60_000, rescan: { watched } }));
+  check("(10a) (positive control) the retry after a good start files the -cleared event once", watched.length === 1 && count(L.vault, "unrecognized-ancestor-root-cleared") === 1);
+
+  // (10b) remove -> re-add -> remove: the SECOND removal files the refusal again (dedupe re-armed by the clear).
+  dbRoots.length = 0;
+  await watched[0].commit();
+  check("(10b) first removal: the running watcher's commit() files an auto_commit refusal", count(L.vault, "unrecognized-ancestor-root", "auto_commit") === 1);
+  dbRoots.push(L.home);
+  await startVaultVersioners(db, { debounceMs: 60_000, rescan: { watched } }); // re-add: clears the open refusal
+  check("(10b) re-add files a second -cleared", count(L.vault, "unrecognized-ancestor-root-cleared") === 2);
+  dbRoots.length = 0;
+  await watched[0].commit();
+  check("(10b) second removal files the auto_commit refusal AGAIN (not silenced by the stale dedupe key)", count(L.vault, "unrecognized-ancestor-root", "auto_commit") === 2);
+  // Negative control: without a clear in between, a repeat refusal stays deduped.
+  await watched[0].commit();
+  check("(10b) (negative control) a repeat tick with no clear in between stays deduped", count(L.vault, "unrecognized-ancestor-root", "auto_commit") === 2);
+  for (const v of watched) await v.stop();
+  db.close();
+  setCodeRepoGuardProvider({ snapshot: () => [], sharedVaultRoots: () => sharedRoots, recordEvent: (d) => events.push(d) });
+
+  // (10c) index.ts source order: vaultVersioners + chain gate hoisted ABOVE buildServer; the boot start opens the gate
+  // after pushing; the rescan hook chains on the gate. (comment-stripped; positive control: the scan sees each token)
+  const src = stripComments(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "index.ts"), "utf8"));
+  const at = (n) => src.indexOf(n);
+  const decl = at("const vaultVersioners: VaultVersioner[] = []");
+  const gateDecl = at("let vaultRescanChain");
+  const build = at("await buildServer({");
+  const bootStart = at("vaultVersioners.push(...await startVaultVersioners(db))");
+  const gateOpen = at("openVaultBootGate();", bootStart);
+  const hook = at("vaultRescanChain = vaultRescanChain.then(");
+  check("(10c) (positive control) the scan finds every anchor", [decl, gateDecl, build, bootStart, gateOpen, hook].every((i) => i > 0));
+  check("(10c) vaultVersioners and the chain gate are declared BEFORE buildServer", decl < build && gateDecl < build);
+  check("(10c) the rescan hook chains on the gate, which the boot start opens only after it ran", hook > build && gateOpen > bootStart && bootStart > build);
+  check("(10c) (negative control) the pre-fix shape (`let vaultVersioners ... = await startVaultVersioners(db)` after buildServer) is gone", at("vaultVersioners = await startVaultVersioners(db)") < 0 && at("let vaultVersioners") < 0);
+
+  // (10d) flush budget is read LIVE: setShutdownCleanup accepts a getter, and a vault added later raises the budget.
+  const { SessionService } = await import("../dist/sessions/service.js");
+  const { computeFlushVaultsStepBudgetMs } = await import("../dist/graceful-teardown.js");
+  const fakeThis = {};
+  const live = [];
+  SessionService.prototype.setShutdownCleanup.call(fakeThis, () => {}, () => computeFlushVaultsStepBudgetMs(live.length));
+  const b0 = fakeThis.shutdownCleanup.flushVaultsStepBudgetMs;
+  live.push({}, {});
+  const b2 = fakeThis.shutdownCleanup.flushVaultsStepBudgetMs;
+  check("(10d) a vault started after registration raises the shutdown flush budget", b0 === computeFlushVaultsStepBudgetMs(0) && b2 === computeFlushVaultsStepBudgetMs(2) && b2 > b0);
+  const fake2 = {};
+  SessionService.prototype.setShutdownCleanup.call(fake2, () => {}, 1234);
+  check("(10d) a plain number budget still works unchanged", fake2.shutdownCleanup.flushVaultsStepBudgetMs === 1234);
+  check("(10d) index.ts passes a getter and reads it live at the graceful step", src.includes("const flushVaultsStepBudgetMs = (): number =>") && src.includes('step("flushVaultsAndStopCodescape", flushVaultsStepBudgetMs())'));
 }
 
 // ===================== (5) boot ordering =====================
