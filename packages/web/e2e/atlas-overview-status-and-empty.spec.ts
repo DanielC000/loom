@@ -16,13 +16,12 @@
 // Presence-first throughout: every absence is asserted only after something that must BE there.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 async function openOverview(page: Page, loomDaemon: LoomDaemon, projectId: string) {
-  await page.addInitScript(([atlasKey, projectKey, id]) => {
-    try { localStorage.setItem(atlasKey, "1"); localStorage.setItem(projectKey, id); } catch { /* storage unavailable */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+  await page.addInitScript(([projectKey, id]) => {
+    try { localStorage.setItem(projectKey, id); } catch { /* storage unavailable */ }
+  }, [PROJECT_KEY, projectId] as const);
   await page.goto(loomDaemon.baseURL + "/project");
   await expect(page.getByTestId("atlas-overview-roster")).toBeVisible();
 }

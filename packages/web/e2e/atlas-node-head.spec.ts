@@ -2,7 +2,7 @@
 // 6 of the Atlas gap audit. Design record: docs/decisions/5968d7e0-atlas-node-head-pills-actions.md.
 //
 // What the card claims, and how each half is measured rather than asserted by shape:
-//   1. SWITCH ON — the project node's head carries REAL readings on every tab: `<N> working` off a
+//   1. The project node's head carries REAL readings on every tab: `<N> working` off a
 //      seeded busy/idle mix, and `<branch> <sha>` off a repo this spec committed to, so both pills
 //      are checked against values the test itself chose rather than against "something rendered".
 //   2. NEITHER PILL IS A KPI. The strip one row below carries the node's six figures on every tab
@@ -13,9 +13,8 @@
 //      swaps from the spawn split-button to the held control + Stop. Nothing is ever spawned.
 //   4. A SESSION NODE'S HEAD GAINS `gen · turns`, beside (never instead of) the context readout.
 //   5. THE GATES LAMPS ARE GONE INSIDE THE FRAME and still present outside it — the occupancy that
-//      used to be stated three times on one screen is stated twice, and the classic page is intact.
-//   6. SWITCH OFF — no node-head pill, no spawn cluster, anywhere.
-//   7. (card 359bcdaa) AN OVER-LONG READING IS ELLIPSISED, not chopped mid-word — measured off the
+//      used to be stated three times on one screen is stated twice.
+//   6. (card 359bcdaa) AN OVER-LONG READING IS ELLIPSISED, not chopped mid-word — measured off the
 //      element that actually holds the text, since every box and document-width claim in this file
 //      passes identically with the defect present. See that leg's own note.
 //
@@ -31,18 +30,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig
+// covers `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
@@ -183,11 +173,10 @@ async function laneOccupancyMentions(page: Page): Promise<string[]> {
 }
 
 test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
-  test("switch ON: the project node's pills read the seeded fleet and repo on EVERY tab", async ({ page, loomDaemon }) => {
+  test("the project node's pills read the seeded fleet and repo on EVERY tab", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const proj = await seedProjectWithRepo(loomDaemon.baseURL);
     const fleet = await seedFleet(loomDaemon, { id: proj.id, name: proj.name });
-    await seedAtlasOn(page);
     await pinProject(page, proj.id);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/project");
@@ -243,9 +232,8 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     expect(offenders, "every project node tab carries the node's two pills and its spawn control").toEqual([]);
   });
 
-  test("switch ON: the Workspace node carries its own pill and NO spawn cluster", async ({ page, loomDaemon }) => {
+  test("the Workspace node carries its own pill and NO spawn cluster", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
-    await seedAtlasOn(page);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/home");
 
@@ -269,7 +257,7 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     expect(working, `working ${working} must not exceed live ${liveTile}`).toBeLessThanOrEqual(liveTile);
   });
 
-  test("switch ON: Spawn + opens the roster dialog, and the go-live guard swaps its control", async ({ page, loomDaemon }) => {
+  test("Spawn + opens the roster dialog, and the go-live guard swaps its control", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const proj = await seedProjectWithRepo(loomDaemon.baseURL);
     // A manager-RIG agent: `managerLive` is `profile.role === "manager" && live`, so the rig is what
@@ -287,7 +275,6 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     });
     await apiJson(`${loomDaemon.baseURL}/api/agents/${manager.id}`, { method: "POST", body: JSON.stringify({ profileId: mgrRig.id }) });
 
-    await seedAtlasOn(page);
     await pinProject(page, proj.id);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/project");
@@ -339,7 +326,7 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     await expect(plainSpawn).toBeEnabled();
   });
 
-  test("switch ON: a session node's head gains gen · turns beside its context readout", async ({ page, loomDaemon }) => {
+  test("a session node's head gains gen · turns beside its context readout", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const proj = await seedProjectWithRepo(loomDaemon.baseURL);
     const mgr = await loomDaemon.seedLiveSession({
@@ -359,7 +346,6 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
       await route.fulfill({ status: res.status(), contentType: "application/json", body: JSON.stringify(rows) });
     });
 
-    await seedAtlasOn(page);
     await pinProject(page, proj.id);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
@@ -380,9 +366,8 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     await expect(page.locator("h1")).toHaveCount(1);
   });
 
-  test("switch ON: the Gates tab states its lane occupancy once, not twice", async ({ page, loomDaemon }) => {
+  test("the Gates tab states its lane occupancy once, not twice", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
-    await seedAtlasOn(page);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/home?tab=gates");
 
@@ -402,11 +387,10 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     expect(mentions[0]).toMatch(/maxConcurrentGates|lanes? busy/i);
   });
 
-  test("switch ON at 420px: the head wraps and nothing escapes the viewport", async ({ page, loomDaemon }) => {
+  test("at 420px: the head wraps and nothing escapes the viewport", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const proj = await seedProjectWithRepo(loomDaemon.baseURL);
     await seedFleet(loomDaemon, { id: proj.id, name: proj.name });
-    await seedAtlasOn(page);
     await pinProject(page, proj.id);
     await page.setViewportSize({ width: 420, height: 900 });
     await page.goto(loomDaemon.baseURL + "/project");
@@ -441,7 +425,7 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
   // `document.scrollWidth == clientWidth` throughout, so the box/document claims above pass in BOTH
   // states. The only visible difference is WHICH ELEMENT holds the text and whether a block container
   // is available for the ellipsis to render in — which is what `readingHost` asks.
-  test("switch ON at 420px: an over-long head pill is ellipsised, not chopped mid-word",
+  test("at 420px: an over-long head pill is ellipsised, not chopped mid-word",
     async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     // Long enough that it cannot fit in ANY plausible pills box, not merely in a 388px one — the
@@ -450,7 +434,6 @@ test.describe("Atlas node head pills + actions (card 5968d7e0)", () => {
     const longBranch = "feature/an-exceedingly-long-branch-name-that-no-node-head-pill-can-fit-at-phone-width";
     const proj = await seedProjectWithRepo(loomDaemon.baseURL, { branch: longBranch });
     await seedFleet(loomDaemon, { id: proj.id, name: proj.name });
-    await seedAtlasOn(page);
     await pinProject(page, proj.id);
     await page.setViewportSize({ width: 420, height: 900 });
     await page.goto(loomDaemon.baseURL + "/project");

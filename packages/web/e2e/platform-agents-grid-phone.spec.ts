@@ -17,8 +17,6 @@ const PHONE = { width: 390, height: 900 };
 const DESKTOP = { width: 1280, height: 900 };
 // Sub-pixel rounding only — the defect was ~10px.
 const TOLERANCE_PX = 1;
-// lib/atlasUi.ts owns this key; hardcoded because the e2e tsconfig cannot import `src/`.
-const ATLAS_KEY = "loom.atlasUi";
 
 type GridFit = { cards: number; gridRight: number; overflow: number; maxCardRight: number; rows: number };
 
@@ -39,11 +37,7 @@ async function measureGrid(page: Page): Promise<GridFit> {
 }
 
 test.describe("Platform node Agents grid at phone width (card dd4f8a16)", () => {
-  test("switch ON: the go-live cards fit the column at 390px and still share a row on desktop", async ({ page, loomDaemon }) => {
-    await page.addInitScript((key) => {
-      try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-    }, ATLAS_KEY);
-
+  test("the go-live cards fit the column at 390px and still share a row on desktop", async ({ page, loomDaemon }) => {
     // ── CONTROL: desktop — two cards, one row. ──
     await page.setViewportSize(DESKTOP);
     await page.goto(`${loomDaemon.baseURL}/platform`);

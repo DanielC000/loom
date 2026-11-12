@@ -13,13 +13,12 @@
 // measure that cannot fire.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
-async function seedAtlas(page: Page, projectId: string) {
-  await page.addInitScript(([a, p, id]) => {
-    try { localStorage.setItem(a, "1"); localStorage.setItem(p, id); } catch { /* assertions will say so */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+async function pinProject(page: Page, projectId: string) {
+  await page.addInitScript(([p, id]) => {
+    try { localStorage.setItem(p, id); } catch { /* assertions will say so */ }
+  }, [PROJECT_KEY, projectId] as const);
 }
 
 const tabRow = (page: Page) => page.getByTestId("atlas-node-tabs");
@@ -41,7 +40,7 @@ test.describe("Atlas session node stability (card 4f62b5cb)", () => {
     const held = await loomDaemon.enqueueMessage({ sessionId: mgr.sessionId, text: "a held queued turn", source: "human", kind: "agent" });
     expect(held.delivered, "fixture precondition: the second enqueue must be HELD").toBe(false);
     await page.setViewportSize({ width: 1440, height: 900 });
-    await seedAtlas(page, mgr.projectId);
+    await pinProject(page, mgr.projectId);
 
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
     await expect(page.getByTestId("session-node-pane-terminal")).toBeVisible();
@@ -91,7 +90,7 @@ test.describe("Atlas session node stability (card 4f62b5cb)", () => {
       ctxInputTokens: 182_000, ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
     });
     await page.setViewportSize({ width: 390, height: 844 });
-    await seedAtlas(page, mgr.projectId);
+    await pinProject(page, mgr.projectId);
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
     const head = page.locator(".loom-atlas-nodehead");
     await expect(head.getByText(/182\.0k ctx/)).toBeVisible();
@@ -134,7 +133,7 @@ test.describe("Atlas session node stability (card 4f62b5cb)", () => {
     let forkCalls = 0;
     await page.route("**/api/sessions/*/fork", (route) => { forkCalls += 1; return route.fulfill({ status: 500, json: {} }); });
     await page.setViewportSize({ width: 390, height: 844 });
-    await seedAtlas(page, mgr.projectId);
+    await pinProject(page, mgr.projectId);
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
 
     const fork = page.locator(".loom-atlas-nodehead").getByRole("button", { name: "Fork" });
@@ -162,7 +161,7 @@ test.describe("Atlas session node stability (card 4f62b5cb)", () => {
         ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
       });
       await page.setViewportSize({ width: 1440, height: 900 });
-      await seedAtlas(page, s.projectId);
+      await pinProject(page, s.projectId);
       await page.goto(`${loomDaemon.baseURL}/session/${s.sessionId}`);
       const select = page.getByTestId("session-node-composer").getByLabel("Voice recognition language");
       await expect(select, "the voice row did not render — the recognizer is unsupported here").toBeVisible();

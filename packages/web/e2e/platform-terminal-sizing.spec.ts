@@ -19,7 +19,6 @@
 // atlas-platform.spec.ts reaches it: by serving `GET /api/platform/home` with the REAL reserved home.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
 // The shipped default pty geometry (packages/shared/src/config.ts `pty`), so the cards render the grid
 // a real Platform session would.
 const GEOMETRY = { cols: 80, rows: 24 };
@@ -67,9 +66,6 @@ async function seedPlatform(page: Page, d: LoomDaemon, edition: "dev" | "enduser
       status: 200, contentType: "application/json", body: JSON.stringify(payload),
     }));
   }
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
 }
 
 type CardGeom = { cardX: number; cardW: number; screenW: number; containerX: number; containerW: number };

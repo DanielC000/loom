@@ -31,14 +31,11 @@
 //     SAME line at 1440. Without it, a build that fixed the overflow by permanently stacking the
 //     controls (or by crushing the textarea to 124px, which `minWidth: 0` alone would have done) reads
 //     green — the wrap is supposed to be a narrow-width behaviour, not a restructure.
-// Both Atlas states are checked because the two shells give the composer different boxes (306px vs
-// 380px at the same 420px viewport) and the classic one is the narrower, harder case.
+// Only the Atlas shell remains (the classic shell, whose narrower 306px box was the harder case, is gone).
 import { expect, test, type Locator, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding. Hardcoded because the e2e tsconfig covers
-// `e2e/` only and cannot pull `src/` in (same reason atlas-wave-replay.spec.ts hardcodes it).
-const ATLAS_KEY = "loom.atlasUi";
-// lib/useVoiceLang.ts owns this one, for the same reason.
+// lib/useVoiceLang.ts owns this key. Hardcoded because the e2e tsconfig covers `e2e/` only and
+// cannot pull `src/` in.
 const VOICE_LANG_KEY = "loom.voiceLang";
 
 const DRAFT = "a half-written turn that must survive the wrap";
@@ -99,22 +96,14 @@ const SEED = {
   ptyGeometry: { cols: 120, rows: 40 }, ptyBytes: "LOOM-NARROW-COMPOSER\r\n",
 };
 
-for (const atlas of [false, true]) {
-  const shell = atlas ? "Atlas" : "classic";
+// The label every message below carries; one value now that Atlas is the only shell.
+const shell = "Atlas";
 
+{
   test.describe(`composer at narrow widths — ${shell} shell`, () => {
-    test.beforeEach(async ({ page }) => {
-      await page.addInitScript((arg: { key: string; on: boolean }) => {
-        try {
-          if (arg.on) localStorage.setItem(arg.key, "1");
-          else localStorage.removeItem(arg.key);
-        } catch { /* storage unavailable — the assertions below will say so */ }
-      }, { key: ATLAS_KEY, on: atlas });
-    });
-
     test(`every control stays inside the composer's own box at 420px (${shell})`, async ({ page, loomDaemon }) => {
       test.setTimeout(120_000);
-      const s = await loomDaemon.seedLiveSession({ ...SEED, id: `e2ecnw${atlas ? "a" : "c"}-${Date.now()}` });
+      const s = await loomDaemon.seedLiveSession({ ...SEED, id: `e2ecnwa-${Date.now()}` });
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.goto(`${loomDaemon.baseURL}/session/${s.sessionId}`);
       await expect(composerBox(page)).toBeVisible();
@@ -192,7 +181,7 @@ for (const atlas of [false, true]) {
 
     test(`the wrapped controls still work, and a typed draft survives the resize (${shell})`, async ({ page, loomDaemon }) => {
       test.setTimeout(120_000);
-      const s = await loomDaemon.seedLiveSession({ ...SEED, id: `e2ecnw${atlas ? "b" : "d"}-${Date.now()}` });
+      const s = await loomDaemon.seedLiveSession({ ...SEED, id: `e2ecnwb-${Date.now()}` });
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.goto(`${loomDaemon.baseURL}/session/${s.sessionId}`);
       await expect(composerBox(page)).toBeVisible();

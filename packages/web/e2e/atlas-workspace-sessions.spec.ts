@@ -14,7 +14,6 @@
 //   4. The expand is bound to the ROW's own session. Measured by reading the mounted pane's REPLAYED
 //      BYTES — each seeded session carries a distinct sentinel line — so moving the mount to a second
 //      row is observable as a byte change no amount of chrome can satisfy.
-//   5. SWITCH OFF: the classic Overview still renders and the card does not exist in the document.
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is also satisfied by a page
 // that is merely still loading, so every pair asserts what must BE there before what must not.
@@ -24,18 +23,6 @@
 // `.xterm-accessibility-tree` whose row elements mirror the real buffer — the same legitimate xterm
 // feature terminal-canned-pty.spec.ts reads from. Nothing is monkeypatched.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
-
-// lib/atlasUi.ts owns this key and the "1" = on encoding. Hardcoded rather than imported: the e2e
-// tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
@@ -93,7 +80,6 @@ const paneText = (page: Page) => terminals(page).locator(".xterm-accessibility-t
 test.describe("Atlas Workspace Sessions card", () => {
   test("lists every running session across projects, project-major, and nothing else", async ({ page, loomDaemon }) => {
     const f = await seedFleet(loomDaemon);
-    await seedAtlasOn(page);
     await page.goto(`${loomDaemon.baseURL}/home`);
 
     // PRESENCE FIRST: the card and its three real rows, before any absence claim below.
@@ -132,7 +118,6 @@ test.describe("Atlas Workspace Sessions card", () => {
 
   test("mounts no terminal at rest, exactly one on expand, and moves it rather than adding a second", async ({ page, loomDaemon }) => {
     const f = await seedFleet(loomDaemon);
-    await seedAtlasOn(page);
     await page.goto(`${loomDaemon.baseURL}/home`);
 
     // AT REST: the rows are there (presence first) and NOTHING is mounted. This is the claim that
@@ -172,7 +157,6 @@ test.describe("Atlas Workspace Sessions card", () => {
 
   test("the expanded card is a readout: a Composer to steer with, and no Stop", async ({ page, loomDaemon }) => {
     const f = await seedFleet(loomDaemon);
-    await seedAtlasOn(page);
     await page.goto(`${loomDaemon.baseURL}/home`);
 
     await expect(rows(page)).toHaveCount(3);

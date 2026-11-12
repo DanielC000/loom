@@ -14,18 +14,11 @@
 // with, so that is what is measured.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-// Hardcoded rather than imported for the same reason every sibling atlas spec hardcodes them: the
+// lib/activeProject.tsx owns the project key.
+// Hardcoded rather than imported for the same reason every sibling atlas spec hardcodes it: the
 // e2e tsconfig covers `e2e/` only, so a spec cannot pull a `src/` module in.
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 const NARROW = { width: 420, height: 900 };
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
@@ -84,9 +77,7 @@ test.describe("Atlas crumb trail at 420px (card 9477a5ed)", () => {
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const { projectId, workerId } = await seedSessionAddress(loomDaemon);
-      await pinProject(page, projectId);
-      await seedAtlasOn(page);
-      await page.setViewportSize(NARROW);
+      await pinProject(page, projectId);      await page.setViewportSize(NARROW);
       await page.goto(`${loomDaemon.baseURL}/review/${workerId}`);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
@@ -132,9 +123,7 @@ test.describe("Atlas crumb trail at 420px (card 9477a5ed)", () => {
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const { projectId, workerId } = await seedSessionAddress(loomDaemon);
-      await pinProject(page, projectId);
-      await seedAtlasOn(page);
-      await page.setViewportSize(NARROW);
+      await pinProject(page, projectId);      await page.setViewportSize(NARROW);
       await page.goto(`${loomDaemon.baseURL}/review/${workerId}`);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
@@ -175,8 +164,6 @@ test.describe("Atlas crumb trail at 420px (card 9477a5ed)", () => {
       test.setTimeout(180_000);
       const { projectId, workerId } = await seedSessionAddress(loomDaemon);
       await pinProject(page, projectId);
-      await seedAtlasOn(page);
-
       // ── The two-segment project trail, at the width the collapse is active at. ──
       await page.setViewportSize(NARROW);
       await page.goto(`${loomDaemon.baseURL}/project`);
@@ -231,9 +218,7 @@ test.describe("Atlas crumb ancestors stay visible beside a long leaf (card c88ac
       const questionId = await loomDaemon.seedQuestion({
         sessionId: mgr.sessionId, projectId: mgr.projectId, title: LONG_TITLE, body: "crumb floor fixture",
       });
-      await pinProject(page, mgr.projectId);
-      await seedAtlasOn(page);
-      await page.setViewportSize({ width: 1440, height: 900 });
+      await pinProject(page, mgr.projectId);      await page.setViewportSize({ width: 1440, height: 900 });
       await page.goto(`${loomDaemon.baseURL}/question/${questionId}`);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
       // POSITIVE ANCHOR: the leaf really is the long title, so the row really is over-full.
@@ -264,9 +249,7 @@ test.describe("Atlas crumb ancestors stay visible beside a long leaf (card c88ac
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const project = await loomDaemon.createProject(LONG_PROJECT);
-      await pinProject(page, project.id);
-      await seedAtlasOn(page);
-      await page.setViewportSize({ width: 390, height: 844 });
+      await pinProject(page, project.id);      await page.setViewportSize({ width: 390, height: 844 });
       await page.goto(`${loomDaemon.baseURL}/agents`);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
       await expect(page.getByTestId("atlas-breadcrumb")).toContainText("Agents");
@@ -300,9 +283,7 @@ test.describe("Atlas crumb ancestors stay visible beside a long leaf (card c88ac
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const project = await loomDaemon.createProject(LONG_PROJECT);
-      await pinProject(page, project.id);
-      await seedAtlasOn(page);
-      await page.setViewportSize({ width: 600, height: 844 });
+      await pinProject(page, project.id);      await page.setViewportSize({ width: 600, height: 844 });
       await page.goto(`${loomDaemon.baseURL}/agents`);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
       await expect(page.getByTestId("atlas-breadcrumb")).toContainText("Agents");

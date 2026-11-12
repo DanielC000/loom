@@ -34,27 +34,11 @@
 // at-rest stability by breaking a case that was already correct.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; hardcoded because tsconfig.e2e.json covers
-// `e2e/` only and a spec cannot import from `src/` (same reason atlas-switch.spec.ts hardcodes it).
-const ATLAS_KEY = "loom.atlasUi";
-const rail = (page: Page) => page.locator(".loom-rail");
 const atlasShell = (page: Page) => page.getByTestId("atlas-shell");
 
-// Only ever seeded ON: OFF is the default (an untouched context has an empty key), and addInitScript
-// re-runs on every navigation, so a "seed off" script would fight a reload for reasons unrelated to
-// the app. Same contract as atlas-switch.spec.ts / atlas-keyboard-shortcuts.spec.ts.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key as string, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
-/** Presence-first, so a leading count-0 can't make the "other shell is gone" half vacuous. */
-async function openShell(page: Page, baseURL: string, atlas: boolean, path: string): Promise<void> {
-  if (atlas) await seedAtlasOn(page);
+async function openShell(page: Page, baseURL: string, path: string): Promise<void> {
   await page.goto(baseURL + path);
-  await expect(atlas ? atlasShell(page) : rail(page)).toBeVisible();
-  await expect(atlas ? rail(page) : atlasShell(page)).toHaveCount(0);
+  await expect(atlasShell(page)).toBeVisible();
 }
 
 /**
@@ -99,67 +83,63 @@ async function clipPx(page: Page): Promise<number> {
 
 const SHORT_ID = "atrest00";
 
-for (const atlas of [true] as const) {
-  const shell = atlas ? "atlas" : "classic";
-
-  test(`${shell}: a live terminal pane is geometrically at rest, and never clips its own grid`, async ({ page, loomDaemon }) => {
-    test.setTimeout(90_000);
-    const seeded = await loomDaemon.seedLiveSession({
-      role: "worker",
-      // A distinctive 8-char prefix, so the tile's rendered short id (`id.slice(0, 8)`) identifies THIS
-      // spec's row rather than the fixture's default "e2e-live" that every other seeded session shows —
-      // a sibling worker's dev server renders this app identically, so the short id is what pins which
-      // data these assertions are actually reading.
-      id: `${SHORT_ID}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
-      ptyGeometry: { cols: 120, rows: 40 },
-      ptyBytes: "AT-REST-ebbc4a70 resting terminal\r\n$ ",
-    });
-
-    // Pinned BEFORE the first paint: the budget is derived during layout, and 1200x900 is the width
-    // that oscillates under both shells (see the header).
-    await page.setViewportSize({ width: 1200, height: 900 });
-    // The project node's Sessions tab (`/terminals`), pinned to THIS seeded project so its tile is the only
-    // terminal on the page — the instrument reads the document's first `.xterm`. It is a HUG-mode tile (a
-    // numeric height budget), which is the mode this spec is about: the classic /overview tile it measured
-    // went with that page (card acbb6df6). Not the session node: that renders `height="auto"`, where the
-    // solver never writes the pane height this instrument compares against.
-    await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), seeded.projectId);
-    await openShell(page, loomDaemon.baseURL, atlas, "/terminals");
-    await expect(page.locator(".xterm-rows").first()).toBeVisible({ timeout: 20_000 });
-
-    // Identity: this is THIS spec's seeded session, not a sibling's identically-rendered app.
-    await expect(page.getByText(seeded.sessionId.slice(0, 8)).first()).toBeVisible();
-    expect(seeded.sessionId.slice(0, 8)).toBe(SHORT_ID);
-
-    await page.waitForTimeout(2500); // attach + geometry frame + the one-shot repaint debounce
-
-    // ── AT REST: exactly one geometry state over ~2s (RED on main: two, alternating per frame)
-    const atRest = await geometryStates(page, 2000);
-    expect(atRest, `pane geometry should be at rest at 1200x900 under the ${shell} shell`).toHaveLength(1);
-
-    // ── NO CLIP at the pinned, previously-oscillating viewport
-    expect(await clipPx(page), "the pane must not be shorter than the grid it renders").toBeLessThanOrEqual(0);
-
-    // ── POSITIVE CONTROL: a REAL container resize must still refit — and then settle again.
-    // Without this, "one distinct state" would also pass on a pane that had stopped refitting entirely.
-    // 640x900 is MEASURED to move the settled geometry under both shells (classic 627x400 -> 540x320,
-    // atlas 634x400 -> 583x360). Several wider candidates do NOT: the budget still binds there, so the
-    // font — and therefore the whole grid — is unchanged, and a control placed at one of those would
-    // fail against a perfectly healthy pane. Don't "fix" a failure here by widening it back.
-    const before = atRest[0];
-    await page.setViewportSize({ width: 640, height: 900 });
-    await page.waitForTimeout(1500);
-    const afterResize = await geometryStates(page, 2000);
-    expect(afterResize, `pane geometry should settle again after a real resize (${shell})`).toHaveLength(1);
-    expect(afterResize[0], "a real container resize must actually refit the grid").not.toBe(before);
-    expect(await clipPx(page), "no clipping after a real resize either").toBeLessThanOrEqual(0);
-
-    // ── CONTRAST CASE: 1450x900 was ALREADY a fixed point under both shells before the fix, so this
-    // leg proves at-rest stability was not bought by breaking a case that was already correct.
-    await page.setViewportSize({ width: 1450, height: 900 });
-    await page.waitForTimeout(1500);
-    const fixedPoint = await geometryStates(page, 1500);
-    expect(fixedPoint, `the already-stable 1450x900 case must stay stable (${shell})`).toHaveLength(1);
-    expect(await clipPx(page), "no clipping at the already-stable viewport").toBeLessThanOrEqual(0);
+test("a live terminal pane is geometrically at rest, and never clips its own grid", async ({ page, loomDaemon }) => {
+  test.setTimeout(90_000);
+  const seeded = await loomDaemon.seedLiveSession({
+    role: "worker",
+    // A distinctive 8-char prefix, so the tile's rendered short id (`id.slice(0, 8)`) identifies THIS
+    // spec's row rather than the fixture's default "e2e-live" that every other seeded session shows —
+    // a sibling worker's dev server renders this app identically, so the short id is what pins which
+    // data these assertions are actually reading.
+    id: `${SHORT_ID}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    ptyGeometry: { cols: 120, rows: 40 },
+    ptyBytes: "AT-REST-ebbc4a70 resting terminal\r\n$ ",
   });
-}
+
+  // Pinned BEFORE the first paint: the budget is derived during layout, and 1200x900 is the width
+  // that oscillates (see the header).
+  await page.setViewportSize({ width: 1200, height: 900 });
+  // The project node's Sessions tab (`/terminals`), pinned to THIS seeded project so its tile is the only
+  // terminal on the page — the instrument reads the document's first `.xterm`. It is a HUG-mode tile (a
+  // numeric height budget), which is the mode this spec is about: the classic /overview tile it measured
+  // went with that page (card acbb6df6). Not the session node: that renders `height="auto"`, where the
+  // solver never writes the pane height this instrument compares against.
+  await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), seeded.projectId);
+  await openShell(page, loomDaemon.baseURL, "/terminals");
+  await expect(page.locator(".xterm-rows").first()).toBeVisible({ timeout: 20_000 });
+
+  // Identity: this is THIS spec's seeded session, not a sibling's identically-rendered app.
+  await expect(page.getByText(seeded.sessionId.slice(0, 8)).first()).toBeVisible();
+  expect(seeded.sessionId.slice(0, 8)).toBe(SHORT_ID);
+
+  await page.waitForTimeout(2500); // attach + geometry frame + the one-shot repaint debounce
+
+  // ── AT REST: exactly one geometry state over ~2s (RED on main: two, alternating per frame)
+  const atRest = await geometryStates(page, 2000);
+  expect(atRest, "pane geometry should be at rest at 1200x900").toHaveLength(1);
+
+  // ── NO CLIP at the pinned, previously-oscillating viewport
+  expect(await clipPx(page), "the pane must not be shorter than the grid it renders").toBeLessThanOrEqual(0);
+
+  // ── POSITIVE CONTROL: a REAL container resize must still refit — and then settle again.
+  // Without this, "one distinct state" would also pass on a pane that had stopped refitting entirely.
+  // 640x900 is MEASURED to move the settled geometry (634x400 -> 583x360). Several wider candidates do
+  // NOT: the budget still binds there, so the font — and therefore the whole grid — is unchanged, and a
+  // control placed at one of those would fail against a perfectly healthy pane. Don't "fix" a failure
+  // here by widening it back.
+  const before = atRest[0];
+  await page.setViewportSize({ width: 640, height: 900 });
+  await page.waitForTimeout(1500);
+  const afterResize = await geometryStates(page, 2000);
+  expect(afterResize, "pane geometry should settle again after a real resize").toHaveLength(1);
+  expect(afterResize[0], "a real container resize must actually refit the grid").not.toBe(before);
+  expect(await clipPx(page), "no clipping after a real resize either").toBeLessThanOrEqual(0);
+
+  // ── CONTRAST CASE: 1450x900 was ALREADY a fixed point before the fix, so this leg proves at-rest
+  // stability was not bought by breaking a case that was already correct.
+  await page.setViewportSize({ width: 1450, height: 900 });
+  await page.waitForTimeout(1500);
+  const fixedPoint = await geometryStates(page, 1500);
+  expect(fixedPoint, "the already-stable 1450x900 case must stay stable").toHaveLength(1);
+  expect(await clipPx(page), "no clipping at the already-stable viewport").toBeLessThanOrEqual(0);
+});

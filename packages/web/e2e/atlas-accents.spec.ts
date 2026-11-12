@@ -15,9 +15,8 @@
 import { expect, test, type Page } from "./fixtures/daemon";
 import { cssColor } from "./helpers/themeToken";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded because the e2e tsconfig covers `e2e/` only, so a spec cannot import a `src/` module.
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 const THEMES = ["dark", "light"] as const;
 
@@ -46,11 +45,10 @@ for (const theme of THEMES) {
   test(`Atlas accents: cobalt brand, green mark and the five additions, in ${theme}`, async ({ page, loomDaemon }) => {
     test.setTimeout(90_000);
     const project = await loomDaemon.createProject(`atlas-accents-${theme}-${Date.now()}`);
-    await page.addInitScript((a: { atlasKey: string; projectKey: string; id: string; t: string }) => {
-      localStorage.setItem(a.atlasKey, "1");
+    await page.addInitScript((a: { projectKey: string; id: string; t: string }) => {
       localStorage.setItem(a.projectKey, a.id);
       localStorage.setItem("loom.theme", a.t);
-    }, { atlasKey: ATLAS_KEY, projectKey: PROJECT_KEY, id: project.id, t: theme });
+    }, { projectKey: PROJECT_KEY, id: project.id, t: theme });
 
     // ── Workspace home: the brand hue, the mark, the selected tree node and the active tab. ──
     await page.goto(loomDaemon.baseURL + "/home");

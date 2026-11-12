@@ -17,9 +17,6 @@
 //   2. THE CONTROL FOR (1): the same measurement at 1280, below the deck's declared first fold,
 //      must report TWO rows. Without it, "they all share a top" is a claim this spec could not have
 //      falsified in the same run — a measurement that can only ever come out one way.
-//   3. SWITCH OFF: the classic Overview renders its own layout and the deck this card restyled does
-//      not exist in that document at all — with the switch-ON count as the positive control that
-//      the absence check is capable of returning non-zero.
 //
 // Two legs moved out with the project node's deck, neither dropped: `KpiTile`'s `fill` rendering is
 // asserted at its one remaining mount (the Workspace `plan` tile) by `workspace-plan-window.spec.ts`;
@@ -28,18 +25,9 @@
 // ceiling has no meter" half, re-pointed at the Workspace deck.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig
+// covers `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload (measured on P1-4).
@@ -113,9 +101,8 @@ async function expectTreeExpanded(page: Page) {
 }
 
 test.describe("Atlas KPI deck row (card 14e48890)", () => {
-  test("switch ON at 1440: six tiles on one row on the Workspace node, and no deck on the project node", async ({ page, loomDaemon }) => {
+  test("at 1440: six tiles on one row on the Workspace node, and no deck on the project node", async ({ page, loomDaemon }) => {
     const seeded = await seedProject(loomDaemon, WARM_PCT);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
 
@@ -151,11 +138,10 @@ test.describe("Atlas KPI deck row (card 14e48890)", () => {
     for (const key of PROJECT_KPIS) await expect(page.getByTestId(`atlas-kpi-${key}`)).toHaveCount(0);
   });
 
-  test("switch ON: the one-row measurement reports TWO rows below the fold (the control)", async ({ page, loomDaemon }) => {
+  test("the one-row measurement reports TWO rows below the fold (the control)", async ({ page, loomDaemon }) => {
     // Without this the test above asserts something it could not have falsified: a measurement that
     // reports one row whatever the layout does would pass on a deck that never fitted.
     const seeded = await seedProject(loomDaemon, WARM_PCT);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(FOLDED);
 

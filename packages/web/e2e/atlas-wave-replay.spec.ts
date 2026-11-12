@@ -21,21 +21,12 @@ import { expect, test, type Locator, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
 import { expectTimestampInsideRow, FIT_CHECK_KINDS } from "./helpers/replayRow";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only, so a spec cannot pull `src/` in.
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 /** The Replay tab's address — a `?tab=` on the Workspace node's own path (card 41eab0eb's shape). */
 const REPLAY_TAB_URL = "/home?tab=replay";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
@@ -72,7 +63,7 @@ async function seedWave(loomDaemon: { seedOrchestrationEvent: (e: { managerSessi
 }
 
 test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
-  test("switch ON: the scrubber moves the timeline, and selecting another wave changes it",
+  test("the scrubber moves the timeline, and selecting another wave changes it",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const project = await loomDaemon.createProject(`atlas-replay-${Date.now()}`);
@@ -84,7 +75,6 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
         ["merge_request", "merge_done", "worker_report", "idle_report", "recycle_complete"]);
       await seedWave(loomDaemon, thinMgr.sessionId, ["merge_request", "merge_done"]);
       await pinProject(page, project.id);
-      await seedAtlasOn(page);
 
       await openReplayTab(page, loomDaemon.baseURL);
       const wave = waveSection(page);
@@ -137,7 +127,7 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
       await expect(liveEdge, "the scrub position survived a subject change").toHaveCount(0);
     });
 
-  test("switch ON: the inactive tier lists a finished-wave project, and its entry does what Mission Control's did",
+  test("the inactive tier lists a finished-wave project, and its entry does what Mission Control's did",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       // A project whose WHOLE wave has exited — the tier's own subject.
@@ -163,7 +153,6 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
       const MISSION_CONTROL_SURFACE = { hrefs: [] as string[], buttons: ["Expand"] };
 
       // ── THE ATLAS SIDE. ──
-      await seedAtlasOn(page);
       await openReplayTab(page, loomDaemon.baseURL);
       const section = inactiveSection(page);
       const strip = section.getByTestId("inactive-fleet");
@@ -207,7 +196,7 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
       await expect(page).toHaveURL(new RegExp(`${REPLAY_TAB_URL.replace("?", "\\?")}$`));
     });
 
-  test("switch ON: the Workspace Pulse band carries the cross-project activity cap, not the old 40",
+  test("the Workspace Pulse band carries the cross-project activity cap, not the old 40",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const project = await loomDaemon.createProject(`atlas-pulse-cap-${Date.now()}`);
@@ -218,7 +207,6 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
       const SEEDED = 45;
       await seedWave(loomDaemon, mgr.sessionId, Array.from({ length: SEEDED }, () => "merge_done"));
       await pinProject(page, project.id);
-      await seedAtlasOn(page);
 
       await page.goto(loomDaemon.baseURL + "/home");
       const pulse = page.getByTestId("atlas-band-pulse");
@@ -237,7 +225,7 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
       expect(box!.height, `the Pulse band grew to ${box!.height}px to fit its rows`).toBeLessThan(420);
     });
 
-  test("switch ON: the Replay tab is mounted only once visited, and never unmounted after",
+  test("the Replay tab is mounted only once visited, and never unmounted after",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const archivedPolls: string[] = [];
@@ -249,7 +237,6 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
       const mgr = await loomDaemon.seedLiveSession({ project, role: "manager", agentName: "LazyMgr" });
       await seedWave(loomDaemon, mgr.sessionId, ["merge_request", "merge_done", "worker_report"]);
       await pinProject(page, project.id);
-      await seedAtlasOn(page);
 
       // ── NOT MOUNTED, AND NOT PAYING FOR IT. The default Atlas landing is Overview; the Replay tab's two
       //    300-row archived pages are exactly what it must not fetch for a tab nobody opened.
@@ -300,14 +287,13 @@ test.describe("Atlas wave replay on the Workspace node (card ff6123de)", () => {
         "an unvisited panel is mounted after all, so the survival claim above proves nothing").toHaveCount(0);
     });
 
-  test("switch ON: at 420px the event row keeps its timestamp inside the row, and 1440 is unchanged (card f51d3068)",
+  test("at 420px the event row keeps its timestamp inside the row, and 1440 is unchanged (card f51d3068)",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const project = await loomDaemon.createProject(`atlas-replay-fit-${Date.now()}`);
       const mgr = await loomDaemon.seedLiveSession({ project, role: "manager", agentName: "FitMgr" });
       await seedWave(loomDaemon, mgr.sessionId, FIT_CHECK_KINDS);
       await pinProject(page, project.id);
-      await seedAtlasOn(page);
 
       // 1440 FIRST, as the control. The row was already correct there, so this leg is what distinguishes
       // "the narrow case was fixed" from "the row was rebuilt and desktop happened to survive" — and it

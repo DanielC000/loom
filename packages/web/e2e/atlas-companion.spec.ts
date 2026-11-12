@@ -34,17 +34,6 @@ import { fileURLToPath } from "node:url";
 import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding.
-const ATLAS_KEY = "loom.atlasUi";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
 // ── The section/group model, parsed out of the real source ─────────────────────────────────────
 // The e2e tsconfig covers e2e/ only, so a spec cannot import src/lib/companionManage.ts. Parsing the
 // declaration is the idiom this suite already uses for exactly this (e2e/atlas-legacy-redirects.spec.ts
@@ -141,7 +130,6 @@ const modeHref = (mode?: string) => `/home?tab=${COMPANION_HOST_TAB}${mode ? `&s
 
 /** Open the Atlas Companion node with the companion in focus, asserting WHICH companion we are looking at. */
 async function openNode(page: Page, baseURL: string, companionName: string, query = "") {
-  await seedAtlasOn(page);
   await page.goto(`${baseURL}/companion${query}`);
   // FIXTURE IDENTITY: a sibling worker's dev server renders this app identically, so pin which companion
   // this is before drawing any conclusion from what is or is not on the page.
@@ -241,7 +229,7 @@ function seedCompanionSkill(loomHome: string, sessionId: string, name: string) {
 }
 
 test.describe("Atlas Companion node — the three modes and the twelve Manage sections", () => {
-  test("switch ON: the three modes are the node's own tab query, linkable and reload-stable", async ({ page, loomDaemon }) => {
+  test("the three modes are the node's own tab query, linkable and reload-stable", async ({ page, loomDaemon }) => {
     const name = `Mode-${Date.now().toString(36)}`;
     await loomDaemon.seedCompanion({ name });
     await openNode(page, loomDaemon.baseURL, name);

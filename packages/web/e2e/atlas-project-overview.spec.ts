@@ -41,9 +41,8 @@
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { cssColor } from "./helpers/themeToken";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig
+// covers `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
 
 const WIDE = { width: 1440, height: 1000 };
@@ -59,12 +58,6 @@ const RED_PCT = 96;
 // The four readings that carry a breakdown. `merged` is deliberately NOT here — leg 5 is the
 // assertion that it is a plain readout, and listing it would make that leg contradict this list.
 const BRIEF_POPOVERS = ["cards", "fleet", "context", "gates"];
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload (measured on P1-4).
@@ -263,9 +256,8 @@ async function rowCells(page: Page, sessionId: string) {
 }
 
 test.describe("the Atlas project Overview's roster composition (card 269f46ef)", () => {
-  test("switch ON at 1440: the roster reads every seeded cell, with the worker nested under its manager", async ({ page, loomDaemon }) => {
+  test("at 1440: the roster reads every seeded cell, with the worker nested under its manager", async ({ page, loomDaemon }) => {
     const seeded = await seedFleet(loomDaemon, WARM_PCT);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");
@@ -329,9 +321,8 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     expect(fillPct, "the roster track's fill is the seeded occupancy").toBe(WARM_PCT);
   });
 
-  test("switch ON at 900: a roster row stacks into a labelled block, losing no cell", async ({ page, loomDaemon }) => {
+  test("at 900: a roster row stacks into a labelled block, losing no cell", async ({ page, loomDaemon }) => {
     const seeded = await seedFleet(loomDaemon, WARM_PCT);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
 
     // BEFORE, at the wide width: one line, and the table's own header row is what names the cells.
@@ -371,10 +362,9 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
       .toBeLessThanOrEqual(scroll.clientW);
   });
 
-  test("switch ON: every briefing pop-over opens and closes, and the landed readout is not a button", async ({ page, loomDaemon }) => {
+  test("every briefing pop-over opens and closes, and the landed readout is not a button", async ({ page, loomDaemon }) => {
     test.setTimeout(120_000);
     const seeded = await seedFleet(loomDaemon, WARM_PCT);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");
@@ -426,13 +416,12 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     await expect(landed.locator("button")).toHaveCount(0);
   });
 
-  test("switch ON: a context above the red threshold reads red, on the briefing figure and in the roster", async ({ page, loomDaemon }) => {
+  test("a context above the red threshold reads red, on the briefing figure and in the roster", async ({ page, loomDaemon }) => {
     // Ordered amber-first (`>= 80 ? amber : >= 95 ? red`) the red branch is unreachable, because
     // every value at 95 is also at 80 — so neither the figure nor the roster's own meter could ever
     // show the one state these readings exist to surface. The claim moved here, with the readings,
     // from atlas-kpi-deck.spec.ts's `context` tile (card 269f46ef).
     const seeded = await seedFleet(loomDaemon, RED_PCT);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");
@@ -466,7 +455,7 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
   // while the card's own head counted every one of them. Record:
   // docs/decisions/6a9cb96a-atlas-overview-roster-lists-every-running-session.md.
 
-  test("switch ON: the roster lists running non-worker sessions, and its head count matches its own list", async ({ page, loomDaemon }) => {
+  test("the roster lists running non-worker sessions, and its head count matches its own list", async ({ page, loomDaemon }) => {
     // Its OWN fleet, never `seedRiggedFleet`'s: the two scope legs below pin that fixture's row
     // count and segment counts exactly, so adding a session to it would redden them.
     const project = await loomDaemon.createProject(uniq("atlasovroles"));
@@ -492,15 +481,13 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
       project, id: `e2e-ovrole-deadtp-${short}`, agentName: `RoleDeadPartner-${short}`,
       role: "assistant", processState: "exited",
     });
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");
 
     // FIXTURE IDENTITY first — a silent fallback to a sibling worker's daemon renders a plausible,
     // entirely wrong page, and every count below would be read off it. Plus the shell's own
-    // identity: both shells mount a project surface, so without this the leg could pass with
-    // `seedAtlasOn` broken and become a mute copy of its classic sibling.
+    // identity, so the leg cannot pass against a different frame.
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
     await expect(page.getByTestId("atlas-project-name")).toHaveText(project.name);
     await expect(page.getByTestId("atlas-roster-table")).toBeVisible();
@@ -546,9 +533,8 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
   // SEPARATE card below it (card 0bcfa530, its own legs at the bottom of this file) answering to
   // this same one preference — so a change to the toggle has to be checked against both.
 
-  test("switch ON: the scope toggle really changes the listed population, both ways", async ({ page, loomDaemon }) => {
+  test("the scope toggle really changes the listed population, both ways", async ({ page, loomDaemon }) => {
     const seeded = await seedRiggedFleet(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");
@@ -595,9 +581,8 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     await expect(page.getByTestId("atlas-overview-roster")).not.toContainText("Listing only the agents");
   });
 
-  test("switch ON: the chosen scope survives a reload, stored per project", async ({ page, loomDaemon }) => {
+  test("the chosen scope survives a reload, stored per project", async ({ page, loomDaemon }) => {
     const seeded = await seedRiggedFleet(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");
@@ -636,7 +621,7 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
   // card)". It is the project-scoped twin of the Workspace node's own Sessions card (9b6be377),
   // reusing that component, and filtered by the SAME preference as the roster above it.
 
-  test("switch ON: the Sessions card lists this project's running sessions only, and follows the one scope toggle in step with the roster", async ({ page, loomDaemon }) => {
+  test("the Sessions card lists this project's running sessions only, and follows the one scope toggle in step with the roster", async ({ page, loomDaemon }) => {
     const seeded = await seedRiggedFleet(loomDaemon);
     // The EXITED negative, seeded HERE rather than into the shared fixture (which the roster legs
     // above pin exactly). On the MANAGER's spawnable rig deliberately: it is then in this project,
@@ -646,7 +631,6 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
       project: seeded.project, id: `e2e-ovsc-dead-${seeded.short}`, agentId: seeded.mgrAgentId,
       agentName: seeded.mgrName, role: "worker", processState: "exited",
     });
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");
@@ -705,7 +689,7 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
     await expect(sessCard(page)).not.toContainText("Listing only the agents");
   });
 
-  test("switch ON: expanding a Sessions row attaches THAT session's terminal, and collapsing releases the view without stopping the session", async ({ page, loomDaemon }) => {
+  test("expanding a Sessions row attaches THAT session's terminal, and collapsing releases the view without stopping the session", async ({ page, loomDaemon }) => {
     const seeded = await seedRiggedFleet(loomDaemon);
     // An exited session on the same fleet — not to be listed, but as the CONTRAST CASE for the
     // `processState` reading below: "still live after a collapse" means nothing unless the same
@@ -714,7 +698,6 @@ test.describe("the Atlas project Overview's roster composition (card 269f46ef)",
       project: seeded.project, id: `e2e-ovsc-ctl-${seeded.short}`, agentId: seeded.mgrAgentId,
       role: "worker", processState: "exited",
     });
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");

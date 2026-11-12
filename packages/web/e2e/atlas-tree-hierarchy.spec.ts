@@ -18,9 +18,6 @@
 //   3. THE CROSS-PROJECT DESTINATIONS ARE NOT TREE ROWS. The workspace tier is exactly two rows, and
 //      the ten re-homed destinations are absent from the rows while still reachable from the escape
 //      hatch at the foot of the tree (cards 41eab0eb / 25c08fba turn them into node tabs).
-// Plus the switch-OFF half: the classic rail renders every NAV_PAGES destination, parsed from the real
-// source rather than typed here, and no `loom-atlas` element is mounted at all.
-//
 // Every absence claim carries a POSITIVE CONTROL on the same collector at the same moment — an empty
 // or mis-typed locator returns zero exactly like a true absence does.
 //
@@ -34,10 +31,9 @@ import { fileURLToPath } from "node:url";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { cssColor } from "./helpers/themeToken";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
 // cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes its own keys.
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -103,14 +99,6 @@ const WORKSPACE_TIER = ["/home", "/workspace-terminals", "/home?tab=inbox", "/ho
 const rowAddress = (els: Element[]) =>
   els.map((el) => { const u = new URL((el as HTMLAnchorElement).href); return u.pathname + u.search; });
 
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
 // Pins the STARTING project, once — it writes only when the key is still absent. addInitScript re-runs
 // on every navigation, `reload()` included, so an unconditional write would re-pin the starting
 // project on any later leg and that leg would measure this helper instead of the app (card e47df20a).
@@ -129,7 +117,7 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /**
  * Every NAV_PAGES `to`, parsed out of the real source — the same idiom (and the same reason) as
  * atlas-tree.spec.ts's `parseAtlasHomes`: the e2e tsconfig cannot import a `src/` module, and a list
- * typed into this file would go stale in exactly the way the switch-OFF claim exists to catch.
+ * typed into this file would go stale silently.
  *
  * The filtered row count is checked against the declaration's own raw marker count, because a regex
  * that quietly stopped matching a row would otherwise return a plausible SUBSET — and a subset would
@@ -146,9 +134,6 @@ function parseNavPages(): { paths: string[]; rawMarkers: number; block: string }
   const paths = [...block.matchAll(/\bto:\s*"([^"]+)"/g)].map((m) => m[1] ?? "");
   return { paths, rawMarkers, block };
 }
-
-/** The classic rail's own destination links — the grouped nav rows plus the footer Settings row. */
-const RAIL_LINKS = "a.loom-rail-item, a.loom-rail-statrow";
 
 /**
  * Two projects, each holding board cards only IT has, plus a live session and a pending Request on the
@@ -177,12 +162,11 @@ async function seedHierarchy(loomDaemon: LoomDaemon) {
 }
 
 test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
-  test("switch ON: projects are sibling branches, expansion is not selection, and the cross-project destinations have left the rows",
+  test("projects are sibling branches, expansion is not selection, and the cross-project destinations have left the rows",
     async ({ page, loomDaemon }) => {
       test.setTimeout(120_000);
       const { alpha, bravo, alphaCard, bravoCard, live } = await seedHierarchy(loomDaemon);
 
-      await seedAtlasOn(page);
       await pinProject(page, alpha.id);
       // Landing on /board, not /home: every claim below about selection NOT moving is then measured
       // against a real project-scoped READ — the board's own cards — rather than against the frame.

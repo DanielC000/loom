@@ -26,9 +26,6 @@
 //   7. DETACH ON LEAVE. Measured on the real WebSockets, collected via `page.on("websocket")` and
 //      asserted CLOSED after navigating off — a DOM absence alone cannot tell a released socket from
 //      one leaked behind an unmounted node.
-//   8. SWITCH OFF: the classic rail still carries exactly ONE Terminals entry, at `/terminals`, this
-//      node's address is not in it, and that page still has NO columns picker — the god-eye contract
-//      card ac0cfe91 set, which this card had to leave intact while giving the Atlas node one.
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is also satisfied by a page
 // that is merely still loading, so every pair asserts what must BE there before what must not.
@@ -44,10 +41,6 @@
 // log `[pty] spawnShell`, which the fixture's narrowed no-spawn guard deliberately lets through.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding. Hardcoded rather than imported: the e2e
-// tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
-
 /** The node's own address — Atlas-only, declared once in src/nav.tsx's ATLAS_HOMES. */
 const NODE = "/workspace-terminals";
 
@@ -59,15 +52,7 @@ const NODE = "/workspace-terminals";
  * Terminals row's own placement WITHIN it. Two specs asserting one order from one constant would make
  * a single wrong edit pass both.
  */
-const WORKSPACE_TIER = ["/home", NODE, "/platform"];
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
+const WORKSPACE_TIER = ["/home", NODE, "/home?tab=inbox", "/home?tab=gates", "/platform"];
 
 /**
  * Clear THIS page's own stored grid layout before it loads.
@@ -191,7 +176,6 @@ test.describe("Atlas Workspace Terminals node", () => {
   const uiSpawnProjects: { baseURL: string; projectName: string }[] = [];
 
   test.beforeEach(async ({ page }) => {
-    await seedAtlasOn(page);
     await clearStoredLayout(page);
   });
 
@@ -229,8 +213,9 @@ test.describe("Atlas Workspace Terminals node", () => {
     // still the wrong sidebar, which is precisely what the owner specified.
     const tierRoutes = await tree.locator("ul.loom-atlas-nodes").first()
       .locator("> li a.loom-atlas-node")
-      .evaluateAll((els) => els.map((el) => new URL((el as HTMLAnchorElement).href).pathname));
-    expect(tierRoutes, "the workspace tier is not Home → Terminals → Platform").toEqual(WORKSPACE_TIER);
+      // Pathname + query: the Inbox and Gates rows differ from the Home row only by their `?tab=`.
+      .evaluateAll((els) => els.map((el) => { const u = new URL((el as HTMLAnchorElement).href); return u.pathname + u.search; }));
+    expect(tierRoutes, "the workspace tier is not Home → Terminals → Inbox → Gates → Platform").toEqual(WORKSPACE_TIER);
 
     // It NAVIGATES, and lands on the node itself rather than AtlasShell's unmounted-address fallback
     // — the failure a declared-but-unrouted ATLAS_HOMES row would produce.

@@ -13,19 +13,11 @@
 // Every claim is scoped to rows this spec seeded: the e2e daemon is shared across spec files.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 test.describe("Atlas home labels (card 73b41b5d)", () => {
-  test("switch ON: gate pair, needs-you split, session-row truncation order, tree badge names, project card labels", async ({ page, loomDaemon }) => {
+  test("gate pair, needs-you split, session-row truncation order, tree badge names, project card labels", async ({ page, loomDaemon }) => {
     test.setTimeout(90_000);
     // A long project and a long agent, the audit's own stress shape.
     const longName = uniq("AUDIT-Delta Extremely Long Customer Onboarding And Billing Reconciliation Platform");
@@ -36,7 +28,6 @@ test.describe("Atlas home labels (card 73b41b5d)", () => {
     await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: project.id, title: uniq("labels request") });
 
     await page.setViewportSize({ width: 1024, height: 900 });
-    await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + "/home");
 
     // FIXTURE IDENTITY first: this spec's own project card and session row are on the page.

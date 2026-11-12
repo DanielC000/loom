@@ -6,18 +6,16 @@
 // handler that only moved a class (or only flipped state nobody draws) fails here.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
-async function seedAtlasOn(page: Page, projectId: string) {
-  await page.addInitScript(([atlasKey, projectKey, id]) => {
+async function pinProject(page: Page, projectId: string) {
+  await page.addInitScript(([projectKey, id]) => {
     try {
-      localStorage.setItem(atlasKey, "1");
       if (localStorage.getItem(projectKey) === null) localStorage.setItem(projectKey, id);
     } catch { /* storage unavailable — assertions will say so */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+  }, [PROJECT_KEY, projectId] as const);
 }
 
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -60,7 +58,7 @@ async function ringOf(page: Page) {
 test.describe("Atlas keyboard: skip link + tree roving focus (card fa8a2887)", () => {
   test("the skip link is the first stop, shows on focus, and moves focus to the page", async ({ page, loomDaemon }) => {
     const { alpha } = await seed(loomDaemon);
-    await seedAtlasOn(page, alpha.id);
+    await pinProject(page, alpha.id);
     await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-tree")).toBeVisible();
 
@@ -96,7 +94,7 @@ test.describe("Atlas keyboard: skip link + tree roving focus (card fa8a2887)", (
   test("the tree is one Tab stop, and ↑↓ →← Home/End move, open and close it", async ({ page, loomDaemon }) => {
     test.setTimeout(120_000);
     const { alpha, bravo, mgr, worker } = await seed(loomDaemon);
-    await seedAtlasOn(page, alpha.id);
+    await pinProject(page, alpha.id);
     await page.goto(loomDaemon.baseURL + "/home");
     const tree = page.getByTestId("atlas-tree");
     await expect(tree).toBeVisible();

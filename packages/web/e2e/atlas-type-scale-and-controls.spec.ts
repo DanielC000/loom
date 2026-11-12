@@ -11,18 +11,16 @@
 // live workers it needs are already seeded.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only, so a spec cannot pull `src/` in.
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
-async function seedAtlasOn(page: Page, projectId: string) {
-  await page.addInitScript(([atlasKey, projectKey, id]) => {
+async function pinProject(page: Page, projectId: string) {
+  await page.addInitScript(([projectKey, id]) => {
     try {
-      localStorage.setItem(atlasKey, "1");
       if (localStorage.getItem(projectKey) === null) localStorage.setItem(projectKey, id);
     } catch { /* storage unavailable: the assertions will say so */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+  }, [PROJECT_KEY, projectId] as const);
 }
 
 /** Every distinct computed font size of a VISIBLE text node on the page (terminals excluded). */
@@ -46,7 +44,7 @@ async function textSizes(page: Page): Promise<Record<string, string>> {
 test.describe("Atlas type scale and shared controls (card 1fe4b596)", () => {
   test("A-23: no text is set below the xs step, and the old in-between sizes are gone", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`type-scale-${Date.now()}`);
-    await seedAtlasOn(page, project.id);
+    await pinProject(page, project.id);
     for (const where of ["/home", "/home?tab=settings", "/home?tab=automation", "/settings"]) {
       await page.goto(loomDaemon.baseURL + where);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
@@ -64,7 +62,7 @@ test.describe("Atlas type scale and shared controls (card 1fe4b596)", () => {
 
   test("A-33: the Workspace Settings index jumps to a section, marks it, and stays in view", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`settings-index-${Date.now()}`);
-    await seedAtlasOn(page, project.id);
+    await pinProject(page, project.id);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${loomDaemon.baseURL}/home?tab=settings`);
     const index = page.getByTestId("settings-index");
@@ -92,7 +90,7 @@ test.describe("Atlas type scale and shared controls (card 1fe4b596)", () => {
 
   test("A-39: a tab explainer is one line until More opens it, and Less folds it back", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`explainer-${Date.now()}`);
-    await seedAtlasOn(page, project.id);
+    await pinProject(page, project.id);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${loomDaemon.baseURL}/home?tab=automation`);
     const text = page.getByText(/^Cron triggers\. On each due boundary/);
@@ -117,7 +115,7 @@ test.describe("Atlas type scale and shared controls (card 1fe4b596)", () => {
 
   test("A-17: column rows align whatever their role chip says, and the WIP field does not clip", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`columns-${Date.now()}`);
-    await seedAtlasOn(page, project.id);
+    await pinProject(page, project.id);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${loomDaemon.baseURL}/settings`);
     const labels = page.getByRole("textbox", { name: "Column label" });
@@ -132,7 +130,7 @@ test.describe("Atlas type scale and shared controls (card 1fe4b596)", () => {
 
   test("A-24: a kit Select draws the kit chevron, not the OS one", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`select-${Date.now()}`);
-    await seedAtlasOn(page, project.id);
+    await pinProject(page, project.id);
     await page.goto(`${loomDaemon.baseURL}/home?tab=usage`);
     const select = page.locator("main select.loom-field").first();
     await expect(select).toBeVisible();

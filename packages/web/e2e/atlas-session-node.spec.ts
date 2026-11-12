@@ -23,18 +23,9 @@
 // loading, so every absence claim is preceded by something that must BE there.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
@@ -78,19 +69,6 @@ const deepestCrumb = (page: Page) =>
  *  routed in-app. Every module-level draft store dies on a reload, so without this a draft-survival
  *  test could only ever fail — and a future `page.goto` creeping back in would look like a real bug. */
 const SENTINEL = "__loomSessionNodeSpec";
-
-/** Route in-app, without reloading the document — react-router's own history-state shape, then the
- *  popstate it subscribes to. Lifted from composer-draft-per-session.spec.ts, which needs it for the
- *  same reason: the classic shell has no tab row to click. */
-async function routeInApp(page: Page, path: string) {
-  await page.evaluate((to) => {
-    const prev = window.history.state as { idx?: number } | null;
-    const idx = typeof prev?.idx === "number" ? prev.idx + 1 : 1;
-    const key = Math.random().toString(36).slice(2, 10);
-    window.history.pushState({ usr: null, key, idx }, "", to);
-    window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
-  }, path);
-}
 
 /** The tab row's labels, in order, with the trailing count span stripped off each. */
 async function tabLabels(page: Page): Promise<string[]> {
@@ -152,7 +130,6 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
     });
 
     await serveCannedDiff(page);
-    await seedAtlasOn(page);
     await pinProject(page, mgr.projectId);
 
     // ── 1a. The EXACT tab set per role. ────────────────────────────────────────────────────────────
@@ -308,7 +285,6 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
       role: "manager", agentName: "DraftMgr", id: `e2e-draftmgr-${Date.now()}`,
       ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
     });
-    await seedAtlasOn(page);
     await pinProject(page, mgr.projectId);
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
     await expect(page.getByTestId("session-node-composer")).toBeVisible();
@@ -333,96 +309,78 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
     await page.getByTestId("session-node-composer").getByRole("textbox").first().fill("");
   });
 
-  // ── The hop that UNMOUNTS the node, in BOTH shells ────────────────────────────────────────────────
-  // Under Atlas the Diff tab is a ROUTE (/review/:workerId), so Terminal→Diff→Terminal tears the whole
-  // node down and builds it again; under the classic shell the same round trip between /session/:id and
-  // /review/:id does the same to the tile. Either way, two drafts have to come back: the composer's
-  // (store-backed since card 14c68c62) and the queue editor's (store-backed by this card's review round
-  // 2 — before it, plain useState with no backing store, so this hop destroyed it).
-  for (const shell of [{ name: "atlas", atlas: true }]) {
-    test(`a route-changing hop keeps the composer AND the open queue editor (${shell.name})`, async ({ page, loomDaemon }) => {
-      test.setTimeout(180_000);
-      const worker = await loomDaemon.seedLiveSession({
-        role: "worker", agentName: `HopWkr${shell.name}`, id: `e2e-hop${shell.name}-${Date.now()}`,
-        branch: `loom/atlas-session-hop-${shell.name}`,
-        ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
-      });
-      // TWO entries, deliberately. The FIRST is DELIVERED straight to an idle session's pty (arming it
-      // busy) and so never appears in the queue at all; only the second is HELD. A single enqueue
-      // leaves `pending` empty and the ledger bar — which self-hides when empty — never renders.
-      // A HUMAN-authored entry is also the only kind the editor will open (agent entries are read-only
-      // and Loom nudges are reorder/remove-only), so the species matters as much as the count.
-      await loomDaemon.enqueueMessage({ sessionId: worker.sessionId, text: "first turn (delivers)", source: "human", kind: "agent" });
-      const held = await loomDaemon.enqueueMessage({ sessionId: worker.sessionId, text: "original queued turn", source: "human", kind: "agent" });
-      expect(held.delivered,
-        "fixture precondition: the second enqueue was DELIVERED rather than held, so there is no queued"
-        + " entry to edit and everything below would be asserting an empty drawer").toBe(false);
-
-      await serveCannedDiff(page);
-      await pinProject(page, worker.projectId);
-      if (shell.atlas) await seedAtlasOn(page);
-
-      const sessionUrl = `${loomDaemon.baseURL}/session/${worker.sessionId}`;
-      const reviewUrl = `${loomDaemon.baseURL}/review/${worker.sessionId}`;
-      const queueInput = () => page.getByTestId("queue-editor-input");
-      const composerBox = () => (shell.atlas
-        ? page.getByTestId("session-node-composer").getByRole("textbox").first()
-        : page.locator("main").getByPlaceholder(/Send a turn to this session/));
-
-      await page.goto(sessionUrl);
-      await page.evaluate((k) => { (window as unknown as Record<string, unknown>)[k] = "alive"; }, SENTINEL);
-      // Open the ledger drawer, then the editor on the seeded row.
-      await page.getByTestId("queue-ledger-bar").click();
-      await expect(page.getByTestId("queue-drawer")).toBeVisible();
-      await page.getByTitle("Edit this queued message").click();
-      await expect(queueInput()).toBeVisible();
-
-      const queueDraft = `half-edited queue text ${Date.now()}`;
-      const composerDraft = `half-written composer text ${Date.now()}`;
-      await queueInput().fill(queueDraft);
-      await composerBox().fill(composerDraft);
-      await expect(queueInput()).toHaveValue(queueDraft);
-
-      // AWAY and BACK, to the SAME URL in both shells. The MECHANISM differs because the shells do:
-      // under Atlas the Diff tab is a real control the user clicks, under classic there is no tab row,
-      // so the hop is driven through history the way an in-app deep-link does
-      // (composer-draft-per-session.spec.ts's own helper, same shape).
-      //
-      // ⛔ NOT `page.goto` — that reloads the document, which wipes every module-level draft store and
-      // would turn this into a test that can only ever fail. The sentinel below is what keeps that
-      // mistake from coming back silently: it is set on the live document and must still be there.
-      if (shell.atlas) {
-        await tabRow(page).getByRole("tab", { name: /^Diff/ }).click();
-      } else {
-        await routeInApp(page, `/review/${worker.sessionId}`);
-      }
-      await expect(page.locator("main").getByRole("button", { name: "Approve & merge" })).toBeVisible();
-      if (shell.atlas) {
-        await tabRow(page).getByRole("tab", { name: "Terminal" }).click();
-      } else {
-        await routeInApp(page, `/session/${worker.sessionId}`);
-      }
-      await expect(page).toHaveURL(sessionUrl);
-      const alive = await page.evaluate((k) => (window as unknown as Record<string, unknown>)[k], SENTINEL);
-      expect(alive, "the hop reloaded the document, so this test is not exercising an unmount at all")
-        .toBe("alive");
-
-      await expect(composerBox(), "the composer draft did not survive the hop").toHaveValue(composerDraft);
-      // The editor must come BACK OPEN on the same row, not merely hold the text somewhere unreachable:
-      // a restored draft behind a collapsed drawer reads to a user as destroyed.
-      await expect(queueInput(), "the queue editor did not reopen with its draft after the hop")
-        .toHaveValue(queueDraft);
-
-      // Cancel IS a decision to discard, unlike the hop — so it clears, and the next open reseeds from
-      // the entry's real text. This is the other half of the contract and it keeps the store from
-      // becoming a thing that can never be emptied.
-      await page.getByRole("button", { name: "Cancel" }).click();
-      await page.getByTitle("Edit this queued message").click();
-      await expect(queueInput(), "Cancel did not discard the draft").toHaveValue("original queued turn");
-      await page.getByRole("button", { name: "Cancel" }).click();
-      await composerBox().fill("");
+  // ── The hop that UNMOUNTS the node ────────────────────────────────────────────────────────────────
+  // The Diff tab is a ROUTE (/review/:workerId), so Terminal→Diff→Terminal tears the whole node down
+  // and builds it again. Two drafts have to come back: the composer's (store-backed since card
+  // 14c68c62) and the queue editor's (store-backed by this card's review round 2 — before it, plain
+  // useState with no backing store, so this hop destroyed it).
+  test("a route-changing hop keeps the composer AND the open queue editor", async ({ page, loomDaemon }) => {
+    test.setTimeout(180_000);
+    const worker = await loomDaemon.seedLiveSession({
+      role: "worker", agentName: "HopWkratlas", id: `e2e-hopatlas-${Date.now()}`,
+      branch: "loom/atlas-session-hop-atlas",
+      ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
     });
-  }
+    // TWO entries, deliberately. The FIRST is DELIVERED straight to an idle session's pty (arming it
+    // busy) and so never appears in the queue at all; only the second is HELD. A single enqueue
+    // leaves `pending` empty and the ledger bar — which self-hides when empty — never renders.
+    // A HUMAN-authored entry is also the only kind the editor will open (agent entries are read-only
+    // and Loom nudges are reorder/remove-only), so the species matters as much as the count.
+    await loomDaemon.enqueueMessage({ sessionId: worker.sessionId, text: "first turn (delivers)", source: "human", kind: "agent" });
+    const held = await loomDaemon.enqueueMessage({ sessionId: worker.sessionId, text: "original queued turn", source: "human", kind: "agent" });
+    expect(held.delivered,
+      "fixture precondition: the second enqueue was DELIVERED rather than held, so there is no queued"
+      + " entry to edit and everything below would be asserting an empty drawer").toBe(false);
+
+    await serveCannedDiff(page);
+    await pinProject(page, worker.projectId);
+
+    const sessionUrl = `${loomDaemon.baseURL}/session/${worker.sessionId}`;
+    const queueInput = () => page.getByTestId("queue-editor-input");
+    const composerBox = () => page.getByTestId("session-node-composer").getByRole("textbox").first();
+
+    await page.goto(sessionUrl);
+    await page.evaluate((k) => { (window as unknown as Record<string, unknown>)[k] = "alive"; }, SENTINEL);
+    // Open the ledger drawer, then the editor on the seeded row.
+    await page.getByTestId("queue-ledger-bar").click();
+    await expect(page.getByTestId("queue-drawer")).toBeVisible();
+    await page.getByTitle("Edit this queued message").click();
+    await expect(queueInput()).toBeVisible();
+
+    const queueDraft = `half-edited queue text ${Date.now()}`;
+    const composerDraft = `half-written composer text ${Date.now()}`;
+    await queueInput().fill(queueDraft);
+    await composerBox().fill(composerDraft);
+    await expect(queueInput()).toHaveValue(queueDraft);
+
+    // AWAY and BACK, to the SAME URL: the Diff tab is a real control the user clicks.
+    //
+    // ⛔ NOT `page.goto` — that reloads the document, which wipes every module-level draft store and
+    // would turn this into a test that can only ever fail. The sentinel below is what keeps that
+    // mistake from coming back silently: it is set on the live document and must still be there.
+    await tabRow(page).getByRole("tab", { name: /^Diff/ }).click();
+    await expect(page.locator("main").getByRole("button", { name: "Approve & merge" })).toBeVisible();
+    await tabRow(page).getByRole("tab", { name: "Terminal" }).click();
+    await expect(page).toHaveURL(sessionUrl);
+    const alive = await page.evaluate((k) => (window as unknown as Record<string, unknown>)[k], SENTINEL);
+    expect(alive, "the hop reloaded the document, so this test is not exercising an unmount at all")
+      .toBe("alive");
+
+    await expect(composerBox(), "the composer draft did not survive the hop").toHaveValue(composerDraft);
+    // The editor must come BACK OPEN on the same row, not merely hold the text somewhere unreachable:
+    // a restored draft behind a collapsed drawer reads to a user as destroyed.
+    await expect(queueInput(), "the queue editor did not reopen with its draft after the hop")
+      .toHaveValue(queueDraft);
+
+    // Cancel IS a decision to discard, unlike the hop — so it clears, and the next open reseeds from
+    // the entry's real text. This is the other half of the contract and it keeps the store from
+    // becoming a thing that can never be emptied.
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await page.getByTitle("Edit this queued message").click();
+    await expect(queueInput(), "Cancel did not discard the draft").toHaveValue("original queued turn");
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await composerBox().fill("");
+  });
 
   // ── The merge that ends the session it is about ───────────────────────────────────────────────────
   // A successful merge hard-stops the worker; the exit archives it; `listAllSessions` drops archived
@@ -437,7 +395,6 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
       ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
     });
     await serveCannedDiff(page);
-    await seedAtlasOn(page);
     await pinProject(page, worker.projectId);
 
     // Mirror the daemon's own sequence rather than performing it: the merge SUCCEEDS, and from that
@@ -539,7 +496,6 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
       ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
     });
     await serveCannedDiff(page);
-    await seedAtlasOn(page);
     await pinProject(page, worker.projectId);
 
     await page.setViewportSize({ width: 420, height: 900 });
@@ -601,7 +557,6 @@ test.describe("Atlas session node (card 525c8ad9)", () => {
       const start = Math.min(Number(offset), transcript.length);
       return route.fulfill({ json: { turns: transcript.slice(start), totalTurns: transcript.length, offset: start, returned: transcript.length - start, nextOffset: null } });
     });
-    await seedAtlasOn(page);
     await pinProject(page, mgr.projectId);
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
 

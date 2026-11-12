@@ -7,18 +7,11 @@
 // band column narrower than the row wants, so either shape fails against a perfectly working feed.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
 
 const uniq = (p: string) => `${p}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload and the leg would be measuring this
@@ -52,11 +45,10 @@ test.describe("the project node's Agents tab carries this project's schedules (c
     for (const id of seededScheduleIds.splice(0)) await deleteSchedule(loomDaemon.baseURL, id);
   });
 
-  test("switch ON: empty → a pointer that routes to Automation; seeded → the cron row, attributed to its agent", async ({ page, loomDaemon }) => {
+  test("empty → a pointer that routes to Automation; seeded → the cron row, attributed to its agent", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasched"));
     const agentName = uniq("SchedAgent");
     const agent = await seedAgent(loomDaemon.baseURL, project.id, agentName);
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
 
     // EMPTY polarity: the collapsed one-line pointer, on the Agents tab.
@@ -137,14 +129,13 @@ test.describe("the project node's Agents tab carries this project's schedules (c
 // Fork and Stop live on the Sessions tab and the session node, Resume on the Archive tab, and
 // Clear-rate-limit on an attention row. It now rides TerminalCard's existing `actionsExtra` slot.
 test.describe("End Session is reachable on the Atlas session node (card 102bc915)", () => {
-  test("switch ON: clicking End Session queues the wrap-up turn on that session", async ({ page, loomDaemon }) => {
+  test("clicking End Session queues the wrap-up turn on that session", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasend"));
     // A CANNED pty — the end route enqueues onto a real pty FIFO, so the session needs one.
     const mgr = await loomDaemon.seedLiveSession({
       project, role: "manager", agentName: "Orchestrator",
       ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "ready\r\n",
     });
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
 
@@ -174,7 +165,7 @@ test.describe("End Session is reachable on the Atlas session node (card 102bc915
       .toMatchObject({ delivered: true });
   });
 
-  test("switch ON: a WORKER's node never offers it, and neither does an EXITED session's", async ({ page, loomDaemon }) => {
+  test("a WORKER's node never offers it, and neither does an EXITED session's", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasendneg"));
     const mgr = await loomDaemon.seedLiveSession({ project, role: "manager", agentName: "Orchestrator" });
     const worker = await loomDaemon.seedLiveSession({
@@ -184,7 +175,6 @@ test.describe("End Session is reachable on the Atlas session node (card 102bc915
       project, role: "manager", agentName: "Retired mgr", processState: "exited",
       id: `e2e-exited-${Date.now()}`,
     });
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
 
     // PRESENCE FIRST on the control case, so a bare `toHaveCount(0)` below can't pass on a blank page.
@@ -233,7 +223,7 @@ test.describe("the project node's Pulse reaches an exited manager's events (card
     return { gone, sentinel };
   };
 
-  test("switch ON: the exited manager's event renders in the project node's Pulse", async ({ page, loomDaemon }) => {
+  test("the exited manager's event renders in the project node's Pulse", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlaspulse"));
     // A LIVE manager too: the two tiers must COMPOSE, not replace each other.
     const live = await loomDaemon.seedLiveSession({ project, role: "manager", agentName: "Orchestrator" });
@@ -244,7 +234,6 @@ test.describe("the project node's Pulse reaches an exited manager's events (card
     });
     const { sentinel } = await seedExitedWithEvent(loomDaemon, project);
 
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.goto(loomDaemon.baseURL + "/project");
 

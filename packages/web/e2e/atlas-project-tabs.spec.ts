@@ -23,18 +23,14 @@
 //      declaration names, and a full RELOAD must come back on the same tab with the same body — which
 //      is the claim `?tab=`-as-component-state could not make.
 //   4. THE BOARD TAB IS THE WHOLE BOARD, AND A CARD OPENS THE CENTRED DIALOG. Both owner rules, on the
-//      tab reached THROUGH the tab row. The lane count is CAPTURED from the classic /board page in the
-//      same browser rather than stated, so "all lanes" is a measurement; the dialog's two side margins
+//      tab reached THROUGH the tab row. The lane count is READ from the board's own REST columns in the
+//      same run rather than stated, so "all lanes" is a measurement; the dialog's two side margins
 //      must be EQUAL, which is the discriminating form of "centred, never a drawer" (a bare
 //      `role=dialog` check passes against a slide-over).
 //
 //   5. …plus the owner directive this card had to design around: UNFINISHED INPUT SURVIVES A TAB
 //      SWITCH. Asserted with its own contrast case, because "the text is still there" is also what a
 //      page that never cleared anything would report — see the test for how the two are told apart.
-//
-// Switch OFF, every re-homed path still renders its classic page: the rail, no Atlas element of any
-// kind, no node tab row, and the page's own heading. Captured as the OFF polarity of each ON claim
-// rather than asserted from memory.
 //
 // What is deliberately NOT re-asserted here, because it is already covered on this exact address and
 // would be a second copy to keep in step: the full centred-dialog geometry sweep across all four board
@@ -49,10 +45,9 @@ import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { nodeTabKeys, openNodeTab } from "./helpers/nodeTabs";
 import type { Locator } from "@playwright/test";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
-// cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes its own keys.
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json), so a spec cannot pull a `src/` module in — the same reason
+// fixtures/daemon.ts hardcodes its own keys.
 const PROJECT_KEY = "loom.projectId";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -70,14 +65,6 @@ const DONE_CARDS = 1;     // a terminal lane, so total (4) != open (3)
 const MEMORY_NOTES = 5;
 const LIVE_SESSIONS = 2;
 const AGENTS = 4;
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, reload
 // included, so an unconditional write would re-pin on a later leg and that leg would be measuring this
@@ -143,11 +130,9 @@ function parseProjectNodeTabs(): { rows: DeclaredTab[]; rawMarkers: number; bloc
  * Every NAV_PAGES `to` — the destinations BOTH shells mount. Parsed with the same marker-count control
  * and for the same reason as the tab list above (the idiom atlas-tree-hierarchy.spec.ts establishes).
  *
- * Needed because the re-homed tabs are not all the same KIND of address. Seven came from NAV_PAGES, so
- * the classic shell still serves each at its own path and the switch-OFF claim applies to it verbatim.
- * `/agents` came from ATLAS_HOMES instead — Atlas-ONLY by construction, deliberately never mounted by
- * the classic shell (see that declaration's own anchor in src/nav.tsx) — so under the switch OFF it
- * renders nothing, which is correct and is asserted as its own, different claim. Derived rather than
+ * Needed because the re-homed tabs are not all the same KIND of address. Seven came from NAV_PAGES;
+ * `/agents` came from ATLAS_HOMES instead (see that declaration's own anchor in src/nav.tsx), which is
+ * a different kind of address and is asserted as its own, different claim. Derived rather than
  * hand-split: a later card re-homing another Atlas-only node must not have to remember to edit a list
  * here, and a NAV_PAGES destination quietly becoming Atlas-only must not slip through as "empty is
  * fine".
@@ -219,7 +204,7 @@ async function seedProjectNode(loomDaemon: LoomDaemon) {
 }
 
 test.describe("Atlas project node tabs (card 25c08fba)", () => {
-  test("switch ON: every declared tab renders with real counts, and each one is a real address",
+  test("every declared tab renders with real counts, and each one is a real address",
     async ({ page, loomDaemon }) => {
       // Every tab clicked and then RELOADED, on a page whose board/memory/agents reads all have to
       // resolve, is well past the 30s default.
@@ -246,7 +231,6 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
         .not.toContain("deck");
 
       const { project } = await seedProjectNode(loomDaemon);
-      await seedAtlasOn(page);
       await pinProject(page, project.id);
       await page.setViewportSize(VIEWPORT);
       await page.goto(loomDaemon.baseURL + "/project");
@@ -323,7 +307,7 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       }
     });
 
-  test("switch ON: every tab stays reachable at phone width, and one of the last ones still navigates",
+  test("every tab stays reachable at phone width, and one of the last ones still navigates",
     async ({ page, loomDaemon }) => {
       // This tab set is many times what the row was built for, and an unwrapped row is CLIPPED at its
       // container's edge rather than scrolled — so at 420 the tail of the set was simply off-screen,
@@ -332,7 +316,6 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       test.setTimeout(120_000);
       const { rows } = parseProjectNodeTabs();
       const { project } = await seedProjectNode(loomDaemon);
-      await seedAtlasOn(page);
       await pinProject(page, project.id);
       await page.setViewportSize({ width: 420, height: 900 });
       await page.goto(loomDaemon.baseURL + "/project");
@@ -405,7 +388,7 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       expect(tops.length, `the ${rows.length} declared tabs wrapped onto ${tops.length} lines at ${VIEWPORT.width}px`).toBe(1);
     });
 
-  test("switch ON: the Board tab is the whole board, and a card opens the centred dialog",
+  test("the Board tab is the whole board, and a card opens the centred dialog",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const { project, cardTitles } = await seedProjectNode(loomDaemon);
@@ -422,7 +405,6 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       expect(boardLanes, "the board declares no lanes, so there is nothing to compare").toBeGreaterThan(1);
 
       // Reached THROUGH the tab row rather than by typing the URL — the affordance this card adds.
-      await seedAtlasOn(page);
       await page.goto(loomDaemon.baseURL + "/project");
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
       await expect(page.getByTestId("atlas-project-name")).toHaveText(project.name);
@@ -473,11 +455,10 @@ test.describe("Atlas project node tabs (card 25c08fba)", () => {
       await expect(lanesIn(scope), "the board reflowed when the dialog opened").toHaveCount(boardLanes);
     });
 
-  test("switch ON: unfinished input on a tab survives switching away and back",
+  test("unfinished input on a tab survives switching away and back",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const { project } = await seedProjectNode(loomDaemon);
-      await seedAtlasOn(page);
       await pinProject(page, project.id);
       await page.setViewportSize(VIEWPORT);
       await page.goto(loomDaemon.baseURL + "/board");

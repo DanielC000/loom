@@ -18,9 +18,6 @@
 //   · The 420 read is asserted to be a DIFFERENT layout from the 1600 one (the panel's own x moves), so
 //     a viewport change that silently did not apply cannot pass as two independent measurements.
 //
-// Both shells, because there is ONE `<Board>` (card a6d7a102) but the dialog sits in a different frame
-// in each: the classic rail page and the Atlas shell hand it different widths at the same viewport.
-//
 // Presence-first (card 625d791c): every leg asserts the fixture's own cards and rows are really on
 // screen before it reads a single box, so a still-loading dialog can never satisfy an alignment check
 // by having nothing to misalign.
@@ -28,9 +25,8 @@ import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import type { Locator } from "@playwright/test";
 import path from "node:path";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
 
 const WIDE = { width: 1600, height: 1000 };
@@ -64,14 +60,6 @@ async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
     try { if (localStorage.getItem(key) === null) localStorage.setItem(key, id); } catch { /* storage unavailable — assertions will say so */ }
   }, [PROJECT_KEY, projectId] as const);
-}
-
-// Only ever seeded ON. OFF is the default (an empty key), and a "seed off" script would re-clear the
-// key on every navigation instead (measured on Atlas P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable */ }
-  }, ATLAS_KEY);
 }
 
 /** Write a card's structure directly, for SEEDING only (never as a stand-in for a UI action). */
@@ -184,23 +172,17 @@ async function panelWidth(dialog: Locator): Promise<number> {
 async function assertSharedRule(
   page: Page,
   loomDaemon: LoomDaemon,
-  opts: { atlas: boolean; label: string; shot: string },
+  opts: { label: string; shot: string },
 ) {
-  const project = await loomDaemon.createProject(uniq(opts.atlas ? "gridalign-atlas" : "gridalign-classic"));
+  const project = await loomDaemon.createProject(uniq("gridalign-atlas"));
   const fx = await seedFixture(loomDaemon, project.id);
 
-  if (opts.atlas) await seedAtlasOn(page);
   await pinProject(page, project.id);
   await page.setViewportSize(WIDE);
   await page.goto(`${loomDaemon.baseURL}/board`);
 
   // The shell under measurement is really the one that mounted.
-  if (opts.atlas) {
-    await expect(page.getByTestId("atlas-shell"), `${opts.label}: the Atlas shell`).toBeVisible();
-  } else {
-    await expect(page.locator(".loom-rail"), `${opts.label}: the classic rail`).toBeVisible();
-    await expect(page.getByTestId("atlas-shell"), `${opts.label}: nothing Atlas is in the document`).toHaveCount(0);
-  }
+  await expect(page.getByTestId("atlas-shell"), `${opts.label}: the Atlas shell`).toBeVisible();
   // Fixture identity: this board, not a sibling spec's leftovers on the shared worker daemon.
   await expect(page.locator(".loom-board-card"), `${opts.label}: the seeded board`).toHaveCount(fx.cardCount);
 
@@ -248,7 +230,7 @@ async function assertSharedRule(
 
 test.describe("the parent row and the relation editor share one label column (card e8e6d91e)", () => {
 
-  test("switch ON: the Atlas dialog states every relation on one rule, at 1600 and at 420", async ({ page, loomDaemon }) => {
-    await assertSharedRule(page, loomDaemon, { atlas: true, label: "Atlas dialog", shot: "atlas" });
+  test("the Atlas dialog states every relation on one rule, at 1600 and at 420", async ({ page, loomDaemon }) => {
+    await assertSharedRule(page, loomDaemon, { label: "Atlas dialog", shot: "atlas" });
   });
 });

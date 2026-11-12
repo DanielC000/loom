@@ -10,14 +10,6 @@
 // the rows it actually rendered, never from how many this spec seeded.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable: assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
 async function seedRequests(loomDaemon: LoomDaemon) {
   const short = `f${Math.random().toString(36).slice(2, 9)}`;
   const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: `NeedsFit-${short}` });
@@ -67,7 +59,6 @@ test.describe("Atlas Needs-you band: ask first, whole rows, overflow row (card 1
   test("at 1920, 1440, 1024 and 390 the panel shows whole rows only, then '+N more in Inbox'", async ({ page, loomDaemon }) => {
     test.setTimeout(120_000);
     const seeded = await seedRequests(loomDaemon);
-    await seedAtlasOn(page);
 
     for (const viewport of [{ width: 1920, height: 1080 }, { width: 1440, height: 900 }, { width: 1024, height: 800 }, { width: 390, height: 844 }] as const) {
       const at = `${viewport.width}x${viewport.height}`;
@@ -140,7 +131,6 @@ test.describe("Atlas Needs-you band: ask first, whole rows, overflow row (card 1
 
   test("the ⌘K palette leads with the ask and keeps the routing target in the tooltip", async ({ page, loomDaemon }) => {
     const seeded = await seedRequests(loomDaemon);
-    await seedAtlasOn(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-band-needs")).toBeVisible();

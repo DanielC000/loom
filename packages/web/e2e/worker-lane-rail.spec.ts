@@ -17,13 +17,12 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
-async function seedAtlas(page: Page, projectId: string) {
-  await page.addInitScript(([a, p, id]) => {
-    try { localStorage.setItem(a, "1"); localStorage.setItem(p, id); } catch { /* assertions will say so */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+async function pinProject(page: Page, projectId: string) {
+  await page.addInitScript(([p, id]) => {
+    try { localStorage.setItem(p, id); } catch { /* assertions will say so */ }
+  }, [PROJECT_KEY, projectId] as const);
 }
 
 const ago = (sec: number) => new Date(Date.now() - sec * 1000).toISOString();
@@ -90,7 +89,7 @@ const lane = (page: Page, id: string) => rail(page).locator(`[data-worker-id="${
 
 async function openManager(page: Page, loomDaemon: LoomDaemon, f: Awaited<ReturnType<typeof seedFleet>>) {
   await layerGates(page, f.merging.sessionId, f.working.sessionId, f.mgr.projectId);
-  await seedAtlas(page, f.mgr.projectId);
+  await pinProject(page, f.mgr.projectId);
   await page.goto(`${loomDaemon.baseURL}/session/${f.mgr.sessionId}`);
   await expect(rail(page)).toBeVisible();
   await expect(rail(page).getByTestId("worker-lane")).toHaveCount(6);
@@ -237,7 +236,7 @@ test.describe("worker lane rail on a manager's session node (card dd5c8724)", ()
     });
     const plain = await loomDaemon.seedLiveSession({ project: lone.project, agentName: "Plain", id: `pl-${randomUUID()}` });
     await page.setViewportSize({ width: 1440, height: 900 });
-    await seedAtlas(page, lone.projectId);
+    await pinProject(page, lone.projectId);
 
     // An exited worker keeps its lane (muted, sorted last) while its row is still listed.
     await loomDaemon.exitSeededSession(w.sessionId);
@@ -254,7 +253,7 @@ test.describe("worker lane rail on a manager's session node (card dd5c8724)", ()
     }
 
     const empty = await loomDaemon.seedLiveSession({ role: "manager", agentName: "EmptyMgr", id: `em-${randomUUID()}` });
-    await seedAtlas(page, empty.projectId);
+    await pinProject(page, empty.projectId);
     await page.goto(`${loomDaemon.baseURL}/session/${empty.sessionId}`);
     await expect(rail(page).getByTestId("worker-lane-empty")).toContainText("No workers running.");
     await expect(rail(page).getByTestId("worker-lane-count")).toHaveText("0");

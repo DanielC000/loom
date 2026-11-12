@@ -29,10 +29,9 @@ import { fileURLToPath } from "node:url";
 import { PAGE_SUB_TAB, expect, test, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
 // cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes its own keys.
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -81,14 +80,6 @@ function tabsUnderTest(): NodeTab[] {
   return rows;
 }
 
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
     try { localStorage.setItem(key, id); } catch { /* storage unavailable */ }
@@ -105,7 +96,7 @@ async function renderedTabKeys(page: Page): Promise<string[]> {
 }
 
 test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
-  test("switch ON: the declared tab set with its counts, each one a real address", async ({ page, loomDaemon }) => {
+  test("the declared tab set with its counts, each one a real address", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const rows = tabsUnderTest();
     const project = await loomDaemon.createProject(`atlas-wstabs-${Date.now()}`);
@@ -120,7 +111,6 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
     await pinProject(page, project.id);
 
     // ── The node's whole tab set. ──
-    await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
 
@@ -186,12 +176,11 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
     }
   });
 
-  test("switch ON: a re-homed address redirects into its tab, carrying its own sub-tab", async ({ page, loomDaemon }) => {
+  test("a re-homed address redirects into its tab, carrying its own sub-tab", async ({ page, loomDaemon }) => {
     test.setTimeout(120_000);
     const rows = tabsUnderTest();
     const project = await loomDaemon.createProject(`atlas-wstabs-redirect-${Date.now()}`);
     await pinProject(page, project.id);
-    await seedAtlasOn(page);
 
     for (const row of rows) {
       await page.goto(loomDaemon.baseURL + row.from);
@@ -231,12 +220,11 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
       .toHaveText(/^skills$/i);
   });
 
-  test("switch ON: a visited panel keeps its unfinished input, and an unvisited one is never mounted",
+  test("a visited panel keeps its unfinished input, and an unvisited one is never mounted",
     async ({ page, loomDaemon }) => {
       test.setTimeout(120_000);
       const project = await loomDaemon.createProject(`atlas-wstabs-draft-${Date.now()}`);
       await pinProject(page, project.id);
-      await seedAtlasOn(page);
       await page.goto(loomDaemon.baseURL + "/home");
       await expect(page.getByTestId("atlas-node-tabs")).toBeVisible();
 
@@ -283,14 +271,13 @@ test.describe("Atlas Workspace node tabs (card 41eab0eb)", () => {
         .toHaveCount(0);
     });
 
-  test("switch ON: a guest's own sub-tab never steals the host's ?tab=", async ({ page, loomDaemon }) => {
+  test("a guest's own sub-tab never steals the host's ?tab=", async ({ page, loomDaemon }) => {
     // The collision this card's `useTabHost` exists to prevent: Actors, Automation and the Companion
     // node each own a `?tab=` of their own, and a bare `tab` write from inside one would replace the
     // node's own tab value and drop the whole node back to Overview. EXERCISED, not merely rendered.
     test.setTimeout(120_000);
     const project = await loomDaemon.createProject(`atlas-wstabs-subkey-${Date.now()}`);
     await pinProject(page, project.id);
-    await seedAtlasOn(page);
 
     for (const { tab, sub } of [{ tab: "actors", sub: "skills" }, { tab: "automation", sub: "events" }]) {
       await page.goto(loomDaemon.baseURL + hrefFor(tab));

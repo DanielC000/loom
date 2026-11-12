@@ -18,7 +18,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { expect, test, type Page, type Locator } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";      // lib/atlasUi.ts owns this key and the "1" = on encoding
 const PROJECT_KEY = "loom.projectId";  // lib/activeProject.tsx owns the active-project one
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -107,12 +106,6 @@ async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
     try { if (localStorage.getItem(key) === null) localStorage.setItem(key, id); } catch { /* unavailable */ }
   }, [PROJECT_KEY, projectId] as const);
-}
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
 }
 
 /** The section's own wrapper — every presence assertion is scoped INSIDE it, never page-wide: "Skills"
@@ -327,7 +320,6 @@ test.describe("released skill copies on project Settings (card 75ea3f73)", () =>
     expect((await readReleased(loomDaemon.baseURL, project.id)).map((r) => r.name)).toContain(name);
 
     await pinProject(page, project.id);
-    await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + "/settings");
 
     // It really is the Atlas project node, so the row below cannot be attributed to the classic page.

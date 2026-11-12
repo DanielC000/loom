@@ -5,9 +5,9 @@
 // was the LAST of the six surfaces living only there (card c9b78d80 re-homed the other five), and the
 // one whose loss would have been worst: a soft-archived project with no second home is invisible AND
 // unrestorable, which silently turns a reversible archive into a permanent delete. This spec is the
-// witness that it now works from the Workspace node, with the switch off changing nothing.
+// witness that it now works from the Workspace node.
 //
-// Each ON leg asserts an observable on BOTH sides of the act, never just "the panel rendered". Every
+// Each leg asserts an observable on BOTH sides of the act, never just "the panel rendered". Every
 // absence claim is paired with a POSITIVE control on the same surface — a project that stays in the
 // tree, a row that stays in the list — because this daemon is SHARED across the specs in a worker: a
 // bare "the row is gone" holds just as well against a tree that drew nothing and a list that was
@@ -23,21 +23,12 @@
 import { expect, test, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only, so a spec cannot pull `src/` in.
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 /** The Workspace node's Settings tab — a `?tab=` on the node's own path (card 41eab0eb). */
 const WORKSPACE_SETTINGS = "/home?tab=settings";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Guarded, not unconditional: an unconditional setItem RE-PINS on every reload, which would make a
 // "the row left the tree" leg measure the helper rather than the app.
@@ -116,8 +107,6 @@ test.describe("Atlas archived projects on the Workspace node (card baca1835)", (
     // `keep` is the ACTIVE project, so archiving `project` is not also a selection change — this leg
     // is about the list and the tree, not about where the active scope goes.
     await pinProject(page, keep.id);
-    await seedAtlasOn(page);
-
     // BEFORE — reached by the TAB, so the affordance that gets a reader here is exercised rather than
     // the address merely rendering. The project is a live tree row and is NOT in the archived list.
     await openWorkspaceSettingsTab(page, loomDaemon.baseURL);
@@ -161,9 +150,7 @@ test.describe("Atlas archived projects on the Workspace node (card baca1835)", (
     // Archived too, and never deleted: it keeps the list non-empty, so the final absence is not
     // satisfied by a panel that stopped rendering rows.
     const keep = await loomDaemon.createProject(`archived-doomed-keep-${Date.now()}`);
-    await pinProject(page, (await loomDaemon.createProject(`archived-doomed-active-${Date.now()}`)).id);
-    await seedAtlasOn(page);
-    await archiveViaRest(loomDaemon.baseURL, doomed.id);
+    await pinProject(page, (await loomDaemon.createProject(`archived-doomed-active-${Date.now()}`)).id);    await archiveViaRest(loomDaemon.baseURL, doomed.id);
     await archiveViaRest(loomDaemon.baseURL, keep.id);
 
     const d = dialogs(page);

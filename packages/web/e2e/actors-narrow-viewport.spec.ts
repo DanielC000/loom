@@ -1,6 +1,6 @@
 // Actors narrow-viewport spec (card a9476319) — /actors must not scroll sideways on a phone.
 //
-// THE DEFECT this locks down, as measured at 390px (where the classic content box is 290px):
+// THE DEFECT this locks down, as measured at 390px in the old classic shell (where the content box was 290px):
 //   1. Profiles and Skills share one list→editor shell, written inline as `300px 1fr`. The fixed 300px
 //      track is wider than the whole box before the editor gets a pixel, and a fixed track list never
 //      reduces its column count.
@@ -14,12 +14,11 @@
 // Fixed in `.loom-actor-split` + `.loom-field-grid-trail` (styles/global.css) and a wrap/min-width pair
 // on the capability row (pages/Profiles.tsx).
 //
-// ⚠️ TWO SHELLS, TWO DIFFERENT INSTRUMENTS — DO NOT COLLAPSE THEM INTO THE PAGE CHECK.
-// A page-level `documentElement.scrollWidth > clientWidth` reading is diagnostic in the CLASSIC shell
-// (measured 730 vs 390 pre-fix) and NON-DIAGNOSTIC under Atlas: `.loom-atlas-content` scrolls, so the
-// same broken layout read a clean 390 vs 390 there while its own box overflowed by 300px. The Atlas leg
-// therefore measures PER-BOX fit inside the Actors subtree instead. Simplifying this file down to the
-// page check would keep it green and silently drop all Atlas coverage.
+// ⚠️ MEASURE PER BOX, NEVER THE PAGE. A page-level `documentElement.scrollWidth > clientWidth` reading
+// was diagnostic in the old classic shell (730 vs 390 pre-fix) but is NON-DIAGNOSTIC under Atlas:
+// `.loom-atlas-content` scrolls, so the same broken layout reads a clean 390 vs 390 while its own box
+// overflows by 300px. Every assertion here therefore measures PER-BOX fit inside the Actors subtree, and
+// one test pins the page reading's blindness so nobody swaps it back in.
 //
 // INSTRUMENT + CONTROL. Every assertion here is that something is ABSENT, and a broken query returns
 // zero exactly like a real fix does — so each measurement is first run against a KNOWN-BAD state at the
@@ -35,11 +34,6 @@ const DESKTOP = { width: 1280, height: 900 };
 // 1px is the tolerance for that, not slack for a real overflow — the defect was 340px.
 const TOLERANCE_PX = 1;
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding. Hardcoded rather than imported for the same
-// reason the other Atlas specs hardcode it: the e2e tsconfig covers `e2e/` only, so a spec cannot pull
-// a `src/` module in.
-const ATLAS_KEY = "loom.atlasUi";
-
 // A bundled profile that every fresh daemon seeds. Selecting one is load-bearing, not decoration: the
 // editor is where two of the three defects lived, and an unselected /actors never mounts it.
 const SEEDED_PROFILE = "Orchestrator";
@@ -48,8 +42,8 @@ const SEEDED_PROFILE = "Orchestrator";
 
 type PageOverflow = { viewport: number; overflow: number; offenderCount: number; offenders: string[] };
 
-/** CLASSIC shell: page-level horizontal overflow, plus WHICH elements cross the right edge. The
- *  offender list is what makes a failure actionable rather than a bare pixel count. */
+/** Page-level horizontal overflow, plus WHICH elements cross the right edge. Kept only for the
+ *  blindness test below: under Atlas this reading cannot see an overflowing box. */
 async function measurePageOverflow(page: Page): Promise<PageOverflow> {
   return page.evaluate(() => {
     const doc = document.documentElement;
@@ -111,25 +105,10 @@ function reportBox(where: string, m: BoxOverflow): string {
 }
 
 // ── Controls ───────────────────────────────────────────────────────────────────────────────────
-// Both inject an over-wide element, re-read, and remove it. The injection point differs because the two
-// instruments answer different questions: the page one must see the DOCUMENT widen, the subtree one must
-// see a box INSIDE the Actors root fail to contain its content.
+// Injects an over-wide element inside the Actors root, re-reads, and removes it: the subtree census must
+// see a box INSIDE the Actors root fail to contain its content before a zero reading means anything.
 
 const CONTROL_WIDTH = 3000;
-
-async function assertPageInstrumentFires(page: Page): Promise<void> {
-  await page.evaluate((w) => {
-    const probe = document.createElement("div");
-    probe.id = "loom-actors-page-control";
-    probe.style.cssText = `width:${w}px;height:2px`;
-    document.body.appendChild(probe);
-  }, CONTROL_WIDTH);
-  const fired = await measurePageOverflow(page);
-  await page.evaluate(() => document.getElementById("loom-actors-page-control")?.remove());
-  expect(fired.offenderCount, `page control did not register — ${reportPage("control", fired)}`).toBeGreaterThan(0);
-  expect(fired.overflow, `page control did not widen the document — ${reportPage("control", fired)}`)
-    .toBeGreaterThan(CONTROL_WIDTH - fired.viewport - 100);
-}
 
 async function assertBoxInstrumentFires(page: Page): Promise<void> {
   await page.evaluate((w) => {
@@ -180,59 +159,38 @@ async function openProfileEditor(page: Page): Promise<void> {
     .toBeVisible();
 }
 
-async function openClassicActors(page: Page, baseURL: string, tab?: "skills"): Promise<void> {
-  await page.goto(`${baseURL}/actors${tab ? `?tab=${tab}` : ""}`);
-  await expect(page.getByTestId("actors")).toBeVisible();
-}
-
 async function openAtlasActors(page: Page, baseURL: string): Promise<void> {
-  await page.addInitScript((k) => localStorage.setItem(k, "1"), ATLAS_KEY);
   await page.goto(`${baseURL}/home`);
   await openNodeTab(page, "actors");
   await expect(page.getByTestId("actors")).toBeVisible();
 }
 
-// ── Classic shell @390 ─────────────────────────────────────────────────────────────────────────
+// ── Atlas @390 ─────────────────────────────────────────────────────────────────────────────────
 
-test.describe("Actors narrow viewport — classic shell (card a9476319)", () => {
+test.describe("Actors narrow viewport (card a9476319)", () => {
   test.use({ viewport: PHONE });
 
-  test("the Profiles editor does not overflow the page at 390px", async ({ page, loomDaemon }) => {
-    await openClassicActors(page, loomDaemon.baseURL);
-    await openProfileEditor(page);
-
-    await assertPageInstrumentFires(page);
-    await assertBoxInstrumentFires(page);
-
-    const pageM = await measurePageOverflow(page);
-    expect(pageM.viewport).toBe(PHONE.width);
-    expect(pageM.offenderCount, reportPage("/actors (Profiles editor)", pageM)).toBe(0);
-    expect(pageM.overflow, reportPage("/actors (Profiles editor)", pageM)).toBeLessThanOrEqual(TOLERANCE_PX);
-
-    const boxM = await measureBoxOverflow(page);
-    expect(boxM.offenderCount, reportBox("/actors (Profiles editor)", boxM)).toBe(0);
-  });
-
-  test("the Skills editor does not overflow the page at 390px", async ({ page, loomDaemon }) => {
-    await openClassicActors(page, loomDaemon.baseURL, "skills");
+  test("the Skills editor does not overflow at 390px", async ({ page, loomDaemon }) => {
+    // `/actors?tab=skills` is a re-homed address: it lands on the Workspace node's Actors tab, Skills sub-tab.
+    await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
+    await expect(page.getByTestId("actors")).toBeVisible();
     // Identity: a bundled skill this daemon really seeds, with its editor really mounted.
     const row = page.getByRole("button").filter({ hasText: "loom-pickup" }).first();
     await expect(row, "the seeded loom-pickup skill is not in this daemon's list").toBeVisible();
     await row.click();
     await expect(page.getByText("· SKILL.md", { exact: false })).toBeVisible();
 
-    await assertPageInstrumentFires(page);
+    await assertBoxInstrumentFires(page);
 
-    const pageM = await measurePageOverflow(page);
-    expect(pageM.offenderCount, reportPage("/actors?tab=skills", pageM)).toBe(0);
-    expect(pageM.overflow, reportPage("/actors?tab=skills", pageM)).toBeLessThanOrEqual(TOLERANCE_PX);
+    const boxM = await measureBoxOverflow(page);
+    expect(boxM.offenderCount, reportBox("/actors?tab=skills", boxM)).toBe(0);
   });
 
   // Not overflowing is only half of it — a collapsed column must still be USABLE. A render-only check
   // passes on a field squeezed to a sliver. Type into the Name field and require an observable state
   // change (the value lands AND the editor's dirty indicator appears). Nothing is saved.
   test("the collapsed editor is still usable at 390px", async ({ page, loomDaemon }) => {
-    await openClassicActors(page, loomDaemon.baseURL);
+    await openAtlasActors(page, loomDaemon.baseURL);
     await openProfileEditor(page);
 
     const scope = page.getByTestId("actors");
@@ -258,16 +216,10 @@ test.describe("Actors narrow viewport — classic shell (card a9476319)", () => 
     await expect(saved).toHaveCount(0);
     await expect(save).toBeEnabled();
   });
-});
 
-// ── Atlas shell @390 ───────────────────────────────────────────────────────────────────────────
-
-test.describe("Actors narrow viewport — Atlas shell (card a9476319)", () => {
-  test.use({ viewport: PHONE });
-
-  // The per-box leg (see the header): under Atlas the page reading is green whatever the layout does,
-  // because `.loom-atlas-content` scrolls. This test is the only thing covering the Atlas side.
-  test("no box in the Actors subtree overflows at 390px under Atlas", async ({ page, loomDaemon }) => {
+  // The per-box leg (see the header): the page reading is green whatever the layout does, because
+  // `.loom-atlas-content` scrolls, so this census is what covers the Profiles editor.
+  test("no box in the Actors subtree overflows at 390px", async ({ page, loomDaemon }) => {
     await openAtlasActors(page, loomDaemon.baseURL);
     await openProfileEditor(page);
 
@@ -280,7 +232,7 @@ test.describe("Actors narrow viewport — Atlas shell (card a9476319)", () => {
 
   // The claim the page-level reading CANNOT make under Atlas, stated as its own assertion so a future
   // reader can see why the leg above is shaped the way it is: this reading is green here either way.
-  test("the page-level reading is non-diagnostic under Atlas (it is green regardless)", async ({ page, loomDaemon }) => {
+  test("the page-level reading is non-diagnostic (it is green regardless)", async ({ page, loomDaemon }) => {
     await openAtlasActors(page, loomDaemon.baseURL);
     await openProfileEditor(page);
 
@@ -316,7 +268,7 @@ test.describe("Actors wide viewport is not regressed (card a9476319)", () => {
   // (equal `top`, list left of editor) — true of the two-column shell, false of a collapsed one — and
   // the list keeps its 300px track. Asserted from rendered geometry, not from the CSS.
   test("keeps the list beside the editor at 1280px, and still does not overflow", async ({ page, loomDaemon }) => {
-    await openClassicActors(page, loomDaemon.baseURL);
+    await openAtlasActors(page, loomDaemon.baseURL);
     await openProfileEditor(page);
 
     const panes = page.locator(".loom-actor-split > *");
@@ -330,10 +282,7 @@ test.describe("Actors wide viewport is not regressed (card a9476319)", () => {
     expect(list.x, "the list is not left of the editor").toBeLessThan(editor.x);
     expect(Math.round(list.width), "the list pane lost its 300px track").toBe(300);
 
-    const pageM = await measurePageOverflow(page);
-    expect(pageM.offenderCount, reportPage("/actors @1280", pageM)).toBe(0);
-    expect(pageM.overflow, reportPage("/actors @1280", pageM)).toBeLessThanOrEqual(TOLERANCE_PX);
-
+    await assertBoxInstrumentFires(page);
     const boxM = await measureBoxOverflow(page);
     expect(boxM.offenderCount, reportBox("/actors @1280", boxM)).toBe(0);
   });

@@ -20,9 +20,8 @@
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
 
-// lib/atlasUi.ts owns the switch key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
 
 /** The project node's Sessions tab address — src/nav.tsx's PROJECT_NODE_TABS `sessions` row. */
@@ -31,14 +30,6 @@ const SESSIONS_PATH = "/terminals";
 const WORKSPACE_TERMINALS_PATH = "/workspace-terminals";
 
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent, so a reload never re-pins.
 async function pinProject(page: Page, projectId: string) {
@@ -52,7 +43,6 @@ const panel = (page: Page) => page.getByTestId("atlas-tabpanel-sessions");
 const projectFilterIn = (scope: ReturnType<Page["getByTestId"]>) => scope.locator("select").filter({ hasText: "All (" });
 
 async function gotoSessionsTab(page: Page, loomDaemon: LoomDaemon, projectId: string) {
-  await seedAtlasOn(page);
   await pinProject(page, projectId);
   await page.goto(loomDaemon.baseURL + SESSIONS_PATH);
   await openNodeTab(page, "sessions");
@@ -75,7 +65,6 @@ test.describe("Atlas Sessions tab — locked to its own project node", () => {
 
   test("the workspace Terminals node keeps the picker (the lock is per project node only)", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("sesslock"));
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.goto(loomDaemon.baseURL + WORKSPACE_TERMINALS_PATH);
     const node = page.getByTestId("atlas-terminals-node");

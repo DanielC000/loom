@@ -13,15 +13,6 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key; hardcoded because tsconfig.e2e.json covers e2e/ only.
-const ATLAS_KEY = "loom.atlasUi";
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
 const lines = (n: number, tag: string) => Array.from({ length: n }, (_, i) => `+export const ${tag}${i} = ${i};`);
 
 const modifiedBlock = (path: string, n: number) => [
@@ -61,7 +52,6 @@ test.describe("review surface Files/Diff region (card 2b7826f4)", () => {
     const dir = `src/${short}`;
     const added = `${dir}/coupon.ts`, edited = `${dir}/total.ts`;
     await serveDiff(page, workerId, [...newBlock(added, 18), ...modifiedBlock(edited, 14)], { files: 2, ins: 32 });
-    await seedAtlasOn(page);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${loomDaemon.baseURL}/review/${workerId}`);
 
@@ -81,7 +71,6 @@ test.describe("review surface Files/Diff region (card 2b7826f4)", () => {
     const dir = `src/${short}`;
     const paths = ["a", "b", "c", "d", "e", "f"].map((x) => `${dir}/${x}.ts`);
     await serveDiff(page, workerId, paths.flatMap((p) => modifiedBlock(p, 4)), { files: 6, ins: 24 });
-    await seedAtlasOn(page);
     // A short viewport, so the last file's block starts below the fold and a scroll is observable.
     await page.setViewportSize({ width: 1440, height: 560 });
     await page.goto(`${loomDaemon.baseURL}/review/${workerId}`);
@@ -112,7 +101,6 @@ test.describe("review surface Files/Diff region (card 2b7826f4)", () => {
     const dir = `src/${short}`;
     const paths = ["a", "b", "c", "d"].map((x) => `${dir}/${x}.ts`);
     await serveDiff(page, workerId, paths.flatMap((p) => modifiedBlock(p, 4)), { files: 4, ins: 16 });
-    await seedAtlasOn(page);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`${loomDaemon.baseURL}/review/${workerId}`);
 

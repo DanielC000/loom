@@ -14,8 +14,6 @@
 //   4. THE GO-LIVE GUARD HOLDS A `starting` MANAGER — on BOTH surfaces, since one shared predicate now
 //      decides it. This is the card's "investigate first" item, reproduced rather than reasoned about:
 //      a `starting` manager row is seeded directly (no spawn), and the surfaces are read.
-//   5. SWITCH OFF: the editor/`＋` reached nothing in the shell a user who never opted in sees, and the
-//      Projects page — the editor's original host — still mounts it.
 //
 // ⛔ NO REAL SPAWN. `loomDaemon.createProject` binds a REAL repo, so POST /api/agents/:id/sessions would
 // start a genuinely metered claude and trip the fixture's `[pty] spawn` no-spawn guard at teardown. Every
@@ -28,18 +26,9 @@
 // merely still loading, so every pair asserts what must BE there first.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload and that leg would be measuring this
@@ -115,16 +104,14 @@ async function captureSpawns(page: Page): Promise<{ bodies: unknown[]; paths: st
 }
 
 test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
-  test("switch ON: the Agents node editor really creates, re-profiles, re-prompts and deletes", async ({ page, loomDaemon }) => {
+  test("the Agents node editor really creates, re-profiles, re-prompts and deletes", async ({ page, loomDaemon }) => {
     test.setTimeout(120_000);
     const seeded = await seedRoster(loomDaemon);
     // The global mutation handler alerts with `window.alert` for any mutation without
     // `meta.inlineError` (src/main.tsx), and the delete is behind a `window.confirm`. Both are NATIVE
     // dialogs, so record and answer them: an unhandled one wedges the test rather than failing it.
     const dialogs: string[] = [];
-    page.on("dialog", (d) => { dialogs.push(d.message()); void d.accept(); });
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+    page.on("dialog", (d) => { dialogs.push(d.message()); void d.accept(); });    await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/agents");
 
     const node = page.getByTestId("atlas-agents-node");
@@ -202,10 +189,8 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     await expect(node.getByTestId(`atlas-agent-card-${seeded.plain.id}`)).toBeVisible();
   });
 
-  test("switch ON: a worker rig is editable from its row and still carries no spawn or stop", async ({ page, loomDaemon }) => {
-    const seeded = await seedRoster(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+  test("a worker rig is editable from its row and still carries no spawn or stop", async ({ page, loomDaemon }) => {
+    const seeded = await seedRoster(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/agents");
 
     const rig = page.getByTestId(`atlas-worker-rig-${seeded.worker.id}`);
@@ -229,15 +214,13 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
     await expect(dialog).toHaveCount(0);
   });
 
-  test("switch ON: the project row's ＋ spawns into THAT project without re-scoping, and selection still works", async ({ page, loomDaemon }) => {
+  test("the project row's ＋ spawns into THAT project without re-scoping, and selection still works", async ({ page, loomDaemon }) => {
     test.setTimeout(90_000);
     const active = await seedRoster(loomDaemon);
     const other = await seedRoster(loomDaemon);
     const spawns = await captureSpawns(page);
     const nativeDialogs: string[] = [];
-    page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });
-    await seedAtlasOn(page);
-    await pinProject(page, active.project.id);
+    page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });    await pinProject(page, active.project.id);
     // Deliberately NOT on the Agents node: the claim is "spawn into a project you are not scoped to".
     await page.goto(loomDaemon.baseURL + "/board");
 
@@ -309,9 +292,7 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
 
     // The classic Overview's spawn cards were the other host of this guard until card acbb6df6 deleted
     // that page; the Agents node is now the only one.
-    await pinProject(page, seeded.project.id);
-    await seedAtlasOn(page);
-    await page.goto(loomDaemon.baseURL + "/agents");
+    await pinProject(page, seeded.project.id);    await page.goto(loomDaemon.baseURL + "/agents");
     const atlasHeld = page.getByTestId(`atlas-agent-live-${seeded.manager.id}`);
     await expect(atlasHeld).toBeVisible();
     await expect(atlasHeld).toBeDisabled();
@@ -353,11 +334,9 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
   // 420 — every floor below fails there.
   for (const vp of [{ width: 1440, height: 900, minPanelW: 1200, minPrompt: 300 },
                     { width: 420, height: 860, minPanelW: 380, minPrompt: 240 }]) {
-    test(`switch ON: the editor dialog fills a ${vp.width}px viewport and its prompt field grows and resizes`, async ({ page, loomDaemon }) => {
+    test(`the editor dialog fills a ${vp.width}px viewport and its prompt field grows and resizes`, async ({ page, loomDaemon }) => {
       const seeded = await seedRoster(loomDaemon);
-      await page.setViewportSize({ width: vp.width, height: vp.height });
-      await seedAtlasOn(page);
-      await pinProject(page, seeded.project.id);
+      await page.setViewportSize({ width: vp.width, height: vp.height });      await pinProject(page, seeded.project.id);
       await page.goto(loomDaemon.baseURL + "/agents");
       await page.getByTestId(`atlas-agent-card-${seeded.plain.id}`).getByTestId(`atlas-agent-edit-${seeded.plain.id}`).click();
       const dialog = page.getByTestId("atlas-agent-editor");
@@ -395,14 +374,12 @@ test.describe("Atlas agent editor + project-row spawn (card 318b5a21)", () => {
   // takes an explicit Discard. "saved" shows only after a real save, never on an untouched field.
   // Measured against the pre-fix web build: this test goes red at its first A-12 check (no placeholder).
   // The Escape and scrim draft loss on that build was confirmed by hand in a browser, not by this test.
-  test("switch ON: an unsaved prompt survives Escape, a scrim click and ×, and 'saved' needs a real save", async ({ page, loomDaemon }) => {
+  test("an unsaved prompt survives Escape, a scrim click and ×, and 'saved' needs a real save", async ({ page, loomDaemon }) => {
     test.setTimeout(90_000);
     const seeded = await seedRoster(loomDaemon);
     const agentUrl = `${loomDaemon.baseURL}/api/projects/${seeded.project.id}/agents`;
     const storedPrompt = async () =>
-      (await apiJson<Array<SeededAgent & { startupPrompt: string }>>(agentUrl)).find((a) => a.id === seeded.plain.id)!.startupPrompt;
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+      (await apiJson<Array<SeededAgent & { startupPrompt: string }>>(agentUrl)).find((a) => a.id === seeded.plain.id)!.startupPrompt;    await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/agents");
 
     const card = page.getByTestId(`atlas-agent-card-${seeded.plain.id}`);

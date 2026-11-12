@@ -12,9 +12,8 @@
 //     scrolls it into view before asserting visibility — the band is a fixed-height panel owning its own
 //     scroll, so "in the DOM" and "reachable" are two different claims. It also asserts the row's own
 //     PROJECT CHIP, which is the half that fails if the fan-out widened but `projectByManager` did not.
-//     Its POSITIVE CONTROL is classic Mission Control, where that row rendered before this card and must
-//     still render after: without it, a zero in the band would not distinguish "the band is blind" from
-//     "the seeded event does not render anywhere".
+//     It is a PRESENCE claim, so a broken fixture fails it rather than satisfying it. (Its positive control,
+//     classic Mission Control, was deleted with that page.)
 //   * Leg 2 is the MEASUREMENT the card's DoD asks for, and the one that discriminates this shape from a
 //     naive widening. With N=12 exited managers and a cap of 8, it counts the DISTINCT managers actually
 //     polled over a fixed window and asserts it is the CAP, not N — 0 is the pre-card band, 12 is the
@@ -29,9 +28,8 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.ts owns the project key.
-// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.ts owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
 
 // src/lib/fleet.ts's PULSE_EXITED_MANAGER_CAP. Restated rather than imported for the same tsconfig
@@ -44,14 +42,6 @@ const SEEDED_EXITED = 12;
 // The measurement window. Long enough that a 3000ms live-tier interval would have fired ~4 times per
 // manager, short enough that the 60s exited interval fires exactly once.
 const WINDOW_MS = 12_000;
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, so an
 // unconditional write would re-pin on a reload and the leg would be measuring this helper.
@@ -113,7 +103,7 @@ function recordEventPolls(page: Page): string[] {
 }
 
 test.describe("Atlas Pulse band — exited managers (card ef86b089)", () => {
-  test("switch ON: an exited-unarchived manager's event renders in the Pulse band, with its project chip",
+  test("an exited-unarchived manager's event renders in the Pulse band, with its project chip",
     async ({ page, loomDaemon }) => {
       test.setTimeout(120_000);
       const tag = sentinel();
@@ -125,7 +115,6 @@ test.describe("Atlas Pulse band — exited managers (card ef86b089)", () => {
       // ── THE CLAIM: the event is reachable from the Atlas band. ──
       const atlas = await page.context().newPage();
       await pinProject(atlas, mgr.projectId);
-      await seedAtlasOn(atlas);
       await atlas.goto(loomDaemon.baseURL + "/home");
       const pulse = atlas.getByTestId("atlas-band-pulse");
       await expect(pulse, "the Workspace node's Pulse band is gone").toBeVisible();
@@ -148,7 +137,7 @@ test.describe("Atlas Pulse band — exited managers (card ef86b089)", () => {
       await atlas.close();
     });
 
-  test("switch ON: the exited tier is CAPPED and SLOW — measured request count stays bounded in N",
+  test("the exited tier is CAPPED and SLOW — measured request count stays bounded in N",
     async ({ page, loomDaemon }) => {
       test.setTimeout(120_000);
       // A 7-char base plus one per-manager letter == the 8 characters `EventRow` actually renders, so all
@@ -168,7 +157,6 @@ test.describe("Atlas Pulse band — exited managers (card ef86b089)", () => {
 
       const polls = recordEventPolls(page);
       await pinProject(page, first.projectId);
-      await seedAtlasOn(page);
       await page.goto(loomDaemon.baseURL + "/home");
       const pulse = page.getByTestId("atlas-band-pulse");
       await expect(pulse, "the Workspace node's Pulse band is gone").toBeVisible();

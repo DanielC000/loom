@@ -1,9 +1,9 @@
-// The cross-cutting chrome, under BOTH Atlas switch states (card a045bec3, Atlas build plan P1-5 —
+// The cross-cutting chrome (card a045bec3, Atlas build plan P1-5 —
 // docs/plans/archive/atlas-ui/03-decomposition.md row P1-5). Six elements: the Command Palette, UpdateBanner,
 // CredentialBanner, GatewayTokenBanner, ToastContainer and FirstRunWelcome.
 //
-// WHY THIS SPEC EXISTS AT ALL, and what P1-0's fingerprint could not do. atlas-switch.spec.ts compares a
-// shell skeleton against a pre-change baseline, but five of these six render NULL on a healthy throwaway
+// WHY THIS SPEC EXISTS AT ALL, and what a shell-skeleton fingerprint could not do. A fingerprint of
+// the shell skeleton against a pre-change baseline (the P1-0 spec, since removed) was blind here: five of these six render NULL on a healthy throwaway
 // daemon — no credential fault, no gateway lock, a from-source daemon reporting packaged:false, no
 // attention arrival, the welcome modal pre-dismissed by the harness — so they contribute no DOM node and
 // dropping or reordering one would not move that fingerprint. It forces `UpdateBanner` alone, which pins
@@ -11,19 +11,9 @@
 // genuinely render, then asserts it is visible AND exercises it to an observable before/after change: a
 // render-only check only proves the page drew.
 //
-// 🔴 THE CHROME IS NOT MOUNTED ONCE AT THE APP ROOT — it REMOUNTS when the switch is toggled. The P1-5
-// plan row and 02-architecture.md both used to say it "stays mounted exactly where App.tsx mounts it
-// today, at the shell root"; the P1-0 Code Review found that is not what landed. App.tsx defines each
-// element ONCE (`ShellOverlays` / `ShellBanners`) but passes them as `overlays`/`banners` PROPS into
-// whichever shell is live, and exactly one shell is ever mounted — so a toggle unmounts the whole chrome
-// subtree and mounts a fresh one. Harmless today (`useNewAttention` re-seeds its seen-set on remount
-// without replaying the backlog — lib/attention.ts's `seen.current === null` branch), but it is a real
-// property, so the last test below PROVES it rather than asserting it in prose. Both docs are corrected
-// in this card's commit; this spec is what keeps them honest.
-//
-// So what is verified here is PER-SHELL mounting, not a single root mount: each element is driven
-// independently under each switch state, and every test asserts up front that exactly ONE shell is
-// mounted, so a green can never come from the other shell's copy.
+// The chrome is passed to the shell as `overlays`/`banners` PROPS (App.tsx defines each element ONCE,
+// as `ShellOverlays` / `ShellBanners`), so each element is driven independently and every test
+// asserts up front that the Atlas shell is mounted.
 //
 // Seeding, and the no-real-claude invariant: everything is either a client-side `page.route` answer (the
 // three banners — fiction the browser alone can see) or a real seeded daemon row via the shared
@@ -33,10 +23,9 @@
 // which is per-version localStorage and touches nothing, is the exercise instead.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/loopbackCredential.ts and App.tsx own the
-// other two. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so
-// a spec cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes them too.
-const ATLAS_KEY = "loom.atlasUi";
+// App.tsx owns this key. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only
+// (tsconfig.e2e.json), so a spec cannot pull a `src/` module in — the same reason fixtures/daemon.ts
+// hardcodes it too.
 const WELCOME_DISMISSED_KEY = "loom.setupWelcomeDismissed";
 
 // The fake release the UpdateBanner is answered with. Its version is what the banner's own per-version
@@ -52,34 +41,12 @@ const UPDATE_DISMISS_KEY = `loom.updateDismissed.${FAKE_LATEST}`;
 // never notice a missing toast.
 const TOAST_STACK = '[data-testid="toast-corner"]';
 
-const rail = (page: Page) => page.locator(".loom-rail");
 const atlasShell = (page: Page) => page.getByTestId("atlas-shell");
 
-// Pre-seed the switch ON for the page's FIRST paint — the switch is read synchronously at module load, so
-// the init script has to land before that. There is deliberately no "seed OFF" counterpart: OFF is the
-// default (an untouched context has empty storage), and an init script is the wrong tool for it anyway —
-// `addInitScript` re-runs on EVERY navigation, `reload()` included, so a "seed off" script would silently
-// re-clear the key across the reloads two tests below depend on (measured on card 757c80dd, and again in
-// the other polarity on card e47df20a).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
-/**
- * Land on `path` under the requested switch state and prove EXACTLY ONE shell is mounted.
- *
- * Presence-first, deliberately: the positive half (`toBeVisible` on the shell that should be there) is
- * asserted BEFORE the negative half (`toHaveCount(0)` on the other), because a leading count-0 also
- * passes on a page that has not rendered anything yet — it would make every "the other shell is gone"
- * claim vacuous on a slow load.
- */
-async function openShell(page: Page, baseURL: string, atlas: boolean, path: string): Promise<void> {
-  if (atlas) await seedAtlasOn(page);
+/** Land on `path` and prove the Atlas shell is mounted. */
+async function openShell(page: Page, baseURL: string, path: string): Promise<void> {
   await page.goto(baseURL + path);
-  await expect(atlas ? atlasShell(page) : rail(page)).toBeVisible();
-  await expect(atlas ? rail(page) : atlasShell(page)).toHaveCount(0);
+  await expect(atlasShell(page)).toBeVisible();
 }
 
 /** Answer the UpdateBanner's own status read with a packaged install that is behind its channel. Pure
@@ -100,18 +67,14 @@ async function fakeUpdateAvailable(page: Page) {
 const updateBanner = (page: Page) =>
   page.locator('[role="status"]').filter({ hasText: "A new Loom release is available" });
 
-const SHELLS = [
-  { name: "switch ON", atlas: true },
-] as const;
-
-for (const shell of SHELLS) {
-  test.describe(`cross-cutting chrome — ${shell.name} (card a045bec3)`, () => {
+test.describe("cross-cutting chrome (card a045bec3)", () => {
+  test.describe("Atlas shell", () => {
     // ── 1. Command Palette ──────────────────────────────────────────────────────────────────────────
     // Nothing to seed: the palette is keyboard-summoned. Both accelerators are exercised because the
     // handler accepts either modifier (`e.metaKey || e.ctrlKey`, components/CommandPalette.tsx) and a
     // single-modifier test would pass with the other half broken.
     test("⌘K and Ctrl+K open the Command Palette, and running a command navigates", async ({ page, loomDaemon }) => {
-      await openShell(page, loomDaemon.baseURL, shell.atlas, "/");
+      await openShell(page, loomDaemon.baseURL, "/");
 
       // The palette's own input is the open/closed witness — it exists only while `open` is true. The
       // count-0 below is meaningful precisely because the SAME locator resolves to 1 immediately after
@@ -143,22 +106,20 @@ for (const shell of SHELLS) {
       // ...and the palette closed itself on the way (`go()` resets open + query).
       await expect(field).toHaveCount(0);
       // The navigation happened INSIDE the live shell — it did not fall out of it.
-      await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
+      await expect(atlasShell(page)).toBeVisible();
     });
 
     // ── 2. UpdateBanner ─────────────────────────────────────────────────────────────────────────────
     test("the UpdateBanner renders and its per-version dismiss sticks across a reload", async ({ page, loomDaemon }) => {
       await fakeUpdateAvailable(page);
-      await openShell(page, loomDaemon.baseURL, shell.atlas, "/");
+      await openShell(page, loomDaemon.baseURL, "/");
 
       const banner = updateBanner(page);
       await expect(banner).toBeVisible();
       await expect(banner).toContainText(`v${FAKE_LATEST}`);
-      if (shell.atlas) {
-        // The `banners` slot is really wired in this shell, not merely declared — nothing else in this
-        // spec would notice AtlasShell silently dropping the prop.
-        await expect(atlasShell(page).locator('[role="status"]').filter({ hasText: "A new Loom release is available" })).toBeVisible();
-      }
+      // The `banners` slot is really wired in this shell, not merely declared — nothing else in this
+      // spec would notice AtlasShell silently dropping the prop.
+      await expect(atlasShell(page).locator('[role="status"]').filter({ hasText: "A new Loom release is available" })).toBeVisible();
 
       // EXERCISE the dismiss ×. Deliberately not "Update & restart": that POSTs /internal/update, a real
       // daemon stop→install→start, and no interception should be the only thing standing between a test
@@ -171,7 +132,7 @@ for (const shell of SHELLS) {
       // PERSISTS: the dismissal is per-offered-version, so the same offer stays dismissed on a reload
       // (and this re-proves it through a fresh mount of the chrome, not just a React state flag).
       await page.reload();
-      await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
+      await expect(atlasShell(page)).toBeVisible();
       await expect(banner).toHaveCount(0);
     });
 
@@ -194,12 +155,10 @@ for (const shell of SHELLS) {
         });
       });
 
-      if (shell.atlas) await seedAtlasOn(page);
       // A hex candidate, distinct from the real secret this browser already holds (the fixture seeds it),
       // so the capture genuinely proceeds to the verify instead of short-circuiting on "already held".
       await page.goto(`${loomDaemon.baseURL}/?token=deadbeefcafe0123456789ab`);
-      await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
-      await expect(shell.atlas ? rail(page) : atlasShell(page)).toHaveCount(0);
+      await expect(atlasShell(page)).toBeVisible();
 
       const banner = page.getByTestId("credential-banner");
       await expect(banner).toBeVisible();
@@ -220,7 +179,7 @@ for (const shell of SHELLS) {
       // ...and Dismiss (offered because this is a link outcome, not an observed lock) clears it.
       await banner.getByTestId("loopback-link-dismiss").click();
       await expect(page.getByTestId("credential-banner")).toHaveCount(0);
-      await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
+      await expect(atlasShell(page)).toBeVisible();
     });
 
     // ── 4. GatewayTokenBanner ───────────────────────────────────────────────────────────────────────
@@ -236,7 +195,7 @@ for (const shell of SHELLS) {
       };
       await page.route((url) => url.pathname === "/api/update-status", (route) => route.fulfill(codedUnauthorized));
 
-      await openShell(page, loomDaemon.baseURL, shell.atlas, "/");
+      await openShell(page, loomDaemon.baseURL, "/");
 
       const banner = page.locator('[role="status"]').filter({ hasText: "This address needs a gateway token." });
       await expect(banner).toBeVisible();
@@ -267,7 +226,7 @@ for (const shell of SHELLS) {
       // then lives 6s, so this test needs more than the 30s file default.
       test.setTimeout(90_000);
 
-      const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: `ChromeToastMgr-${shell.atlas ? "atlas" : "classic"}` });
+      const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "ChromeToastMgr-atlas" });
       const short = mgr.sessionId.slice(0, 8);
 
       // A FIRST episode, seeded BEFORE the load. `useNewAttention` seeds its seen-set from the first
@@ -281,7 +240,7 @@ for (const shell of SHELLS) {
       });
 
       // Mission Control renders the attention queue itself, so the row witness is available here.
-      await openShell(page, loomDaemon.baseURL, shell.atlas, "/");
+      await openShell(page, loomDaemon.baseURL, "/");
       const row = page.locator('main [data-testid="attention-row"][data-kind="QUIET BOARD"]').filter({ hasText: short });
       await expect(row).toBeVisible({ timeout: 30_000 });
       await expect(row).toContainText("quiet: 0 cards");
@@ -312,7 +271,7 @@ for (const shell of SHELLS) {
       // overlay's `useNavigate` resolving against whichever shell's Router is live.
       await toast.click();
       await expect(page).toHaveURL(new RegExp(`/session/${mgr.sessionId}$`));
-      await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
+      await expect(atlasShell(page)).toBeVisible();
     });
 
     // ── 6. FirstRunWelcome ──────────────────────────────────────────────────────────────────────────
@@ -347,7 +306,7 @@ for (const shell of SHELLS) {
 
         // A fresh context starts with empty storage, so the welcome key is absent for the first paint
         // without anything having to clear it.
-        await openShell(page, loomDaemon.baseURL, shell.atlas, "/");
+        await openShell(page, loomDaemon.baseURL, "/");
         expect(await page.evaluate((k) => localStorage.getItem(k), WELCOME_DISMISSED_KEY)).toBeNull();
 
         const welcome = page.getByRole("dialog", { name: "Welcome to Loom" });
@@ -363,11 +322,11 @@ for (const shell of SHELLS) {
 
         // PERSISTS, for the app's own reason: nothing in this context writes that key but App.tsx.
         await page.reload();
-        await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
+        await expect(atlasShell(page)).toBeVisible();
         await expect(page.getByRole("dialog", { name: "Welcome to Loom" })).toHaveCount(0);
       } finally {
         await context.close();
       }
     });
   });
-}
+});

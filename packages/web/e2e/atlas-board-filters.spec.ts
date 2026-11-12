@@ -45,9 +45,8 @@
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import type { Locator } from "@playwright/test";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 // The default board layout (PLATFORM_DEFAULTS.kanbanColumns). Pinned as a constant so a change to it
@@ -74,14 +73,6 @@ const SEED = [
 
 type Slot = (typeof SEED)[number]["slot"];
 type SeededCards = Record<Slot, { id: string; title: string }>;
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, so an
 // unconditional write would re-pin on a reload and that leg would measure this helper (card e47df20a).
@@ -281,11 +272,10 @@ async function assertMultiSelectFilters(
 
 test.describe("the Board's multi-select filters on every Atlas board surface (card 5dcb5ae9)", () => {
   // ── 1. The Board node — which under Atlas IS the project node's Board tab ───────────────────────
-  test("switch ON: the Board node carries the real multi-select filters", async ({ page, loomDaemon }) => {
+  test("the Board node carries the real multi-select filters", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasfilt-boardnode"));
     const cards = await seedCards(loomDaemon, project.id);
 
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize(VIEWPORT);
     await page.goto(`${loomDaemon.baseURL}/board`);
@@ -295,7 +285,7 @@ test.describe("the Board's multi-select filters on every Atlas board surface (ca
   });
 
   // ── 2. The Platform node's own Board tab ────────────────────────────────────────────────────────
-  test("switch ON: the Platform node's Board tab carries the real multi-select filters", async ({ page, loomDaemon }) => {
+  test("the Platform node's Board tab carries the real multi-select filters", async ({ page, loomDaemon }) => {
     // The Platform node's board is the reserved home's, never the active project's (card fa3bb729) —
     // so the cards have to be seeded THERE, and removed after: that board is shared with every other
     // spec on this worker's daemon (card 1d3192dc trap 1). Being shared is also why this leg passes
@@ -311,7 +301,6 @@ test.describe("the Board's multi-select filters on every Atlas board surface (ca
     const other = await loomDaemon.createProject(uniq("atlasfilt-zulu"));
 
     try {
-      await seedAtlasOn(page);
       await pinProject(page, other.id);
       await page.setViewportSize(VIEWPORT);
       await page.goto(`${loomDaemon.baseURL}/platform?tab=board`);

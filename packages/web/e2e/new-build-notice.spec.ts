@@ -6,25 +6,18 @@
 // found", which fails identically whether the comparison is missing, present, or present and wrong.
 //
 // The fixture serves the REAL built dist, so the tab's own hash is genuine and unforgeable from here;
-// what is faked is the SERVER's answer (same `page.route` shape atlas-switch.spec.ts uses for
+// what is faked is the SERVER's answer (a `page.route` on
 // /api/update-status — it is the one side that can be moved purely client-side).
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// Owned by src/lib/atlasUi.ts and src/lib/newBuild.ts. Hardcoded rather than imported: the e2e tsconfig
+// Owned by src/lib/newBuild.ts. Hardcoded rather than imported: the e2e tsconfig
 // covers `e2e/` only (tsconfig.e2e.json), so a spec cannot pull a `src/` module in.
-const ATLAS_KEY = "loom.atlasUi";
 const dismissKeyFor = (served: string) => `loom.newBuildDismissed.${served}`;
 
 /** A bundle filename shaped exactly like vite's, but not the one this tab loaded. */
 const SERVED_ELSEWHERE = "index-NEWBUILD.js";
 
 const notice = (page: Page) => page.getByTestId("new-build-notice");
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable */ }
-  }, ATLAS_KEY);
-}
 
 /** Make the server report `served` for the bundle it is currently serving. */
 async function serveBundle(page: Page, served: string | null) {
@@ -62,8 +55,7 @@ async function assertGenuinelyStale(page: Page) {
 
 test.describe("new-build reload notice (card e98bf784)", () => {
 
-  test("switch ON (Atlas shell): the same notice renders — one mount covers both shells", async ({ page, loomDaemon }) => {
-    await seedAtlasOn(page);
+  test("the Atlas shell renders the notice", async ({ page, loomDaemon }) => {
     await serveBundle(page, SERVED_ELSEWHERE);
     await page.goto(loomDaemon.baseURL + "/");
     await expect(page.getByTestId("atlas-shell")).toBeVisible();

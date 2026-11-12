@@ -12,19 +12,10 @@
 // so each is first shown firing against a known-bad state on the same page at the same moment.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
-// cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes its own keys.
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json), so a spec cannot pull a `src/` module in — the same reason
+// fixtures/daemon.ts hardcodes its own keys.
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
@@ -346,7 +337,6 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
       // A FRESH LOAD of the old URL lands inside the Atlas frame — the classic shell is replaced,
       // not merely hidden, and the catch-all's "nothing here yet" panel is gone for these three.
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
-      await expect(page.locator(".loom-rail")).toHaveCount(0);
       await expect(page.getByTestId("atlas-empty")).toHaveCount(0);
 
       // The RIGHT node + tab: the crumbs read as the path through the tree, and the heading names
@@ -426,7 +416,6 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
 
     await serveCannedDiff(page);
     await pinProject(page, mgr.projectId);
-    await seedAtlasOn(page);
 
     // ── /review/:workerId — the Request-changes gate flips on a typed note. Read-only on purpose:
     // the two writes this panel offers (Approve & merge, Request changes) both reach the daemon.
@@ -483,7 +472,6 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     });
 
     await pinProject(page, mgr.projectId);
-    await seedAtlasOn(page);
 
     // Truncation read off the real rendered boxes, not inferred from the stylesheet: an ellipsising
     // span's scrollWidth exceeds the width it was actually given.
@@ -546,7 +534,6 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     });
 
     await pinProject(page, mgr.projectId);
-    await seedAtlasOn(page);
     // Card 41eab0eb: /inbox is the Workspace node's `inbox` TAB under Atlas, so this address
     // redirects there. The subject of the test is unchanged — the modal is mounted at App.tsx's root,
     // outside both shells, and must still open in place wherever the Inbox surface is showing.
@@ -562,6 +549,5 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
     await expect(page).toHaveURL(/\/home\?tab=inbox$/);
     // And it is the Atlas frame the dialog opened over, not a shell that silently swapped back.
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    await expect(page.locator(".loom-rail")).toHaveCount(0);
   });
 });

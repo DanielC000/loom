@@ -27,7 +27,6 @@
 //   * Every run measures the WIDEST 12h timestamp (card 6ba79d7c): the describe pins `locale` and a
 //     runtime-computed `timezoneId` (`widestTimestampTimezone`), and each row asserts the pin took.
 //     Unpinned, the chip reading tracked the wall clock — 22.11px at a one-digit hour, 14.92 at two.
-//   * SWITCH OFF renders no band at all, so none of this can have leaked into the classic Overview.
 //
 // FIXTURE IDENTITY (load-bearing): the Workspace Pulse feed is the CROSS-PROJECT god-eye stream, so a
 // sibling spec's rows interleave with this run's. Every row measurement is scoped by this run's own
@@ -37,9 +36,7 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding. Hardcoded rather than imported: the e2e
-// tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
 
 // The kind the fixture seeds, and its measured natural width at the row's 12px mono. The spec never
@@ -79,14 +76,6 @@ function widestTimestampTimezone(now = new Date()): string {
 }
 /** What `widestTimestampTimezone` must produce on screen — asserted, so a broken pin fails loudly. */
 const WIDE_TIMESTAMP = /^1[0-2]:\d\d:\d\d [AP]M$/;
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, so an
 // unconditional write would re-pin on a reload and the leg would be measuring this helper.
@@ -246,11 +235,10 @@ function assertPulseIsReadable(m: BandReading, at: string, expectChip: boolean, 
 test.describe("Atlas dashboard band track budget (card b4442d27)", () => {
   // The worst-case timestamp, not the wall clock's — see `widestTimestampTimezone`.
   test.use({ locale: "en-US", timezoneId: widestTimestampTimezone() });
-  test("switch ON: at 1280, 1440 and 1920 the Workspace Pulse band stops being what limits the event kind, keeps the project chip off its floor, and stays one band row", async ({ page, loomDaemon }) => {
+  test("at 1280, 1440 and 1920 the Workspace Pulse band stops being what limits the event kind, keeps the project chip off its floor, and stays one band row", async ({ page, loomDaemon }) => {
     // Three viewports plus a fold control, each a full navigation.
     test.setTimeout(240_000);
     const seeded = await seedPulseRows(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.projectId);
 
     const byWidth = new Map<number, BandReading>();
@@ -316,10 +304,9 @@ test.describe("Atlas dashboard band track budget (card b4442d27)", () => {
   // composition that clears that number, so the leg asserts the thing the budget was a compromise
   // FOR — every column at its natural width, no shrink anywhere — rather than re-checking a
   // compromise the node no longer makes.
-  test("switch ON: the project node's Pulse is a full-width card, so no EventRow column is short at all", async ({ page, loomDaemon }) => {
+  test("the project node's Pulse is a full-width card, so no EventRow column is short at all", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedPulseRows(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.projectId);
 
     await page.setViewportSize({ width: 1440, height: 1000 });

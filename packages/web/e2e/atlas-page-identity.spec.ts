@@ -7,35 +7,23 @@
 // duplicated chrome the gap audit measured. `useFrameOwnsNodeIdentity()` (src/lib/atlasNodeHead.ts) is
 // the one switch that drops it, and every block it drops carries `data-testid="page-identity"`.
 //
-// Three claims, each measured against the running app rather than a list typed into this file:
+// Two claims, each measured against the running app rather than a list typed into this file:
 //   1. ONE `<h1>` PER ATLAS DOCUMENT, and it is the FRAME's. The addresses are collected from the
 //      rendered tree and the two rendered node tab rows — "every mounted classic page you can reach",
 //      literally, so a page re-homed by a later card is covered without this file being edited. The
 //      count alone is not the claim: a build that suppressed the FRAME's heading instead of the page's
 //      would also read 1, so the surviving `<h1>` is required to be the node head's own.
 //   2. NOT ONE `page-identity` BLOCK SURVIVES inside the frame, at any of those addresses.
-//   3. SWITCH OFF: every one of those blocks is back, with its text verbatim. This leg is also the
-//      POSITIVE CONTROL for claim 2 — the same locator, on the same build, reading the same four
-//      blocks it must find ZERO of under Atlas. An empty or mis-typed locator returns zero exactly
-//      like a true absence does, so the absence claim means nothing without it.
 //
-// The verbatim text is read off the CLASSIC rendering at run time, never typed here: the claim worth
-// making is that Atlas drops exactly what the classic shell shows, and a literal in this file would
-// keep passing after a copy edit while the two silently disagreed.
+// The classic shell is gone, so the old third leg — the same `page-identity` locator reading the four
+// blocks back in the classic rendering, as the positive control for claim 2 — no longer exists. Claim
+// 2's zero count therefore has no in-file positive control.
 //
 // FIXTURE IDENTITY is asserted, not assumed: this daemon is shared across the specs in its worker, so
 // each leg names a project THIS spec created and checks it is the one the frame is scoped to.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
-
-/** Only ever seeded ON — off IS the default, and addInitScript re-runs on every navigation. */
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
@@ -85,7 +73,7 @@ async function headings(page: Page): Promise<{ all: string[]; inNodeHead: number
 }
 
 test.describe("Atlas drops the classic page header (card a7f23a2f)", () => {
-  test("switch ON: one <h1> per document — the frame's — and no page-identity block anywhere",
+  test("one <h1> per document — the frame's — and no page-identity block anywhere",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const project = await loomDaemon.createProject(`atlas-identity-${Date.now()}`);
@@ -103,7 +91,6 @@ test.describe("Atlas drops the classic page header (card a7f23a2f)", () => {
         body: "Seeded so the Inbox surface renders its own tab row.", options: ["Yes", "No"],
       });
       await pinProject(page, project.id);
-      await seedAtlasOn(page);
 
       const addresses = await reachableAddresses(page, loomDaemon.baseURL);
       // POSITIVE CONTROLS on the collector. A selector that quietly stopped matching would hand back a

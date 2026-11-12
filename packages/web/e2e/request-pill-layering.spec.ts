@@ -19,18 +19,16 @@
 // No real claude: the manager is a seeded `processState:"live"` row and the request a seeded DB row.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
-async function seedAtlasOn(page: Page, projectId: string) {
-  await page.addInitScript(([atlasKey, projectKey, id]) => {
+async function pinProject(page: Page, projectId: string) {
+  await page.addInitScript(([projectKey, id]) => {
     try {
-      localStorage.setItem(atlasKey, "1");
       if (localStorage.getItem(projectKey) === null) localStorage.setItem(projectKey, id);
     } catch { /* storage unavailable — assertions will say so */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+  }, [PROJECT_KEY, projectId] as const);
 }
 
 const scrollerPaddingBottom = (page: Page) =>
@@ -66,7 +64,7 @@ test.describe("request pill layering (card 3094c4aa)", () => {
       sessionId: mgr.sessionId, projectId: mgr.projectId, type: "decision",
       title: `Pill layering ${Date.now()}`, options: ["Retry first", "Fail fast"],
     });
-    await seedAtlasOn(page, mgr.projectId);
+    await pinProject(page, mgr.projectId);
 
     // ── (1) 390px: the last button on /question/:id scrolls clear of the pill.
     await page.setViewportSize({ width: 390, height: 844 });
@@ -122,7 +120,7 @@ test.describe("request pill layering (card 3094c4aa)", () => {
     for (let i = 0; i < 30; i++) {
       filler.push((await loomDaemon.createTask(wkr.projectId, { title: `fix(web): filler ${i}`, columnKey: "backlog" })).id);
     }
-    await seedAtlasOn(page, wkr.projectId);
+    await pinProject(page, wkr.projectId);
     const pill = page.getByTestId("request-count-pill");
 
     // ── Session composer at 1440: Voice, language and "Send turn" stay clickable with the pill up.

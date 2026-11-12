@@ -14,8 +14,6 @@
 //      the ▾'s "Manager" sends `role:"manager"` — pinned at the request, which no amount of
 //      watching a button go to "Spawning…" could show.
 //   4. THE NODE IS A REAL ADDRESS. It is in the tree, it navigates, and the frame names it.
-//   5. SWITCH OFF: the classic Overview's own spawn cards are untouched, and `/agents` renders
-//      nothing at all in the shell a user who never opted in is looking at.
 //
 // ⛔ NO REAL SPAWN. `loomDaemon.createProject` git-inits and binds a REAL repo, so POST
 // /api/agents/:id/sessions here would start a genuinely metered claude and trip the fixture's own
@@ -29,18 +27,9 @@
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig
+// covers `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload and that leg would be measuring this
@@ -133,10 +122,8 @@ test.describe("Atlas agents (card c6160c7d)", () => {
   // them as `AgentRosterCard` (`atlas-agent-card-*`) rather than the band's compact
   // `AgentRosterRow`. Every assertion below is the one it always made, re-pointed at that card —
   // plus a new one, at the end, that the removed panel really is gone.
-  test("switch ON: the Agents node is the derived roster, not the agent list", async ({ page, loomDaemon }) => {
-    const seeded = await seedRoster(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+  test("the Agents node is the derived roster, not the agent list", async ({ page, loomDaemon }) => {
+    const seeded = await seedRoster(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/agents");
 
     // The node's own body first, so a half-loaded page cannot satisfy the absences below. P2-1's
@@ -191,7 +178,7 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     await expect(page.getByTestId(`atlas-agent-row-${seeded.plain.id}`)).toHaveCount(0);
   });
 
-  test("switch ON: the go-live guard holds the live manager, releases it, and never touches its neighbour", async ({ page, loomDaemon }) => {
+  test("the go-live guard holds the live manager, releases it, and never touches its neighbour", async ({ page, loomDaemon }) => {
     test.setTimeout(90_000);
     const seeded = await seedRoster(loomDaemon);
     // A live session for the MANAGER agent, inserted directly — no pty, no spawn.
@@ -209,9 +196,7 @@ test.describe("Atlas agents (card c6160c7d)", () => {
         await new Promise((r) => setTimeout(r, 1500));
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true }) });
       },
-    );
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+    );    await pinProject(page, seeded.project.id);
     // The Agents node, not the Overview's band panel — card 269f46ef removed that panel (see the
     // first leg's own note). `AgentActions` is the SAME component at both mounts, so the guard this
     // leg exercises is unchanged; only which page renders it is.
@@ -250,7 +235,7 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     await expect(page.getByTestId(`atlas-agent-stop-${seeded.manager.id}`)).toHaveCount(0);
   });
 
-  test("switch ON: a spawn sends the role its control promised, and never reaches the daemon", async ({ page, loomDaemon }) => {
+  test("a spawn sends the role its control promised, and never reaches the daemon", async ({ page, loomDaemon }) => {
     const seeded = await seedRoster(loomDaemon);
     const spawns = await captureSpawns(page);
     // The global mutation handler alerts with `window.alert` unless the mutation set
@@ -258,9 +243,7 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     // instrument for it. Record any that fires and dismiss it, or an un-opted-out mutation would
     // wedge this test rather than fail it.
     const nativeDialogs: string[] = [];
-    page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+    page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });    await pinProject(page, seeded.project.id);
     // The Agents node, for the reason the first leg's own note gives (card 269f46ef).
     await page.goto(loomDaemon.baseURL + "/agents");
 
@@ -291,10 +274,8 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     expect(spawns.bodies[1], "the 'Manager' item must send role:manager").toEqual({ role: "manager" });
   });
 
-  test("switch ON: the Agents node is a real address, with the roster and the worker rigs", async ({ page, loomDaemon }) => {
-    const seeded = await seedRoster(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+  test("the Agents node is a real address, with the roster and the worker rigs", async ({ page, loomDaemon }) => {
+    const seeded = await seedRoster(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/project");
 
     // The node is reached from the project node's own TAB ROW, not from a tree row: card ec1aa18e
@@ -356,11 +337,9 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     await expect(page.getByTestId("atlas-agents-worker-note")).toContainText(/dispatch it from the manager/i);
   });
 
-  test("switch ON: the tree's quick-spawn opens the roster without navigating, and closes", async ({ page, loomDaemon }) => {
+  test("the tree's quick-spawn opens the roster without navigating, and closes", async ({ page, loomDaemon }) => {
     const seeded = await seedRoster(loomDaemon);
-    const spawns = await captureSpawns(page);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+    const spawns = await captureSpawns(page);    await pinProject(page, seeded.project.id);
     // Deliberately NOT on the Agents node: the whole claim is "spawn without first navigating".
     await page.goto(loomDaemon.baseURL + "/board");
     const startedAt = new URL(page.url()).pathname;
@@ -400,15 +379,13 @@ test.describe("Atlas agents (card c6160c7d)", () => {
     expect(new URL(page.url()).pathname, "closing the quick-spawn must not navigate either").toBe(startedAt);
   });
 
-  test("switch ON: the Workspace Operators panel reads standing operators and offers no controls", async ({ page, loomDaemon }) => {
+  test("the Workspace Operators panel reads standing operators and offers no controls", async ({ page, loomDaemon }) => {
     const seeded = await seedRoster(loomDaemon);
     // A companion is a standing operator: the workspace fleet counts deliberately exclude it, and
     // this panel is that exclusion's complement.
     const companion = await loomDaemon.seedLiveSession({
       project: seeded.project, agentName: uniq("Deja"), role: "assistant", id: `e2e-oper-${Date.now()}`,
-    });
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+    });    await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/home");
 
     const panel = page.getByTestId("atlas-band-operators");

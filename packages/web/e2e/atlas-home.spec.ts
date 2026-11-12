@@ -20,25 +20,15 @@
 //      Deck, card 4a0ad464 the Workspace node's. Each gets its own leg (same shape, different
 //      content): the Deck tab is gone, no tab-row KPI strip exists, and a legacy `?tab=deck` lands
 //      on Overview in place, with nothing dropped.
-//   5. SWITCH OFF: the classic Overview still renders, and nothing Atlas exists in the document.
 //
 // Presence-first everywhere (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, because a quiet DOM is not a ready one — so every pair asserts what must
 // BE there first, and only then what must not.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig
+// covers `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload and that leg would be measuring this
@@ -83,10 +73,8 @@ async function seedProjectWithBoard(loomDaemon: LoomDaemon) {
 const lanes = (page: Page) => page.locator(".loom-board-grid > .loom-grid");
 
 test.describe("Atlas home nodes (card fd99b2d7)", () => {
-  test("switch ON: the project node's briefing line reads the real board, and the board itself is on its own tab", async ({ page, loomDaemon }) => {
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+  test("the project node's briefing line reads the real board, and the board itself is on its own tab", async ({ page, loomDaemon }) => {
+    const seeded = await seedProjectWithBoard(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/project");
 
     // The frame landed on the node: the heading and the deepest crumb are the PROJECT's own name,
@@ -141,12 +129,10 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
   // on the Workspace node alone. The project node's own readings are a briefing line whose
   // pop-overs are opened and closed by the same before/after pairs in
   // `atlas-project-overview.spec.ts` — the claim moved with the rendering, it was not dropped.
-  test("switch ON: every KPI pop-over opens and closes on the Workspace node", async ({ page, loomDaemon }) => {
+  test("every KPI pop-over opens and closes on the Workspace node", async ({ page, loomDaemon }) => {
     // 6 tiles × (open + assert + close + assert) is past the 30s default.
     test.setTimeout(180_000);
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+    const seeded = await seedProjectWithBoard(loomDaemon);    await pinProject(page, seeded.project.id);
 
     for (const [path, keys] of [["/home", WORKSPACE_KPIS]] as const) {
       await page.goto(loomDaemon.baseURL + path);
@@ -191,10 +177,8 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
   // resolved to it rather than falling back. Deliberately NOT folded back into a loop over both
   // nodes — the shapes are the same now, but the two nodes' CONTENT is not, and a shared loop would
   // stop checking either one for what it actually is (the same reason card 44f725fe split it).
-  test("switch ON: the Workspace node has ONE home tab, and a legacy ?tab=deck lands on it", async ({ page, loomDaemon }) => {
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+  test("the Workspace node has ONE home tab, and a legacy ?tab=deck lands on it", async ({ page, loomDaemon }) => {
+    const seeded = await seedProjectWithBoard(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.setViewportSize({ width: 1440, height: 1000 });
 
     const path = "/home";
@@ -233,10 +217,8 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     await expect(page.getByTestId("atlas-fleet-controls-bar")).toBeVisible();
   });
 
-  test("switch ON: the project node has ONE home tab, and a legacy ?tab=deck lands on it", async ({ page, loomDaemon }) => {
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+  test("the project node has ONE home tab, and a legacy ?tab=deck lands on it", async ({ page, loomDaemon }) => {
+    const seeded = await seedProjectWithBoard(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/project");
     await expect(page.getByTestId("atlas-project-name")).toHaveText(seeded.project.name);
 
@@ -270,10 +252,8 @@ test.describe("Atlas home nodes (card fd99b2d7)", () => {
     await expect(lanes(page)).toHaveCount(0);
   });
 
-  test("switch ON: both home nodes are reachable from the tree, and the workspace grid names the project", async ({ page, loomDaemon }) => {
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+  test("both home nodes are reachable from the tree, and the workspace grid names the project", async ({ page, loomDaemon }) => {
+    const seeded = await seedProjectWithBoard(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.goto(loomDaemon.baseURL + "/home");
 
     const tree = page.getByTestId("atlas-tree");

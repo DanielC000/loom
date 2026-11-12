@@ -44,7 +44,6 @@
 //      docs/decisions/44f725fe-atlas-unified-project-home.md's own amendment.)
 //   6. NO HORIZONTAL PAGE SCROLL AT 820px — on the Workspace node in both fold states, and on the
 //      project node, each with a positive control that the overflow read can return a difference.
-//   7. SWITCH OFF: the disclosure exists nowhere. The classic UI is untouched.
 //
 // @decision 269f46ef — do not re-point this file's fold claims at the project node. It has no band
 // and no embedded board; the fold is the Workspace node's, and the project block below asserts the
@@ -54,9 +53,8 @@
 // merely still loading, so every pair asserts what must BE there first and only then what must not.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 const WIDE = { width: 1600, height: 1000 };
@@ -77,12 +75,6 @@ const WS_BAND_PANELS = ["needs", "operators", "gates", "plan", "pulse"];
 const WS_SUMMARY_PILLS = ["needs", "operators", "event"];
 // ...and the two the deck already carries, which must NOT be restated on the bar.
 const WS_PILLS_THE_DECK_CARRIES = ["gates", "plan"];
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload and that leg would be measuring this
@@ -167,11 +159,9 @@ test.describe("the project node has no dashboard disclosure (cards 44f725fe → 
   //
   // @decision 269f46ef — never re-add a disclosure, a band or a board embed to this tab to make an
   // old leg pass again. All three were removed on the owner's own instruction.
-  test("switch ON: the project node's Overview has no disclosure, no band and no board, and 820px has no horizontal page scroll", async ({ page, loomDaemon }) => {
+  test("the project node's Overview has no disclosure, no band and no board, and 820px has no horizontal page scroll", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+    const seeded = await seedProjectWithBoard(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");
 
@@ -245,11 +235,9 @@ test.describe("the Workspace node's dashboard disclosure (card 4a0ad464)", () =>
   // ⭐ CARD 4a0ad464's part C. RED on the pre-card build at every assertion: there was no disclosure
   // bar on `/home` at all — the band sat open and unfoldable on an Overview tab, and the board-first
   // reading lived on a separate `Deck` tab.
-  test("switch ON: folding the dashboard lifts the project grid without narrowing it, and the choice persists", async ({ page, loomDaemon }) => {
+  test("folding the dashboard lifts the project grid without narrowing it, and the choice persists", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+    const seeded = await seedProjectWithBoard(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/home");
 
@@ -345,11 +333,9 @@ test.describe("the Workspace node's dashboard disclosure (card 4a0ad464)", () =>
   // preference really is PERSISTED and really does CLEAR, which a one-way latch would also satisfy
   // on a single visit. (That the absent second consumer is genuinely absent, rather than silently
   // broken, is asserted in the project describe block above.)
-  test("switch ON: the fold is a persisted preference with a real clear path", async ({ page, loomDaemon }) => {
+  test("the fold is a persisted preference with a real clear path", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
-    const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, seeded.project.id);
+    const seeded = await seedProjectWithBoard(loomDaemon);    await pinProject(page, seeded.project.id);
     await page.setViewportSize(WIDE);
 
     await page.goto(loomDaemon.baseURL + "/home");

@@ -31,18 +31,9 @@
 // notion of liveness lets the rail and a row's own live chip disagree about the same project.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, so an
 // unconditional write would re-pin on a reload and that leg would measure this helper (card e47df20a).
@@ -70,13 +61,12 @@ async function seedOrderFixture(loomDaemon: LoomDaemon) {
 }
 
 test.describe("Atlas tree project order (card ec1aa18e)", () => {
-  test("switch ON: running projects lead, alphabetical within each group, and the order follows start/stop",
+  test("running projects lead, alphabetical within each group, and the order follows start/stop",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const { aaa, mmm, zzz } = await seedOrderFixture(loomDaemon);
       const mine = [aaa.name, mmm.name, zzz.name];
 
-      await seedAtlasOn(page);
       // AAA is the pinned/selected project throughout. It is deliberately the one whose NAME sorts
       // first: that makes step 2's reading discriminating in two ways at once — a build that floated
       // the selected branch to the top would also fail there, not just one that ignored liveness.

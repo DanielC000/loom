@@ -20,8 +20,6 @@
 //      change the row count, and one that did nothing at all would not change the box.
 //   5. The tile COUNT is unchanged by a column change — this page's renderer is the heavy one, so
 //      "mounts no more than before" is asserted on both sides rather than assumed.
-//   6. SWITCH OFF / the god-eye mount: the classic `/terminals` page has neither control. That is the
-//      `projectId`-absent contract it shares with the quick-start (card f3b18f27).
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is also satisfied by a page
 // that is merely still loading, so every pair asserts what must BE there before what must not.
@@ -37,10 +35,8 @@
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
 
-// lib/atlasUi.ts owns the switch key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), the
-// same reason fixtures/daemon.ts hardcodes its own keys.
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json), the same reason fixtures/daemon.ts hardcodes its own keys.
 const PROJECT_KEY = "loom.projectId";
 
 /** The project node's Sessions tab address — src/nav.tsx's PROJECT_NODE_TABS `sessions` row. */
@@ -51,16 +47,8 @@ const PINNED_GEOMETRY = { cols: 80, rows: 24 };
 
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
-// Writes only while the key is still absent, for the same reason as above: an unconditional write
-// would re-pin on a reload, and that leg would be measuring this helper instead of the app.
+// Writes only while the key is still absent: addInitScript re-runs on EVERY navigation, so an
+// unconditional write would re-pin on a reload, and that leg would be measuring this helper instead of the app.
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
     try { if (localStorage.getItem(key) === null) localStorage.setItem(key, id); } catch { /* storage unavailable */ }
@@ -116,7 +104,6 @@ async function seedManagerRow(loomDaemon: LoomDaemon) {
 
 /** Land on the project node's Sessions tab, switch on and project pinned. */
 async function gotoSessionsTab(page: Page, loomDaemon: LoomDaemon, projectId: string) {
-  await seedAtlasOn(page);
   await pinProject(page, projectId);
   await page.goto(loomDaemon.baseURL + SESSIONS_PATH);
   await openNodeTab(page, "sessions");

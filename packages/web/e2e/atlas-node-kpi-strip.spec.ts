@@ -8,12 +8,11 @@
 //
 // This file used to prove the strip rode EVERY tab of both home nodes. It now proves the inverse,
 // in the same shape, at the same addresses, over the same app-collected tab sets:
-//   1. SWITCH ON — NO tab of either home node carries a strip, or any pill from one. Measured over
+//   1. NO tab of either home node carries a strip, or any pill from one. Measured over
 //      the node's whole DECLARED tab set, folded tabs included, not whatever the row happens to fit.
 //   2. The node's readout is still REAL and still reachable: the home tab's full-size DECK reads the
 //      count this spec seeded into named lanes. That is the positive control the absence needs — a
 //      page that rendered no readout AT ALL would otherwise satisfy every assertion here.
-//   3. SWITCH OFF — unchanged, and still passing: the classic shell never had a strip either.
 //
 // ⛔ THE TAB SET IS COLLECTED FROM THE APP, NEVER TYPED. A hardcoded list would quietly stop covering
 // a tab the moment a later card adds one — the exact shape of the defect card 7874e8c2 existed to
@@ -27,18 +26,9 @@
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { nodeTabKeys, openNodeTab } from "./helpers/nodeTabs";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig
+// covers `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload and that leg would be measuring this
@@ -115,10 +105,9 @@ async function deckFigures(page: Page): Promise<Record<string, string>> {
 }
 
 test.describe("Atlas node tab rows carry no KPI strip (card 4a0ad464)", () => {
-  test("switch ON: NO project node tab carries a strip, and the deck still reads the seeded board", async ({ page, loomDaemon }) => {
+  test("NO project node tab carries a strip, and the deck still reads the seeded board", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/project");
@@ -167,9 +156,8 @@ test.describe("Atlas node tab rows carry no KPI strip (card 4a0ad464)", () => {
       .toEqual([]);
   });
 
-  test("switch ON: NO Workspace node tab carries a strip, and the deck still declares its six tiles", async ({ page, loomDaemon }) => {
+  test("NO Workspace node tab carries a strip, and the deck still declares its six tiles", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
-    await seedAtlasOn(page);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/home");
 
@@ -195,10 +183,9 @@ test.describe("Atlas node tab rows carry no KPI strip (card 4a0ad464)", () => {
     expect(offenders, "no workspace node tab carries a tab-row KPI readout").toEqual([]);
   });
 
-  test("switch ON: no address the project node's own tab row links to carries a strip", async ({ page, loomDaemon }) => {
+  test("no address the project node's own tab row links to carries a strip", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/project");

@@ -10,17 +10,15 @@
 import { expect, test, type Page } from "./fixtures/daemon";
 import { cssColor } from "./helpers/themeToken";
 
-// lib/atlasUi.ts and lib/activeProject.tsx own these keys; hardcoded because the e2e tsconfig covers e2e/ only.
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns this key; hardcoded because the e2e tsconfig covers e2e/ only.
 const PROJECT_KEY = "loom.projectId";
 
 async function openProjectOverview(page: Page, baseURL: string, projectId: string) {
-  await page.addInitScript(([atlasKey, projectKey, id]) => {
+  await page.addInitScript(([projectKey, id]) => {
     try {
-      localStorage.setItem(atlasKey, "1");
       if (localStorage.getItem(projectKey) === null) localStorage.setItem(projectKey, id);
     } catch { /* storage unavailable — the assertions below will say so */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+  }, [PROJECT_KEY, projectId] as const);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(baseURL + "/project");
 }

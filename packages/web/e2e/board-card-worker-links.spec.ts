@@ -12,17 +12,15 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key; lib/activeProject.tsx owns the project one (e2e tsconfig can't import src/).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key (e2e tsconfig can't import src/).
 const PROJECT_KEY = "loom.projectId";
 
-async function atlasOnProject(page: Page, projectId: string) {
-  await page.addInitScript(([atlasKey, projectKey, id]) => {
+async function pinProject(page: Page, projectId: string) {
+  await page.addInitScript(([projectKey, id]) => {
     try {
-      localStorage.setItem(atlasKey, "1");
       if (localStorage.getItem(projectKey) === null) localStorage.setItem(projectKey, id);
     } catch { /* storage unavailable — assertions will say so */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+  }, [PROJECT_KEY, projectId] as const);
 }
 
 /** A live manager, a worker with a pending merge request, and a second worker with none. */
@@ -52,7 +50,7 @@ const openCard = (page: Page, title: string) => page.locator(".loom-board-open")
 test.describe("board card links to its worker session and review (card fa4234ab)", () => {
   test("the worker pill on a card opens that worker's session", async ({ page, loomDaemon }) => {
     const s = await seed(loomDaemon);
-    await atlasOnProject(page, s.projectId);
+    await pinProject(page, s.projectId);
     await page.goto(loomDaemon.baseURL + "/board");
 
     const link = card(page, s.reviewer.taskTitle!).getByTestId("card-worker-link");
@@ -65,7 +63,7 @@ test.describe("board card links to its worker session and review (card fa4234ab)
 
   test("clicking the card's branch chip still opens the card dialog", async ({ page, loomDaemon }) => {
     const s = await seed(loomDaemon);
-    await atlasOnProject(page, s.projectId);
+    await pinProject(page, s.projectId);
     await page.goto(loomDaemon.baseURL + "/board");
 
     await expect(page.getByTestId("card-worker-row")).toHaveCount(0);
@@ -76,7 +74,7 @@ test.describe("board card links to its worker session and review (card fa4234ab)
 
   test("the dialog's Worker row: Review diff only while a merge request is pending", async ({ page, loomDaemon }) => {
     const s = await seed(loomDaemon);
-    await atlasOnProject(page, s.projectId);
+    await pinProject(page, s.projectId);
     await page.goto(loomDaemon.baseURL + "/board");
 
     // The working card: a session link, no review link.
@@ -102,7 +100,7 @@ test.describe("board card links to its worker session and review (card fa4234ab)
 
   test("with unsaved edits, Open session asks before leaving and keeps the draft on Cancel", async ({ page, loomDaemon }) => {
     const s = await seed(loomDaemon);
-    await atlasOnProject(page, s.projectId);
+    await pinProject(page, s.projectId);
     await page.goto(loomDaemon.baseURL + "/board");
 
     await openCard(page, s.worker.taskTitle!);
@@ -122,7 +120,7 @@ test.describe("board card links to its worker session and review (card fa4234ab)
 
   test("the Overview's merge-request row names the card", async ({ page, loomDaemon }) => {
     const s = await seed(loomDaemon);
-    await atlasOnProject(page, s.projectId);
+    await pinProject(page, s.projectId);
     await page.goto(loomDaemon.baseURL + "/project");
 
     const row = page.getByTestId("atlas-band-needs")

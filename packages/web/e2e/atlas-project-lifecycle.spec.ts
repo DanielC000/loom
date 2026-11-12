@@ -3,9 +3,9 @@
 //
 // Card 5afd71bd retires /projects as an Atlas destination, and Atlas card 11's investigation found that
 // five surfaces existed ONLY there. This spec is the witness that each of the five now WORKS from the
-// project node's Settings tab, and that the classic page still has them with the switch off.
+// project node's Settings tab.
 //
-// Each ON leg exercises its control and asserts an observable BEFORE/AFTER on both sides — never just
+// Each leg exercises its control and asserts an observable BEFORE/AFTER on both sides — never just
 // "the panel rendered". Where a write could plausibly land on the wrong project, a DECOY project is
 // seeded and asserted untouched: "a project was renamed" passes against a surface scoped to whatever it
 // happened to find.
@@ -26,21 +26,12 @@ import path from "node:path";
 import { expect, test, type Locator, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only, so a spec cannot pull `src/` in.
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only, so a spec cannot pull `src/` in.
 const PROJECT_KEY = "loom.projectId";
 
 /** The project tier's Settings node — the address this card's section lives at. */
 const PROJECT_NODE = "/settings";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Guarded, not unconditional: an unconditional setItem RE-PINS on every reload, which would make the
 // archive/delete legs below measure the helper rather than the app (the project they archived would
@@ -52,7 +43,7 @@ async function pinProject(page: Page, projectId: string) {
 }
 
 const section = (page: Page) => page.getByTestId("settings-section-project-lifecycle");
-/** The un-collapsed control body — the SAME component the classic page renders inside its disclosure. */
+/** The un-collapsed control body of the project lifecycle controls. */
 const fields = (page: Page) => section(page).getByTestId("project-manage-fields");
 const nameField = (page: Page) => fields(page).getByPlaceholder("name", { exact: true });
 const vaultField = (page: Page) => fields(page).getByPlaceholder(/^vault path/);
@@ -90,7 +81,6 @@ test.describe("Atlas project lifecycle on the Settings tab (card c9b78d80)", () 
     const project = await loomDaemon.createProject(`lifecycle-rename-${Date.now()}`);
     const decoy = await loomDaemon.createProject(`lifecycle-rename-decoy-${Date.now()}`);
     await pinProject(page, project.id);
-    await seedAtlasOn(page);
 
     // Reached by the TAB, so the affordance is exercised rather than the address merely rendering.
     await openSettingsTab(page, loomDaemon.baseURL);
@@ -145,7 +135,6 @@ test.describe("Atlas project lifecycle on the Settings tab (card c9b78d80)", () 
     mkdirSync(newVault, { recursive: true });
     try {
       await pinProject(page, project.id);
-      await seedAtlasOn(page);
       await page.goto(loomDaemon.baseURL + PROJECT_NODE);
       await expect(section(page)).toHaveCount(1);
 
@@ -182,7 +171,6 @@ test.describe("Atlas project lifecycle on the Settings tab (card c9b78d80)", () 
     const validPath = (await restProject(loomDaemon.baseURL, project.id))?.repoPath;
     expect(validPath, "the seeded project has no repoPath to use as a reference repo").toBeTruthy();
     await pinProject(page, project.id);
-    await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + PROJECT_NODE);
     await expect(section(page)).toHaveCount(1);
 
@@ -215,7 +203,6 @@ test.describe("Atlas project lifecycle on the Settings tab (card c9b78d80)", () 
   test("repo registry: an entry is registered and removed, both read back off the store", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`lifecycle-registry-${Date.now()}`);
     await pinProject(page, project.id);
-    await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + PROJECT_NODE);
     await expect(section(page)).toHaveCount(1);
 
@@ -259,7 +246,6 @@ test.describe("Atlas project lifecycle on the Settings tab (card c9b78d80)", () 
     // satisfy the absence below for the wrong reason.
     const keep = await loomDaemon.createProject(`lifecycle-archive-keep-${Date.now()}`);
     await pinProject(page, project.id);
-    await seedAtlasOn(page);
 
     const prompts: string[] = [];
     page.on("dialog", (d) => { prompts.push(d.message()); void d.accept(); });
@@ -294,7 +280,6 @@ test.describe("Atlas project lifecycle on the Settings tab (card c9b78d80)", () 
     const doomed = await loomDaemon.createProject(`lifecycle-doomed-${Date.now()}`);
     const keep = await loomDaemon.createProject(`lifecycle-doomed-keep-${Date.now()}`);
     await pinProject(page, doomed.id);
-    await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + PROJECT_NODE);
     await expect(section(page)).toHaveCount(1);
 
@@ -335,14 +320,13 @@ test.describe("Atlas project lifecycle on the Settings tab (card c9b78d80)", () 
 });
 
 // Card 196d951a — two defects in the SAME shared body c9b78d80 moved here, so each is one component
-// seen through two frames rather than two implementations: (1) the name and vaultPath inputs were
+// seen through one frame (the classic frame is gone): (1) the name and vaultPath inputs were
 // labelled by PLACEHOLDER ONLY, which no accessible-name computation reads; (2) Archive and the
 // permanent delete sat bare at the end of the fields column, visually inside the "Registered repos"
 // group and under its heading.
 //
-// Each frame is driven in the switch state where it is actually REACHABLE, measured not assumed: with
-// the switch ON, /projects redirects to /home (card 5afd71bd), so the classic disclosure exists only
-// with it OFF; the Atlas project node's Settings tab exists only with it ON.
+// The Atlas project node's Settings tab is the only place this body renders: /projects redirects to
+// /home (card 5afd71bd).
 test.describe("project lifecycle: labelled fields and a separated Retire group (card 196d951a)", () => {
   // getByLabel matches an accessible NAME, so a label wrapping the WRONG input satisfies it just as
   // well — each field's matched VALUE is pinned too, which is what makes this an assertion about that
@@ -378,12 +362,11 @@ test.describe("project lifecycle: labelled fields and a separated Retire group (
       "Delete permanently is still outside the retire group").toHaveCount(1);
   }
 
-  test("switch ON: the Atlas Settings tab labels both fields and separates the retire actions", async ({ page, loomDaemon }) => {
+  test("the Atlas Settings tab labels both fields and separates the retire actions", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`lifecycle-a11y-on-${Date.now()}`);
     const seeded = await restProject(loomDaemon.baseURL, project.id);
     expect(seeded?.vaultPath, "the seeded project has no vaultPath to assert against").toBeTruthy();
     await pinProject(page, project.id);
-    await seedAtlasOn(page);
 
     await openSettingsTab(page, loomDaemon.baseURL);
     // Identity: this is the pinned project's own panel, not whichever project the surface found first.

@@ -7,23 +7,13 @@
 // only moved visually would fail it. The ranking itself is unit-tested in test/palette-commands.mjs.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
-
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable: assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
 const field = (page: Page) => page.getByRole("combobox", { name: /Jump to/ });
 const options = (page: Page) => page.getByRole("option");
 
 test.describe("Command palette jumps (card bafbca40)", () => {
   test("typing a project's name ranks the PROJECT first, and Enter opens its node", async ({ page, loomDaemon }) => {
     const tag = Math.random().toString(36).slice(2, 7);
-    const seeded = await loomDaemon.seedLiveSession({ role: "manager", agentName: `Pal-${tag}` });
-    await seedAtlasOn(page);
-    await page.goto(loomDaemon.baseURL + "/home");
+    const seeded = await loomDaemon.seedLiveSession({ role: "manager", agentName: `Pal-${tag}` });    await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
     await page.keyboard.press("Control+k");
@@ -47,9 +37,7 @@ test.describe("Command palette jumps (card bafbca40)", () => {
 
   test("↑/↓ move the active option, and Enter runs the active one, not row 1", async ({ page, loomDaemon }) => {
     const tag = Math.random().toString(36).slice(2, 7);
-    const seeded = await loomDaemon.seedLiveSession({ role: "manager", agentName: `Arrow-${tag}` });
-    await seedAtlasOn(page);
-    await page.goto(loomDaemon.baseURL + "/home");
+    const seeded = await loomDaemon.seedLiveSession({ role: "manager", agentName: `Arrow-${tag}` });    await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
     await page.keyboard.press("Control+k");
@@ -88,9 +76,7 @@ test.describe("Command palette jumps (card bafbca40)", () => {
 
   test("the agent row opens that agent's editor on the Agents node", async ({ page, loomDaemon }) => {
     const tag = Math.random().toString(36).slice(2, 7);
-    const seeded = await loomDaemon.seedLiveSession({ role: "manager", agentName: `Ed-${tag}` });
-    await seedAtlasOn(page);
-    await page.goto(loomDaemon.baseURL + "/home");
+    const seeded = await loomDaemon.seedLiveSession({ role: "manager", agentName: `Ed-${tag}` });    await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
     await page.keyboard.press("Control+k");
@@ -103,9 +89,7 @@ test.describe("Command palette jumps (card bafbca40)", () => {
   });
 
   test("rows that share a label are told apart by their context, and Home is offered", async ({ page, loomDaemon }) => {
-    await loomDaemon.createProject();
-    await seedAtlasOn(page);
-    await page.goto(loomDaemon.baseURL + "/home");
+    await loomDaemon.createProject();    await page.goto(loomDaemon.baseURL + "/home");
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
     await page.keyboard.press("Control+k");
@@ -123,9 +107,7 @@ test.describe("Command palette jumps (card bafbca40)", () => {
     expect(pages.some((p) => p.startsWith("Skills|"))).toBe(true);
   });
 
-  test("the crumb bar's ⌘K button opens the palette, and Esc returns focus to it", async ({ page, loomDaemon }) => {
-    await seedAtlasOn(page);
-    await page.goto(loomDaemon.baseURL + "/home");
+  test("the crumb bar's ⌘K button opens the palette, and Esc returns focus to it", async ({ page, loomDaemon }) => {    await page.goto(loomDaemon.baseURL + "/home");
     const door = page.getByTestId("atlas-jump");
     await expect(door).toBeVisible();
     await expect(field(page)).toHaveCount(0);

@@ -2,7 +2,7 @@
 // parity gap §J.9). Decisions + the full section → write-call → read-call table:
 // docs/decisions/595e2a47-atlas-settings-scope-split.md.
 //
-// The card's claim has three halves, and each is asserted against the live app rather than a list
+// The card's claim has two halves, and each is asserted against the live app rather than a list
 // typed into this file:
 //   1. PLACEMENT, swept. The section list is parsed out of the real `SETTINGS_SECTIONS` declaration
 //      in src/pages/Settings.tsx, and EVERY row is required to render on its own Atlas node and on
@@ -10,11 +10,6 @@
 //   2. SCOPE, exercised. A project row's Save writes the ACTIVE project's config and not a decoy
 //      project's; a workspace row's Save writes the one platform override. "It rendered in the right
 //      column" is a weaker claim than "it edits the right store", so both are made.
-//   3. SWITCH OFF is untouched. The classic page still renders every row it declares in one column,
-//      and the Atlas-only /workspace-settings address renders nothing there. Card c9b78d80 added the
-//      one exception the array can now declare — an `atlasOnly` row, which the classic page must NOT
-//      render because those controls already live on its own /projects page; it is parsed off the
-//      declaration like everything else, and its absence from classic is asserted, not skipped.
 //
 // ⚠️ Locator discipline (see the project-memory note `atlas-nav-labels-collide-with-exact-text-locators`):
 // "Settings" is now TWO tree labels and "Memory" is a tree label too, so a page-wide exact-text
@@ -26,9 +21,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only, so a spec cannot pull `src/` in.
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -54,19 +48,11 @@ function parseSettingsSections(): { rows: ParsedSection[]; rawMarkers: number; b
   const rawMarkers = (block.match(/\bkey:\s*"/g) ?? []).length;
   // `atlasOnly` (card c9b78d80) is OPTIONAL and must sit immediately after `scope` in the declaration
   // for this to see it — a row that grows the flag somewhere else parses as `false` and would then be
-  // demanded on the classic page by the switch-OFF test below, which is the loud failure, not a silent
-  // pass. Captured rather than ignored because that flag is exactly what the OFF contract turns on.
+  // demanded on the Atlas node it is not scoped to, which is the loud failure, not a silent pass.
+  // Captured rather than ignored because that flag is part of the declaration's placement contract.
   const rows = [...block.matchAll(/\bkey:\s*"([^"]+)",\s*label:\s*"([^"]+)",\s*scope:\s*"([^"]+)"(?:,\s*atlasOnly:\s*(true|false))?/g)]
     .map((m) => ({ key: m[1] ?? "", label: m[2] ?? "", scope: m[3] ?? "", atlasOnly: m[4] === "true" }));
   return { rows, rawMarkers, block };
-}
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
 }
 
 // Guarded, not unconditional: an unconditional setItem RE-PINS on every reload, which would make a
@@ -111,7 +97,6 @@ test.describe("Atlas Settings scope split (card 595e2a47)", () => {
     expect(workspace.length, "no section is declared workspace-scoped, so the split is vacuous").toBeGreaterThan(0);
 
     await pinProject(page, (await loomDaemon.createProject(`atlas-settings-sweep-${Date.now()}`)).id);
-    await seedAtlasOn(page);
 
     for (const node of [PROJECT_NODE, WORKSPACE_NODE] as const) {
       await page.goto(loomDaemon.baseURL + node);
@@ -185,7 +170,6 @@ test.describe("Atlas Settings scope split (card 595e2a47)", () => {
     const active = await loomDaemon.createProject(`atlas-settings-active-${Date.now()}`);
     const decoy = await loomDaemon.createProject(`atlas-settings-decoy-${Date.now()}`);
     await pinProject(page, active.id);
-    await seedAtlasOn(page);
 
     await page.goto(loomDaemon.baseURL + PROJECT_NODE);
     // The node is the project's — its crumb names the pinned project, so a write below cannot be
@@ -219,7 +203,6 @@ test.describe("Atlas Settings scope split (card 595e2a47)", () => {
 
   test("a daemon-global section is only on the Workspace node, and writes the platform override", async ({ page, loomDaemon }) => {
     await pinProject(page, (await loomDaemon.createProject(`atlas-settings-global-${Date.now()}`)).id);
-    await seedAtlasOn(page);
 
     // Rate Limits is the plan's own named daemon-global example (§J.9). It is NOT on the project node.
     await page.goto(loomDaemon.baseURL + PROJECT_NODE);
@@ -256,7 +239,6 @@ test.describe("Atlas Settings scope split (card 595e2a47)", () => {
     // the default harness): the split must MOVE them, never relax them. Each is asserted where it now
     // lives, in the shape it had before.
     await pinProject(page, (await loomDaemon.createProject(`atlas-settings-human-${Date.now()}`)).id);
-    await seedAtlasOn(page);
 
     await page.goto(loomDaemon.baseURL + WORKSPACE_NODE);
     // maxConcurrentGates — still its own control with its own inherit placeholder.

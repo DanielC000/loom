@@ -22,7 +22,6 @@
 //      which is the page's own stated claim, not a restatement of the seed.
 //   5. THE DISCLOSURE SAYS THE FOUR HONEST THINGS, and the window control is wired — EXERCISED, with
 //      the rows present at one window and the empty state at another.
-//   6. SWITCH OFF: the tab exists only under Atlas — no project-usage surface in the classic shell.
 //
 // 🔴 EVERY SAMPLE IS BACK-DATED BY `SAMPLE_AGE_DAYS`, and the tab is driven to "All time" to see them.
 // That is isolation, not scenery: the `loomDaemon` fixture is WORKER-SCOPED and shared across every
@@ -37,10 +36,9 @@ import { fileURLToPath } from "node:url";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { nodeTabKeys, openNodeTab } from "./helpers/nodeTabs";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
 // cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes its own keys.
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -72,14 +70,6 @@ async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, { ...init, headers: { "content-type": "application/json", ...(init?.headers ?? {}) } });
   if (!res.ok) throw new Error(`${init?.method ?? "GET"} ${url} -> ${res.status}: ${await res.text()}`);
   return (await res.json()) as T;
-}
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
 }
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, reload
@@ -190,7 +180,7 @@ async function seedUsageProject(loomDaemon: LoomDaemon) {
 }
 
 test.describe("project node Usage tab (card 30266229)", () => {
-  test("switch ON: the tab is a real address, and its per-task rows roll children up exactly once",
+  test("the tab is a real address, and its per-task rows roll children up exactly once",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
 
@@ -204,7 +194,6 @@ test.describe("project node Usage tab (card 30266229)", () => {
         .toContainEqual({ key: "usage", label: "Usage", to: "/project?tab=usage" });
 
       const seeded = await seedUsageProject(loomDaemon);
-      await seedAtlasOn(page);
       await pinProject(page, seeded.project.id);
       await page.setViewportSize(VIEWPORT);
       await page.goto(loomDaemon.baseURL + "/project");

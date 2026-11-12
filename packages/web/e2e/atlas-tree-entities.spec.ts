@@ -29,18 +29,9 @@
 // board on screen is showing its own sentinel card.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, so an
 // unconditional write would re-pin on a reload and that leg would measure this helper (card e47df20a).
@@ -105,7 +96,7 @@ async function seedEntities(loomDaemon: LoomDaemon) {
 }
 
 test.describe("Atlas tree entity tier (card 3b563642)", () => {
-  test("switch ON: workers nest under their manager, and a session row is that session's node",
+  test("workers nest under their manager, and a session row is that session's node",
     async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       const { alpha, bravo, mgr, worker, loose, sentinel, bravoMgr, idle } = await seedEntities(loomDaemon);
@@ -119,7 +110,6 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
         if (/^\/api\/projects\/[^/]+\/board$/.test(pathname)) boardReads.push(pathname);
       });
 
-      await seedAtlasOn(page);
       await pinProject(page, alpha.id);
       // Landing on /board, the project node's Board TAB: it gives the fixture-identity read below
       // something project-specific to be measured against, and it is the address whose own tree row
@@ -292,9 +282,9 @@ test.describe("Atlas tree entity tier (card 3b563642)", () => {
       expect(boardReads.filter((p) => p.includes(bravo.id)),
         "expanding another project's branch issued a board read for it").toEqual([]);
 
-      // The entity collector itself, non-empty — the positive control the switch-OFF test's own
-      // zero needs, recorded here on a build where it is known to fire.
+      // The entity collector itself, non-empty — the positive control for every absence claim above,
+      // recorded here on a build where it is known to fire.
       expect(await page.locator("[data-atlas-entity]").count(),
-        "the entity-row collector found nothing with the switch ON").toBeGreaterThan(0);
+        "the entity-row collector found nothing").toBeGreaterThan(0);
     });
 });

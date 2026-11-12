@@ -1,4 +1,4 @@
-// Keyboard shortcuts under BOTH Atlas switch states (card a1c6e339, Atlas build plan P2-8 —
+// Keyboard shortcuts in the Atlas shell (card a1c6e339, Atlas build plan P2-8 —
 // docs/plans/archive/atlas-ui/03-decomposition.md row P2-8). Closes parity gaps §J.3 and §J.10 of
 // docs/plans/archive/atlas-ui/01-parity-checklist.md.
 //
@@ -36,10 +36,8 @@
 // moves only when P2-7 lands). That is why the weight of this spec sits on /platform: it is the one
 // frame where a rebuild could have dropped a handler.
 //
-// WHY EVERY TEST RUNS TWICE. The Atlas rule for this epic is two assertions per behaviour — it works
-// with the switch ON, and the classic shell is untouched with it OFF — so each test below is generated
-// for both states by the SHELLS loop, and `openShell` proves exactly one shell is mounted before
-// anything else is asserted.
+// The classic shell and the Atlas switch are gone, so each test below runs once, against the Atlas
+// frame; `openShell` proves that frame is mounted before anything else is asserted.
 //
 // NO RENDER-ONLY CHECKS. Every leg presses the real key and asserts an observable before/after state
 // change (a cleared composer, a persisted prompt read back over REST, a new preset row, a rewritten
@@ -57,13 +55,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
-// cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes its own keys.
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json), so a spec cannot pull a `src/` module in — the same reason
+// fixtures/daemon.ts hardcodes its own keys.
 const PROJECT_KEY = "loom.projectId";
 
-const rail = (page: Page) => page.locator(".loom-rail");
 const atlasShell = (page: Page) => page.getByTestId("atlas-shell");
 
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
@@ -77,15 +73,6 @@ test.afterAll(() => {
   }
 });
 
-// Only ever seeded ON. OFF is the default (an untouched context has an empty key), and `addInitScript`
-// re-runs on EVERY navigation including reload() — so a "seed off" script would silently re-clear the
-// key mid-test (measured on card 757c80dd, and again in the other polarity on card e47df20a).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
 // Pins the active project, but only while the key is still absent: addInitScript re-runs on every
 // navigation, so an unconditional write would re-pin on a later leg and measure the helper, not the app.
 async function pinProject(page: Page, projectId: string) {
@@ -94,19 +81,10 @@ async function pinProject(page: Page, projectId: string) {
   }, [PROJECT_KEY, projectId] as const);
 }
 
-/**
- * Land on `path` under the requested switch state and prove EXACTLY ONE shell is mounted.
- *
- * Presence-first: the positive half is asserted BEFORE the negative half, because a leading count-0 also
- * passes on a page that has not rendered anything yet — which would make every "the other shell is gone"
- * claim vacuous on a slow load. (Same helper shape as atlas-shell-chrome.spec.ts; copied rather than
- * shared because each Atlas spec owns its own, and a shared one would couple their load contracts.)
- */
-async function openShell(page: Page, baseURL: string, atlas: boolean, path: string): Promise<void> {
-  if (atlas) await seedAtlasOn(page);
+/** Land on `path` and prove the Atlas shell is mounted before anything else is asserted. */
+async function openShell(page: Page, baseURL: string, path: string): Promise<void> {
   await page.goto(baseURL + path);
-  await expect(atlas ? atlasShell(page) : rail(page)).toBeVisible();
-  await expect(atlas ? rail(page) : atlasShell(page)).toHaveCount(0);
+  await expect(atlasShell(page)).toBeVisible();
 }
 
 // ── Shared seeding: the reserved Platform home's operator agent + a canned-pty session on it ─────────
@@ -148,8 +126,8 @@ async function seedOperatorTerminal(loomDaemon: LoomDaemon, bytes: string) {
 }
 
 /** Land on the Platform node/page with this spec's seeded tile rendered and the font scale settled. */
-async function openPlatformWithTile(page: Page, baseURL: string, atlas: boolean): Promise<void> {
-  await openShell(page, baseURL, atlas, "/platform");
+async function openPlatformWithTile(page: Page, baseURL: string): Promise<void> {
+  await openShell(page, baseURL, "/platform");
   // Identity first: this is THIS spec's seeded session, not a leftover or a sibling worker's.
   await expect(page.getByText(new RegExp(SHORT_ID)).first()).toBeVisible();
   await expect(page.locator(".xterm-screen")).toHaveCount(1);
@@ -161,12 +139,7 @@ async function openPlatformWithTile(page: Page, baseURL: string, atlas: boolean)
 const composerBox = (page: Page) => page.getByPlaceholder("Send a turn to this session", { exact: false });
 const sendTurn = (page: Page) => page.getByRole("button", { name: "Send turn" });
 
-const SHELLS = [
-  { name: "switch ON (Atlas)", atlas: true },
-] as const;
-
-for (const shell of SHELLS) {
-  test.describe(`keyboard shortcuts — ${shell.name} (card a1c6e339)`, () => {
+test.describe("keyboard shortcuts — Atlas shell (card a1c6e339)", () => {
     // ── 1. ⌘/Ctrl+Enter in the session COMPOSER ────────────────────────────────────────────────────
     // BOTH modifiers, because the handler is `e.metaKey || e.ctrlKey` and a single-modifier test passes
     // with the other half broken (the same reasoning atlas-shell-chrome.spec.ts gives for ⌘K/Ctrl+K).
@@ -175,7 +148,7 @@ for (const shell of SHELLS) {
     // send — fails here rather than passing the two modifier legs for the wrong reason.
     test("the composer sends on ⌘/Ctrl+Enter, and not on a bare Enter", async ({ page, loomDaemon }) => {
       await seedOperatorTerminal(loomDaemon, "LOOM-KBD-COMPOSER\r\ncmd+enter sends this turn\r\n");
-      await openPlatformWithTile(page, loomDaemon.baseURL, shell.atlas);
+      await openPlatformWithTile(page, loomDaemon.baseURL);
 
       const box = composerBox(page);
       await expect(box).toBeVisible();
@@ -212,7 +185,7 @@ for (const shell of SHELLS) {
     // reachable through a mounted Composer — which is why it shares this host.
     test("the preset editor saves on ⌘/Ctrl+Enter, and not on a bare Enter", async ({ page, loomDaemon }) => {
       await seedOperatorTerminal(loomDaemon, "LOOM-KBD-PRESET\r\ncmd+enter saves the preset\r\n");
-      await openPlatformWithTile(page, loomDaemon.baseURL, shell.atlas);
+      await openPlatformWithTile(page, loomDaemon.baseURL);
 
       const LABEL = uniq("KBD preset");
       const PROMPT = uniq("KBD-PRESET-BODY: saved from the keyboard");
@@ -282,7 +255,7 @@ for (const shell of SHELLS) {
       expect((await send("first turn — delivers and arms busy")).delivered).toBe(true);
       expect((await send(ORIGINAL)).delivered).toBe(false); // held in the FIFO
 
-      await openPlatformWithTile(page, loomDaemon.baseURL, shell.atlas);
+      await openPlatformWithTile(page, loomDaemon.baseURL);
 
       // The ledger bar appears on SessionQueue's own 3s poll.
       await expect(page.getByText(/Queued \(1\)/)).toBeVisible({ timeout: 10_000 });
@@ -344,7 +317,7 @@ for (const shell of SHELLS) {
         });
 
       try {
-        await openShell(page, loomDaemon.baseURL, shell.atlas, "/platform");
+        await openShell(page, loomDaemon.baseURL, "/platform");
 
         // IDENTITY, not position. platform.spec.ts addresses this disclosure as `.first()` and calls it
         // "the operator's"; that is a DOM-order guess. Expanding it and matching the textarea against
@@ -397,7 +370,7 @@ for (const shell of SHELLS) {
         "Find-Me.md": `# Keyboard find fixture\n\nThe scoped finder should land on ${NEEDLE} exactly once.\n`,
       });
       await pinProject(page, id);
-      await openShell(page, loomDaemon.baseURL, shell.atlas, "/repository");
+      await openShell(page, loomDaemon.baseURL, "/repository");
 
       const noteRow = page.locator("button.loom-tree-row").filter({ hasText: "Find-Me.md" });
       await expect(noteRow).toBeVisible();
@@ -448,7 +421,7 @@ for (const shell of SHELLS) {
       await recordStdinFrames(page);
       await recordClipboardWrites(page);
       await seedOperatorTerminal(loomDaemon, "LOOM-KBD-CLIPBOARD selectable words here\r\n");
-      await openPlatformWithTile(page, loomDaemon.baseURL, shell.atlas);
+      await openPlatformWithTile(page, loomDaemon.baseURL);
 
       expect(await page.evaluate(() => !!navigator.clipboard),
         "this origin must expose navigator.clipboard, or the copy assertion below is vacuous").toBe(true);
@@ -529,8 +502,7 @@ for (const shell of SHELLS) {
       expect((await clipboardWrites(page)).length,
         "with the selection cleared, a second copy must not fire").toBe(clipsBeforeSecond);
     });
-  });
-}
+});
 
 // ── Witnesses ───────────────────────────────────────────────────────────────────────────────────────
 

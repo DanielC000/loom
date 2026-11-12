@@ -16,18 +16,16 @@ import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { openNodeTab } from "./helpers/nodeTabs";
 
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
-async function seedAtlas(page: Page, projectId: string) {
-  await page.addInitScript(([atlasKey, projectKey, id]) => {
+async function pinProject(page: Page, projectId: string) {
+  await page.addInitScript(([projectKey, id]) => {
     try {
-      localStorage.setItem(atlasKey, "1");
       if (localStorage.getItem(projectKey) === null) localStorage.setItem(projectKey, id);
     } catch { /* storage unavailable — the assertions will say so */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+  }, [PROJECT_KEY, projectId] as const);
 }
 
 /** A manager and its workers in ONE project, every pane pinned at `cols`. */
@@ -57,7 +55,7 @@ test.describe("Atlas — tree rows that tell sessions apart, tiles that stay rea
       { agentName: "QA Tester", task: "test(web): cover the wizard" },
     ]);
     const [devA, devB, qa] = f.kids;
-    await seedAtlas(page, f.project.id);
+    await pinProject(page, f.project.id);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${loomDaemon.baseURL}/session/${devA!.sessionId}`);
 
@@ -85,7 +83,7 @@ test.describe("Atlas — tree rows that tell sessions apart, tiles that stay rea
       new Set([...grid.children].map((t) => Math.round(t.getBoundingClientRect().top))).size);
 
     // The 120-column project's own Sessions tab.
-    await seedAtlas(page, wide.project.id);
+    await pinProject(page, wide.project.id);
     await page.goto(`${loomDaemon.baseURL}/terminals`);
     await openNodeTab(page, "sessions");
     const panel = page.getByTestId("atlas-tabpanel-sessions");
@@ -114,7 +112,7 @@ test.describe("Atlas — tree rows that tell sessions apart, tiles that stay rea
   // that shell by card acbb6df6.)
   test("at 390px no Auto tile, and nothing else, overflows sideways", async ({ page, loomDaemon }) => {
     const f = await seedRow(loomDaemon, "ovf41-atlas-a-long-customer-onboarding-and-billing-reconciliation-project", 80, [{ agentName: "Phone Dev" }]);
-    await seedAtlas(page, f.project.id);
+    await pinProject(page, f.project.id);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`${loomDaemon.baseURL}/workspace-terminals`);
 

@@ -3,14 +3,12 @@
 // docs/decisions/49e883a9-atlas-tree-drawer-at-narrow-widths.md.
 //
 // What the card claims, and how each half is measured rather than asserted by shape:
-//   1. SWITCH ON at 420px — the tree is OUT of flow (an overlay, not a stacked block), so the node
+//   1. At 420px — the tree is OUT of flow (an overlay, not a stacked block), so the node
 //      head starts directly under the crumb row instead of ~290px down the page; the drawer opens and
 //      closes via the toggle, Escape and the scrim, each with a before/after visibility diff; the
 //      deepest crumb is not truncated; a tree row navigates AND closes; and a typed draft in the page
 //      underneath survives an open/close cycle.
-//   2. SWITCH ON at 1440px — the tree is still a persistent rail: in flow, visible, no toggle.
-//   3. SWITCH OFF at 420px — the classic Instrument Rail's own narrow behaviour is untouched, and no
-//      part of this card's machinery exists anywhere in that shell.
+//   2. At 1440px — the tree is still a persistent rail: in flow, visible, no toggle.
 //
 // ⛔ VISIBILITY IS THE MEASUREMENT, NOT PRESENCE. The drawer OVERLAYS — it never unmounts the tree,
 // the content column or the page panels (the owner's standing rule: no path discards unfinished
@@ -20,9 +18,8 @@
 // overlay claim behaviourally rather than by reading the CSS back.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 const NARROW = { width: 420, height: 900 };
@@ -35,14 +32,6 @@ const WIDE = { width: 1440, height: 1000 };
 // card c315f579 shortened it to "search tasks…" below 820px.
 const BOARD_SEARCH = "Search tasks by id, title, or description";
 const DRAFT = "drawer-must-not-eat-this";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload and that leg would be measuring this
@@ -81,10 +70,9 @@ async function seedNarrowProject(loomDaemon: { createProject: (n?: string) => Pr
 }
 
 test.describe("Atlas tree drawer at narrow widths", () => {
-  test("switch ON at 420px: the tree is an overlay, so the node head is in the first viewport", async ({ page, loomDaemon }) => {
+  test("at 420px: the tree is an overlay, so the node head is in the first viewport", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const project = await seedNarrowProject(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize(NARROW);
     await page.goto(loomDaemon.baseURL + "/project");
@@ -120,10 +108,9 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     expect(overflow, "a closed off-canvas drawer adds no horizontal document scroll").toBeLessThanOrEqual(0);
   });
 
-  test("switch ON at 420px: the toggle, Escape and the scrim each open and close the drawer", async ({ page, loomDaemon }) => {
+  test("at 420px: the toggle, Escape and the scrim each open and close the drawer", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const project = await seedNarrowProject(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize(NARROW);
     await page.goto(loomDaemon.baseURL + "/project");
@@ -187,10 +174,9 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     await expectClosedAndRefocused("the scrim");
   });
 
-  test("switch ON at 420px: the deepest crumb is not truncated", async ({ page, loomDaemon }) => {
+  test("at 420px: the deepest crumb is not truncated", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const project = await seedNarrowProject(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize(NARROW);
     await page.goto(loomDaemon.baseURL + "/project");
@@ -236,10 +222,9 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     // was deleted with the classic shell by card acbb6df6, so the row's only other occupant is the toggle.)
   });
 
-  test("switch ON at 420px: a tree row navigates and closes the drawer, and a typed draft survives", async ({ page, loomDaemon }) => {
+  test("at 420px: a tree row navigates and closes the drawer, and a typed draft survives", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const project = await seedNarrowProject(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize(NARROW);
     await page.goto(loomDaemon.baseURL + "/board");
@@ -296,11 +281,10 @@ test.describe("Atlas tree drawer at narrow widths", () => {
   //    `atlas-narrow`, so the current project is the row a capped strip would have scrolled off — the
   //    "it is in view after opening" leg is measured against the case that used to fail.
   for (const width of [768, 820]) {
-    test(`switch ON at ${width}px: the tree is a drawer, and opening it shows the current project`, async ({ page, loomDaemon }) => {
+    test(`at ${width}px: the tree is a drawer, and opening it shows the current project`, async ({ page, loomDaemon }) => {
       test.setTimeout(180_000);
       for (let i = 1; i <= 6; i++) await loomDaemon.createProject(`aaa-filler-${i}`);
       const project = await seedNarrowProject(loomDaemon);
-      await seedAtlasOn(page);
       await pinProject(page, project.id);
       await page.setViewportSize({ width, height: 1024 });
       await page.goto(loomDaemon.baseURL + "/project");
@@ -333,10 +317,9 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     });
   }
 
-  test("switch ON at 821px: the first width above the line is the persistent rail", async ({ page, loomDaemon }) => {
+  test("at 821px: the first width above the line is the persistent rail", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const project = await seedNarrowProject(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize({ width: 821, height: 1024 });
     await page.goto(loomDaemon.baseURL + "/project");
@@ -353,10 +336,9 @@ test.describe("Atlas tree drawer at narrow widths", () => {
   // a 32px square without changing what is drawn. A hit test, not a CSS read: elementFromPoint 15px out
   // from each glyph's centre must still land on that button. Vertically only to the row's own pitch
   // (28px rows; the next row's target wins its 2px overlap), which is why the downward probe is 11px.
-  test("switch ON at 768px: the drawer's twist and ＋ have a 32px pointer target and an unchanged glyph", async ({ page, loomDaemon }) => {
+  test("at 768px: the drawer's twist and ＋ have a 32px pointer target and an unchanged glyph", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const project = await seedNarrowProject(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize({ width: 768, height: 1024 });
     await page.goto(loomDaemon.baseURL + "/project");
@@ -386,10 +368,9 @@ test.describe("Atlas tree drawer at narrow widths", () => {
     }
   });
 
-  test("switch ON at 1440px: the tree is still a persistent rail and the drawer never appears", async ({ page, loomDaemon }) => {
+  test("at 1440px: the tree is still a persistent rail and the drawer never appears", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const project = await seedNarrowProject(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize(WIDE);
     await page.goto(loomDaemon.baseURL + "/project");

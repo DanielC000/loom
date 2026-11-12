@@ -70,20 +70,11 @@ import { expect, gotoActorsReady, test, type LoomDaemon, type Page } from "./fix
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const NAV_SOURCE = path.resolve(__dirname, "..", "src", "nav.tsx");
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
 const VIEWPORT = { width: 1400, height: 1000 };
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, so an
 // unconditional write would re-pin on a later goto and that leg would measure this helper (card e47df20a).
@@ -136,19 +127,15 @@ async function assertDialogIsCard(page: Page, target: SeededCard, decoy: SeededC
 
 test.describe("Atlas deep links (card 3ed3dc31)", () => {
   // ── 1. The Board node ───────────────────────────────────────────────────────────────────────────
-  test("switch ON: ?task= on the Board node opens that card's dialog and clears only the task param", async ({ page, loomDaemon }) => {
+  test("?task= on the Board node opens that card's dialog and clears only the task param", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasdeep-board"));
     const { decoy, target } = await seedDecoyAndTarget(loomDaemon, project.id);
-
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize(VIEWPORT);
     await page.goto(`${loomDaemon.baseURL}/board?task=${encodeURIComponent(target.id)}`);
 
-    // PRESENCE first: the ATLAS frame is really what mounted, so this leg cannot be measuring the
-    // classic shell with the switch quietly off.
+    // PRESENCE first: the Atlas frame is really what mounted.
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
-    await expect(page.locator(".loom-rail")).toHaveCount(0);
 
     await assertDialogIsCard(page, target, decoy);
 
@@ -165,11 +152,9 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
   });
 
   // ── 2 + 3. The project node, and the tab/task coexistence case ──────────────────────────────────
-  test("switch ON: ?task= on the project node opens that card's dialog, and a legacy ?tab=deck survives it", async ({ page, loomDaemon }) => {
+  test("?task= on the project node opens that card's dialog, and a legacy ?tab=deck survives it", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasdeep-project"));
     const { decoy, target } = await seedDecoyAndTarget(loomDaemon, project.id);
-
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
     await page.setViewportSize(VIEWPORT);
 
@@ -223,7 +208,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
   });
 
   // ── 4. The Platform node — the other `?tab=` owner, and the always-mounted one ───────────────────
-  test("switch ON: ?task= on the Platform node's Board tab opens that card's dialog", async ({ page, loomDaemon }) => {
+  test("?task= on the Platform node's Board tab opens that card's dialog", async ({ page, loomDaemon }) => {
     // The Platform node's board is the RESERVED home's, never the active project's (card fa3bb729),
     // so both cards have to be seeded THERE — and removed after: that board is shared with every other
     // spec on this worker's daemon (card 1d3192dc trap 1).
@@ -237,9 +222,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     // the active project's board having been rendered here instead.
     const other = await loomDaemon.createProject(uniq("atlasdeep-zulu"));
 
-    try {
-      await seedAtlasOn(page);
-      await pinProject(page, other.id);
+    try {      await pinProject(page, other.id);
       await page.setViewportSize(VIEWPORT);
       await page.goto(`${loomDaemon.baseURL}/platform?tab=board&task=${encodeURIComponent(target.id)}`);
 
@@ -257,7 +240,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
   });
 
   // ── 4b + 6b. The Platform node WITHOUT tab=board — and the same link through a legacy redirect ──
-  test("switch ON: ?task= on the Platform node with no tab=board switches to the Board tab and opens the card", async ({ page, loomDaemon }) => {
+  test("?task= on the Platform node with no tab=board switches to the Board tab and opens the card", async ({ page, loomDaemon }) => {
     // Card 260fb29a. The Platform node keeps all five panels MOUNTED and hides the inactive ones
     // (PlatformView.tsx — the owner's rule that a tab click is not consent to discard unfinished
     // input), so its <Board> is live on every tab. `?task=` arriving without `tab=board` was therefore
@@ -277,9 +260,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     // the active project's board having been rendered here instead.
     const other = await loomDaemon.createProject(uniq("atlasdeep-platform-notab"));
 
-    try {
-      await seedAtlasOn(page);
-      await pinProject(page, other.id);
+    try {      await pinProject(page, other.id);
       await page.setViewportSize(VIEWPORT);
 
       // ── The bare node address: no tab at all, so Home is what it would otherwise resolve to. ──
@@ -344,7 +325,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
   });
 
   // ── 4c. The hidden panel's board must not CONSUME the param — the half no fresh load can see ────
-  test("switch ON: a hidden Platform panel's board does not eat ?task= when the board cache is already warm", async ({ page, loomDaemon }) => {
+  test("a hidden Platform panel's board does not eat ?task= when the board cache is already warm", async ({ page, loomDaemon }) => {
     // Card 260fb29a's fix is two halves, and this leg exists because the OTHER half's legs cannot
     // discriminate this one. MEASURED, both polarities, on a real build: with `Board`'s `deepLinks`
     // gate REMOVED but the normalization <Navigate> kept, every other leg in this file still passes.
@@ -373,9 +354,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     const { decoy, target } = await seedDecoyAndTarget(loomDaemon, home.project.id);
     const other = await loomDaemon.createProject(uniq("atlasdeep-platform-warm"));
 
-    try {
-      await seedAtlasOn(page);
-      await pinProject(page, other.id);
+    try {      await pinProject(page, other.id);
       await page.setViewportSize(VIEWPORT);
 
       // ── Warm the board cache by sitting on the Board tab, and WAIT for the read that warms it. ──
@@ -415,7 +394,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
   });
 
   // ── 5. The profile + grant deep link ────────────────────────────────────────────────────────────
-  test("switch ON: ?profile=&grant= pre-selects that profile, the retired grant= is inert, and a widening Save confirms rather than writes", async ({ page, loomDaemon }) => {
+  test("?profile=&grant= pre-selects that profile, the retired grant= is inert, and a widening Save confirms rather than writes", async ({ page, loomDaemon }) => {
     const base = loomDaemon.baseURL;
     const connection = await apiJson<{ id: string; name: string }>(`${base}/api/connections`, {
       method: "POST",
@@ -438,9 +417,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     });
     await apiJson(`${base}/api/agents/${agent.id}`, { method: "POST", body: JSON.stringify({ profileId: profile.id }) });
 
-    try {
-      await seedAtlasOn(page);
-      await pinProject(page, project.id);
+    try {      await pinProject(page, project.id);
       await page.setViewportSize(VIEWPORT);
       // `gotoActorsReady` (fixtures/daemon.ts) waits for the editor's own `GET /api/agents` to land.
       // Without it, `planGrantSave` fails CLOSED on an unresolved list (@decision 3c4e0df6) and Save
@@ -451,7 +428,6 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
 
       // PRESENCE first: the Atlas frame, then the Profiles tab under it.
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
-      await expect(page.locator(".loom-rail")).toHaveCount(0);
 
       // THE RIGHT PROFILE. The editor's Name field holds the stored row's name, so it names which
       // profile actually mounted — and the decoy's name proves the check discriminates. (Compared on
@@ -533,9 +509,7 @@ test.describe("Atlas deep links (card 3ed3dc31)", () => {
     const ATLAS_URL = /\/home\?tab=actors&/;
     const PLACEHOLDER = "Select a profile to edit it";
 
-    try {
-      await seedAtlasOn(page);
-      await page.setViewportSize(VIEWPORT);
+    try {      await page.setViewportSize(VIEWPORT);
 
       // THE ADDRESS FIRST, on a plain goto, before the functional half below. `gotoActorsReady` awaits
       // the editor's own `GET /api/agents`, and that request only fires once the editor MOUNTS — which

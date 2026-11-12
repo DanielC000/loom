@@ -9,14 +9,8 @@
 //   that says what it measures), so the "won't reach it" notice is the one voice for reachability.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* unavailable: assertions will say so */ }
-  }, ATLAS_KEY);
-}
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
     try { localStorage.setItem(key, id); } catch { /* unavailable */ }
@@ -35,7 +29,6 @@ test.describe("plain language in event, transcript and companion states (card 99
       const taskId = wk.taskId!;
       await loomDaemon.seedOrchestrationEvent({ managerSessionId: mgr.sessionId, kind: "spawn_worker", workerSessionId: wk.sessionId, taskId });
       await loomDaemon.seedOrchestrationEvent({ managerSessionId: mgr.sessionId, kind: "worker_report", workerSessionId: wk.sessionId, taskId, detail: { status: "done" } });
-      await seedAtlasOn(page);
       await pinProject(page, mgr.projectId);
 
       await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
@@ -67,7 +60,6 @@ test.describe("plain language in event, transcript and companion states (card 99
   test("the transcript empty state is a plain sentence", async ({ page, loomDaemon }) => {
     test.setTimeout(90_000);
     const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "QuietMgr" });
-    await seedAtlasOn(page);
     await pinProject(page, mgr.projectId);
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
     await page.getByRole("tab", { name: "Transcript" }).click();
@@ -82,7 +74,6 @@ test.describe("plain language in event, transcript and companion states (card 99
     for (const kind of ["spawn_worker", "worker_report", "merge_request", "worker_context_high", "session_recovery_abandoned"]) {
       await loomDaemon.seedOrchestrationEvent({ managerSessionId: mgr.sessionId, kind });
     }
-    await seedAtlasOn(page);
     await pinProject(page, mgr.projectId);
     await page.goto(`${loomDaemon.baseURL}/home?tab=replay`);
     const wave = page.getByTestId("atlas-replay-wave");

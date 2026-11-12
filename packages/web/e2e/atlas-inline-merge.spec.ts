@@ -14,9 +14,6 @@
 //     pair a single `!merged` check would collapse (card 361520a0 Half Four).
 //   * Interception is also why no real merge runs: the seeded worker has no worktree, exactly as
 //     worker-diff-staletime.spec.ts intercepts /diff for the same reason. No real claude spawns.
-//   * SWITCH OFF asserts the classic Overview KEEPS its own rich card and its own merge button —
-//     it does NOT assert "no merge button in classic", which would be false (that button has always
-//     been there) and would fail. The OFF polarity is scoped to the compact action's own test id.
 //
 // FIXTURE IDENTITY (load-bearing): the e2e daemon is SHARED across spec files, so a sibling spec's
 // worker renders a byte-identical merge row. Every locator here is scoped either to this test's own
@@ -25,18 +22,9 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload and that leg would be measuring this
@@ -95,7 +83,7 @@ const mergeRow = (page: Page, container: string, workerId: string) =>
   page.getByTestId(container).locator(`[data-testid="attention-row"][data-session-id="${workerId}"]`);
 
 test.describe("Atlas inline merge actions (card c2968651)", () => {
-  test("switch ON: the band's merge row merges through the real write path, at both levels", async ({ page, loomDaemon }) => {
+  test("the band's merge row merges through the real write path, at both levels", async ({ page, loomDaemon }) => {
     // Two node loads, two outcome branches, and a /review round-trip is past the 30s default.
     test.setTimeout(150_000);
     const seeded = await seedPendingReview(loomDaemon);
@@ -103,8 +91,6 @@ test.describe("Atlas inline merge actions (card c2968651)", () => {
     const pendingReason = `gate-running-${seeded.short}`;
     let reply: Record<string, unknown> = { merged: false, pending: false, reason: rejectedReason };
     const hits = await interceptMerge(page, () => reply);
-
-    await seedAtlasOn(page);
     await pinProject(page, seeded.projectId);
     await page.goto(loomDaemon.baseURL + "/home");
 
@@ -178,7 +164,7 @@ test.describe("Atlas inline merge actions (card c2968651)", () => {
     expect(hits).toHaveLength(2);
   });
 
-  test("switch ON: the worst-context pop-over exits to the session and to the threshold", async ({ page, loomDaemon }) => {
+  test("the worst-context pop-over exits to the session and to the threshold", async ({ page, loomDaemon }) => {
     // A session that actually REPORTS context, so the pop-over has a row at all. `model` is passed
     // alongside so the expected % is derivable from `contextWindowForModel` rather than a magic
     // number: 200_000 of a 1M window is 20%.
@@ -186,9 +172,7 @@ test.describe("Atlas inline merge actions (card c2968651)", () => {
     const mgr = await loomDaemon.seedLiveSession({
       role: "manager", agentName: `CtxExit-${short}`,
       model: "claude-sonnet-4-5", ctxInputTokens: 200_000,
-    });
-    await seedAtlasOn(page);
-    await pinProject(page, mgr.projectId);
+    });    await pinProject(page, mgr.projectId);
     await page.goto(loomDaemon.baseURL + "/project");
 
     // The reading that carries this breakdown. It was the `worst context` KPI tile until card

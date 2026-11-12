@@ -20,10 +20,6 @@
 //   * The overflow sweep is the card's own sound check — `scrollWidth > clientWidth` over boxes whose
 //     COMPUTED `overflow-x` is `visible`. Skipping boxes with an x-scrollable ancestor would be
 //     vacuous here: the band body is `overflow-y:auto`, which forces its own `overflow-x` to `auto`.
-//   * SWITCH OFF pins the CLASSIC row's DOM: the text span is still a DIRECT child of the row frame,
-//     still wraps (`white-space: normal`), the `flex:1` spacer is still beside it, and the band's own
-//     action line does not exist anywhere on the page. That shape is what `c2968651`'s decision record
-//     forbids changing, and scoping the fix to the band is what this leg measures.
 //
 // FIXTURE IDENTITY (load-bearing): the e2e daemon is SHARED, so a sibling spec's pending Request
 // renders a byte-identical row. Every locator is scoped to this run's own manager/worker session id
@@ -31,18 +27,8 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding. Hardcoded rather than imported: the e2e
-// tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, so an
 // unconditional write would re-pin on a reload and the leg would be measuring this helper.
@@ -128,11 +114,10 @@ async function measureBand(page: Page, managerSessionId: string) {
 }
 
 test.describe("Atlas Needs-you band row shape (card d0d430d4)", () => {
-  test("switch ON: at 1600×1000 and 420px the action sits inside the band, the long title is one visible line, and the merge footer stays in view", async ({ page, loomDaemon }) => {
+  test("at 1600×1000 and 420px the action sits inside the band, the long title is one visible line, and the merge footer stays in view", async ({ page, loomDaemon }) => {
     // Two viewports, a modal round-trip and a /review-free click path are past the 30s default.
     test.setTimeout(150_000);
     const seeded = await seedBandRows(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.projectId);
 
     for (const viewport of [{ width: 1600, height: 1000 }, { width: 420, height: 900 }] as const) {

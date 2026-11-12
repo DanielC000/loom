@@ -21,18 +21,6 @@
 import { expect, test, type Page } from "./fixtures/daemon";
 import { cssColor } from "./helpers/themeToken";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding. Hardcoded rather than imported: the e2e
-// tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
 // Figures chosen to be mutually distinguishable, so an assertion can never pass by reading the wrong
 // window: no two are equal, and the two the tile can show sit in DIFFERENT tone bands (phosphor < 80
 // ≤ amber < 95 ≤ red), so the tone assertions are not all satisfied by one colour.
@@ -77,7 +65,6 @@ async function routeUsage(page: Page, withFiveHour: boolean) {
 
 async function gotoWorkspace(page: Page, baseURL: string, withFiveHour: boolean) {
   await routeUsage(page, withFiveHour);
-  await seedAtlasOn(page);
   await page.goto(baseURL + "/home");
   await expect(page.getByTestId("atlas-kpi-deck")).toBeVisible();
 }

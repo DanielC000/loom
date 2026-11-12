@@ -33,18 +33,9 @@
 import { randomUUID } from "node:crypto";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, so an
 // unconditional write would re-pin on a reload and that leg would be measuring this helper instead
@@ -118,14 +109,13 @@ test.describe("one-click merge success is acknowledged (card c2182f9d)", () => {
   // `merged` (no per-run sentinel of its own — the real daemon's green response carries no `reason`
   // to put one in), the subject itself embeds this run's short prefix, so a match proves the line
   // came from THIS row's own mutation, not merely "a" success line somewhere on a shared daemon.
-  test("switch ON: a subject in the merge response is named; its absence still renders bare `merged`", async ({ page, loomDaemon }) => {
+  test("a subject in the merge response is named; its absence still renders bare `merged`", async ({ page, loomDaemon }) => {
     test.setTimeout(150_000);
     const seeded = await seedPendingReview(loomDaemon);
     const subject = `fix(web): land merge-ok-${seeded.short}`;
     let reply: Record<string, unknown> = { ...MERGED_OK };
     const hits = await interceptMerge(page, () => reply);
 
-    await seedAtlasOn(page);
     await pinProject(page, seeded.projectId);
     await page.goto(loomDaemon.baseURL + "/home");
 
@@ -152,7 +142,7 @@ test.describe("one-click merge success is acknowledged (card c2182f9d)", () => {
     await expect(bareMergedLine).toHaveCount(0);
     expectMergePost(hits, 2, seeded.wkr.sessionId);
   });
-  test("switch ON: the Atlas band row confirms a merge, and still reads both other outcomes", async ({ page, loomDaemon }) => {
+  test("the Atlas band row confirms a merge, and still reads both other outcomes", async ({ page, loomDaemon }) => {
     // One node load and three merge round-trips is past the 30s default.
     test.setTimeout(150_000);
     const seeded = await seedPendingReview(loomDaemon);
@@ -161,7 +151,6 @@ test.describe("one-click merge success is acknowledged (card c2182f9d)", () => {
     let reply: Record<string, unknown> = { ...MERGED_OK };
     const hits = await interceptMerge(page, () => reply);
 
-    await seedAtlasOn(page);
     await pinProject(page, seeded.projectId);
     await page.goto(loomDaemon.baseURL + "/home");
 

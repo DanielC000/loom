@@ -1,4 +1,4 @@
-// First-run, credential-lock and browser-notification states under BOTH Atlas switch states (card
+// First-run, credential-lock and browser-notification states in the Atlas shell (card
 // 19683d2f, Atlas build plan P2-11 — docs/plans/archive/atlas-ui/03-decomposition.md row P2-11). Closes parity
 // gaps §J.6–§J.8 of docs/plans/archive/atlas-ui/01-parity-checklist.md.
 //
@@ -40,10 +40,9 @@
 // outward daemon write is ever clicked: the SetupWizard is opened and closed, never applied.
 import { expect, test, type Page } from "./fixtures/daemon";
 
-// Owned by lib/atlasUi.ts, App.tsx and lib/loopbackCredential.ts respectively. Hardcoded rather than
+// Owned by App.tsx and lib/loopbackCredential.ts respectively. Hardcoded rather than
 // imported for the same reason atlas-shell-chrome.spec.ts hardcodes them: tsconfig.e2e.json covers `e2e/`
 // only, so a spec cannot pull a `src/` module in.
-const ATLAS_KEY = "loom.atlasUi";
 const WELCOME_DISMISSED_KEY = "loom.setupWelcomeDismissed";
 const LOOPBACK_TOKEN_KEY = "loom.loopbackToken";
 // lib/activeProject.tsx owns this one. The project node's own queue is project-FILTERED, so the
@@ -60,24 +59,18 @@ const GUARD_401 = {
   body: JSON.stringify({ error: "unauthorized — see `loom open` for how to obtain the local access credential" }),
 };
 
-const rail = (page: Page) => page.locator(".loom-rail");
 const atlasShell = (page: Page) => page.getByTestId("atlas-shell");
 const credentialBanner = (page: Page) => page.getByTestId("credential-banner");
 const welcomeDialog = (page: Page) => page.getByRole("dialog", { name: "Welcome to Loom" });
 
-const SHELLS = [
-  { name: "switch ON", atlas: true },
-] as const;
-
 /**
- * Where the browser-notification mute toggles live in THIS shell.
+ * Where the browser-notification mute toggles live.
  *
- * The whole point of the §J.8 half: classic renders every section on one page, while Atlas splits them by
- * `scope` and these toggles are inside a `workspace` section. Derived here once so every test below is
- * driven through the shell's REAL location, and a wrong answer fails as a missing toggle rather than as a
- * silently skipped assertion.
+ * Atlas splits the Settings sections by `scope` and these toggles are inside a `workspace` section.
+ * Declared here once so every test below is driven through the REAL location, and a wrong answer fails as
+ * a missing toggle rather than as a silently skipped assertion.
  */
-const settingsPathFor = (atlas: boolean) => (atlas ? "/workspace-settings" : "/settings");
+const SETTINGS_PATH = "/workspace-settings";
 
 /**
  * The Global/Daemon section's own wrapper (pages/Settings.tsx › SettingsColumn stamps
@@ -91,26 +84,10 @@ const settingsPathFor = (atlas: boolean) => (atlas ? "/workspace-settings" : "/s
 const globalSection = (page: Page) => page.getByTestId("settings-section-global-daemon");
 const notifySave = (page: Page) => globalSection(page).getByRole("button", { name: "Save", exact: true });
 
-/** Seed the switch ON for the FIRST paint — lib/atlasUi.ts reads it synchronously at module load. There is
- *  deliberately no OFF counterpart: OFF is what empty storage already means. */
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
-
-/**
- * Land on `path` under the requested switch state and prove EXACTLY ONE shell is mounted.
- *
- * Presence before absence, same as atlas-shell-chrome.spec.ts: a leading `toHaveCount(0)` on the other
- * shell also passes on a page that has rendered nothing yet, which would make every "the other shell is
- * gone" claim vacuous on a slow load.
- */
-async function openShell(page: Page, baseURL: string, atlas: boolean, path: string): Promise<void> {
-  if (atlas) await seedAtlasOn(page);
+/** Land on `path` and prove the Atlas shell is mounted. */
+async function openShell(page: Page, baseURL: string, path: string): Promise<void> {
   await page.goto(baseURL + path);
-  await expect(atlas ? atlasShell(page) : rail(page)).toBeVisible();
-  await expect(atlas ? rail(page) : atlasShell(page)).toHaveCount(0);
+  await expect(atlasShell(page)).toBeVisible();
 }
 
 /** Read the STORED platform override's muted list. `null` is the default — "nothing muted" is stored as an
@@ -143,8 +120,8 @@ async function refuseConfigWrites(page: Page): Promise<void> {
   });
 }
 
-for (const shell of SHELLS) {
-  test.describe(`first-run / credential / notification states — ${shell.name} (card 19683d2f)`, () => {
+// (Body left at its old indentation: unwrapping the retired per-shell loop would re-indent ~320 lines.)
+  test.describe("first-run / credential / notification states (card 19683d2f)", () => {
     // The mute tests below write a DAEMON-GLOBAL key. Always clear it back to the all-on default, even on
     // a failure, or a leftover mute silences a later spec file's notifications.
     test.afterEach(async ({ loomDaemon }) => {
@@ -165,12 +142,11 @@ for (const shell of SHELLS) {
     test("the welcome's Start guided setup opens the SetupWizard, and closing it returns to the welcome", async ({ browser, loomDaemon }) => {
       const context = await browser.newContext();
       try {
-        await context.addInitScript(([tokenKey, token, atlasKey, on]: string[]) => {
+        await context.addInitScript(([tokenKey, token]: string[]) => {
           try {
             localStorage.setItem(tokenKey!, token!);
-            if (on === "1") localStorage.setItem(atlasKey!, "1");
           } catch { /* storage unavailable — assertions will say so */ }
-        }, [LOOPBACK_TOKEN_KEY, loomDaemon.loopbackSecret, ATLAS_KEY, shell.atlas ? "1" : "0"]);
+        }, [LOOPBACK_TOKEN_KEY, loomDaemon.loopbackSecret]);
         const page = await context.newPage();
         // Answered, never seeded: emptying the real daemon's project list would wreck every sibling spec on
         // this shared worker. `api.projects` is already archived-filtered and reserved-excluded
@@ -181,8 +157,7 @@ for (const shell of SHELLS) {
         );
 
         await page.goto(loomDaemon.baseURL + "/");
-        await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
-        await expect(shell.atlas ? rail(page) : atlasShell(page)).toHaveCount(0);
+        await expect(atlasShell(page)).toBeVisible();
 
         const welcome = welcomeDialog(page);
         await expect(welcome).toBeVisible();
@@ -209,8 +184,7 @@ for (const shell of SHELLS) {
         await expect(welcome).toBeVisible();
 
         // All of it happened inside the live shell; neither overlay fell out of it.
-        await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
-        await expect(shell.atlas ? rail(page) : atlasShell(page)).toHaveCount(0);
+        await expect(atlasShell(page)).toBeVisible();
       } finally {
         await context.close();
       }
@@ -223,20 +197,18 @@ for (const shell of SHELLS) {
     test("the welcome's Open Platform lands on the real Platform node and dismisses the welcome", async ({ browser, loomDaemon }) => {
       const context = await browser.newContext();
       try {
-        await context.addInitScript(([tokenKey, token, atlasKey, on]: string[]) => {
+        await context.addInitScript(([tokenKey, token]: string[]) => {
           try {
             localStorage.setItem(tokenKey!, token!);
-            if (on === "1") localStorage.setItem(atlasKey!, "1");
           } catch { /* storage unavailable — assertions will say so */ }
-        }, [LOOPBACK_TOKEN_KEY, loomDaemon.loopbackSecret, ATLAS_KEY, shell.atlas ? "1" : "0"]);
+        }, [LOOPBACK_TOKEN_KEY, loomDaemon.loopbackSecret]);
         const page = await context.newPage();
         await page.route((url) => url.pathname === "/api/projects", (route) =>
           route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
         );
 
         await page.goto(loomDaemon.baseURL + "/");
-        await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
-        await expect(shell.atlas ? rail(page) : atlasShell(page)).toHaveCount(0);
+        await expect(atlasShell(page)).toBeVisible();
         await expect(welcomeDialog(page)).toBeVisible();
 
         await welcomeDialog(page).getByRole("button", { name: "Open Platform" }).click();
@@ -261,7 +233,7 @@ for (const shell of SHELLS) {
         await expect(page.getByTestId("atlas-empty"),
           "Open Platform landed on AtlasShell's fallback node — /platform is not mounted in the Atlas route table").toHaveCount(0);
 
-        await expect(shell.atlas ? atlasShell(page) : rail(page)).toBeVisible();
+        await expect(atlasShell(page)).toBeVisible();
       } finally {
         await context.close();
       }
@@ -274,7 +246,7 @@ for (const shell of SHELLS) {
     // which also makes this test the place where §J.7's state and §J.8's new location meet.
     test("a refused write locks writes from this shell's Settings, and a wrong paste keeps it locked with no Dismiss", async ({ page, loomDaemon }) => {
       await refuseConfigWrites(page);
-      await openShell(page, loomDaemon.baseURL, shell.atlas, settingsPathFor(shell.atlas));
+      await openShell(page, loomDaemon.baseURL, SETTINGS_PATH);
 
       // The toggle proves the mute panel really is at THIS address under THIS shell before anything else is
       // asserted — on a wrong guess the rest of the test would fail for an unrelated reason.
@@ -330,7 +302,7 @@ for (const shell of SHELLS) {
     // (components/CredentialBanner.tsx's `visible` effect), so this pins the one polarity that is a bug.
     test("a half-typed credential survives navigating between destinations", async ({ page, loomDaemon }) => {
       await refuseConfigWrites(page);
-      await openShell(page, loomDaemon.baseURL, shell.atlas, settingsPathFor(shell.atlas));
+      await openShell(page, loomDaemon.baseURL, SETTINGS_PATH);
 
       await globalSection(page).getByTestId("notify-quiet-board").uncheck();
       await notifySave(page).click();
@@ -381,7 +353,7 @@ for (const shell of SHELLS) {
         w.Notification = AskRecordingNotification;
       });
 
-      await openShell(page, loomDaemon.baseURL, shell.atlas, "/");
+      await openShell(page, loomDaemon.baseURL, "/");
 
       await expect.poll(() => page.evaluate(() => (window as unknown as { __loomAsks: string[] }).__loomAsks.length),
         { message: "ToastContainer never asked for notification permission under this shell" }).toBe(1);
@@ -400,7 +372,7 @@ for (const shell of SHELLS) {
       // its own witness, so this needs more than the 30s file default.
       test.setTimeout(120_000);
 
-      const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: `P211Mgr-${shell.atlas ? "atlas" : "classic"}` });
+      const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "P211Mgr-atlas" });
       const stamp = Date.now();
       const mutedTitle = `P2-11 muted decision ${stamp}`;
       const unmutedTitle = `P2-11 unmuted decision ${stamp}`;
@@ -427,8 +399,8 @@ for (const shell of SHELLS) {
 
       // Set the mute where THIS shell actually puts it, and confirm it reached the daemon-global override.
       // A render-only or localStorage-only implementation would fail right here.
-      await openShell(page, loomDaemon.baseURL, shell.atlas, settingsPathFor(shell.atlas));
-      const quietBoard = globalSection(page).getByTestId("notify-quiet-board");
+      await openShell(page, loomDaemon.baseURL, SETTINGS_PATH);
+const quietBoard = globalSection(page).getByTestId("notify-quiet-board");
       await expect(quietBoard).toBeVisible();
       await expect(quietBoard).toBeChecked();
       // "request" is the category a pending decision resolves to (lib/attention.ts) and is the one under
@@ -436,7 +408,7 @@ for (const shell of SHELLS) {
       await globalSection(page).getByTestId("notify-request").uncheck();
       await notifySave(page).click();
       await expect.poll(() => readMuted(loomDaemon.baseURL),
-        { message: `saving the mute at ${settingsPathFor(shell.atlas)} never reached the platform override` }).toEqual(["request"]);
+        { message: `saving the mute at ${SETTINGS_PATH} never reached the platform override` }).toEqual(["request"]);
 
       // ── PHASE A: muted. The item arrives, the pill proves the toast surface processed it, NO Notification.
       // /platform is outside the pill's suppression set (App.tsx — the routes whose own page renders the
@@ -472,7 +444,6 @@ for (const shell of SHELLS) {
       expect(await matching(mutedTitle)).toEqual([]);
     });
   });
-}
 
 // ── The Atlas Workspace node renders the queue, so the collapsed pill must stand down there ─────────
 // Found while establishing where each of these states mounts, and the one product change this card makes.
@@ -493,12 +464,10 @@ test("the collapsed request pill stands down on the Atlas Workspace node, which 
   const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "P211PillMgr" });
   const title = `P2-11 pill decision ${Date.now()}`;
 
-  await seedAtlasOn(page);
   // An Atlas node that renders NO attention queue, so the pill is expected here. `/agents` is a node of its
   // own (card c6160c7d) and is not in the suppression set.
   await page.goto(`${loomDaemon.baseURL}/agents`);
   await expect(atlasShell(page)).toBeVisible();
-  await expect(rail(page)).toHaveCount(0);
 
   await loomDaemon.seedQuestion({
     sessionId: mgr.sessionId, projectId: mgr.projectId, type: "decision",
@@ -547,7 +516,6 @@ test("the collapsed request pill stands down on the Atlas project node, which re
   const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "P211ProjPillMgr" });
   const title = `P2-11 project pill decision ${Date.now()}`;
 
-  await seedAtlasOn(page);
   // Unconditional, unlike atlas-project-selection.spec.ts's `pinProject`: nothing here reloads to
   // measure persistence, and this spec's whole point is that the node is open on the project owning
   // the seeded request — so re-pinning on every navigation is the intent, not a confound.
@@ -557,7 +525,6 @@ test("the collapsed request pill stands down on the Atlas project node, which re
 
   await page.goto(`${loomDaemon.baseURL}/agents`);
   await expect(atlasShell(page)).toBeVisible();
-  await expect(rail(page)).toHaveCount(0);
 
   await loomDaemon.seedQuestion({
     sessionId: mgr.sessionId, projectId: mgr.projectId, type: "decision",

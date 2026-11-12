@@ -23,19 +23,10 @@
 // live PTY tile mounts. Spawn controls are asserted present/enabled/disabled and never clicked.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-// Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so a spec
-// cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes its own.
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json), so a spec cannot pull a `src/` module in — the same reason
+// fixtures/daemon.ts hardcodes its own.
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Pins the active project, but only while the key is still absent: addInitScript re-runs on every
 // navigation (reload included), so an unconditional write would re-pin on a later leg and measure the
@@ -192,9 +183,8 @@ const content = (page: Page) => page.locator("main");
 
 test.describe("Atlas Platform node (card c07ff42a)", () => {
   // ── 1. The edition toggle flips every forked element, both directions ──────────────────────────────
-  test("switch ON: the View-as toggle flips each dev-only and end-user-only element, both ways", async ({ page, loomDaemon }) => {
+  test("the View-as toggle flips each dev-only and end-user-only element, both ways", async ({ page, loomDaemon }) => {
     await serveDevPlatformHome(page, loomDaemon);
-    await seedAtlasOn(page);
     await page.goto(`${loomDaemon.baseURL}/platform`);
 
     // The Atlas frame, provably — otherwise every assertion below could be measuring the classic page.
@@ -261,8 +251,8 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
 
     // The classic page's one-label heading ("Platform" + the home badge + the muted span) has no Atlas
     // twin at all since card f76b89b9: the node head owns the page's one <h1> and carries the other two
-    // as pills. This is the exact regex the switch-OFF test asserts VISIBLE on the classic page, read
-    // here against the same edition's copy. (Leg 8 is what proves the pills POSITIVELY — this absence
+    // as pills. This is the regex the classic page's heading used to match, read here against the
+    // same edition's copy. (Leg 8 is what proves the pills POSITIVELY — this absence
     // on its own would also be satisfied by a node that stated nothing.)
     await expect(page.getByText(/^Platform\s*Platform\s*your cross-project workspace agent/)).toHaveCount(0);
 
@@ -341,7 +331,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   });
 
   // ── 2. The node's own board is the PLATFORM home's, never the active project's ─────────────────────
-  test("switch ON: the Board tab shows the Platform home's cards and never the active project's", async ({ page, loomDaemon }) => {
+  test("the Board tab shows the Platform home's cards and never the active project's", async ({ page, loomDaemon }) => {
     const home = await readSetupHome(loomDaemon);
     const platformCard = uniq("platformcard-SENTINEL");
     const projectCard = uniq("projectcard-SENTINEL");
@@ -354,7 +344,6 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     await loomDaemon.createTask(project.id, { title: projectCard, columnKey: "inbox" });
 
     try {
-      await seedAtlasOn(page);
       await pinProject(page, project.id);
       await page.goto(`${loomDaemon.baseURL}/platform?tab=board`);
 
@@ -383,14 +372,13 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   });
 
   // ── 3. Findings: inline Adopt / Dismiss, with an observable before/after ───────────────────────────
-  test("switch ON: the Findings tab adopts and dismisses the auditor's preset suggestions", async ({ page, loomDaemon }) => {
+  test("the Findings tab adopts and dismisses the auditor's preset suggestions", async ({ page, loomDaemon }) => {
     const toAdopt = uniq("suggest-ADOPTME");
     const toDismiss = uniq("suggest-DROPME");
     const adopted = await seedSuggestion(loomDaemon, toAdopt, "Run the adopt-path check");
     const dismissed = await seedSuggestion(loomDaemon, toDismiss, "Run the dismiss-path check");
 
     try {
-      await seedAtlasOn(page);
       await page.goto(`${loomDaemon.baseURL}/platform?tab=findings`);
 
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
@@ -437,7 +425,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   });
 
   // ── 4. Findings: the filed-findings list, and the edition's own event kind as its scope ───────────
-  test("switch ON: the Findings tab lists filed findings and is scoped by the edition's event kind", async ({ page, loomDaemon }) => {
+  test("the Findings tab lists filed findings and is scoped by the edition's event kind", async ({ page, loomDaemon }) => {
     const home = await readSetupHome(loomDaemon);
     const mineTitle = uniq("finding-MINE");
     const theirsTitle = uniq("finding-THEIRS");
@@ -463,7 +451,6 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     });
 
     try {
-      await seedAtlasOn(page);
       await page.goto(`${loomDaemon.baseURL}/platform?tab=findings`);
       await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
@@ -508,7 +495,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   // inside a disclosure that is itself local state), a typed-but-unsaved cron expression on another tab,
   // and a live session tile's composer draft. Nothing here is ever SAVED — the assertion is that the
   // unsaved text survives, so saving it would measure the wrong thing (and write to a real agent).
-  test("switch ON: a tab switch preserves unsaved drafts on every panel", async ({ page, loomDaemon }) => {
+  test("a tab switch preserves unsaved drafts on every panel", async ({ page, loomDaemon }) => {
     const home = await readSetupHome(loomDaemon);
     // A live operator session so the Home tab mounts a real session tile with its composer. Seeded as a
     // DB row (never startSession — the fixture's no-spawn guard), so the terminal attach is a no-op and
@@ -524,7 +511,6 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
     const cronDraft = "7 7 * * *";
     const composerDraft = "DRAFT-composer-do-not-lose-me";
 
-    await seedAtlasOn(page);
     await page.goto(`${loomDaemon.baseURL}/platform`);
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
@@ -581,19 +567,16 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   // ⚠️ The aborting route is what makes this safe to run on the fixture at all — the no-spawn guard
   // forbids a real claude spawn, so a control that DOES fire must never reach the daemon. It also means
   // a FAILURE here is observed as a recorded request, never as a side effect.
-  for (const atlas of [true]) {
-    const shell = atlas ? "switch ON" : "switch OFF";
-
-    test(`${shell}: no control in the dev End-user preview sends a request`, async ({ page, loomDaemon }) => {
+  {
+    test("no control in the dev End-user preview sends a request", async ({ page, loomDaemon }) => {
       const home = await serveDevPlatformHome(page, loomDaemon);
-      if (atlas) await seedAtlasOn(page);
       await seedViewAsEndUser(page);
       const sent = await blockMutations(page);
       await page.goto(`${loomDaemon.baseURL}/platform`);
 
       // Provably the right shell AND the right view — every zero below is worthless if this page is the
       // real end-user edition (no previewOnly) or the Developer view (different controls entirely).
-      await expect(page.getByTestId("atlas-shell")).toHaveCount(atlas ? 1 : 0);
+      await expect(page.getByTestId("atlas-shell")).toHaveCount(1);
       await expect(viewAs(page, "End-user")).toHaveAttribute("aria-pressed", "true");
       await expect(page.getByText(/your cross-project workspace agent/i).first()).toBeVisible();
 
@@ -623,10 +606,10 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       // (c) The cadence form, NO-SCHEDULE state — the only control that renders is "Schedule". Phase B
       // below seeds a real schedule so the other four (Save / Enable / Disable / Remove) are exercised
       // too, rather than left to the structural pin alone.
-      if (atlas) await openTab(page, "Cadence");
+      await openTab(page, "Cadence");
       await expect(page.getByText(/^Run automatically$/)).toBeVisible();
       await expect(page.getByRole("button", { name: /^schedule$/i })).toBeDisabled();
-      if (atlas) await openTab(page, "Home");
+      await openTab(page, "Home");
 
       // Clicking a disabled button records nothing by construction, so the assertion so far rests on the
       // disabled attributes. `force` dispatches the click anyway — past the disabled attribute, straight
@@ -645,7 +628,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       // need an existing schedule. Neither is live, so neither disturbs the spawn readings above.
       const operator = home.agents.find((a) => a.name === "Platform")!;
       const auditor = home.agents.find((a) => a.name === "Workspace Auditor")!;
-      const tag = `b472645a-${atlas ? "atlas" : "classic"}-${Date.now()}`;
+      const tag = `b472645a-atlas-${Date.now()}`;
       // `enabled: false` deliberately — the fixture boots LOOM_SCHEDULER_ENABLED=0 so nothing can fire,
       // and a disabled row keeps that true even if that ever changes.
       const schedule = await seedWorkspaceAuditorSchedule(loomDaemon, auditor.id, `cad-${tag}`);
@@ -659,7 +642,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
 
         // Resume, in BOTH history sections. The end-user edition renders history EXPANDED, so these need
         // no disclosure click — which is exactly why the gap mattered.
-        if (atlas) await openTab(page, "History");
+        await openTab(page, "History");
         const resumes = page.getByRole("button", { name: /^resume$/i });
         // A FLOOR, not an exact count: the two rows seeded above are the minimum, and the daemon is
         // shared across this file's tests, so an earlier test's exited row legitimately adds more.
@@ -673,7 +656,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
         expect(sent, "Resume must not respawn the previewed home's session").toEqual([]);
 
         // The cadence form's other three controls, now that a schedule exists.
-        if (atlas) await openTab(page, "Cadence");
+        await openTab(page, "Cadence");
         // ⚠️ Save is dirty-gated as well as held, so `toBeDisabled` on it ALONE would pass even with no
         // gate at all (nothing has edited the cron). The load-bearing assertion is that the FIELD is
         // read-only, which is also what makes Save unreachable — read it the same way the prompt editor's
@@ -691,7 +674,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
           await page.getByRole("button", { name }).first().click({ force: true }).catch(() => { /* held */ });
         }
         expect(sent, "no cadence control in the preview may reach the daemon").toEqual([]);
-        if (atlas) await openTab(page, "Home");
+        await openTab(page, "Home");
 
         // ── PHASE C — Stop needs a LIVE session. Seeded LAST, because a live operator session flips the
         // spawn button's own label to "Live" and disables it via the edition's singleton gate, which
@@ -722,13 +705,9 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   // Without this, test 8 is satisfied by a gate that disabled the shipping UI too: "zero requests" is
   // also what a broken page produces. Same aborting counter, same clicks, opposite expectation — so the
   // pair proves the gate discriminates on `previewOnly` rather than on the control being dead.
-  // ⚠️ Run under BOTH shells. The gate is threaded once PER LAYOUT, so an over-gate is per-layout too:
-  // a mount that passed `previewOnly` unconditionally would disable the SHIPPING end-user surface on
-  // that one layout, and a classic-only contrast test would never see it. The preview legs above already
-  // run per shell; this is their missing twin on the other side of the contrast.
-  for (const atlas of [true]) {
-  const shellLabel = atlas ? "switch ON" : "switch OFF";
-  test(`${shellLabel}: the same controls on a REAL end-user install DO send their requests`, async ({ page, loomDaemon }) => {
+  // This is the preview legs' missing twin on the other side of the contrast.
+  {
+  test("the same controls on a REAL end-user install DO send their requests", async ({ page, loomDaemon }) => {
     const home = await readSetupHome(loomDaemon);
     const operator = home.agents.find((a) => a.name === "Platform")!;
     const auditor = home.agents.find((a) => a.name === "Workspace Auditor")!;
@@ -742,12 +721,11 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       await loomDaemon.seedLiveSession({ project: home.project, agentId: auditor.id, role: "workspace-auditor",
         id: `live-aud-${tag}` });
 
-      if (atlas) await seedAtlasOn(page);
       const sent = await blockMutations(page);
       await page.goto(`${loomDaemon.baseURL}/platform`);
       // No mock ⇒ the shipping edition, with no preview toggle at all. The shell is asserted too: this
       // test's whole value is that it reads the OTHER layout from the one a classic-only run would.
-      await expect(page.getByTestId("atlas-shell")).toHaveCount(atlas ? 1 : 0);
+      await expect(page.getByTestId("atlas-shell")).toHaveCount(1);
       await expect(page.getByRole("group", { name: "Preview edition" })).toHaveCount(0);
       await expect(page.getByText(/your cross-project workspace agent/i).first()).toBeVisible();
 
@@ -764,7 +742,7 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       await ta.fill("contrast-case-edit-via-shortcut");
       await ta.press("Control+Enter");
 
-      if (atlas) await openTab(page, "Cadence");
+      await openTab(page, "Cadence");
       await expect(page.getByText(/^Run automatically$/)).toBeVisible();
       // Save is dirty-gated, so the cron must actually change first — and that the field ACCEPTS this
       // edit is itself the contrast to the preview leg, where the same `fill` cannot change it.
@@ -783,15 +761,15 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       // of depending on the removal having landed.
       await deleteSchedule(loomDaemon, schedule.id);
       await page.reload();
-      if (atlas) await openTab(page, "Cadence");
+      await openTab(page, "Cadence");
       const createBtn = page.getByRole("button", { name: /^schedule$/i });
       await expect(createBtn).toBeVisible();
       await expect(createBtn).toBeEnabled();
       await createBtn.click();
 
-      if (atlas) await openTab(page, "History");
+      await openTab(page, "History");
       await page.getByRole("button", { name: /^resume$/i }).first().click();
-      if (atlas) await openTab(page, "Home");
+      await openTab(page, "Home");
       await page.getByRole("button", { name: /^stop$/i }).first().click();
 
       // Each write path test 8 asserts SILENT must appear here — as PATHS, not just a count, so a page
@@ -836,13 +814,10 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   // (a broken route handler produces the same empty array as a perfect gate), and it establishes that the
   // held click's own window has elapsed, since `page.route` sees requests in the order they are issued.
   // It is also DoD-2 — card CRUD in the preview stays ungated — asserted rather than assumed.
-  for (const atlas of [true]) {
-    const shell = atlas ? "switch ON" : "switch OFF";
-
-    test(`${shell}: the preview's board rail cannot open or answer a request`, async ({ page, loomDaemon }) => {
+  {
+    test("the preview's board rail cannot open or answer a request", async ({ page, loomDaemon }) => {
       const home = await serveDevPlatformHome(page, loomDaemon);
       const seed = await seedReservedHomeRequest(loomDaemon, home);
-      if (atlas) await seedAtlasOn(page);
       await seedViewAsEndUser(page);
       const sent = await blockMutations(page);
       // Wide enough that the two-column dossier renders its rail as a column rather than wrapping, and
@@ -852,13 +827,13 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
       // until its tab is active, so the tab is carried in the SAME navigation rather than clicked after:
       // a tab <Link> builds its address fresh and drops `?task=`, so clicking across first would race the
       // deep link away before the board data had loaded to consume it.
-      await page.goto(`${loomDaemon.baseURL}/platform?${atlas ? "tab=board&" : ""}task=${encodeURIComponent(seed.task.id)}`);
+      await page.goto(`${loomDaemon.baseURL}/platform?tab=board&task=${encodeURIComponent(seed.task.id)}`);
 
       // The right shell AND the right view — every reading below is worthless on the real end-user
       // edition (which carries no previewOnly) or in the Developer view (a different home entirely).
-      await expect(page.getByTestId("atlas-shell")).toHaveCount(atlas ? 1 : 0);
+      await expect(page.getByTestId("atlas-shell")).toHaveCount(1);
       await expect(viewAs(page, "End-user")).toHaveAttribute("aria-pressed", "true");
-      if (atlas) await expect(tab(page, "Board")).toHaveAttribute("aria-selected", "true");
+      await expect(tab(page, "Board")).toHaveAttribute("aria-selected", "true");
 
       // The fixture's own identity, asserted rather than assumed: this rail must carry THIS seeded ask.
       // A drawer that opened on the wrong card, or a rail that silently rendered empty, would make every
@@ -928,10 +903,9 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   // SHARED MARKUP rather than the look: the structural shape of the row is collected from the PROJECT
   // node and from the Platform node and the two must be equal. Text is deliberately excluded — the two
   // nodes have different tabs, and a fingerprint that included labels could only ever differ.
-  test("switch ON: the node wears the same NodeTabs row the project node wears, and all five tabs select",
+  test("the node wears the same NodeTabs row the project node wears, and all five tabs select",
     async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(uniq("atlasplat-tabs"));
-    await seedAtlasOn(page);
     await pinProject(page, project.id);
 
     // `/board` is a PROJECT node tab (card 25c08fba), so this renders the project node and its own row.
@@ -987,13 +961,12 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   });
 
   // ── 11. card f76b89b9 — the identity sits in the node head, and nowhere below it ──────────────────
-  test("switch ON: the node's identity is node-head pills, with no second block under the tab row",
+  test("the node's identity is node-head pills, with no second block under the tab row",
     async ({ page, loomDaemon }) => {
     // The REAL end-user edition — no `/api/platform/home` mock, so this is the shipping surface. Its
     // identity is asserted against the home the daemon actually resolved, never a typed-in name.
     const home = await readSetupHome(loomDaemon);
     expect(home.project.name, "the reserved home this leg reads its identity from").toBe("Platform");
-    await seedAtlasOn(page);
     await page.goto(`${loomDaemon.baseURL}/platform`);
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
 
@@ -1059,9 +1032,8 @@ test.describe("Atlas Platform node (card c07ff42a)", () => {
   // The identity STRIP was folded into the node head; the edition's explainer PARAGRAPH was not deleted
   // with it. It is the only place this surface says what Platform is — the agent cards carry no prose —
   // so an end user who turns the switch on must still get it. It lives at the top of the Home tab body.
-  test("switch ON: the edition's explainer renders in the Home panel, once, and on no other tab",
+  test("the edition's explainer renders in the Home panel, once, and on no other tab",
     async ({ page, loomDaemon }) => {
-    await seedAtlasOn(page);
     await page.goto(`${loomDaemon.baseURL}/platform`);
     await expect(page.getByTestId("atlas-shell")).toBeVisible();
 

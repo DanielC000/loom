@@ -11,7 +11,6 @@
 //   4. COUNTS ONLY: no connection id appears in the drift read the page issued.
 import { expect, test } from "./fixtures/daemon";
 
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 const uniq = (p: string) => `${p}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
@@ -51,9 +50,9 @@ test.describe("Re-pin grants (card 158cb01a)", () => {
         await apiJson(`${base}/api/agents/${s.agentId}`, { method: "POST", body: JSON.stringify({ connections: conns }) });
       }
 
-      await page.addInitScript(([k, v, pk, pv]) => {
-        try { localStorage.setItem(k, v); localStorage.setItem(pk, pv); } catch { /* assertions will say so */ }
-      }, [ATLAS_KEY, "1", PROJECT_KEY, zero.projectId] as const);
+      await page.addInitScript(([pk, pv]) => {
+        try { localStorage.setItem(pk, pv); } catch { /* assertions will say so */ }
+      }, [PROJECT_KEY, zero.projectId] as const);
 
       const driftBodies: string[] = [];
       page.on("response", async (r) => {
@@ -119,9 +118,9 @@ test.describe("Re-pin grants (card 158cb01a)", () => {
       role: "manager", agentName: "RepinLoosen", id: `e2e-repinloose-${Date.now()}`,
       restrictedTools: true, ptyGeometry: { cols: 80, rows: 24 }, ptyBytes: "loosen ready\r\n",
     });
-    await page.addInitScript(([k, v, pk, pv]) => {
-      try { localStorage.setItem(k, v); localStorage.setItem(pk, pv); } catch { /* assertions will say so */ }
-    }, [ATLAS_KEY, "1", PROJECT_KEY, s.projectId] as const);
+    await page.addInitScript(([pk, pv]) => {
+      try { localStorage.setItem(pk, pv); } catch { /* assertions will say so */ }
+    }, [PROJECT_KEY, s.projectId] as const);
     await page.goto(`${base}/session/${s.sessionId}`);
     const badge = page.getByTestId(`repin-drift-badge-${s.sessionId}`);
     await expect(badge).toBeVisible();

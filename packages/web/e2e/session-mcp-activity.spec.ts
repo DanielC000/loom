@@ -8,13 +8,12 @@
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 import { cssColor } from "./helpers/themeToken";
 
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 
-async function seedAtlasOn(page: Page, projectId: string) {
-  await page.addInitScript(([atlasKey, projectKey, id]) => {
-    try { localStorage.setItem(atlasKey, "1"); localStorage.setItem(projectKey, id); } catch { /* assertions will say so */ }
-  }, [ATLAS_KEY, PROJECT_KEY, projectId] as const);
+async function pinProject(page: Page, projectId: string) {
+  await page.addInitScript(([projectKey, id]) => {
+    try { localStorage.setItem(projectKey, id); } catch { /* assertions will say so */ }
+  }, [PROJECT_KEY, projectId] as const);
 }
 
 const call = (tag: string, name: string, args: Record<string, unknown>) => `[tool] {${tag}} ${name}(${JSON.stringify(args)})`;
@@ -87,7 +86,7 @@ async function openSession(page: Page, loomDaemon: LoomDaemon, transcript: Reado
     const start = Math.min(Number(offset), transcript.length);
     return route.fulfill({ json: { turns: transcript.slice(start), totalTurns: transcript.length, offset: start, returned: transcript.length - start, nextOffset: null } });
   });
-  await seedAtlasOn(page, mgr.projectId);
+  await pinProject(page, mgr.projectId);
   await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
   return mgr;
 }
@@ -378,7 +377,7 @@ test.describe("session Loom MCP activity strip", () => {
     });
     await page.route(`**/api/sessions/${mgr.sessionId}/transcript`, (route) =>
       route.fulfill({ json: [{ role: "user", text: "hi" }, { role: "assistant", text: call("t1", "Read", { file_path: "x" }) }] }));
-    await seedAtlasOn(page, mgr.projectId);
+    await pinProject(page, mgr.projectId);
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
     await expect(page.getByTestId("mcp-activity")).toHaveAttribute("data-state", "empty");
     await expect(page.getByTestId("mcp-activity")).toContainText("No Loom MCP calls yet this session.");
@@ -414,7 +413,7 @@ async function openCodexSession(page: Page, loomDaemon: LoomDaemon, rows: typeof
     await page.route(new RegExp(`/api/sessions/${s.sessionId}/mcp-calls(\\?.*)?$`), (route) =>
       route.fulfill({ json: { calls: rows, dropped: 0, writeFailures: 0 } }));
   }
-  await seedAtlasOn(page, s.projectId);
+  await pinProject(page, s.projectId);
   await page.goto(`${loomDaemon.baseURL}/session/${s.sessionId}`);
   return { s, hits };
 }

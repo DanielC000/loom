@@ -5,10 +5,9 @@
 // project — the SAME context the rail chip writes and every `scoped` page reads — so a page you
 // already have open re-scopes exactly as it did under the chip. Two claims, each measured against
 // the page's OWN project-scoped data rather than against "the frame re-rendered":
-//   1. SWITCH ON. With /board open on project A's only card, clicking project B's tree row replaces
+//   1. With /board open on project A's only card, clicking project B's tree row replaces
 //      it with project B's only card, moves the tree's open branch and the breadcrumb with it, and
 //      leaves the URL alone — selecting a project re-scopes, it does not navigate.
-//   2. SWITCH OFF. The rail chip still switches projects the old way, with no Atlas frame mounted.
 //
 // Both polarities are asserted on BOTH sides of the click (A present + B absent, then B present +
 // A absent), so neither direction can pass vacuously: a sentinel that never rendered at all would
@@ -18,25 +17,15 @@
 // a quiet DOM is not a ready one (card 625d791c).
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json), so
-// a spec cannot pull a `src/` module in — the same reason fixtures/daemon.ts hardcodes its own.
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig covers
+// `e2e/` only (tsconfig.e2e.json), so a spec cannot pull a `src/` module in — the same reason
+// fixtures/daemon.ts hardcodes its own.
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Pins the STARTING project, once — it writes only when the key is still absent. addInitScript
 // re-runs on every navigation, `reload()` included, so an unconditional write would re-pin the
 // starting project on the reload leg below and that leg would be measuring this helper's own
-// behaviour instead of whether the app persisted the tree's selection. (The same mechanism, in its
-// other polarity, is why the Atlas switch is only ever seeded ON — measured on P1-0.)
+// behaviour instead of whether the app persisted the tree's selection.
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
     try { if (localStorage.getItem(key) === null) localStorage.setItem(key, id); } catch { /* storage unavailable */ }
@@ -70,13 +59,12 @@ async function seedTwoProjects(loomDaemon: LoomDaemon) {
 }
 
 test.describe("Atlas project selection (card e47df20a)", () => {
-  test("switch ON: selecting a project node re-scopes the page already open", async ({ page, loomDaemon }) => {
+  test("selecting a project node re-scopes the page already open", async ({ page, loomDaemon }) => {
     const { first, second, firstCard, secondCard } = await seedTwoProjects(loomDaemon);
     // A live session on the SECOND project only, so the project row's live marker has both
     // polarities to be measured against on one screen rather than an unfalsifiable single reading.
     await loomDaemon.seedLiveSession({ project: second, role: "manager", agentName: "AtlasSelMgr" });
 
-    await seedAtlasOn(page);
     await pinProject(page, first.id);
     await page.goto(loomDaemon.baseURL + "/board");
 

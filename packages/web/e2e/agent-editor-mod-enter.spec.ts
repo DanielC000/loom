@@ -25,25 +25,15 @@
 // isolated fixture daemon for real. Nothing here starts a session.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
+// lib/activeProject.tsx owns the project key.
 // Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
 const PROJECT_KEY = "loom.projectId";
 const AGENT_KEY = "loom.agentId";
 
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-const rail = (page: Page) => page.locator(".loom-rail");
 const atlasShell = (page: Page) => page.getByTestId("atlas-shell");
 /** Any mounted copy of the shared editor, whichever frame hosts it. */
 const anyEditor = (page: Page) => page.locator('[data-testid^="agent-editor-"]');
-
-// Only ever seeded ON. OFF is the default (an untouched context has an empty key) and addInitScript
-// re-runs on EVERY navigation, so a "seed off" script would silently re-clear the key mid-test.
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Pins the active project and clears any persisted agent selection, but only while the project key is
 // still absent: addInitScript re-runs on every navigation, so an unconditional write would re-pin on a
@@ -97,10 +87,9 @@ function countSaves(page: Page, agentId: string): string[] {
 
 const SURFACES = [
   {
-    name: "switch ON (Atlas) — the Agents node's edit dialog",
+    name: "the Agents node's edit dialog",
     atlas: true,
     async open(page: Page, baseURL: string, seeded: Awaited<ReturnType<typeof seedOne>>) {
-      await seedAtlasOn(page);
       await pinProject(page, seeded.project.id);
 
       // `/projects` is retired under Atlas (card 5afd71bd): it redirects, so the classic pane that
@@ -112,7 +101,6 @@ const SURFACES = [
 
       await page.goto(baseURL + "/agents");
       await expect(atlasShell(page)).toBeVisible();
-      await expect(rail(page)).toHaveCount(0);
       await expect(page.getByTestId("atlas-agents-node")).toBeVisible();
       await page.getByTestId(`atlas-agent-card-${seeded.agent.id}`)
         .getByTestId(`atlas-agent-edit-${seeded.agent.id}`).click();

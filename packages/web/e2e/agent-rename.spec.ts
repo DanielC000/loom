@@ -18,15 +18,9 @@
 // ⛔ NO REAL SPAWN. Renames are plain DB writes. The tree's session row is a SEEDED live row (no pty).
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project one.
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key.
 const PROJECT_KEY = "loom.projectId";
 
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
     try { if (localStorage.getItem(key) === null) localStorage.setItem(key, id); } catch { /* storage unavailable */ }
@@ -62,11 +56,9 @@ async function openEditor(page: Page, agentId: string) {
 }
 
 test.describe("agent rename from the editor (card b0495d0b)", () => {
-  test("switch ON: a rename lands on the server and shows in the header, the roster and the tree", async ({ page, loomDaemon }) => {
+  test("a rename lands on the server and shows in the header, the roster and the tree", async ({ page, loomDaemon }) => {
     const { project, subject } = await seed(loomDaemon);
-    const session = await loomDaemon.seedLiveSession({ project, agentId: subject.id, agentName: subject.name, id: `e2e-rename-${Date.now()}` });
-    await seedAtlasOn(page);
-    await pinProject(page, project.id);
+    const session = await loomDaemon.seedLiveSession({ project, agentId: subject.id, agentName: subject.name, id: `e2e-rename-${Date.now()}` });    await pinProject(page, project.id);
     await page.goto(loomDaemon.baseURL + "/agents");
 
     // BEFORE: the tree row and the roster card carry the old name.
@@ -101,14 +93,12 @@ test.describe("agent rename from the editor (card b0495d0b)", () => {
     await expect(treeRow).not.toContainText(subject.name);
   });
 
-  test("switch ON: an empty or duplicate name is refused with a visible reason, and nothing is written", async ({ page, loomDaemon }) => {
+  test("an empty or duplicate name is refused with a visible reason, and nothing is written", async ({ page, loomDaemon }) => {
     const { project, subject, taken } = await seed(loomDaemon);
     // The global mutation handler would alert for a non-inline mutation; the rename is inline, so any
     // native dialog here is a defect. Record rather than let one wedge the test.
     const nativeDialogs: string[] = [];
-    page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });
-    await seedAtlasOn(page);
-    await pinProject(page, project.id);
+    page.on("dialog", (d) => { nativeDialogs.push(d.message()); void d.dismiss(); });    await pinProject(page, project.id);
     await page.goto(loomDaemon.baseURL + "/agents");
     const dialog = await openEditor(page, subject.id);
     await dialog.getByTestId(`agent-rename-${subject.id}`).click();
@@ -147,10 +137,8 @@ test.describe("agent rename from the editor (card b0495d0b)", () => {
     expect(nativeDialogs).toEqual([]);
   });
 
-  test("switch ON: an unsaved name draft blocks the dialog's close", async ({ page, loomDaemon }) => {
-    const { project, subject } = await seed(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, project.id);
+  test("an unsaved name draft blocks the dialog's close", async ({ page, loomDaemon }) => {
+    const { project, subject } = await seed(loomDaemon);    await pinProject(page, project.id);
     await page.goto(loomDaemon.baseURL + "/agents");
     const dialog = await openEditor(page, subject.id);
     await dialog.getByTestId(`agent-rename-${subject.id}`).click();
@@ -167,10 +155,8 @@ test.describe("agent rename from the editor (card b0495d0b)", () => {
     await expect(dialog).toBeVisible();
   });
 
-  test("switch ON: a rename made elsewhere while the field is open is followed or stated, never reverted", async ({ page, loomDaemon }) => {
-    const { project, subject } = await seed(loomDaemon);
-    await seedAtlasOn(page);
-    await pinProject(page, project.id);
+  test("a rename made elsewhere while the field is open is followed or stated, never reverted", async ({ page, loomDaemon }) => {
+    const { project, subject } = await seed(loomDaemon);    await pinProject(page, project.id);
     await page.goto(loomDaemon.baseURL + "/agents");
     const dialog = await openEditor(page, subject.id);
     const input = dialog.getByTestId(`agent-name-input-${subject.id}`);
@@ -232,7 +218,7 @@ test.describe("agent rename from the editor (card b0495d0b)", () => {
     expect(await serverName(loomDaemon.baseURL, project.id, subject.id)).toBe(mine);
   });
 
-  test("switch ON: the field is locked while a rename is in flight, and closes on the name it sent", async ({ page, loomDaemon }) => {
+  test("the field is locked while a rename is in flight, and closes on the name it sent", async ({ page, loomDaemon }) => {
     const { project, subject } = await seed(loomDaemon);
     // Hold the rename's POST until the test has looked at the in-flight state.
     let release!: () => void;
@@ -241,9 +227,7 @@ test.describe("agent rename from the editor (card b0495d0b)", () => {
     await page.route(`**/api/agents/${subject.id}`, async (route) => {
       if (route.request().method() === "POST") { heldCount++; await held; }
       await route.continue();
-    });
-    await seedAtlasOn(page);
-    await pinProject(page, project.id);
+    });    await pinProject(page, project.id);
     await page.goto(loomDaemon.baseURL + "/agents");
     const dialog = await openEditor(page, subject.id);
     await dialog.getByTestId(`agent-rename-${subject.id}`).click();

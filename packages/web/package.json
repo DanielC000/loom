@@ -19,7 +19,6 @@
     "test:form-sync": "node --experimental-strip-types test/form-sync.mjs",
     "test:fleet": "node --experimental-strip-types test/fleet.mjs",
     "test:fleet-socket": "node --experimental-strip-types test/fleetSocket.mjs",
-    "test:orchestration-no-global-cluster": "node --experimental-strip-types test/orchestration-no-global-cluster.mjs",
     "test:usage-consumption-wording": "node --experimental-strip-types test/usage-consumption-wording.mjs",
     "test:run-label-copy": "node test/run-label-copy.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",

@@ -946,7 +946,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       // unread badge (`loom-rail-badge-muted`, components/Sidebar.tsx) is driven by `read_at`, not by
       // pending. So a resolved-but-never-opened seeded row keeps adding an ELEMENT to the rail of
       // every later spec on this shared worker daemon — invisible until a spec fingerprints the shell
-      // and reds for something it never did (measured on atlas-switch.spec.ts's BASELINE_SHELL, with
+      // and reds for something it never did (measured on the since-deleted atlas-switch.spec.ts's BASELINE_SHELL, with
       // this very cleanup having already run). Mark read for EVERY type, not just the notice below.
       const markRead = async (id: string) => {
         await fetch(`${baseURL}/api/questions/mark-read`, {

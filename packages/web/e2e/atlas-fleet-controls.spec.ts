@@ -13,7 +13,6 @@
 //   4. Kill all is a genuine TWO-step: the first click fires NOTHING (instrumented, not assumed), the
 //      second fires exactly one POST, and Cancel/Escape disarm with zero requests. The daemon's own
 //      `{stopped:N}` is cross-checked against the count the confirm displayed.
-//   5. SWITCH OFF: Mission Control's own cluster is untouched and nothing Atlas exists.
 //
 // 🔴 WHAT THIS SPEC CANNOT SHOW, STATED RATHER THAN PAPERED OVER. `killAllWorkers` stops a worker by
 // calling `pty.stop(id,"hard")`; the DB row flips to `exited` from the pty's own `onExit`. This fixture
@@ -30,18 +29,6 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
-
-// lib/atlasUi.ts owns this key and the "1" = on encoding. Hardcoded rather than imported: the e2e
-// tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 const uniq = (prefix: string) => `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
@@ -63,10 +50,8 @@ async function restoreOrchestration(loomDaemon: LoomDaemon) {
 test.describe("Atlas fleet controls (card 7b893d54)", () => {
   test.afterEach(async ({ loomDaemon }) => { await restoreOrchestration(loomDaemon); });
 
-  test("switch ON: pause from the bar reads back on the chip, survives a navigation, and resume from the pop-over clears it", async ({ page, loomDaemon }) => {
-    test.setTimeout(90_000);
-    await seedAtlasOn(page);
-    await page.goto(loomDaemon.baseURL + "/home");
+  test("pause from the bar reads back on the chip, survives a navigation, and resume from the pop-over clears it", async ({ page, loomDaemon }) => {
+    test.setTimeout(90_000);    await page.goto(loomDaemon.baseURL + "/home");
 
     const bar = page.getByTestId("atlas-fleet-controls-bar");
     const barPill = bar.getByTestId("fleet-orch-pill");
@@ -123,7 +108,7 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
       .toHaveText(/orchestration: running/i);
   });
 
-  test("switch ON: clear usage hold drops the daemon's real latch", async ({ page, loomDaemon }) => {
+  test("clear usage hold drops the daemon's real latch", async ({ page, loomDaemon }) => {
     // THE BEFORE-STATE. There is no REST or agent write for this latch — only the clear — so seeding it
     // in the daemon's own scratch LOOM_HOME is the documented exception (LoomDaemon.loomHome's own doc),
     // not a shortcut around a surface that exists. usage-awareness.ts reads the file on every call with
@@ -132,8 +117,6 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
     mkdirSync(path.dirname(latch), { recursive: true });
     writeFileSync(latch, JSON.stringify({ lastRateLimitAt: new Date().toISOString() }, null, 2), "utf-8");
     expect(existsSync(latch), "the seeded latch must exist before the click — otherwise its absence after proves nothing").toBe(true);
-
-    await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + "/home");
 
     const bar = page.getByTestId("atlas-fleet-controls-bar");
@@ -158,10 +141,8 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
   // Card 3221d0d9: with NO latch and NO parked session the button is absent altogether. The latch file is
   // removed explicitly (the daemon is shared across specs), and the bar's presence is asserted first so
   // a page that is merely still loading cannot satisfy the zero-count.
-  test("switch ON: clear usage hold is hidden when no latch is armed and no session is parked", async ({ page, loomDaemon }) => {
-    rmSync(latchPath(loomDaemon.loomHome), { force: true });
-    await seedAtlasOn(page);
-    const usage = page.waitForResponse((r) => r.url().endsWith("/api/usage/limits") && r.request().method() === "GET");
+  test("clear usage hold is hidden when no latch is armed and no session is parked", async ({ page, loomDaemon }) => {
+    rmSync(latchPath(loomDaemon.loomHome), { force: true });    const usage = page.waitForResponse((r) => r.url().endsWith("/api/usage/limits") && r.request().method() === "GET");
     await page.goto(loomDaemon.baseURL + "/home");
     const bar = page.getByTestId("atlas-fleet-controls-bar");
     await expect(bar.getByTestId("fleet-pause")).toBeVisible();
@@ -177,7 +158,7 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
   // has no `rateLimitedUntil` field, and a real park needs a real rate-limited claude. The injection
   // stops the moment the button is clicked, so the AFTER state is the daemon's own unparked list: the
   // same session, read back without the mark, is what turns the button quiet again.
-  test("switch ON: clear usage hold is full weight only while a session is parked", async ({ page, loomDaemon }) => {
+  test("clear usage hold is full weight only while a session is parked", async ({ page, loomDaemon }) => {
     rmSync(latchPath(loomDaemon.loomHome), { force: true }); // the BEFORE state must be latch-free whatever ran earlier
     const project = await loomDaemon.createProject(uniq("fleethold"));
     const parked = await loomDaemon.seedLiveSession({ project, role: "worker", agentName: "Dev" });
@@ -190,8 +171,6 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
       const until = new Date(Date.now() + 60 * 60_000).toISOString();
       await route.fulfill({ response: res, json: rows.map((r) => (r.id === parked.sessionId ? { ...r, rateLimitedUntil: until } : r)) });
     });
-
-    await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + "/home");
     const hold = page.getByTestId("atlas-fleet-controls-bar").getByTestId("fleet-clear-hold");
 
@@ -217,7 +196,7 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
     await expect(hold).toHaveCount(0, { timeout: 8_000 });
   });
 
-  test("switch ON: kill all is a real two-step — cancel and Escape fire nothing, Confirm fires once and the daemon acts", async ({ page, loomDaemon }) => {
+  test("kill all is a real two-step — cancel and Escape fire nothing, Confirm fires once and the daemon acts", async ({ page, loomDaemon }) => {
     test.setTimeout(120_000);
 
     // A manager plus exactly two workers, in one project. The manager is the control: `killAllWorkers`
@@ -245,8 +224,6 @@ test.describe("Atlas fleet controls (card 7b893d54)", () => {
       try { stopped = (await res.json() as { stopped: number }).stopped; } catch { /* asserted below */ }
       await route.fulfill({ response: res });
     });
-
-    await seedAtlasOn(page);
     await page.goto(loomDaemon.baseURL + "/home");
 
     const bar = page.getByTestId("atlas-fleet-controls-bar");

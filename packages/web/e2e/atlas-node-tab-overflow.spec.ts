@@ -16,7 +16,7 @@
 // real fold now run at `FOLD_WIDTH` rather than 1440.
 //
 // What each leg measures:
-//   1. SWITCH ON at 1280/1440/1920 — card 4a0ad464's own claim: both home nodes' whole tab block is
+//   1. At 1280/1440/1920 — card 4a0ad464's own claim: both home nodes' whole tab block is
 //      ONE line with NO trigger at all, the row holds the entire declared set, and no KPI strip
 //      exists on it. This leg is RED on the pre-card build at every one of those widths.
 //   2. The PLATFORM node is the INERT control: 5 tabs, never a strip, never a fold. (Stated plainly:
@@ -29,7 +29,6 @@
 //   5. A typed draft in a panel survives a trip out through the menu and back.
 //   6. 720 and 420, where the tree is a drawer (card 49e883a9): no horizontal overflow, the tab row
 //      is one line, and the menu still opens and selects wherever it folds.
-//   7. SWITCH OFF — no trigger and no menu exist anywhere.
 //
 // Presence-first throughout (card 625d791c): a leading `toHaveCount(0)` is satisfied by a page that
 // is merely still loading, so every pair asserts what must BE there before what must not.
@@ -39,18 +38,9 @@
 // assuming it, so a width that stopped folding fails loudly instead of going vacuous.
 import { expect, test, type LoomDaemon, type Page } from "./fixtures/daemon";
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding; lib/activeProject.tsx owns the project
-// one. Hardcoded rather than imported: the e2e tsconfig covers `e2e/` only (tsconfig.e2e.json).
-const ATLAS_KEY = "loom.atlasUi";
+// lib/activeProject.tsx owns the project key. Hardcoded rather than imported: the e2e tsconfig
+// covers `e2e/` only (tsconfig.e2e.json).
 const PROJECT_KEY = "loom.projectId";
-
-// Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
-// navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript((key) => {
-    try { localStorage.setItem(key, "1"); } catch { /* storage unavailable — assertions will say so */ }
-  }, ATLAS_KEY);
-}
 
 // Writes only while the key is still absent: addInitScript re-runs on every navigation, `reload()`
 // included, so an unconditional write would re-pin on a reload and that leg would be measuring this
@@ -216,7 +206,7 @@ async function allReachableKeys(page: Page): Promise<{ row: string[]; menu: stri
  *
  * Use it only where the test must DISCOVER which element holds focus. Where the expected element is
  * already a locator, `await expect(locator).toBeFocused()` says the same thing — that is what the
- * sibling keyboard specs (atlas-board-dialog, atlas-keyboard-shortcuts, atlas-switch) use.
+ * sibling keyboard specs (atlas-board-dialog, atlas-keyboard-shortcuts) use.
  */
 async function focusedTestId(page: Page, want: RegExp | string, message: string): Promise<string> {
   const read = () => page.evaluate(() => document.activeElement?.getAttribute("data-testid") ?? "");
@@ -238,10 +228,9 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
   // ⭐ CARD 4a0ad464's OWN CLAIM, and the DoD clause that asked for 1280/1440/1920 by name. RED on
   // the pre-card build at all three: with the KPI strip beside them neither home node's tabs fitted
   // one line at any of these widths, so both `hasMore` and `stripPresent` came out the other way.
-  test("switch ON at 1280/1440/1920: both home blocks are ONE line, with NO strip and NO More menu", async ({ page, loomDaemon }) => {
+  test("at 1280/1440/1920: both home blocks are ONE line, with NO strip and NO More menu", async ({ page, loomDaemon }) => {
     test.setTimeout(240_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
 
     // Each node's whole declared tab set, read off its own home tab before the measurements below —
@@ -288,9 +277,8 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     expect(offenders, "both home nodes' tab blocks are one unfolded line at every desktop width").toEqual([]);
   });
 
-  test("switch ON at 1440: the Platform node, whose tabs already fit, is untouched", async ({ page, loomDaemon }) => {
+  test("at 1440: the Platform node, whose tabs already fit, is untouched", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
-    await seedAtlasOn(page);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/platform");
 
@@ -305,10 +293,9 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     await expect(page.getByTestId("atlas-node-tabs-menu")).toHaveCount(0);
   });
 
-  test("switch ON: an overflowed tab selected through the menu navigates, and lands IN the row", async ({ page, loomDaemon }) => {
+  test("an overflowed tab selected through the menu navigates, and lands IN the row", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize({ width: FOLD_WIDTH, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/board");
@@ -360,10 +347,9 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     await expect(page.getByTestId("atlas-node-tabs-more")).toHaveAttribute("aria-expanded", "false");
   });
 
-  test("switch ON: the menu is operable from the keyboard alone, and Escape returns focus", async ({ page, loomDaemon }) => {
+  test("the menu is operable from the keyboard alone, and Escape returns focus", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize({ width: FOLD_WIDTH, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/board");
@@ -409,10 +395,9 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     expect(new URL(page.url()).pathname, "a keyboard selection navigates").not.toBe(beforeUrl);
   });
 
-  test("switch ON: an open menu keeps keyboard focus across a relayout", async ({ page, loomDaemon }) => {
+  test("an open menu keeps keyboard focus across a relayout", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize({ width: FOLD_WIDTH, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/board");
@@ -444,10 +429,9 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     await focusedTestId(page, /^atlas-more-item-/, "the arrow keys still work after the relayout");
   });
 
-  test("switch ON: a typed draft survives a trip out through the menu and back", async ({ page, loomDaemon }) => {
+  test("a typed draft survives a trip out through the menu and back", async ({ page, loomDaemon }) => {
     test.setTimeout(180_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
     await page.setViewportSize({ width: FOLD_WIDTH, height: 1000 });
     await page.goto(loomDaemon.baseURL + "/board");
@@ -476,10 +460,9 @@ test.describe("Atlas node tab overflow menu (card d4350286)", () => {
     await expect(draft, "the unsent draft survived the tab round trip").toHaveValue(text);
   });
 
-  test("switch ON at 720 and 420: nothing overflows the viewport and the menu still works", async ({ page, loomDaemon }) => {
+  test("at 720 and 420: nothing overflows the viewport and the menu still works", async ({ page, loomDaemon }) => {
     test.setTimeout(240_000);
     const seeded = await seedProjectWithBoard(loomDaemon);
-    await seedAtlasOn(page);
     await pinProject(page, seeded.project.id);
 
     const declared: Record<string, string[]> = {

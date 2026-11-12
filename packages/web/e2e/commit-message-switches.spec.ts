@@ -34,12 +34,6 @@ async function pinActiveProject(page: Page, projectId: string) {
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
-// lib/atlasUi.ts owns this key and the "1" = on encoding (hardcoded for the same reason
-// atlas-board-dialog.spec.ts hardcodes it: tsconfig.e2e.json covers `e2e/` only).
-async function seedAtlasOn(page: Page) {
-  await page.addInitScript(() => { try { localStorage.setItem("loom.atlasUi", "1"); } catch { /* assertions will say so */ } });
-}
-
 const uniq = (p: string) => `${p}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
 /** The two stored keys as they actually sit on THIS project's override, or null when absent. */
