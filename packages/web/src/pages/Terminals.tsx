@@ -12,7 +12,7 @@ import { Button, Select, Input, StatusPill, SectionLabel } from "../components/u
 import { AgentQuickStart } from "../components/atlasAgents";
 import { HarnessMixProvider } from "../components/HarnessPicker";
 import {
-  AUTO_GRID_TEMPLATE, DEFAULT_TILE_LAYOUT, GRID_COLUMN_CHOICES, applyTileOrder, gridTemplateColumns,
+  AUTO_GRID_TEMPLATE, DEFAULT_TILE_LAYOUT, GRID_COLUMN_CHOICES, TILE_MAX_HEIGHT, applyTileOrder, gridTemplateColumns,
   moveTileInOrder, readTileLayout, writeTileLayout, type GridColumns, type TileLayout,
 } from "../lib/terminalLayout";
 import { maxPinnedCols, usePinnedCols } from "../lib/pinnedGeometry";
@@ -22,15 +22,6 @@ import { color, font, fs, radius } from "../theme";
 // each tile hugs its own content up to its cap rather than being stretched to the tallest tile in the row
 // (which padded a bare card out below its composer). Content-dynamic per-card height is the intended shape.
 const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: AUTO_GRID_TEMPLATE, gap: 12, alignItems: "start" };
-
-/**
- * A session tile's HUG cap: a MAXIMUM, so a tile is only as tall as its width-bound grid needs.
- *
- * @decision 53dfa70c — keep it tall enough that the pinned grid stays WIDTH-bound up to the widest
- * 1-column `auto` card (~1120px). The font solver fits by both axes, so at 540 the height bound won
- * from a ~790px card on and the grid stopped growing while the card kept widening.
- */
-const TILE_MAX_HEIGHT = 760;
 
 /** What each column choice is called in the picker. `auto` names what it does, not its number. */
 const COLUMN_LABELS: Record<GridColumns, string> = {

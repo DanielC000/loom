@@ -17,6 +17,8 @@ import { PlatformFindings } from "./PlatformFindings";
 import { color, font, fs, radius } from "../theme";
 import { errorText } from "../lib/loopbackCredential";
 import { roleDisplay } from "../lib/roleDisplay";
+import { TILE_MAX_HEIGHT, autoGridTemplate } from "../lib/terminalLayout";
+import { maxPinnedCols, usePinnedCols } from "../lib/pinnedGeometry";
 import {
   type PlatformEdition, type PlatformSpawnRole, type AgentCardCopy, type HistoryCopy,
   operatorSpawnDisabled, auditorSpawnDisabled, resolveOperatorSpawnRole,
@@ -592,11 +594,18 @@ function AgentControl({ edition, agent, role, card, session, liveCount, showLive
 function PlatformSessions({ sessions, emptyLabel, previewOnly }:
   { sessions: SessionListItem[]; emptyLabel: string; previewOnly: boolean }) {
   const live = sessions.filter((s) => s.processState === "live");
+  // The Terminals page's own template and cap (lib/terminalLayout.ts), never a local pair: `min(100%, …)`
+  // keeps a phone from scrolling sideways, the pinned-cols floor keeps a wide grid readable, and the
+  // shared cap keeps the grid WIDTH-bound so every card in a row draws the same terminal.
+  const pinnedCols = usePinnedCols();
   if (live.length === 0) return <p style={{ color: color.text3, marginTop: 0 }}>{emptyLabel}</p>;
-  const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(560px, 1fr))", gap: 12, alignItems: "start" };
+  const grid: CSSProperties = {
+    display: "grid", gap: 12, alignItems: "start",
+    gridTemplateColumns: autoGridTemplate(maxPinnedCols(pinnedCols, live.map((s) => s.id))),
+  };
   return (
-    <div style={grid}>
-      {live.map((s) => <PlatformSessionTile key={s.id} session={s} height={440} previewOnly={previewOnly} />)}
+    <div style={grid} data-testid="platform-sessions-grid">
+      {live.map((s) => <PlatformSessionTile key={s.id} session={s} height={TILE_MAX_HEIGHT} previewOnly={previewOnly} />)}
     </div>
   );
 }
@@ -606,7 +615,9 @@ function PlatformSessions({ sessions, emptyLabel, previewOnly }:
 function SingleSession({ session, empty, stopTitle, previewOnly }:
   { session?: SessionListItem; empty: string; stopTitle?: string; previewOnly: boolean }) {
   if (!session) return <p style={{ color: color.text3, marginTop: 0 }}>{empty}</p>;
-  return <PlatformSessionTile session={session} height={480} maxWidth={920} stopTitle={stopTitle}
+  // The shared cap, so the grid stays width-bound inside the 920 reading width and the operator and
+  // auditor tiles draw the same terminal whatever chrome (a task bar, wakes) either one carries.
+  return <PlatformSessionTile session={session} height={TILE_MAX_HEIGHT} maxWidth={920} stopTitle={stopTitle}
     previewOnly={previewOnly} />;
 }
 

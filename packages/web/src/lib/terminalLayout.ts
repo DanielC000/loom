@@ -29,6 +29,20 @@ export type GridColumns = (typeof GRID_COLUMN_CHOICES)[number];
 export const AUTO_GRID_TEMPLATE = "repeat(auto-fill, minmax(min(100%, 560px), 1fr))";
 
 /**
+ * A live-session tile's HUG cap: a MAXIMUM, so a tile is only as tall as its width-bound grid needs.
+ * Shared by every grid of live terminal cards (the Terminals page and the Platform node), so the same
+ * card at the same width renders the same terminal on both.
+ *
+ * @decision 53dfa70c — keep it tall enough that the pinned grid stays WIDTH-bound up to the widest
+ * 1-column `auto` card (~1120px). The font solver fits by both axes, so at 540 the height bound won
+ * from a ~790px card on and the grid stopped growing while the card kept widening.
+ * @decision b8b7b969 — never give a terminal-card surface its own lower cap: the Platform node's 440/480
+ * made its grid height-bound past ~560px, so cards widened around a stalled terminal and two cards in
+ * one row drew different terminal sizes (each budget is the cap minus that card's own chrome).
+ */
+export const TILE_MAX_HEIGHT = 760;
+
+/**
  * The narrowest tile an explicit column count may produce, and the grid's own `gap` (pages/
  * Terminals.tsx `gridStyle`) that the share-out has to account for.
  *
