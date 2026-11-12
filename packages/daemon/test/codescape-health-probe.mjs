@@ -117,6 +117,17 @@ const STALL_TIMEOUT_MS = ambientScaledBudget(8000, 3);
 // runner's per-file timeout in that case. This is deliberate, not an oversight: a slow, loud hang beats a
 // fast false FAIL on a healthy-but-contended system, which is the defect this helper replaces. Do not
 // read "has a stallTimeoutMs" as "is bounded against its own condition never becoming true" — it isn't.
+// Polls an OBSERVABLE condition against a wall-clock deadline — for scenarios whose real health-probe timer
+// is deliberately off (a long healthProbeIntervalMs), where tick progress (above) can never advance.
+async function waitForObservable(cond, { pollMs = 25, timeoutMs = STALL_TIMEOUT_MS } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) return false;
+    await sleep(pollMs);
+  }
+  return true;
+}
+
 async function waitForCompletedCondition(cond, tickCounter, { pollMs = 25, stallTimeoutMs = STALL_TIMEOUT_MS } = {}) {
   let lastTicks = tickCounter();
   let lastProgressAt = Date.now();
@@ -2279,10 +2290,14 @@ for (const kind of ["PASS", "diagnostic"]) {
       memorySampler: async () => ({ ok: true, bytes: 10 * 1024 * 1024 }),
       restartBackoffMs: [50, 100, 150],
       healthyRunMs: 60_000,
-      healthProbeIntervalMs: 60,
+      // Long enough the REAL timer never fires — every tick below is driven directly. With the wedge flag
+      // already on disk, a short interval let the real timer wedge-kill AND SIGKILL-escalate the child
+      // during the start-up wait, so on a slower host (ubuntu CI) the supervisor was already mid-restart
+      // (getPid() null) when "initial serve spawned" was read. Same rationale as (22-win32) above.
+      healthProbeIntervalMs: 10 * 60_000,
       healthProbeTimeoutMs: 40,
       healthProbeFailureThreshold: 1,
-      killEscalationProbeTicks: 2,
+      killEscalationProbeTicks: 1,
     });
     await posixSup.start(["/fake/repo/kill-escalation-posix"]);
     await waitForCompletedCondition(() => posixSup.getPort() !== null, () => posixSup.getCompletedProbeTickCount());
@@ -2292,21 +2307,19 @@ for (const kind of ["PASS", "diagnostic"]) {
     const errs = captureErrors();
     await posixSup.runOneHealthProbeForTest(); // fires the wedge kill (SIGTERM) — the fixture traps it, survives
     check("(22-posix) the wedge kill latched and the child genuinely survives the SIGTERM",
-      posixSup.getPid() === pidBefore);
+      posixSup.getPid() === pidBefore && posixSup.childKillPid === pidBefore);
 
-    // killEscalationProbeTicks=2 @ healthProbeIntervalMs=60 — age must reach >=120ms. Direct ticks bypass
-    // the real timer, but the escalation's own clock is wall-clock Date.now(), so real time must actually
-    // elapse between ticks here.
-    let escalated = false;
-    for (let i = 0; i < 20 && !escalated; i++) {
-      await sleep(70);
-      await posixSup.runOneHealthProbeForTest();
-      escalated = errs.lines.some((l) => l.includes("escalating to SIGKILL"));
-    }
-    check("(22-posix) precondition: the loop above actually observed the escalation within its bound", escalated === true);
+    // Fast-forward the latch age past the escalation threshold (as (22-win32)/(22-zombie) do), then drive
+    // the next tick directly: it takes the isChildKillLatched() branch and sends a REAL SIGKILL.
+    posixSup.childKillIssuedAt = Date.now() - (10 * 60_000 * 1 + 1000);
+    await posixSup.runOneHealthProbeForTest();
+    const escalated = errs.lines.some((l) => l.includes("escalating to SIGKILL"));
+    check("(22-posix) precondition: the direct tick observed the escalation", escalated === true);
     check("(22-posix) the escalation fires exactly once", errs.lines.filter((l) => l.includes("escalating to SIGKILL")).length === 1);
 
-    await waitForCompletedCondition(() => posixSup.getPid() !== pidBefore, () => posixSup.getCompletedProbeTickCount());
+    // The real exit -> scheduleRestart path respawns after restartBackoffMs; the real timer is off, so poll
+    // the observable condition itself against a load-scaled deadline rather than tick progress.
+    await waitForObservable(() => posixSup.getPid() !== null && posixSup.getPid() !== pidBefore);
     check("(22-posix) SIGKILL genuinely ended the trapped child — a real respawn followed",
       posixSup.getPid() !== pidBefore && posixSup.getPid() !== null);
     check("(22-posix) no 'still alive after SIGKILL' warning (the real SIGKILL worked)",

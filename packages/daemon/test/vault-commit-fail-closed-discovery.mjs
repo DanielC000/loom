@@ -223,9 +223,20 @@ process.env.GIT_CEILING_DIRECTORIES = root;
     return real;
   };
 
-  const result = await commitVault(vault, "loom: first commit under a simulated localized host", {
-    deps: { gitFactory: localeAwareGitFactory },
-  });
+  // commitVault skips its generic-identity fallback whenever a test gitFactory is injected (the fake never
+  // receives env), so this commit runs under whatever identity the HOST resolves. An identity-less host
+  // (ubuntu CI runner: "empty ident name") then failed "Author identity unknown" — pin one for this call.
+  const IDENT_ENV = { GIT_AUTHOR_NAME: "vault-fail-closed-test", GIT_AUTHOR_EMAIL: "vault-fail-closed@example.com", GIT_COMMITTER_NAME: "vault-fail-closed-test", GIT_COMMITTER_EMAIL: "vault-fail-closed@example.com" };
+  const savedIdentEnv = Object.fromEntries(Object.keys(IDENT_ENV).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, IDENT_ENV);
+  let result;
+  try {
+    result = await commitVault(vault, "loom: first commit under a simulated localized host", {
+      deps: { gitFactory: localeAwareGitFactory },
+    });
+  } finally {
+    for (const [k, v] of Object.entries(savedIdentEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 
   // THE PINNED PATH: both probes' git instances actually carry the locale pin — fails RED if either call
   // site stops passing env, or passes GIT_DIR/GIT_WORK_TREE instead of the locale-only override.
