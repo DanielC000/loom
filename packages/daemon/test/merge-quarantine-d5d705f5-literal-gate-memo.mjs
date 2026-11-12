@@ -155,7 +155,8 @@ const junctionTargetDir = fs.mkdtempSync(path.join(loomHome, "junction-target-")
 fs.symlinkSync(junctionTargetDir, identityULit, "junction");
 const tLit1 = raiseAndClear(identityULit);
 const tLit2 = raiseAndClear(identityULit);
-fs.rmdirSync(identityULit); // removes the junction stub itself -- never recurses into junctionTargetDir
+// win32: rmdir removes the junction; POSIX: the junction is a symlink, which rmdir refuses (ENOTDIR).
+if (process.platform === "win32") fs.rmdirSync(identityULit); else fs.unlinkSync(identityULit); // removes the junction stub itself -- never recurses into junctionTargetDir
 
 const resultLit = readSurvivingOnDiskTokensTestOnly({ tokens: [tLit1, tLit2] }, identityULit);
 check("M3: tLit1 does NOT survive (tombstoned via the LITERAL key -- direct no longer matches post-removal)", !resultLit.surviving.includes(tLit1));

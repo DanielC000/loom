@@ -48,6 +48,11 @@ try {
   const X = path.join(os.tmpdir(), `loom-mq6b32-ghost-X-${freshSfx()}`);
   const K = "mq6b32-i1-key-" + freshSfx();
   const C = path.join(os.tmpdir(), `loom-mq6b32-ghost-C-${freshSfx()}`);
+  // Production records a reduced-out contributor as its directPathIdentity (reduceForeignUnionContributor /
+  // markIdentityAsReducedOnForeignKey add the identity, never the raw path). The raw path only differs from
+  // it on win32 (lowercased), which used to mask the reduced-arm behaviour asserted at the end of this
+  // scenario on that platform alone — so the fixture uses the production form on every platform.
+  const Cid = mod.directPathIdentity(C);
   const t1 = "tok-t1-" + freshSfx();
   const t2 = "tok-t2-" + freshSfx();
   const enteredAt = Date.now();
@@ -55,7 +60,7 @@ try {
   fs.mkdirSync(mod.MERGE_QUARANTINE_DIR, { recursive: true });
 
   // The ALREADY-REDUCED shared object: contributorRepoPaths dropped, reducedContributorRepoPaths:[C].
-  const reducedEntry = { repoPath: X, branch: "loom/x-branch", reason: "merge in progress for X (6b327712 item1)", enteredAt, tokens: [t1, t2], contributorRepoPaths: undefined, reducedContributorRepoPaths: [C], armedKeys: [K] };
+  const reducedEntry = { repoPath: X, branch: "loom/x-branch", reason: "merge in progress for X (6b327712 item1)", enteredAt, tokens: [t1, t2], contributorRepoPaths: undefined, reducedContributorRepoPaths: [Cid], armedKeys: [K] };
 
   // X's own separate PENDING file P: STALE — still names C in contributorRepoPaths.
   const pendingBasename = `mq6b32-i1-pending-${freshSfx()}.json`;
@@ -69,7 +74,7 @@ try {
   check("precondition: X's own stale pending file P still names contributor C on disk", JSON.stringify(JSON.parse(fs.readFileSync(pendingPath, "utf8")).contributorRepoPaths) === JSON.stringify([C]));
   const beforeRebase = mod.stillBlockedEntryFor(X); // PURE peek — never activeMergeQuarantineFor/resolveQuarantineFor
   check("precondition: X correctly shows NO contributorRepoPaths before the rebase", !!beforeRebase && beforeRebase.contributorRepoPaths === undefined);
-  check("precondition: reducedContributorRepoPaths already correctly names C", Array.isArray(beforeRebase.reducedContributorRepoPaths) && beforeRebase.reducedContributorRepoPaths.includes(C));
+  check("precondition: reducedContributorRepoPaths already correctly names C", Array.isArray(beforeRebase.reducedContributorRepoPaths) && beforeRebase.reducedContributorRepoPaths.includes(Cid));
 
   const idx = mod.findPendingIndexByIdentityTestOnly(X);
   check("precondition: X's pending wrapper found", idx !== -1);
@@ -79,14 +84,17 @@ try {
 
   const afterRebase = mod.stillBlockedEntryFor(X);
   check("*** FIX *** C is NOT resurrected into contributorRepoPaths — RED before this card (resurrected)", afterRebase?.contributorRepoPaths === undefined);
-  check("reducedContributorRepoPaths still correctly names C (unchanged by this fix)", Array.isArray(afterRebase?.reducedContributorRepoPaths) && afterRebase.reducedContributorRepoPaths.includes(C));
+  check("reducedContributorRepoPaths still correctly names C (unchanged by this fix)", Array.isArray(afterRebase?.reducedContributorRepoPaths) && afterRebase.reducedContributorRepoPaths.includes(Cid));
   const onDiskAfter = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
   check("*** FIX *** on-disk P no longer names C in contributorRepoPaths either", onDiskAfter.contributorRepoPaths === undefined || !onDiskAfter.contributorRepoPaths.includes(C));
 
-  // The consequence: a real human /clear on X's own active key must NOT offer C as a lift candidate —
-  // it was already durably accounted for via reducedContributorRepoPaths.
+  // The consequence: a real human /clear on X's own active key reports C exactly ONCE, via the reduced-out
+  // arm (C's identity is still blocked by X until X is cleared — 3b1944b6 rounds 6-8). It must not be
+  // listed twice (once via the resurrected contributor entry, once via the reduced arm). This does not
+  // discriminate the pre-fix code on its own (the lifted list is de-duplicated); the three resurrection
+  // checks above are what pin this card's fix.
   const clearResult = mod.clearMergeQuarantineByKey(K, X, undefined, true);
-  check("*** FIX (over-report) *** C is NOT reported as a genuinely lifted repoPath — RED before this card (over-reported)", !clearResult.liftedRepoPaths.includes(C));
+  check("C is reported as lifted exactly once, via the reduced-out arm", clearResult.liftedRepoPaths.filter((p) => mod.directPathIdentity(p) === Cid).length === 1);
 
   // ═══════════════════════════════════════════════════════════════════════════════════════════════════
   // (RE-RAISE, Round 2 B-1) reducedContributorRepoPaths is STICKY and a re-raise can LEGITIMATELY re-add

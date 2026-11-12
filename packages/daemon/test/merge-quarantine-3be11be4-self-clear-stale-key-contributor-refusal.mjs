@@ -80,7 +80,7 @@ function checkMirrorPrecondition(tag, R, sub) {
   // @decision 3be11be4 (Round 2, item 4) — `?.` here so a future negative-control revert (which can
   // legitimately leave `reason` undefined) fails these three checks rather than crashing past them.
   check("(i-clear) the refusal names R", !!result.reason?.includes(R));
-  check("(i-clear) the refusal does NOT recommend clear-by-path with sub's own path (that route now ALSO refuses)", !result.reason?.includes(`clear-by-path with one of ["${sub}"`));
+  check("(i-clear) the refusal does NOT recommend clear-by-path with sub's own path (that route now ALSO refuses)", !result.reason?.includes(`clear by repoPath instead: POST /internal/merge-quarantine/clear-by-path with one of ${JSON.stringify([sub]).slice(0, -1)}`));
   check("(i-clear) the refusal names the project-resolved /clear route as the one that actually works", !!result.reason?.includes("/internal/merge-quarantine/clear"));
 }
 
@@ -106,7 +106,7 @@ function checkMirrorPrecondition(tag, R, sub) {
   const id = quarantineLatchIdFor(sub);
   const result = clearMergeQuarantineLatchFile(id);
   check("(iii-clearbyid) clear-by-id refuses (pre-existing, unaffected posture — ambiguous contributorRepoPaths)", result.ok === false);
-  check("*** THE FIX (iii-clearbyid) *** the corrected text no longer recommends clear-by-path with sub's own path", !result.reason.includes(`clear-by-path with one of ["${sub}"`));
+  check("*** THE FIX (iii-clearbyid) *** the corrected text no longer recommends clear-by-path with sub's own path", !result.reason.includes(`clear by repoPath instead: POST /internal/merge-quarantine/clear-by-path with one of ${JSON.stringify([sub]).slice(0, -1)}`));
   check("*** THE FIX (iii-clearbyid) *** the corrected text names the project-resolved /clear route instead", result.reason.includes("project-resolved POST /internal/merge-quarantine/clear"));
   check("(iii-clearbyid) R is still blocked", assertRepoNotQuarantined(R).ok === false);
 }
@@ -372,12 +372,15 @@ function checkMirrorPrecondition(tag, R, sub) {
   // before isNestedUnderKey ever sees them, so nesting is still correctly detected either way.
   const RUpperSpelling = R.toUpperCase();
   const subWithTrailingSep = sub + path.sep;
-  check("*** (nest-case) *** an upper-cased spelling of R still normalizes to the SAME key as R itself",
+  // Case-folding is win32-only by design (see directPathIdentity): on a case-sensitive filesystem an
+  // upper-cased spelling is a DIFFERENT, nonexistent path, so the two upper-case checks apply to win32 only.
+  const caseInsensitive = process.platform === "win32";
+  if (caseInsensitive) check("*** (nest-case) *** an upper-cased spelling of R still normalizes to the SAME key as R itself",
     directPathIdentity(RUpperSpelling) === canonicalRepoLockKey(R));
   check("*** (nest-case) *** a trailing-separator spelling of sub still normalizes to the SAME identity as sub itself",
     directPathIdentity(subWithTrailingSep) === directPathIdentity(sub));
   check("*** (nest-case) *** nesting still holds through differently-spelled (case/trailing-slash) inputs, end-to-end",
-    isNestedUnderKey(directPathIdentity(subWithTrailingSep), canonicalRepoLockKey(RUpperSpelling)));
+    isNestedUnderKey(directPathIdentity(subWithTrailingSep), canonicalRepoLockKey(caseInsensitive ? RUpperSpelling : R)));
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════

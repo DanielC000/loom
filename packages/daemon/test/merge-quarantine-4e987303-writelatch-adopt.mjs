@@ -332,6 +332,9 @@ for (const marked of [true, false]) {
 // Proves ONE /clear call sticks, in memory AND on disk, for every spelling disk might carry.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
 for (const { marked, variant } of [{ marked: true, variant: "same" }, { marked: false, variant: "same" }, { marked: true, variant: "upper" }, { marked: true, variant: "fwdslash" }]) {
+  // An upper-cased spelling is the SAME identity only on a case-insensitive filesystem (win32); elsewhere
+  // it names a different, nonexistent path (realpath ENOENT), so the variant has no meaning there.
+  if (variant === "upper" && process.platform !== "win32") continue;
   const tag = `s6-${marked ? "marked" : "unmarked"}-${variant}`;
   // @decision 4e987303 (round 3) — dId must share Y's own canonical key (ancestor-walk collision, same
   // as scenarios 1/5) — a bare standalone dir resolves its OWN path as its key, never reaches `freshIsForeign`.

@@ -151,7 +151,10 @@ function placeholderize(key, finalPath, repoPath, memTokens, diskTokens, diskBra
 // one site but not the other swaps a fail-open for a forever-stuck (a genuinely-cleared token that can
 // never again be recognized as cleared against its own record).
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════
-{
+// Case/separator-insensitive identity is a win32 property: on a case-sensitive POSIX filesystem an
+// upper-cased, slash-flipped spelling is simply a different path, so the scenario has no meaning there.
+if (process.platform !== "win32") note("(s5) skipped: case/separator spelling variants are the same identity on win32 only");
+else {
   const y = freshRepo("s5-y");
   const k = canonicalRepoLockKey(y);
   const fin = path.join(MERGE_QUARANTINE_DIR, `${hashForKey(k)}.json`);
