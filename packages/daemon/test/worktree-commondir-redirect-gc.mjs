@@ -44,6 +44,12 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 useOwnLoomHome("b4cc-gc-home-");
 
+// A test-owned git identity for the whole process: case (9) runs a real union-forward under the
+// `gitFactory` test seam, and `killableCanonicalRaw` ignores its `env` argument (the production
+// identity-fallback) whenever a factory is supplied — the merge commit then needs an identity from the
+// AMBIENT environment, which a clean CI runner does not have.
+Object.assign(process.env, { GIT_AUTHOR_NAME: "b4cc", GIT_AUTHOR_EMAIL: "b4cc@loom", GIT_COMMITTER_NAME: "b4cc", GIT_COMMITTER_EMAIL: "b4cc@loom" });
+
 const { worktreeHasWork, worktreeHasWorkDetailed, detectStrandedWork, readWorktreeUncommittedState, precheckWorkerDone, mergeMainIntoWorktree } = await import("../dist/git/worktrees.js");
 const { CanonicalGitRefusal, boundedSimpleGit } = await import("../dist/git/bounded.js");
 

@@ -40,7 +40,7 @@ function newRepo(name) {
 function listLocalBranches(repo) {
   // Deliberately NOT the function under test — a raw, independent read so the assertion never
   // bottoms out on the same primitive it's trying to verify.
-  return git(repo, "branch --list --format=%(refname:lstrip=2)").split("\n").map((s) => s.trim()).filter(Boolean);
+  return git(repo, `branch --list "--format=%(refname:lstrip=2)"`).split("\n").map((s) => s.trim()).filter(Boolean);
 }
 
 try {

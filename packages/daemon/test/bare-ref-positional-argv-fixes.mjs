@@ -322,7 +322,7 @@ try {
     execSync(`git checkout -q master`, { cwd: repo });
     fs.writeFileSync(path.join(repo, "mainfile.txt"), "mainfile\n");
     execSync(`git add -A && git ${GIT_ID} commit -q -m mainfile`, { cwd: repo });
-    execSync(`git merge --no-ff -q -m merge-otherline otherline`, { cwd: repo });
+    execSync(`git ${GIT_ID} merge --no-ff -q -m merge-otherline otherline`, { cwd: repo });
     const mergeSha = git(repo, "rev-parse HEAD");
 
     check("(1) PRECONDITION: the merge commit's own diff-tree --cc is empty (a clean union, no " +

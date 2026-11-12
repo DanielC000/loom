@@ -46,6 +46,12 @@ import { lateCommitBeforeSquashTarget } from "./_late-commit-seam.mjs";
 
 useOwnLoomHome("loom-26c12fac-");
 
+// A test-owned git identity for the whole process: the race landings below run under the
+// `soloMergeGitFactory` test seam, and `killableCanonicalRaw` ignores its `env` argument (the production
+// identity-fallback) whenever a factory is supplied — the squash commit then needs an identity from the
+// AMBIENT environment, which a clean CI runner does not have.
+Object.assign(process.env, { GIT_AUTHOR_NAME: "mlrr", GIT_AUTHOR_EMAIL: "mlrr@loom", GIT_COMMITTER_NAME: "mlrr", GIT_COMMITTER_EMAIL: "mlrr@loom" });
+
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv();
 

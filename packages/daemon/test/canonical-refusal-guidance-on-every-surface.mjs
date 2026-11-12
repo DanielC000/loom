@@ -77,6 +77,12 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+// A test-owned git identity for the whole process. This file drives merge-path code through the
+// `gitFactory` test seam, and `killableCanonicalRaw` ignores its `env` argument (the production
+// identity-fallback) whenever a factory is supplied — so any commit made under the seam needs an identity
+// from the AMBIENT environment, which a clean CI runner does not have. Never rely on the host's.
+Object.assign(process.env, { GIT_AUTHOR_NAME: "crg", GIT_AUTHOR_EMAIL: "crg@loom", GIT_COMMITTER_NAME: "crg", GIT_COMMITTER_EMAIL: "crg@loom" });
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, "..", "dist", "git");
 const { assembleBatchBranches } = await import(pathToFileURL(path.join(distDir, "batch-merge.js")).href);
