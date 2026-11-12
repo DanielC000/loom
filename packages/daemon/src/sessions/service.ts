@@ -13800,8 +13800,18 @@ export class SessionService {
    * regardless of liveness and redrives once the parent comes back), rather than silently dropping it the
    * way treating "unknown" the same as "live and stuck" previously did.
    */
-  handleClaudeBootDialogStuck(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null; phase?: "boot" | "mid-session"; escalation?: boolean }): void {
+  handleClaudeBootDialogStuck(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null; phase?: "boot" | "mid-session"; escalation?: boolean; modeMismatch?: { target: string; landed: string } }): void {
     const s = this.db.getSession(sessionId);
+    if (info.modeMismatch) {
+      // @decision f951417c — the boot mode-cycle never pressed (a write-blocking modal outlasted its bounded wait): file ONE
+      // owner-visible (parentNudged:false) event naming target + landed mode. Never nudges the stuck session itself (01160ae3).
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s?.parentSessionId ?? sessionId,
+        workerSessionId: sessionId, taskId: s?.taskId ?? null, kind: "claude_boot_dialog_stuck",
+        detail: { timeoutMs: info.timeoutMs, signatureName: info.signatureName, role: info.role, parentNudged: false, phase: "mid-session", modeMismatch: info.modeMismatch },
+      });
+      return;
+    }
     if (info.escalation) {
       // @decision 20ff76de — the once-per-episode OWNER escalation of a still-held mid-session modal: files
       // an owner-visible (parentNudged:false) event UNLESS this episode's own event already is. Never nudges.

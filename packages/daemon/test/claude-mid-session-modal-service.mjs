@@ -150,6 +150,20 @@ try {
     try { sessions.deliverRedirect(target, "do X", opts); } catch (e) { msg = e.message; }
     check("(F) positive control: an UNHELD target also proceeds past the refusal check", msg === "REACHED-flushPending" && pty.flushed === true);
   }
+
+  // ===== (G) card f951417c: a modal-blocked boot mode-cycle's mismatch is a DURABLE, owner-visible event =====
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `cmms-g-mgr-${sfx}`, wkr = `cmms-g-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" }); mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setPastBoot(mgr);
+    sessions.handleClaudeBootDialogStuck(wkr, { timeoutMs: 0, signatureName: "unknown-modal", role: "worker", phase: "mid-session", modeMismatch: { target: "default", landed: "acceptEdits" } });
+    const ev = stuckEvents(wkr);
+    check("(G) one durable event naming target + landed mode, owner-visible (parentNudged:false), phase mid-session",
+      ev.length === 1 && ev[0].detail.modeMismatch?.target === "default" && ev[0].detail.modeMismatch?.landed === "acceptEdits" && ev[0].detail.parentNudged === false && ev[0].detail.phase === "mid-session");
+    check("(G) nobody is written to (the stuck session itself never; the parent is not nudged either)", pty.enqueueCalls.length === 0);
+  }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }

@@ -1673,8 +1673,10 @@ export const MODE_LOG_MAX_ATTEMPTS = 8; // ≤ ~4s of best-effort polling, then 
  * target ABSOLUTELY for BOTH a fresh spawn and a resume: press one Shift+Tab, then poll the footer until
  * it CHANGES (the press registered) before deciding again — so a laggy repaint can never trick us into
  * overshooting. Polling cadence + the per-press change-wait cap (≈3s) and the total press cap. Sized so
- * the whole loop (worst case ≈ MAX_PRESSES × CHANGE_MAX_POLLS × POLL_MS + settle ≈ 13–14s) finishes
- * COMFORTABLY under MODE_CYCLE_FALLBACK_MS (20s, re-armed from SessionStart — see its own doc; card
+ * the whole loop (worst case ≈ MAX_PRESSES × CHANGE_MAX_POLLS × POLL_MS = 12s + settle 0.7s ≈ 12.7s, plus
+ * a pre-press wait on a write-blocking modal of up to settle + 2s ≈ 3.5s, so ≈ 16.2s at the real
+ * MODAL_DISMISS_SETTLE_MS; that wait is itself clamped to MODE_CYCLE_FALLBACK_MS from the cycle's start,
+ * card f951417c) finishes under MODE_CYCLE_FALLBACK_MS (20s, re-armed from SessionStart — see its own doc; card
  * c469d54e corrected this comment, which previously named READY_FALLBACK_MS here — that constant is
  * SPAWN-anchored and no longer what a healthy in-flight cycle races against once SessionStart has fired)
  * — the mode-cycle fallback must not fire mid-cycle and release queued injections before the mode settles
@@ -1683,6 +1685,8 @@ export const MODE_LOG_MAX_ATTEMPTS = 8; // ≤ ~4s of best-effort polling, then 
 const RESUME_MODE_READ_POLL_MS = Number(process.env.LOOM_RESUME_MODE_POLL_MS) || 200;
 const RESUME_MODE_CHANGE_MAX_POLLS = Number(process.env.LOOM_RESUME_MODE_MAX_POLLS) || 15;
 const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES) || 4;
+/** Lives that already filed their durable modal-blocked mode-mismatch event (card f951417c): once per Live. */
+const modeMismatchReported = new WeakSet<object>();
 /**
  * `logLandedMode`'s auto-heal trigger set (card 9c03f5a6) — every DEFINITE `LandedMode` reading short of
  * the session's own configured target (`auto` for the platform default). Deliberately an explicit
@@ -4371,7 +4375,7 @@ export interface PtyHostEvents {
    *  ceiling (never retried; a late SessionStart still resolves normally). Fires on the timeout whether or
    *  not a signature matched — `signatureName` null means nothing recognized was in the scan buffer, not
    *  that the session is fine. Never carries screen content — signature NAME only. */
-  onClaudeBootDialogStuck?(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null; phase?: "boot" | "mid-session"; escalation?: boolean }): void;
+  onClaudeBootDialogStuck?(sessionId: string, info: { timeoutMs: number; signatureName: string | null; role: SessionRole | null; phase?: "boot" | "mid-session"; escalation?: boolean; modeMismatch?: { target: string; landed: string } }): void;
   /** Card b1da256d — the RESOLVE half of the pair above: fired from `deliverHook` the first time
    *  `Live.anyHookObserved` flips false→true for THIS Live incarnation (see that flip site's own doc) —
    *  never scoped to the `SessionStart` hook alone, so a non-SessionStart first hook under the
@@ -14936,6 +14940,22 @@ export class PtyHost {
     live.modeCycleChain = live.modeCycleChain.then(runQueued, runQueued);
   }
 
+  /** Card f951417c — the owner-visible, DURABLE half of a modal-blocked boot cycle's mismatch (a console line alone is
+   *  not surfaced). Rides the existing `onClaudeBootDialogStuck` pair (no new channel); once per Live. */
+  private reportModeMismatch(sessionId: string, live: Live, target: LandedMode, landed: LandedMode): void {
+    if (modeMismatchReported.has(live)) return;
+    modeMismatchReported.add(live);
+    try {
+      this.events.onClaudeBootDialogStuck?.(sessionId, {
+        timeoutMs: 0, signatureName: live.midSessionModal?.signature ?? live.modalCandidate?.signature ?? null, role: live.role ?? null,
+        phase: "mid-session", modeMismatch: { target, landed },
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`[resume-mode] ${sessionId} onClaudeBootDialogStuck (mode mismatch) handler threw — swallowed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+
   /** The actual press-and-verify cycle loop, run EXCLUSIVELY (see cycleToMode's queueing above) — never
    *  call this directly; go through `cycleToMode`.
    *
@@ -14945,6 +14965,10 @@ export class PtyHost {
    */
   private runCycleToMode(sessionId: string, target: LandedMode, startLive: Live, onDone: () => void): void {
     let presses = 0;
+    // Clamped to the fallback headroom: never past MODE_CYCLE_FALLBACK_MS from the cycle's own start, so a large
+    // LOOM_MODAL_DISMISS_SETTLE_MS cannot push the wait past the fallback that releases the session.
+    const cycleStartedAt = Date.now();
+    const modalWaitDeadline = cycleStartedAt + Math.min(MODE_CYCLE_SETTLE_MS + MODAL_DISMISS_SETTLE_MS + 2000, MODE_CYCLE_FALLBACK_MS);
     let finished = false;
     const finish = (reason: string, mode: LandedMode): void => {
       if (finished) return;
@@ -14966,6 +14990,23 @@ export class PtyHost {
       const action = nextCycleAction({ current: cur, target, presses, maxPresses: RESUME_MODE_MAX_PRESSES });
       if (action === "done") { finish("reached", cur); return; }
       if (action === "giveup") { finish("press-cap", cur); return; }
+      // @decision f951417c — wait (bounded) on `modalWriteBlocked` before pressing; never exempt Shift+Tab
+      // from the chokepoint, and never swallow expiry (a dropped press strands `default` in acceptEdits).
+      if (this.modalWriteBlocked(live)) {
+        // An ENGAGED hold never clears on its own (only a hook/human releases it): waiting is pure delay.
+        if (live.midSessionModal || Date.now() >= modalWaitDeadline) {
+          // eslint-disable-next-line no-console
+          console.error(`[resume-mode] ${sessionId} MODE MISMATCH — cycle→${target} never pressed: write chokepoint still blocked on an on-screen prompt after ${Date.now() - cycleStartedAt}ms; session stays in ${cur}`);
+          // Engage the hold exactly as the refused press used to (PROMPT HELD row + owner escalation); it exempts a
+          // settling candidate itself, so this cannot revive the 5450ad93 deadlock.
+          this.modalBlockedEngaging(sessionId, live);
+          this.reportModeMismatch(sessionId, live, target, cur);
+          finish("modal-blocked", cur);
+          return;
+        }
+        setTimeout(() => { const m = this.readFooterMode(live); decide(m === "unknown" ? cur : m); }, RESUME_MODE_READ_POLL_MS);
+        return;
+      }
       presses++;
       this.ptyWrite(sessionId, live, SHIFT_TAB, "shift-tab");
       setTimeout(() => awaitChange(cur, 0), RESUME_MODE_READ_POLL_MS);
