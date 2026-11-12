@@ -57,7 +57,8 @@ Every new fact comes from a field the page already fetched and was throwing away
 | Engine | `profile.harness` + `profile.model`, via `lib/sessions`' `shortModel` |
 | Grants | `rigCapabilities(profile)` + `profile.skills` |
 | Cron | the `["schedules"]` cache entry the Schedules strip below already reads |
-| Vitals | the live session row the roster already joins |
+
+The card draws **no session vitals** (no `gen · turns · context` strip). It had one until card `291cc8aa`, where the owner asked, verbatim: "from the agent card on a project Agent Tab i want you to remove the "gen 487 · 103 turns 23% context" from the cards." The status pill still says the agent is live. The compact `AgentRosterRow` (band panel, quick-spawn dialog) keeps its one-line `sessionVitals` meta: it is a different component the request did not name.
 
 `RosterAgent` gained one field — `profile`, the whole row — rather than three more flattened ones, so the next fact a card needs is a derivation in `lib/atlasAgents.ts` instead of another field on every mount.
 

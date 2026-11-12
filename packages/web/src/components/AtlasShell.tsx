@@ -9,7 +9,7 @@ import { PALETTE_SHORTCUT, openCommandPalette } from "./CommandPalette";
 import {
   ATLAS_HOMES, LEGACY_REDIRECTS, NAV_PAGES, PARAM_PAGES, PROJECT_NODE_PATH, PROJECT_NODE_TABS,
   isRehomedProjectTab, projectNodeTabAt, projectTabPath,
-  workspaceNodeTabFor,
+  workspaceNodeTabFor, workspaceTabHref,
   type AtlasHome, type NavPage, type ParamPage,
 } from "../nav";
 import { AtlasNodeHeadContext } from "../lib/atlasNodeHead";
@@ -110,10 +110,6 @@ function RehomedToNodeTab({ to, subKey }: { to: string; subKey: string }) {
 
 /** The host's sub-key, mirroring pages/WorkspaceHome.tsx's own `SUB_KEY`. */
 const WORKSPACE_SUB_KEY = "sub";
-
-/** A re-homed destination's address on the Workspace node. Never the node's bare path: every tab this
- *  redirects into is one of the seven, and the bare path is Overview's. */
-const workspaceTabHref = (key: string) => `/home?tab=${key}`;
 
 // A session's node label, in the app's OWN identity grammar — TileTitle (components/TerminalCard.tsx)
 // renders `[project · ]agent[ · role] · <short id>` on every terminal header. The project half is

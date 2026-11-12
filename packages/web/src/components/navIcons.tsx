@@ -50,6 +50,9 @@ const ICONS: Record<string, ReactElement> = {
   // `/terminals` above, on the same rule `/workspace-settings` and `/home`/`/project` follow: they
   // are the same KIND of node told apart by depth, and a second terminal outline differing only in
   // its stroke would read as a different thing rather than the same thing one tier up.
+  // The Gates row (card 291cc8aa) — the Workspace node's Gates tab reached from the tree. Two posts and
+  // a barrier: a gate is a checkpoint a branch has to pass, not a merge arrow.
+  "/gates": <G><path d="M5 4.5V20M19 4.5V20M5 9.5h14M5 15h14M5 15l14-5.5" /></G>,
   "/workspace-terminals": <G sw={1.7}><rect x="3" y="4.5" width="18" height="15" rx="2.2" /><path d="M7 10l3 2.5-3 2.5M12.5 15.5H17" /></G>,
 };
 

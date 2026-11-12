@@ -24,7 +24,7 @@ import { errorText } from "../lib/loopbackCredential";
 import { useActiveProject } from "../lib/activeProject";
 import { goLiveHeldControl, goLiveSessionPill } from "../lib/sessions";
 import {
-  engineLine, grantChips, missionLine, resolveSpawnPick, sessionVitalParts, sessionVitals,
+  engineLine, grantChips, missionLine, resolveSpawnPick, sessionVitals,
   spawnPickLabel, useAgentRoster, type RosterAgent,
 } from "../lib/atlasAgents";
 import { color, radius } from "../theme";
@@ -200,7 +200,6 @@ export function AgentRosterCard({ entry, onEdit, dispatched = false, cron = [], 
 }) {
   const role = roleDisplay(entry.role);
   const pill = entry.session ? goLiveSessionPill(entry.session) : null;
-  const vitals = entry.session ? sessionVitalParts(entry.session) : null;
   const grants = grantChips(entry);
   // THE LEADING EDGE — liveness, answerable peripherally without reading a single pill, plus the
   // dashed subordinate weight for a rig. It rides `Panel`'s own `style` prop, NOT a class, and so do
@@ -260,17 +259,9 @@ export function AgentRosterCard({ entry, onEdit, dispatched = false, cron = [], 
         </>}
       </dl>
 
-      {/* Vitals exist only while something is running, so they are their own strip rather than an
-          empty row on every idle card. The counters can legitimately be empty on a session that has
-          not taken a turn yet — the strip still draws, because the pill above already said it is
-          starting and a vanishing strip would read as the session having stopped. */}
-      {vitals && (
-        <div className="loom-bayvitals" data-testid={`atlas-agent-vitals-${entry.agent.id}`}>
-          <span>{vitals.counters || pill!.label}</span>
-          <span style={{ flex: 1 }} />
-          {vitals.context && <span>{vitals.context}</span>}
-        </div>
-      )}
+      {/* No gen · turns · context strip on this card (card 291cc8aa, owner: "remove the "gen 487 ·
+          103 turns 23% context" from the cards"). The status pill above already says the agent is
+          live; the counters belong to the session itself, not the agent's launch card. */}
 
       <div className="loom-baycard-bar">
         {dispatched

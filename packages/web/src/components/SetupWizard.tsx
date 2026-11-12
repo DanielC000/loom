@@ -27,8 +27,9 @@ import { roleDisplay, roleColor } from "../lib/roleDisplay";
 //   4. Done              → the AUTHORITATIVE created counts from the apply response. The wizard itself
 //      spawns NO agent — "Go to the board" / "Spawn the Orchestrator" are navigation, not spawns.
 //
-// Reached from two entry points (both mount THIS component with their own open state): a launcher on the
-// /platform page, and the first-run welcome overlay (App.tsx › FirstRunWelcome). Rendered in Loom's real
+// Reached from three entry points (each mounts THIS component with its own open state): a launcher on the
+// /platform page, the first-run welcome overlay (App.tsx › FirstRunWelcome), and the Atlas tree's
+// "New project" `＋` beside its Projects heading (components/AtlasTree.tsx, card 291cc8aa). Rendered in Loom's real
 // "Terminal Cockpit" tokens + role sigils — no new color system, reusing Button/Input + roleDisplay.
 
 type Step = 1 | 2 | 3 | 4;

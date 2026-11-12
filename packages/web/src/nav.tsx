@@ -196,6 +196,11 @@ export const WORKSPACE_NODE_TABS: WorkspaceNodeTab[] = [
   { key: "settings", from: "/workspace-settings" },
 ];
 
+/** A Workspace node tab's own address. Never the node's bare path: that is Overview's. Shared by the
+ *  shell's redirect into a tab and the tree's Inbox / Gates rows (card 291cc8aa), so a row and the tab it
+ *  opens can never name two different addresses. */
+export const workspaceTabHref = (key: string) => `/home?tab=${key}`;
+
 /** The tab a given address re-homes into, or `undefined` for an address that is still its own node. */
 export function workspaceNodeTabFor(path: string): WorkspaceNodeTab | undefined {
   return WORKSPACE_NODE_TABS.find((t) => t.from === path);

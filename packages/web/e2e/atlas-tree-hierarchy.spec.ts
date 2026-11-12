@@ -88,7 +88,9 @@ function parseWorkspaceNodeTabs(): { rows: { key: string; from: string }[]; rawM
 }
 
 // The rows that deliberately STAYED at the workspace tier, IN ORDER: the tier's own home, the
-// Terminals node, and the reserved Platform home — which the mockup pins "above the project list in
+// Terminals node, the Inbox and Gates rows (card 291cc8aa, the owner: "make inbox and gates pages own
+// menu points under Workspace" — each is a SHORTCUT to its Workspace node tab, so it is written as
+// that tab's own address, and its destination still lives on the node), and the reserved Platform home — which the mockup pins "above the project list in
 // the tree, not inside it" because it is a sibling ENTITY of the projects (a home with its own
 // agents), not a surface of them.
 //
@@ -96,7 +98,10 @@ function parseWorkspaceNodeTabs(): { rows: { key: string; from: string }[]; rawM
 // "In the left sidebar place it between home and Platform" — and the `toEqual` below is the only
 // assertion in the suite that pins it: a Terminals row that drifted above Home or below Platform
 // would satisfy every containment check in this file and still be the wrong sidebar.
-const WORKSPACE_TIER = ["/home", "/workspace-terminals", "/platform"];
+const WORKSPACE_TIER = ["/home", "/workspace-terminals", "/home?tab=inbox", "/home?tab=gates", "/platform"];
+// Pathname + query: the Inbox and Gates rows differ from the Home row only by their `?tab=`.
+const rowAddress = (els: Element[]) =>
+  els.map((el) => { const u = new URL((el as HTMLAnchorElement).href); return u.pathname + u.search; });
 
 // Only ever seeded ON. Off IS the default (an empty storage key), and addInitScript re-runs on EVERY
 // navigation — so a "seed off" script would silently re-clear the key mid-test (measured on P1-0).
@@ -382,13 +387,12 @@ test.describe("Atlas tree entity hierarchy (card 0d0c6cee)", () => {
       // fails here even if every absence check below were deleted.
       const tierRoutes = await tree.locator("ul.loom-atlas-nodes").first()
         .locator("> li a.loom-atlas-node")
-        .evaluateAll((els) => els.map((el) => new URL((el as HTMLAnchorElement).href).pathname));
+        .evaluateAll(rowAddress);
       expect(tierRoutes,
-        "the workspace tier is no longer exactly the Workspace home, the Terminals node and the Platform node, in that order")
+        "the workspace tier is no longer exactly the Workspace home, the Terminals node, the Inbox and Gates rows and the Platform node, in that order")
         .toEqual(WORKSPACE_TIER);
 
-      const treeRoutes = await tree.locator("a.loom-atlas-node")
-        .evaluateAll((els) => els.map((el) => new URL((el as HTMLAnchorElement).href).pathname));
+      const treeRoutes = await tree.locator("a.loom-atlas-node").evaluateAll(rowAddress);
       // POSITIVE CONTROL on that collector before trusting any absence from it: it does see the rows
       // that are genuinely there. A broken selector returns [] and would "prove" every absence below.
       // The floor is exactly the workspace tier now — card ec1aa18e took the project node's tabs out

@@ -37,20 +37,24 @@ import {
   createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState,
   type FocusEvent, type KeyboardEvent, type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { CONTEXT_WARN_RATIO, contextWindowForModel, type Project, type SessionListItem } from "@loom/shared";
+import { CONTEXT_WARN_RATIO, contextWindowForModel, type Project, type QuestionInboxItem, type SessionListItem } from "@loom/shared";
 import {
   ATLAS_HOMES, PROJECT_NODE_PATH, PROJECT_NODE_TABS, isRehomedProjectTab, projectNodeTabAt,
-  projectTabPath, useVisibleNavPages, type AtlasHome, type NavPage,
+  WORKSPACE_NODE_TABS, projectTabPath, useVisibleNavPages, workspaceNodeTabOf, workspaceTabHref,
+  type AtlasHome, type NavPage,
 } from "../nav";
 import { AgentsQuickSpawn } from "./atlasAgents";
+import { GatePair } from "./atlasHome";
+import { SetupWizard } from "./SetupWizard";
 import { NavIcon } from "./navIcons";
 import { Logo } from "./Logo";
 import { SectionLabel } from "./ui";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention } from "../lib/attention";
-import { isLiveSession, liveCountsByProject } from "../lib/atlasHome";
+import { gateLanes, gatePairWords, isLiveSession, liveCountsByProject, useGatesActive } from "../lib/atlasHome";
 import { sortProjectsRunningFirst } from "../lib/projectOrder";
 import { standingOperators } from "../lib/atlasAgents";
 import { groupSessionRows, isCompanionSession, sessionRowSuffixes } from "../lib/sessions";
@@ -381,10 +385,13 @@ function sessionMetric(s: SessionListItem): ReactNode {
 //
 // `trailing` rides OUTSIDE the link, as a sibling in the same row: a button nested inside an anchor is
 // invalid HTML and unreachable by the keyboard, which is exactly what the quick-spawn `＋` must not be.
-function HomeNode({ home, testId, active = true, trailing, metric, onNavigate }: {
+function HomeNode({ home, testId, active = true, landed, trailing, metric, onNavigate }: {
   home: AtlasHome;
   testId: string;
   active?: boolean;
+  /** Overrides the path match. The Workspace home needs it since card 291cc8aa: `/home?tab=inbox` is
+   *  the Inbox ROW's address, and a path-only match would mark Home as landed there too. */
+  landed?: boolean;
   trailing?: ReactNode;
   metric?: ReactNode;
   onNavigate?: () => void;
@@ -401,7 +408,16 @@ function HomeNode({ home, testId, active = true, trailing, metric, onNavigate }:
   return (
     <li className={trailing ? "loom-atlas-noderow" : undefined}>
       {/* Same active/inactive split, and for the same reason, as TreeNode above. */}
-      {active
+      {/* A plain <Link> under an override, never a NavLink with a forced class: NavLink writes its own
+          `aria-current="page"` from the path match, which the class alone cannot take back. */}
+      {active && landed !== undefined
+        ? (
+          <Link to={home.to} onClick={onNavigate} className={`loom-atlas-node${landed ? " is-active" : ""}`}
+            aria-current={landed ? "page" : undefined} data-testid={testId} {...item}>
+            {body}
+          </Link>
+        )
+        : active
         ? (
           <NavLink to={home.to} end={false} onClick={onNavigate}
             className={({ isActive }) => `loom-atlas-node${isActive ? " is-active" : ""}`}
@@ -416,6 +432,42 @@ function HomeNode({ home, testId, active = true, trailing, metric, onNavigate }:
 }
 
 const WORKSPACE_HOME = ATLAS_HOMES.find((h) => h.key === "workspace")!;
+
+/**
+ * The Workspace node tabs that ALSO get a row in the tree's Workspace group — card 291cc8aa, the
+ * owner: "make inbox and gates pages own menu points under Workspace." Keys into WORKSPACE_NODE_TABS,
+ * so the label and the source address come from that one declaration.
+ *
+ * A row here is a SHORTCUT to the tab, not a second placement of the destination: its href is the
+ * tab's own `/home?tab=<key>` address, and the tab stays on the Workspace node. That is why
+ * atlas-tree.spec.ts's one-placement partition (it collects tree rows by PATHNAME) still holds.
+ */
+const WORKSPACE_TAB_ROWS = ["inbox", "gates"] as const;
+
+/** One Workspace-tab row. The same anchor body every destination row draws, so its label sits on the
+ *  tier's one text origin. Landed when the address IS its tab, or a detail row hangs under its source
+ *  address (`/question/:id` is "under /inbox"), which no path match can see. */
+function WorkspaceTabNode({ to, icon, label, landed, testId, metric }: {
+  to: string;
+  icon: string;
+  label: string;
+  landed: boolean;
+  testId: string;
+  metric?: ReactNode;
+}) {
+  const item = useTreeItem(`node:${testId}`);
+  return (
+    <li>
+      <Link to={to} className={`loom-atlas-node${landed ? " is-active" : ""}`}
+        aria-current={landed ? "page" : undefined} data-testid={testId} {...item}>
+        <span className="loom-atlas-twist" aria-hidden />
+        <span className="loom-atlas-ico" aria-hidden><NavIcon to={icon} /></span>
+        <span className="loom-atlas-lbl">{label}</span>
+        {metric}
+      </Link>
+    </li>
+  );
+}
 
 /**
  * The Workspace tier's Terminals node — card b439c2dc, the owner's own placement: "In the left
@@ -543,6 +595,22 @@ function ProjectNode({ project, selected, expanded, metrics, metricsKey = "", on
       </div>
       {expanded && children}
     </li>
+  );
+}
+
+/**
+ * The Projects heading's "New project" `＋` (card 291cc8aa). It wears the project rows' own
+ * `.loom-atlas-plus`, so it reads as the control the rows below already teach.
+ *
+ * A roving tree ITEM, in document order between the Workspace group and the first project: the tree
+ * holds ONE Tab stop however many controls it draws (card fa8a2887), and a heading control with a
+ * stop of its own would be a second one. ↑/↓ reach it; Enter and Space press it, as on any button.
+ */
+function NewProjectButton({ onOpen }: { onOpen: () => void }) {
+  const item = useTreeItem("new-project");
+  return (
+    <button type="button" className="loom-atlas-plus" data-testid="atlas-new-project"
+      aria-label="New project" title="New project" aria-haspopup="dialog" onClick={onOpen} {...item}>+</button>
   );
 }
 
@@ -697,8 +765,9 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
 
   // ── Row metrics, all off query keys some other surface already fills ─────────────────────────────
   // `["allSessions"]` is ActiveProjectProvider's own and `useAttention()` is mounted app-wide by
-  // App.tsx for BOTH shells, so the tree adds no poll of its own and can never disagree with the
-  // number the page below it shows. (Card ec1aa18e dropped the `["agents", id]` and `["board", id]`
+  // App.tsx for BOTH shells, so these add no poll of their own and can never disagree with the
+  // number the page below it shows. The Gates row's `["gates-active"]` is the one exception (card
+  // 291cc8aa, below). (Card ec1aa18e dropped the `["agents", id]` and `["board", id]`
   // reads along with the rows that carried their counts — those figures are on the project node's own
   // tab row now, which is where the owner's feedback moved a reader's eye for them.)
   const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: ({ signal }) => api.allSessions(signal) });
@@ -736,6 +805,44 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
   // what else is running. The two agree at rest, which is the only state where they are claims
   // about the same population.
   const terminalsLive = useMemo(() => workspaceRunningSessions(sessionsQ.data).length, [sessionsQ.data]);
+  // The Inbox and Gates rows' figures (card 291cc8aa) — the SAME numbers the Workspace node's own tab
+  // row shows, off the SAME keys: `["openQuestions"]` (kept warm app-wide by useAttention, no poll) with
+  // notices excluded, exactly as WorkspaceHome's `inboxCount` is; and `["gates-active"]`. That second
+  // one is the one read this tree adds: it shares the node's cache entry, but it now polls on every
+  // page rather than only on the home nodes. It is the in-memory gate snapshot, so the cost is small.
+  const questionsQ = useQuery<QuestionInboxItem[]>({ queryKey: ["openQuestions"], queryFn: ({ signal }) => api.openQuestions(false, signal) });
+  const inboxWaiting = questionsQ.data?.filter((q) => q.state !== "notice").length ?? 0;
+  const lanes = gateLanes(useGatesActive().data);
+
+  // Which Workspace tab the address is on, if it is one the tree carries as a row. The Home row stays
+  // landed on every OTHER tab of its node, as it always has.
+  const homeTab = pathname === WORKSPACE_HOME.to ? new URLSearchParams(search).get("tab") : null;
+  const tabRows = WORKSPACE_TAB_ROWS.map((key) => {
+    const tab = WORKSPACE_NODE_TABS.find((t) => t.key === key)!;
+    return { key, from: tab.from, label: workspaceNodeTabOf(tab).label, landed: homeTab === key || activeTo === tab.from };
+  });
+  const homeLanded = pathname === WORKSPACE_HOME.to && !tabRows.some((r) => r.landed);
+  const tabMetric = (key: (typeof WORKSPACE_TAB_ROWS)[number]): ReactNode => {
+    if (key === "inbox") {
+      return inboxWaiting > 0
+        ? <NodeBadge count={inboxWaiting} title={`${inboxWaiting} request${inboxWaiting === 1 ? "" : "s"} waiting on you`} />
+        : undefined;
+    }
+    return lanes.running + lanes.queued > 0
+      ? <NodeMeta value={<GatePair lanes={lanes} />} title={gatePairWords(lanes)} />
+      : undefined;
+  };
+
+  // The "New project" `＋` beside the Projects heading (card 291cc8aa) opens the SAME guided setup
+  // wizard the Platform node's launcher does — never a second flow (card 5afd71bd: project creation's
+  // home is that wizard). Portalled to <body>: below the drawer breakpoint this tree is a translated
+  // drawer, and a transformed ancestor would trap the wizard's `position: fixed` overlay inside it.
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const openNewProject = () => {
+    setWizardOpen(true);
+    // On a phone the drawer would otherwise still be standing over the page when the wizard closes.
+    onNavigate?.();
+  };
   // EVERY project's live sessions — not just the selected one, and NOT companion-filtered here: the
   // only predicate below is `isLiveSession`, so an assistant-role (companion) session IS in this map.
   // Companions are dropped downstream, at the render site, by `groupSessionRows` (see `sessionRows`
@@ -877,7 +984,7 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
       <div className="loom-atlas-treebody">
         <SectionLabel style={{ margin: "0 0 4px", padding: "0 10px" }}>Workspace</SectionLabel>
         <ul className="loom-atlas-nodes">
-          <HomeNode home={WORKSPACE_HOME} testId={`atlas-home-${WORKSPACE_HOME.key}`} />
+          <HomeNode home={WORKSPACE_HOME} testId={`atlas-home-${WORKSPACE_HOME.key}`} landed={homeLanded} />
           {/* Between Home and Platform — the owner's own placement (card b439c2dc). Its metric is
               the UNFILTERED count of what that node lists; see `terminalsLive` above for why it
               deliberately does not follow the page's own project filter. */}
@@ -885,6 +992,12 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
             metric={terminalsLive > 0
               ? <NodeMeta value={`${terminalsLive} live`} title={`${terminalsLive} running session${terminalsLive === 1 ? "" : "s"} across the workspace`} />
               : undefined} />
+          {/* Inbox and Gates — card 291cc8aa, the owner's "own menu points under Workspace". After
+              Terminals and before Platform, which stays pinned directly above the project list. */}
+          {tabRows.map((r) => (
+            <WorkspaceTabNode key={r.key} to={workspaceTabHref(r.key)} icon={r.from} label={r.label}
+              landed={r.landed} testId={`atlas-workspace-tab-${r.key}`} metric={tabMetric(r.key)} />
+          ))}
           {/* Pinned directly above the project list, as the mockup's own note says it is: "the
               reserved Platform home is pinned above the project list in the tree, not inside it". */}
           {platformNodes.map((p) => (
@@ -897,7 +1010,10 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
 
         {/* Plural, and plural even at one project: the label names the kind of node under it, the way
             "Workspace" above does, not how many there happen to be today. */}
-        <SectionLabel style={{ margin: "18px 0 4px", padding: "0 10px" }}>Projects</SectionLabel>
+        <div className="loom-atlas-grouphead">
+          <SectionLabel style={{ margin: 0, flex: "1 1 auto", minWidth: 0 }}>Projects</SectionLabel>
+          <NewProjectButton onOpen={openNewProject} />
+        </div>
         {projects.length === 0 ? (
           <>
             {/* Nothing to select, so nothing here pretends to be selectable — the row stays the plain
@@ -965,6 +1081,9 @@ export function AtlasTree({ activeTo, open = false, onNavigate }: {
         )}
       </div>
     </nav>
+    {/* OUTSIDE the <nav>: a portal still bubbles React events to its React parent, and the nav's
+        delegated click and roving-key handlers have no business seeing the wizard's. */}
+    {wizardOpen && createPortal(<SetupWizard open onClose={() => setWizardOpen(false)} />, document.body)}
     </TreeStopContext.Provider>
   );
 }

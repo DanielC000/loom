@@ -4778,23 +4778,6 @@ button.loom-ovbrief-cell.is-open {
   color: var(--loom-text-3);
 }
 
-/* Vitals exist only while something is running, so they are their own strip rather than an
-   empty row on every idle card. */
-.loom-bayvitals {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 12px 11px;
-  padding: 6px 9px;
-  border: 1px solid var(--loom-line);
-  border-radius: var(--loom-radius);
-  background: var(--loom-surface-2);
-  font-family: var(--loom-font-mono);
-  font-size: var(--loom-fs-xs);
-  color: var(--loom-text-2);
-  font-variant-numeric: tabular-nums;
-}
-
 /* The control bar. `margin-top: auto` pins it to the bottom of a stretched card, so a row of
    cards with missions of different lengths still ends on one line of controls. */
 .loom-baycard-bar {
@@ -4872,6 +4855,15 @@ button.loom-ovbrief-cell.is-open {
 .loom-atlas-noderow > .loom-atlas-node {
   flex: 1 1 auto;
   min-width: 0;
+}
+/* A tree group heading that carries a control — the Projects heading's "New project" `＋` (card
+   291cc8aa). Same right inset as a project row, so the heading's `＋` stands in the same column as
+   every row `＋` under it. */
+.loom-atlas-grouphead {
+  display: flex;
+  align-items: center;
+  margin: 18px 0 4px;
+  padding-left: 10px;
 }
 .loom-atlas-plus {
   flex: none;

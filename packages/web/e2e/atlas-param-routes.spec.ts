@@ -316,11 +316,15 @@ test.describe("Atlas parameterized routes (card 1d3192dc)", () => {
         trail: ["Workspace", mgr.projectName, workerNode, "Diff"], belowNode: 1,
         node: null, nodeTestId: `atlas-session-${worker.sessionId}`,
       },
-      // `node: null` since card 0d0c6cee: /inbox is no longer a tree ROW, so there is nothing for
-      // the tree to mark. The frame still names the destination (the crumb + heading above come
-      // from the same NAV_PAGES row they always did) — only the tree's own highlight is gone, and
-      // highlighting a nearby row instead would be a lie about where you are.
-      [questionUrl]: { trail: ["Workspace", inboxLabel, questionTitle], belowNode: 1, node: null, hatch: "inbox" },
+      // Card 291cc8aa gave the tree an Inbox ROW again (the owner: "make inbox and gates pages own
+      // menu points under Workspace"), as a shortcut to the Workspace node's Inbox tab. A request's
+      // detail address hangs under /inbox, so that row is the one the tree marks here — through
+      // `activeTo`, since no path match can see it. It was `node: null` from card 0d0c6cee until then,
+      // when there was no Inbox row to mark.
+      [questionUrl]: {
+        trail: ["Workspace", inboxLabel, questionTitle], belowNode: 1,
+        node: null, nodeTestId: "atlas-workspace-tab-inbox", hatch: "inbox",
+      },
       [sessionUrl]: {
         trail: ["Workspace", mgr.projectName, plainNode, "Terminal"], belowNode: 1,
         node: null, nodeTestId: `atlas-session-${plain.sessionId}`,

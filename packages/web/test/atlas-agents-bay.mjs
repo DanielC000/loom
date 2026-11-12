@@ -17,7 +17,7 @@ import { register } from "node:module";
 // import below must therefore be DYNAMIC — a static one would hoist above `register()`.
 register("./_tsxLoaderHook.mjs", import.meta.url);
 
-const { engineLine, grantChips, missionLine, rosterAgent, rosterTally, sessionVitalParts, splitRoster } =
+const { engineLine, grantChips, missionLine, rosterAgent, rosterTally, splitRoster } =
   await import("../src/lib/atlasAgents.ts");
 
 /** An agent row as GET /api/projects/:id/agents returns it — only the fields these derivations read. */
@@ -119,23 +119,6 @@ const PROFILES = [LEAD_RIG, DEV_RIG];
   // No rig ⇒ no grants to state. An empty list is what lets the card omit the row entirely rather
   // than printing "none" on every plain agent.
   assert.deepEqual(grantChips(plain), []);
-}
-
-// ── sessionVitalParts: the same three facts, laid out where a wide card draws them ───────────────
-{
-  const s = { gen: 466, ctxTurns: 318, ctxInputTokens: 82_000, model: "claude-opus-4-8" };
-  const v = sessionVitalParts(s);
-  assert.equal(v.counters, "gen 466 · 318 turns");
-  assert.match(v.context, /^\d+% context$/, "the context reading is its own right-aligned fact");
-  // `contextPercentFor` is null EXACTLY when the tokens are, never on a measured 0 — so a session
-  // that has not reported yet draws NO context fact rather than claiming 0%.
-  assert.equal(sessionVitalParts({ ...s, ctxInputTokens: null }).context, null);
-  assert.equal(sessionVitalParts({ ...s, ctxInputTokens: 0 }).context, "0% context");
-  // A session that has not taken a turn reports none of the counters. The card falls back to the
-  // pill's own label there rather than drawing an empty strip, which would read as "stopped".
-  assert.equal(sessionVitalParts({ gen: null, ctxTurns: null, ctxInputTokens: null, model: null }).counters, "");
-  assert.equal(sessionVitalParts({ gen: 1, ctxTurns: 1, ctxInputTokens: null, model: null }).counters, "gen 1 · 1 turn",
-    "one turn is not '1 turns'");
 }
 
 console.log("atlas-agents-bay: OK");

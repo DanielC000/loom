@@ -143,18 +143,6 @@ export function sessionVitals(s: SessionListItem): string {
 // harness and skill subset). No new `api.ts` member was added for any of them, which is the same
 // hard rule the roster itself was built under.
 
-/** A live session's vitals, split where the card draws them: the counters on the left, the context
- *  reading on the right. `sessionVitals` stays the one-line form the band row and the quick-spawn
- *  dialog use — this is the SAME three facts laid out for a wider surface, not a second rule. */
-export function sessionVitalParts(s: SessionListItem): { counters: string; context: string | null } {
-  const pct = contextPercentFor(s.ctxInputTokens, s.model);
-  return {
-    counters: [s.gen ? `gen ${s.gen}` : null, s.ctxTurns ? plural(s.ctxTurns, "turn") : null]
-      .filter(Boolean).join(" · "),
-    context: pct === null ? null : `${pct}% context`,
-  };
-}
-
 /** What this agent will spawn ON — `"claude · opus-4-8"`, or `"claude · default"` for a rig that
  *  pins no model. A plain agent (no rig at all) still spawns on the default engine, so it reads the
  *  same way rather than leaving the fact blank and the question open. */
