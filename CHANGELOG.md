@@ -105,6 +105,7 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 - **Dropping a file no longer navigates the Loom tab away.** Dropping a file onto a terminal or the composer is now ignored instead of opening the file in the tab.
 - **Pasting an image into a terminal works.** Ctrl+V with only an image on the clipboard now sends Claude Code's image-paste key (Alt+V on Windows), so pasting a screenshot works when the browser and the daemon run on the same machine; a one-time hint notes that images are read from this computer's clipboard.
 - **Platform-config updates keep sibling fields.** A `PATCH` that sets one field of an integration (for example `integrations.codescape.memoryCeilingMb`) no longer wipes that integration's other fields; `null` clears just that one field.
+- **Installing the GitHub MCP server binary works when Loom was started from PowerShell 7.** On Windows, starting Loom from `pwsh` made the install fail at extraction, because the Windows PowerShell 5.1 that Loom launches to unpack the archive inherited PowerShell 7's module path and loaded an incompatible `Expand-Archive`. Loom now launches it with that module path removed.
 - **Many smaller internal reliability fixes** across git, orchestration, pty and gateway are not listed individually.
 
 ## [0.31.0] — 2026-10-13
