@@ -502,6 +502,27 @@ export function activeVaultLockAlerts(events: readonly OrchestrationEvent[]): Or
   return out;
 }
 
+// ── VAULT ANCESTOR-ROOT REFUSAL (card f098fbd9) ─────────────────────────────────────────────────────────
+// The vault auto-committer's fail-closed refusal of a vault governed by an unlisted ancestor git repo. Same
+// latest-wins pairing as activeVaultLockAlerts, keyed by detail.vaultPath: a later "-cleared" event (filed at
+// a boot where the vault passes) drops the item. `seedNote` carries the newest boot-seed none/ambiguous
+// event's reason, so the item can say why the shared-roots list is empty — it never surfaces on its own
+// (a seed of "none" is the normal state of an install with a single plain vault).
+export function activeVaultAncestorRefusals(events: readonly OrchestrationEvent[]): { alerts: OrchestrationEvent[]; seedNote: "none" | "ambiguous" | null } {
+  const sorted = [...events].sort((a, b) => +new Date(a.ts) - +new Date(b.ts));
+  const latest = new Map<string, OrchestrationEvent>();
+  let seedNote: "none" | "ambiguous" | null = null;
+  for (const e of sorted) {
+    if (e.kind !== "vault_autocommit_refused_code_repo") continue;
+    const d = (e.detail ?? {}) as { reason?: string; vaultPath?: string };
+    if (d.reason === "shared-roots-seed-none") seedNote = "none";
+    else if (d.reason === "shared-roots-seed-ambiguous") seedNote = "ambiguous";
+    else if ((d.reason === "unrecognized-ancestor-root" || d.reason === "unrecognized-ancestor-root-cleared") && d.vaultPath) latest.set(d.vaultPath, e);
+  }
+  const alerts = [...latest.values()].filter((e) => (e.detail as { reason?: string }).reason === "unrecognized-ancestor-root");
+  return { alerts, seedNote };
+}
+
 // ── CODEX ISOLATION GAP (card ed0858dc) ─────────────────────────────────────────────────────────────────
 // Surfaces a PARENTLESS codex session's dropped claude-side protections, which the daemon files durably but
 // nudges nobody about. Same one-kind-filtered-fetch shape as `activeBootStuckAlerts` above.

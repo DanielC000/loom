@@ -886,6 +886,47 @@ function refuseCodeRepoCollision(
   } catch { /* best-effort — an audit-event fault must never block the refusal itself */ }
 }
 
+/**
+ * @decision f098fbd9 — refuse (never pathspec-scope) a commit whose toplevel is an ancestor of the vault
+ * unless {@link isRecognizedVaultRoot}; never add a second signal.
+ *
+ * The vault dir itself is always fine; an unwired provider fails open like {@link checkCodeRepoCollision}.
+ */
+function isUnrecognizedAncestorRoot(vaultPath: string, commitPath: string): boolean {
+  if (!codeRepoGuard) return false;
+  if (canonicalSharedRootKey(vaultPath) === canonicalSharedRootKey(commitPath)) return false;
+  return !isRecognizedVaultRoot(commitPath);
+}
+
+/** One warn + one durable event per (vaultPath, commitPath) per process, like {@link refuseCodeRepoCollision}. */
+const warnedAncestorRootRefusals = new Set<string>();
+
+function refuseUnrecognizedAncestorRoot(
+  vaultPath: string,
+  commitPath: string,
+  source: "boot" | "auto_commit" | "flush_sync",
+  projectId?: string,
+): void {
+  const dedupeKey = `${canonicalSharedRootKey(vaultPath)}::${canonicalSharedRootKey(commitPath)}::${source}`;
+  if (warnedAncestorRootRefusals.has(dedupeKey)) return;
+  warnedAncestorRootRefusals.add(dedupeKey);
+  console.warn(
+    `[vault-versioner] ${vaultPath} is governed by ${commitPath}, an ancestor git repo that is neither the vault ` +
+    `itself nor listed under Settings → Platform → sharedVaultRoots — refusing to auto-commit (it would stage ` +
+    `that whole repo). If it really is a shared notes vault, add ${commitPath} to sharedVaultRoots (Settings → Platform) ` +
+    `and RESTART the daemon (a vault refused at boot is not started live).`,
+  );
+  try {
+    codeRepoGuard?.recordEvent({
+      ...(projectId ? { projectId } : {}),
+      reason: "unrecognized-ancestor-root",
+      vaultPath,
+      commitPath,
+      source,
+    });
+  } catch { /* best-effort — an audit-event fault must never block the refusal itself */ }
+}
+
 /** `commitVault`'s own result (replaces a bare `boolean` — card a09b81a0): `blockedReason` is present
  *  (and `committed:false`) ONLY for the code-repo-collision refusal above, distinct from every OTHER
  *  silent backoff this function already had (quarantined / externally-managed / nothing-staged /
@@ -1808,6 +1849,11 @@ export class VaultVersioner {
       if (this.watcher) this.schedule();
       return;
     }
+    // @decision f098fbd9 — live per tick (never cached): a list edit applies to the next commit.
+    if (isUnrecognizedAncestorRoot(this.vaultPath, this.commitPath)) {
+      refuseUnrecognizedAncestorRoot(this.vaultPath, this.commitPath, "auto_commit", this.lockAlert?.projectId);
+      return;
+    }
     // Route through the shared commit path (at the resolved repo root) so UI writes and auto-commits
     // stay consistent. commitVault re-confirms root === commitPath, so it commits (not backs off) here.
     // `lockAlert` is threaded through so a merge-eligible vault's canonical-index-lock refusal can file
@@ -1853,6 +1899,11 @@ export class VaultVersioner {
     const collision = checkCodeRepoCollision(this.commitPath);
     if (collision) {
       refuseCodeRepoCollision(this.commitPath, this.commitPath, collision, "flush_sync");
+      return false;
+    }
+    // @decision f098fbd9 — flushSync runs raw `git add -A` at commitPath, so it needs its own ancestor check.
+    if (isUnrecognizedAncestorRoot(this.vaultPath, this.commitPath)) {
+      refuseUnrecognizedAncestorRoot(this.vaultPath, this.commitPath, "flush_sync", this.lockAlert?.projectId);
       return false;
     }
     // @decision 8d49c36c — `this.commitPath` is already the resolved governing root (set in `start()`);
@@ -2235,6 +2286,19 @@ export const OPERATIONAL_HOME_GIT_WRITE_ERROR =
 export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number }): Promise<VaultVersioner[]> {
   const started: VaultVersioner[] = [];
   const seen = new Set<string>();
+  // @decision f098fbd9 — vaults whose LATEST durable ancestor-refusal event is still "refused" (a later
+  // "-cleared" event supersedes it); one passing boot files the clear so the owner's item goes away.
+  const openAncestorRefusals = new Set<string>();
+  try {
+    const latest = new Map<string, boolean>();
+    for (const e of [...db.listRecentEventsByKinds(["vault_autocommit_refused_code_repo"], 500)].reverse()) {
+      const d = (e.detail ?? {}) as { reason?: string; vaultPath?: string };
+      if (!d.vaultPath) continue;
+      if (d.reason === "unrecognized-ancestor-root") latest.set(canonicalSharedRootKey(d.vaultPath), true);
+      else if (d.reason === "unrecognized-ancestor-root-cleared") latest.set(canonicalSharedRootKey(d.vaultPath), false);
+    }
+    for (const [k, open] of latest) if (open) openAncestorRefusals.add(k);
+  } catch { /* best-effort — a missing clear only leaves a stale owner item */ }
   for (const project of db.listAllProjects()) {
     if (project.archivedAt) continue;
     const vaultPath = project.vaultPath?.trim();
@@ -2280,6 +2344,19 @@ export async function startVaultVersioners(db: Db, opts?: { debounceMs?: number 
       if (collision) {
         refuseCodeRepoCollision(vaultPath, ctx.commitPath, collision, "boot", project.id);
         continue;
+      }
+      // @decision f098fbd9 — after the externallyManaged back-off (never refuse what Obsidian-Git owns); per
+      // project, before the sibling dedupe. A root that is ANOTHER live project's own vault already has its
+      // own watcher committing it, so no event there (it is just not ours to start).
+      if (!ctx.externallyManaged && isUnrecognizedAncestorRoot(vaultPath, ctx.commitPath)) {
+        const rootKey = canonicalSharedRootKey(ctx.commitPath);
+        const rootIsAnotherVault = db.listAllProjects().some((o) => o.id !== project.id && !o.archivedAt && !!o.vaultPath?.trim() && canonicalSharedRootKey(o.vaultPath.trim()) === rootKey);
+        if (!rootIsAnotherVault) refuseUnrecognizedAncestorRoot(vaultPath, ctx.commitPath, "boot", project.id);
+        continue;
+      }
+      if (!ctx.externallyManaged && openAncestorRefusals.has(canonicalSharedRootKey(vaultPath))) {
+        openAncestorRefusals.delete(canonicalSharedRootKey(vaultPath));
+        try { codeRepoGuard?.recordEvent({ projectId: project.id, reason: "unrecognized-ancestor-root-cleared", vaultPath, commitPath: ctx.commitPath, source: "boot" }); } catch { /* best-effort audit */ }
       }
       const key = ctx.commitPath.replace(/\\/g, "/");
       if (seen.has(key)) continue; // already watching this repo root

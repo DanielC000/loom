@@ -2297,6 +2297,9 @@ export type OrchestrationEventKind =
   // @decision a09b81a0 — the vault auto-committer refused to commit a resolved repo root that canonically
   //  collides with a registered project's own code repo (see the decision record for the full predicate).
   //  `detail`: { projectId?, vaultPath, commitPath, collidesWithProjectId, collidesWithRepoPath, source }.
+  //  Card f098fbd9 reuses this kind with a `reason` discriminator (no collidesWith* fields): "unrecognized-
+  //  ancestor-root" { projectId?, vaultPath, commitPath, source }, its pairing "unrecognized-ancestor-root-
+  //  cleared" { vaultPath }, and the boot seed outcomes "shared-roots-seed-none" / "-ambiguous" { candidates? }.
   | "vault_autocommit_refused_code_repo"
   // Card 4b2e0146 — a `recycleManager`/`resume` fresh-spawn refused by `managerSessionBarredFrom`
   // (agents/clone-core.ts): the project's repoPath became reserved/an operational-home ancestor (e.g. a

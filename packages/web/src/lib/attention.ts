@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import type { SessionListItem, OrchestrationEvent, BrowserNotificationKind } from "@loom/shared";
 import { api } from "./api";
-import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultLockAlerts, buildLatestMergeMap, deriveContextExhaustedAlerts, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isBailed, isRateLimited, isStuckBusy, rateLimitBailedDismissKey, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey, showsAsRateLimited } from "./fleet";
+import { activeBootStuckAlerts, activeCodexIsolationGapAlerts, activeCrashLoopAbandonments, activeKickoffDroppedAlerts, activeRecycleLineageConsolidatedAlerts, activeVaultAncestorRefusals, activeVaultLockAlerts, buildLatestMergeMap, deriveContextExhaustedAlerts, hasSupervisedWorkers, idleDoneEpisodeStarts, isActiveWaitingSnooze, isBailed, isRateLimited, isStuckBusy, rateLimitBailedDismissKey, rateLimitDismissKey, requestAttentionBranch, requestDismissKey, sessionEpisodeDismissKey, showsAsRateLimited } from "./fleet";
 import { decisionAttentionText, decisionRoutingLabel, requestAttentionLabel } from "./questions";
 import type { Tone } from "../theme";
 
@@ -316,6 +316,14 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
     queryFn: ({ signal }) => api.orchestrationEventsByKinds(["vault_index_lock_stale", "vault_index_lock_cleared"], signal),
   });
   const activeVaultLocks = activeVaultLockAlerts(vaultLockEventsQuery.data ?? []);
+
+  // Card f098fbd9: the auto-committer's refusal of a vault under an unlisted ancestor git repo — filed
+  // `managerSessionId:""` like the lock alert, so it has its own kind-filtered query (card 43084723's rule).
+  const vaultAncestorEventsQuery = useQuery({
+    queryKey: ["orchEventsByKind", "vault_autocommit_refused_code_repo"],
+    queryFn: ({ signal }) => api.orchestrationEventsByKinds(["vault_autocommit_refused_code_repo"], signal),
+  });
+  const vaultAncestor = activeVaultAncestorRefusals(vaultAncestorEventsQuery.data ?? []);
 
   // Card ed0858dc — a codex session's DROPPED claude-side isolation/permission protections. The daemon
   // files this row on every codex spawn but nudges a recipient only when the session HAS a parent, so a
@@ -672,6 +680,23 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
         `${ageMin !== null ? ` for ~${ageMin}min` : ""}; run: ${detail.command ?? "(see event detail)"}`,
     });
   }
+  for (const e of vaultAncestor.alerts) {
+    const detail = (e.detail ?? {}) as { vaultPath?: string; commitPath?: string; projectId?: string };
+    items.push({
+      key: `var-${e.id}`, tone: "danger", notify: "vault-lock-stuck", kind: "VAULT NOT COMMITTING",
+      dismissKey: `var:${e.id}`,
+      dismissHint: "Hide this alert — it returns if the daemon refuses this vault again after a restart. Nothing is committed until the root is listed.",
+      projectId: detail.projectId ?? null,
+      text: `${detail.vaultPath ?? "a vault"} sits inside git repo ${detail.commitPath ?? "(unknown)"}, which Loom will not auto-commit ` +
+        `(it would stage that whole repo). If it is your shared notes vault, add ${detail.commitPath ?? "that repo"} to Settings → Platform → ` +
+        `shared vault roots, then RESTART the daemon.`,
+      hoverText: vaultAncestor.seedNote === "none"
+        ? "The one-time boot seed of shared vault roots found no shared notes vault, so the list is empty."
+        : vaultAncestor.seedNote === "ambiguous"
+          ? "The one-time boot seed of shared vault roots found several candidate roots and seeded none, so the list is empty."
+          : null,
+    });
+  }
   // Card ed0858dc — a PARENTLESS codex session's dropped claude-side protections, which the daemon
   // discloses durably but nudges nobody about. activeCodexIsolationGapAlerts (lib/fleet.ts) owns the
   // filtering/keying rules and carries the decision anchor for what must not be changed here.
@@ -924,7 +949,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   //     derivable keys, and pruning against that absence is exactly the wipe described above.
   // Collapsing them to one expression would have to pick one predicate and would break the other half.
   const loaded = sessions.data !== undefined && questions.data !== undefined
-    && bootStuckEventsQuery.data !== undefined && vaultLockEventsQuery.data !== undefined
+    && bootStuckEventsQuery.data !== undefined && vaultLockEventsQuery.data !== undefined && vaultAncestorEventsQuery.data !== undefined
     && codexGapEventsQuery.data !== undefined && recycleConsolidatedEventsQuery.data !== undefined
     && crashLoopAbandonedEventsQuery.data !== undefined && crashLoopRecoveredEventsQuery.data !== undefined
     && kickoffDroppedEventsQuery.data !== undefined && contextExhaustedEventsQuery.data !== undefined
@@ -942,7 +967,7 @@ export function useAttention(): { items: AttentionItem[]; count: number; resolve
   // @decision 3157a563 — never narrow this to a subset of the queries, and never fold it into `loaded`
   // above (a deliberately narrower gate, naming only the DISMISSABLE kinds' own sources).
   const resolved = !sessions.isPending && !questions.isPending && !bootStuckEventsQuery.isPending
-    && !vaultLockEventsQuery.isPending && !codexGapEventsQuery.isPending
+    && !vaultLockEventsQuery.isPending && !vaultAncestorEventsQuery.isPending && !codexGapEventsQuery.isPending
     && !recycleConsolidatedEventsQuery.isPending
     && !crashLoopAbandonedEventsQuery.isPending && !crashLoopRecoveredEventsQuery.isPending
     && !kickoffDroppedEventsQuery.isPending && !contextExhaustedEventsQuery.isPending

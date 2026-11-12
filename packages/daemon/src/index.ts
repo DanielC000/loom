@@ -194,9 +194,17 @@ async function main(): Promise<void> {
   });
   // Card 7c1d6dbf: one-shot seed of the human-only shared-notes-vault list, BEFORE any versioner starts so
   // the install's existing shared vault stays exempt across the switch from layout inference to the list.
-  // Best-effort: never gates boot; marker stamped only on a final outcome (ambiguous/none retry next boot).
+  // Best-effort: never gates boot. A TRUE one-shot: the marker is stamped after the first evaluation of ANY
+  // outcome (only a corrupt config row skips unstamped and retries). none/ambiguous also file a durable event
+  // so the owner sees why a vault under an unlisted repo is refused (card f098fbd9).
   try {
     const seeded = seedSharedVaultRootsOnce(db);
+    if (seeded.outcome === "none" || seeded.outcome === "ambiguous") {
+      db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "", kind: "vault_autocommit_refused_code_repo",
+        detail: { reason: seeded.outcome === "none" ? "shared-roots-seed-none" : "shared-roots-seed-ambiguous", ...(seeded.outcome === "ambiguous" ? { candidates: seeded.candidates } : {}) },
+      });
+    }
     if (seeded.outcome === "seeded") console.log(`[boot] seeded sharedVaultRoots with ${seeded.root} (${seeded.vouchers} distinct project vault paths live there) — review it under Settings → Platform; recorded in the platform-config history`);
     else if (seeded.outcome === "ambiguous") console.warn(`[boot] sharedVaultRoots NOT seeded: ${seeded.candidates.length} candidate roots (${seeded.candidates.join(", ")}) — the seed is one-shot and will not run again; add the right one under Settings`);
     else if (seeded.outcome === "none") console.warn("[boot] sharedVaultRoots NOT seeded: no shared notes-vault root found — the seed is one-shot and will not run again; add one under Settings if you use a shared vault");

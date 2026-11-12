@@ -16,7 +16,7 @@ import {
   ARCHIVED_FOLD_CAP, capArchived, fleetRollup, workerBuckets,
   isStuckBusy, hasSupervisedWorkers, isActiveWaitingSnooze, STUCK_BUSY_MS,
   isBailed, isRateLimited, showsAsRateLimited, rateLimitBailedDismissKey,
-  activeBootStuckAlerts, activeKickoffDroppedAlerts, activeContextExhaustedAlerts, deriveContextExhaustedAlerts, activeVaultLockAlerts, buildLatestMergeMap, activeCodexIsolationGapAlerts,
+  activeBootStuckAlerts, activeKickoffDroppedAlerts, activeContextExhaustedAlerts, deriveContextExhaustedAlerts, activeVaultLockAlerts, activeVaultAncestorRefusals, buildLatestMergeMap, activeCodexIsolationGapAlerts,
   activeCrashLoopAbandonments, activeRecycleLineageConsolidatedAlerts,
   resolveAttentionProjectId, attentionItemInProject,
 } from "../src/lib/fleet.ts";
@@ -651,6 +651,42 @@ check("activeVaultLockAlerts: an event with no detail.repoPath is dropped defens
   const malformed = vaultLockEv({ detail: {} });
   const alerts = activeVaultLockAlerts([malformed]);
   assert.equal(alerts.length, 0, "no repoPath to key on ⇒ dropped, not surfaced");
+});
+
+// ── VAULT ANCESTOR-ROOT REFUSAL (card f098fbd9) — latest-wins per detail.vaultPath, seed note is context only.
+const arEv = (reason, detail = {}, ts) => ({
+  id: `ar-${++vlSeq}`, ts: ts ?? new Date(1000 + vlSeq).toISOString(), kind: "vault_autocommit_refused_code_repo",
+  workerSessionId: null, managerSessionId: "", taskId: null, detail: { reason, ...detail },
+});
+check("activeVaultAncestorRefusals: a refusal surfaces an alert naming vault + root", () => {
+  const r = arEv("unrecognized-ancestor-root", { vaultPath: "/h/notes", commitPath: "/h" });
+  const { alerts, seedNote } = activeVaultAncestorRefusals([r]);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].detail.commitPath, "/h");
+  assert.equal(seedNote, null);
+});
+check("activeVaultAncestorRefusals: a later -cleared for the same vault drops it; a newer refusal re-surfaces it", () => {
+  const r = arEv("unrecognized-ancestor-root", { vaultPath: "/h/notes", commitPath: "/h" }, "2026-01-01T00:00:00.000Z");
+  const c = arEv("unrecognized-ancestor-root-cleared", { vaultPath: "/h/notes" }, "2026-01-01T00:00:01.000Z");
+  const r2 = arEv("unrecognized-ancestor-root", { vaultPath: "/h/notes", commitPath: "/h" }, "2026-01-01T00:00:02.000Z");
+  assert.equal(activeVaultAncestorRefusals([r, c]).alerts.length, 0);
+  assert.equal(activeVaultAncestorRefusals([c, r, r2]).alerts.length, 1, "unsorted input, newer refusal wins");
+});
+check("activeVaultAncestorRefusals: a seed none/ambiguous event alone surfaces NO alert, but is reported as context", () => {
+  const none = activeVaultAncestorRefusals([arEv("shared-roots-seed-none")]);
+  assert.equal(none.alerts.length, 0);
+  assert.equal(none.seedNote, "none");
+  assert.equal(activeVaultAncestorRefusals([arEv("shared-roots-seed-ambiguous", { candidates: ["/a", "/b"] })]).seedNote, "ambiguous");
+});
+check("activeVaultAncestorRefusals: legacy code-repo-collision rows (no reason) and a refusal with no vaultPath are ignored", () => {
+  const legacy = arEv(undefined, { vaultPath: "/v", commitPath: "/c", collidesWithProjectId: "p" });
+  const noPath = arEv("unrecognized-ancestor-root", { commitPath: "/h" });
+  assert.equal(activeVaultAncestorRefusals([legacy, noPath]).alerts.length, 0);
+});
+check("useAttention builds the VAULT NOT COMMITTING item from activeVaultAncestorRefusals (source wiring + restart wording)", () => {
+  const att = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "src", "lib", "attention.ts"), "utf8");
+  assert.ok(att.includes("activeVaultAncestorRefusals(vaultAncestorEventsQuery.data"), "query result feeds the helper");
+  assert.ok(att.includes('kind: "VAULT NOT COMMITTING"') && att.includes("RESTART the daemon"), "item present and tells the owner to restart");
 });
 
 check("activeVaultLockAlerts: an unrelated event kind is ignored", () => {
