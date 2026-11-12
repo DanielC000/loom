@@ -16,14 +16,34 @@
 //   2. NOT ONE `page-identity` BLOCK SURVIVES inside the frame, at any of those addresses.
 //
 // The classic shell is gone, so the old third leg — the same `page-identity` locator reading the four
-// blocks back in the classic rendering, as the positive control for claim 2 — no longer exists. Claim
-// 2's zero count therefore has no in-file positive control.
+// blocks back in the classic rendering, as the positive control for claim 2 — no longer exists. NO LIVE
+// SURFACE renders a block any more: every identity-bearing page (Memory, Gates, Inbox) returns it only
+// while `useFrameOwnsNodeIdentity()` is false, i.e. outside `AtlasNodeHeadContext`, and every route in
+// AtlasShell mounts inside that provider. So claim 2's control is split in two, in a second test:
+//   A. LOCATOR + COUNT PATH — a stand-in element carrying the testid is placed inside the live frame
+//      and the SAME counting helper the claim uses must read it back as 1. Proves the locator can
+//      match; says nothing about the product.
+//   B. PRODUCT ATTRIBUTE — the three page sources that emit the block must still contain the literal
+//      testid. Proves the attribute the claim looks for has not been renamed; it is a source-text
+//      check, NOT a render, so a block emitted another way (new component) is not covered.
+// Neither shows the product renders a block under any state; that is unreachable without a src edit.
 //
 // FIXTURE IDENTITY is asserted, not assumed: this daemon is shared across the specs in its worker, so
 // each leg names a project THIS spec created and checks it is the one the frame is scoped to.
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "./fixtures/daemon";
 
 const PROJECT_KEY = "loom.projectId";
+/** The one testid every suppressible identity block carries (see atlasNodeHead.ts). */
+const PAGE_IDENTITY_TESTID = "page-identity";
+const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
+
+/** How many identity blocks the document holds — the ONE counter claim 2 and its control share. */
+async function countIdentityBlocks(page: Page): Promise<number> {
+  return page.getByTestId(PAGE_IDENTITY_TESTID).count();
+}
 
 async function pinProject(page: Page, projectId: string) {
   await page.addInitScript(([key, id]) => {
@@ -122,11 +142,36 @@ test.describe("Atlas drops the classic page header (card a7f23a2f)", () => {
         // CLAIM 2 — and no page states its own identity a second time. Collected, not asserted in
         // place, for the same reason: one address's failure must not stop the other twenty being
         // measured, and a reader of a red run wants the whole set, not the first member of it.
-        const blocks = await page.getByTestId("page-identity").count();
+        const blocks = await countIdentityBlocks(page);
         if (blocks !== 0) offenders.push(`${at} → ${blocks} page-identity block(s) inside the frame`);
       }
       expect(offenders,
         `addresses that carry more than the frame's own <h1>, or a page-identity block:\n${offenders.join("\n")}`)
         .toEqual([]);
+    });
+
+  test("positive control for the zero-identity-block claim: the locator matches, and the product still emits the testid",
+    async ({ page, loomDaemon }) => {
+      // A. Locator + count path, inside the live frame. Zero first, so the 1 is caused by the stand-in.
+      await page.goto(loomDaemon.baseURL + "/home");
+      await expect(page.getByTestId("atlas-shell")).toBeVisible();
+      expect(await countIdentityBlocks(page), "the frame already holds an identity block before the stand-in")
+        .toBe(0);
+      await page.evaluate((id) => {
+        const el = document.createElement("div");
+        el.setAttribute("data-testid", id);
+        el.textContent = "stand-in identity block";
+        (document.querySelector("main") ?? document.body).appendChild(el);
+      }, PAGE_IDENTITY_TESTID);
+      expect(await countIdentityBlocks(page), "the claim's counter did not see a page-identity element")
+        .toBe(1);
+
+      // B. Product attribute: each emitter must still carry the literal testid (source text, not a render).
+      for (const file of ["pages/Memory.tsx", "pages/Gates.tsx", "pages/RequestsPage.tsx"]) {
+        const src = readFileSync(path.join(SRC, file), "utf8");
+        expect(src.includes(`data-testid="${PAGE_IDENTITY_TESTID}"`),
+          `${file} no longer emits data-testid="${PAGE_IDENTITY_TESTID}" — claim 2's selector would pass vacuously`)
+          .toBe(true);
+      }
     });
 });
