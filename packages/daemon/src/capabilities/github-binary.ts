@@ -26,6 +26,7 @@ import { spawn } from "node:child_process";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { LOOM_HOME } from "../paths.js";
+import { windowsPowerShellEnv } from "./powershell-env.js";
 
 /** The pinned github/github-mcp-server release this build downloads. Bump alongside the checksum map below. */
 export const GITHUB_MCP_SERVER_VERSION = "1.5.0";
@@ -131,7 +132,7 @@ const OUTPUT_TAIL_BYTES = 4096;
 
 /** Run a child process to completion ASYNCHRONOUSLY, capturing a bounded stdout+stderr tail. NEVER rejects
  *  — a spawn error, non-zero exit, or timeout all resolve `ok:false` (mirrors `python/venv.ts`'s `runAsync`). */
-function runChildAsync(command: string, args: string[], timeoutMs: number, extraEnv?: Record<string, string>): Promise<{ ok: boolean; timedOut: boolean; output: string }> {
+function runChildAsync(command: string, args: string[], timeoutMs: number, extraEnv?: Record<string, string>, baseEnv: NodeJS.ProcessEnv = process.env): Promise<{ ok: boolean; timedOut: boolean; output: string }> {
   return new Promise((resolve) => {
     let settled = false;
     let timedOut = false;
@@ -149,7 +150,7 @@ function runChildAsync(command: string, args: string[], timeoutMs: number, extra
     const finish = (ok: boolean): void => { if (!settled) { settled = true; resolve({ ok, timedOut, output: tail() }); } };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: extraEnv ? { ...process.env, ...extraEnv } : process.env });
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"], env: extraEnv ? { ...baseEnv, ...extraEnv } : baseEnv });
     } catch {
       finish(false);
       return;
@@ -231,6 +232,7 @@ async function extractGithubBinary(archivePath: string, destDir: string, platfor
       ["-NoProfile", "-NonInteractive", "-Command", "Expand-Archive -LiteralPath $env:LOOM_GHMCP_ARCHIVE -DestinationPath $env:LOOM_GHMCP_EXTRACT_DIR -Force"],
       GITHUB_MCP_EXTRACT_TIMEOUT_MS,
       { LOOM_GHMCP_ARCHIVE: archivePath, LOOM_GHMCP_EXTRACT_DIR: tmpExtractDir },
+      windowsPowerShellEnv(),
     );
     if (!r.ok) return { ok: false, errorTail: r.output || "Expand-Archive failed" };
     extractedBin = path.join(tmpExtractDir, "github-mcp-server.exe");

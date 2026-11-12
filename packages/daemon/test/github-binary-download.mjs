@@ -78,7 +78,7 @@ const archivePath = path.join(work, asset);
 if (isWin) {
   execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
     "Compress-Archive -Path $env:LOOM_GHDL_STUB -DestinationPath $env:LOOM_GHDL_ARCHIVE -Force"],
-    { env: { ...process.env, LOOM_GHDL_STUB: stubPath, LOOM_GHDL_ARCHIVE: archivePath } });
+    { env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== "psmodulepath")), LOOM_GHDL_STUB: stubPath, LOOM_GHDL_ARCHIVE: archivePath } });
 } else {
   execFileSync("tar", ["-czf", archivePath, "-C", stubDir, stubName]);
 }
