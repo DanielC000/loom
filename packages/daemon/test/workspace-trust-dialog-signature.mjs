@@ -24,5 +24,35 @@ check("older wording still names workspace-trust (both detectors)",
 const other = collapseBoot("Some future dialog\nEnter to confirm · Esc to cancel");
 check("negative control: unrelated footer dialog stays enter-esc-footer", detectBlockingDialogSignature(other) === "enter-esc-footer");
 
+// ── Card 1e837254: the MID-SESSION detector must not fire on a session's OWN output quoting the question ──
+const { detectMidSessionModal } = await import("../dist/pty/host.js");
+const quoted = JSON.parse(fs.readFileSync(new URL("./fixtures/1e837254-real-assistant-quoted-trust-question-claude-2.1.323.json", import.meta.url), "utf8")).quotedReplyBytes;
+check("positive control: the quoted-reply bytes really contain the question text (the case is falsifiable)",
+  detectBlockingDialogSignature(collapseBoot(quoted)) === "workspace-trust");
+check("REAL quoted reply (assistant output quoting the question; no echo stripping) is NOT a modal",
+  detectMidSessionModal(quoted) === null);
+check("REAL genuine trust dialog bytes are still detected as workspace-trust",
+  detectMidSessionModal(fx.dialogFrame) === "workspace-trust");
+// Fail toward visible: bare question text with NO live-frame chrome after it stays a detection.
+check("ambiguous: bare question text with no chrome after it is still detected",
+  detectMidSessionModal("Is this a project you trust?\r\n") === "workspace-trust");
+// Footer-less / row-less partial shapes: footer alone still holds (generic name); rows alone are structure.
+check("footer only (question wording unknown) still yields a modal",
+  detectMidSessionModal("Some new dialog\r\nEnter to confirm · Esc to cancel") === "unknown-modal");
+check("question + option row, no footer yet, is structure -> detected",
+  detectMidSessionModal("Is this a project you trust?\r\n❯ No, exit\r\n  Yes, I trust this folder") === "workspace-trust");
+// Sibling signatures that matched on bare text: quoted (chrome after) is not a modal; with footer it is.
+const chrome = "\r\n⏵⏵ accept edits on (shift+tab to cycle)";
+check("external-imports: bare words in a reply with live chrome after are NOT a modal",
+  detectMidSessionModal("● You can allow external imports in CLAUDE.md" + chrome) === null);
+check("external-imports: real shape (question + footer) is detected",
+  detectMidSessionModal("Allow external CLAUDE.md file imports?\r\n❯ No, disable external imports\r\n  Yes, allow external imports\r\nEnter to confirm · Esc to cancel") === "external-imports");
+check("mcp-server-enable: bare tokens in a reply with live chrome after are NOT a modal",
+  detectMidSessionModal("● an mcp server may offer reject all" + chrome) === null);
+check("mcp-server-enable: bare tokens with no chrome (unconfirmed real shape) stay detected",
+  detectMidSessionModal("2 new MCP servers found\r\n❯ Enable\r\n  Reject all") === "mcp-server-enable");
+check("quoted full mock dialog followed by the redrawn composer box is NOT a modal",
+  detectMidSessionModal("Is this a project you trust?\r\n❯ No, exit\r\n  Yes, I trust this folder\r\nEnter to confirm · Esc to cancel\r\n" + "─".repeat(40) + "❯ ") === null);
+
 if (failed) { console.log(`${failed} FAILED`); process.exit(1); }
 console.log("ALL PASS");

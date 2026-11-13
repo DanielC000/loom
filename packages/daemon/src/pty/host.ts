@@ -1517,8 +1517,53 @@ export function detectMidSessionModal(rawTail: string, opts?: { echoText?: strin
   // after a LIVE modal (timers, spinner) are cursor-addressed text and never draw that box.
   // Measured against a real captured modal: any "trailing text" length cap decays as those repaints accrue.
   if (hasFooter && MODAL_COMPOSER_BOX_RE.test(flat.slice(footerEnd))) return null;
-  if (known !== null && known !== "enter-esc-footer") return known;
+  if (known !== null && known !== "enter-esc-footer") {
+    // A SPECIFIC signature is question text, which the session's own reply can quote. It names a live modal
+    // only with the dialog's STRUCTURE after it (the confirm/cancel footer, or its option rows); bare text
+    // followed by the live frame's own chrome is quoted output. Bare text with NO such chrome stays a
+    // detection (fail toward visible: a missed real dialog stalls a session silently).
+    const verdict = classifySpecificModal(known, flat, hasFooter ? { escIdx, enterIdx: enter!.index ?? 0, footerEnd } : null);
+    if (verdict === "live") return known;
+    if (verdict === "stale") return null;
+    // "quoted": fall through — a footer alone (handled above) still yields the generic name, text alone nothing.
+  }
   return hasFooter ? "unknown-modal" : null;
+}
+
+/** Collapsed text of the live frame's own chrome (mode footer / status line) — drawn on every repaint of the idle
+ *  or busy composer, never part of a modal's own question. Matched only AFTER a bare signature, as quoted-output evidence. */
+const MODAL_LIVE_CHROME_RE = /shift\+?tabtocycle|accepteditson|planmodeon|automodeon|manualmodeon|bypasspermissionson|\/effort|esctointerrupt/i;
+/** Option rows a specific dialog draws under its question (collapsed). Only dialogs whose real rows were captured. */
+const MODAL_OPTION_ROWS: Readonly<Record<string, RegExp>> = { "workspace-trust": /yes,itrustthisfolder/gi };
+
+/**
+ * Structure check for a specific signature (PURE). `live`: question followed by the dialog's footer/option rows
+ * (and no redrawn composer box after them); `stale`: that structure followed by the composer box; `quoted`: bare
+ * question text with the live frame's chrome after it; `live` also for bare text with no chrome (fail visible).
+ */
+function classifySpecificModal(
+  name: string,
+  flat: string,
+  footer: { escIdx: number; enterIdx: number; footerEnd: number } | null,
+): "live" | "stale" | "quoted" {
+  const ends = (re: RegExp): number => {
+    let last = -1;
+    for (const m of flat.matchAll(new RegExp(re.source, "gi"))) last = (m.index ?? 0) + m[0].length;
+    return last;
+  };
+  const qStart = name === "workspace-trust" ? ends(WORKSPACE_TRUST_RE)
+    : name === "external-imports" ? ends(/externalimports/)
+    : Math.max(ends(/mcpserver/), ends(/rejectall/));
+  const q = Math.max(qStart, 0);
+  const footerAfter = footer !== null && Math.min(footer.escIdx, footer.enterIdx) >= q;
+  const rowsRe = MODAL_OPTION_ROWS[name];
+  const rowsEnd = rowsRe ? ends(rowsRe) : -1;
+  const rowsAfter = rowsEnd >= q && rowsEnd >= 0;
+  if (footerAfter || rowsAfter) {
+    const structureEnd = Math.max(footerAfter ? footer!.footerEnd : -1, rowsAfter ? rowsEnd : -1);
+    return MODAL_COMPOSER_BOX_RE.test(flat.slice(structureEnd)) ? "stale" : "live";
+  }
+  return MODAL_LIVE_CHROME_RE.test(flat.slice(q)) ? "quoted" : "live";
 }
 /** @decision 20ff76de — how long a mid-session hold lasts before the ONE owner escalation (never a timeout into the Enter ladder). */
 export const MODAL_HOLD_ESCALATE_MS = Number(process.env.LOOM_MODAL_HOLD_ESCALATE_MS) || 180_000;
