@@ -1,6 +1,7 @@
-// The session's Loom MCP activity strip, under the composer on the Atlas session node (card a9a7140c,
+// The session's MCP activity strip, under the composer on the Atlas session node (card a9a7140c,
 // owner pick B · Ledger). Compact: the latest Loom call as a sentence. Expanded: every call grouped by
-// agent turn, a facet rail, and an inline "Asked Loom / Loom answered" per call. Data and its limits:
+// agent turn, a facet rail, and an inline "Asked / answered" per call. Loom's own routers and third-party
+// servers (Playwright, markitdown, …) both show; a third-party call reads under "Other servers" (card 6232d9b4). Data and its limits:
 // lib/mcpActivity.ts. Arguments and results are agent-authored text and render as React text only.
 // A codex session reads the daemon's per-call record instead (lib/mcpCallRecord.ts): no args, no answer,
 // no turns, and a duration the router measured, so its copy says so (SourceCtx).
@@ -16,7 +17,7 @@ import {
 import { turnCauses, type TurnCause } from "../lib/turnCause";
 import {
   mcpRecordQuery, mcpSourceFor, recordSentenceOf, recordToMcpCalls, RECORD_DURATION_HINT, RECORD_GROUP_LABEL, RECORD_NOT_KEPT,
-  RECORD_REFUSED_HINT, RECORD_SPAN_HINT, type McpSource,
+  RECORD_NO_EXTERNAL, RECORD_REFUSED_HINT, RECORD_SPAN_HINT, type McpSource,
 } from "../lib/mcpCallRecord";
 
 /** Where this strip's calls came from: the transcript (claude) or the per-call record (codex). */
@@ -144,10 +145,15 @@ export function McpActivity({ sessionId, harness, busy = false }: {
         : "No Loom MCP calls recorded for this codex session yet."
       : q.isError ? "Couldn't read this session's transcript."
         : q.isLoading ? "Reading the transcript…"
-        : "No Loom MCP calls yet this session.";
+        : "No MCP calls yet this session.";
     return (
       <div className="loom-mcp" data-testid="mcp-activity" data-state="empty" data-source={source}>
-        <div className="loom-mcp-empty-bar"><span className="loom-mcp-lab">Loom MCP</span><span>{note}</span></div>
+        <div className="loom-mcp-empty-bar">
+          <span className="loom-mcp-lab">MCP</span><span>{note}</span>
+          {source === "record" && !q.isError && !q.isLoading && (
+            <span className="loom-mcp-muted" data-testid="mcp-activity-no-external">{RECORD_NO_EXTERNAL}</span>
+          )}
+        </div>
       </div>
     );
   }
@@ -168,11 +174,11 @@ export function McpActivity({ sessionId, harness, busy = false }: {
         data-testid="mcp-activity-bar"
         aria-expanded={expanded}
         aria-controls={panelId}
-        title={expanded ? "Collapse" : "Show every Loom call this session"}
+        title={expanded ? "Collapse" : "Show every MCP call this session"}
         onClick={() => setExpanded((v) => !v)}
       >
         <span className="loom-mcp-l1">
-          <span className="loom-mcp-lab">Loom MCP</span>
+          <span className="loom-mcp-lab">MCP</span>
           {recorded ? <span data-testid="mcp-activity-scope">· latest calls</span> : <span>· turn {latest.turn}</span>}
           <Cause cause={causes.get(latest.turn)} testId="mcp-activity-cause" />
           <span className="loom-mcp-beads" aria-label={recorded ? `latest ${plural(beads.length, "call")}` : `${plural(turnCalls.length, "call")} this turn`}>
@@ -239,7 +245,7 @@ function Expanded({ id, calls, causes }: { id: string; calls: McpCall[]; causes:
     <div className="loom-mcp-x" id={id}>
       <Facets calls={calls} filter={filter} setFilter={setFilter} />
       <div className={`loom-mcp-log${calls.some((c) => c.at != null) ? " timed" : ""}`}
-        data-testid="mcp-activity-log" role="list" aria-label="Loom calls by turn">
+        data-testid="mcp-activity-log" role="list" aria-label="MCP calls by turn">
         {groups.length === 0 ? (
           <p className="loom-mcp-none">No calls match. Clear a filter to widen it.</p>
         ) : groups.map((g) => {
@@ -251,7 +257,7 @@ function Expanded({ id, calls, causes }: { id: string; calls: McpCall[]; causes:
               <div className="loom-mcp-turnh">
                 <span className="loom-mcp-tn">{src === "record" ? RECORD_GROUP_LABEL : `Turn ${g.turn}`}</span>
                 {startedAt && (
-                  <span className="loom-mcp-tat" data-testid={`mcp-turn-${g.turn}-at`} title={`first Loom call at ${fmtDateTime(startedAt)}`}>
+                  <span className="loom-mcp-tat" data-testid={`mcp-turn-${g.turn}-at`} title={`first MCP call at ${fmtDateTime(startedAt)}`}>
                     {fmtClock(startedAt).slice(0, 5)}
                   </span>
                 )}
@@ -283,6 +289,8 @@ function Entry({ call, open, onToggle }: { call: McpCall; open: boolean; onToggl
   const recorded = useContext(SourceCtx) === "record";
   const bodyId = `loom-mcp-call-${call.seq}`;
   const links = linksOf(call);
+  // Who was asked: Loom for its own routers, the server by name for a third-party one.
+  const who = call.subsystem === "external" ? call.router : "Loom";
   return (
     <>
       <button
@@ -321,11 +329,11 @@ function Entry({ call, open, onToggle }: { call: McpCall; open: boolean; onToggl
             </div>
           ) : <>
           <div>
-            <div className="loom-mcp-subh">Asked Loom</div>
+            <div className="loom-mcp-subh">Asked {who}</div>
             <pre className="loom-mcp-blk">{JSON.stringify(call.args, null, 2)}</pre>
           </div>
           <div>
-            <div className="loom-mcp-subh">Loom answered · first 2 KB</div>
+            <div className="loom-mcp-subh">{who} answered · first 2 KB</div>
             <pre className={`loom-mcp-blk ${call.outcome}`} data-testid={`mcp-call-${call.seq}-answer`}>
               {call.result ?? "No answer yet."}
             </pre>
@@ -430,12 +438,13 @@ function Facets({ calls, filter, setFilter }: { calls: McpCall[]; filter: McpFil
         ))}
       </div>
       <div>
-        <div className="loom-mcp-fh"><span>Router</span></div>
+        <div className="loom-mcp-fh"><span>Server</span></div>
         {routers.map(([router, n]) => (
           <FacetRow key={router} testId={`mcp-facet-router-${router}`} lead={<span className="loom-mcp-muted" aria-hidden="true">⌁</span>}
             label={router} n={n} max={calls.length} pressed={filter.router === router} barClass="plain"
             onClick={() => setFilter({ ...filter, router: filter.router === router ? "" : router })} />
         ))}
+        {recorded && <p className="loom-mcp-legend" data-testid="mcp-facet-no-external">{RECORD_NO_EXTERNAL}</p>}
       </div>
     </aside>
   );

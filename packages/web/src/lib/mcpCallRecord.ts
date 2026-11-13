@@ -51,7 +51,7 @@ export function recordToMcpCalls(rows: readonly McpCallRecordRow[]): McpCall[] {
       args: {},
       outcome: (OUTCOMES.has(r.outcome) ? r.outcome : "ok") as McpOutcome,
       result: null,
-      subsystem: subsystemOf(r.tool),
+      subsystem: subsystemOf(r.tool, r.router),
       at: typeof r.startedAt === "number" && Number.isFinite(r.startedAt) && r.startedAt > 0 ? new Date(r.startedAt).toISOString() : null,
       ms: typeof r.durationMs === "number" && Number.isFinite(r.durationMs) && r.durationMs >= 0 ? r.durationMs : null,
     }));
@@ -76,6 +76,8 @@ export const RECORD_REFUSED_HINT = "The tool returned an error envelope (a top-l
 export const RECORD_SPAN_HINT = "Time from the first recorded call's start to the last one's return.";
 export const RECORD_NOT_KEPT = "Arguments and answer aren't recorded for codex calls.";
 export const RECORD_GROUP_LABEL = "All calls · codex records no turns";
+/** The record is written by Loom's own routers, so a codex session's third-party server calls never reach it (card 6232d9b4). */
+export const RECORD_NO_EXTERNAL = "Third-party server calls (Playwright, GitHub, Codescape, …) aren't recorded for codex sessions.";
 
 /**
  * The record query's options. Disabled for every non-codex session, so a claude session never fetches

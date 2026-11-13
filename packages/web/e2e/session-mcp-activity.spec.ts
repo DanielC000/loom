@@ -309,10 +309,10 @@ test.describe("session Loom MCP activity strip", () => {
       const d = new Date(s), p = (n: number) => String(n).padStart(2, "0");
       return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
     }, TS0);
-    await expect(turnAt).toHaveAttribute("title", `first Loom call at ${fullLocal}`);
+    await expect(turnAt).toHaveAttribute("title", `first MCP call at ${fullLocal}`);
     const total = page.getByTestId("mcp-turn-1-total");
     await expect(total).toHaveText("· ≈1.4s");
-    await expect(total).toHaveAttribute("title", "Time from the first Loom call to the last answer in this turn (approximate).");
+    await expect(total).toHaveAttribute("title", "Time from the first MCP call to the last answer in this turn (approximate).");
     await expect(page.getByTestId("mcp-turn-1")).toContainText("3 calls · ≈1.4s");
 
     // The detail states the time and that the duration is approximate.
@@ -369,6 +369,67 @@ test.describe("session Loom MCP activity strip", () => {
     expect(polls, "transcript polls in 11s with the Transcript tab open").toBeLessThanOrEqual(3);
   });
 
+  // Card 6232d9b4: a third-party server's call (Playwright here) shows beside Loom's own, under its own
+  // subsystem and its own server row, and its detail names the server rather than Loom.
+  test("third-party server calls show beside Loom's, under Other servers", async ({ page, loomDaemon }) => {
+    test.setTimeout(120_000);
+    await openSession(page, loomDaemon, [
+      { role: "user", text: "Kick off: eyeball the page." },
+      { role: "assistant", text: [
+        call("ext00001", "mcp__loom-tasks__tasks_get", { id: "6232d9b4" }),
+        call("ext00002", "mcp__playwright__browser_navigate", { url: "http://127.0.0.1:5999/sentinel-6232" }),
+        call("ext00003", "Bash", { command: "echo mcp__fake__not_a_call" }),
+        call("ext00004", "mcp__loom-platform__project_create", { name: "Sentinel" }),
+      ].join("\n") },
+      { role: "tool_result", text: [
+        "-> tool result {ext00001}: {\"id\":\"6232d9b4\"}",
+        "-> tool result {ext00002}: ### Page state\n- Page URL: http://127.0.0.1:5999/sentinel-6232",
+        "-> tool result {ext00003}: mcp__fake__not_a_call",
+        "-> tool result {ext00004}: {\"id\":\"p1\"}",
+      ].join("\n") },
+      { role: "assistant", text: call("ext00005", "mcp__playwright__browser_take_screenshot", { filename: "s.png" }) },
+    ]);
+
+    // Four MCP calls: the Bash line is not one. The latest is the unanswered Playwright one.
+    await expect(page.getByTestId("mcp-activity-count")).toHaveText("4");
+    await expect(page.getByTestId("mcp-activity-latest")).toHaveText("Asking playwright to call browser_take_screenshot");
+    await expect(page.getByTestId("mcp-activity-bar")).toContainText("MCP");
+
+    await page.getByTestId("mcp-activity-bar").click();
+    await expect(entries(page)).toHaveCount(4);
+    await expect(page.getByTestId("mcp-call-2")).toContainText("Called browser_navigate on playwright");
+    await expect(page.getByTestId("mcp-call-3")).toContainText("Called project_create");
+    await expect(page.getByTestId("mcp-facet-sub-external")).toContainText("Other servers");
+    await expect(page.getByTestId("mcp-facet-sub-external")).toContainText("2");
+    await expect(page.getByTestId("mcp-facet-sub-workspace")).toContainText("1");
+    await expect(page.getByTestId("mcp-facet-sub-self")).toHaveCount(0);
+    await expect(page.getByTestId("mcp-facet-router-playwright")).toContainText("2");
+    // Codex's note never shows on a claude session.
+    await expect(page.getByTestId("mcp-facet-no-external")).toHaveCount(0);
+
+    // The Other servers facet narrows to the third-party calls, then widens back.
+    const ext = page.getByTestId("mcp-facet-sub-external");
+    await ext.click();
+    await expect(ext).toHaveAttribute("aria-pressed", "true");
+    expect(await entries(page).evaluateAll((els) => els.map((e) => e.getAttribute("data-testid"))))
+      .toEqual(["mcp-call-4", "mcp-call-2"]);
+    await ext.click();
+    await expect(entries(page)).toHaveCount(4);
+    // The server row filters by server.
+    await page.getByTestId("mcp-facet-router-loom-platform").click();
+    expect(await entries(page).evaluateAll((els) => els.map((e) => e.getAttribute("data-testid")))).toEqual(["mcp-call-3"]);
+    await page.getByTestId("mcp-filter-clear").click();
+
+    // The detail names the server it asked, and shows the answer as served.
+    await page.getByTestId("mcp-call-2").click();
+    const detail = page.getByTestId("mcp-call-2-detail");
+    await expect(detail).toContainText("router playwright");
+    await expect(detail).toContainText("Asked playwright");
+    await expect(detail).toContainText("playwright answered · first 2 KB");
+    await expect(detail).not.toContainText("Asked Loom");
+    await expect(page.getByTestId("mcp-call-2-answer")).toContainText("sentinel-6232");
+  });
+
   test("a session with no Loom calls says so instead of an empty box", async ({ page, loomDaemon }) => {
     test.setTimeout(120_000);
     const mgr = await loomDaemon.seedLiveSession({
@@ -380,7 +441,7 @@ test.describe("session Loom MCP activity strip", () => {
     await pinProject(page, mgr.projectId);
     await page.goto(`${loomDaemon.baseURL}/session/${mgr.sessionId}`);
     await expect(page.getByTestId("mcp-activity")).toHaveAttribute("data-state", "empty");
-    await expect(page.getByTestId("mcp-activity")).toContainText("No Loom MCP calls yet this session.");
+    await expect(page.getByTestId("mcp-activity")).toContainText("No MCP calls yet this session.");
     await expect(page.getByTestId("mcp-activity-bar")).toHaveCount(0);
   });
 });
@@ -456,6 +517,8 @@ test.describe("session Loom MCP activity strip · codex (per-call record)", () =
     await expect(page.getByTestId("mcp-call-3")).toContainText("Ran decisions_for");
     await expect(page.getByTestId("mcp-call-3-dur")).toHaveCount(0);
     await expect(page.getByTestId("mcp-refused-legend")).toHaveText("! refused: the tool returned an error envelope.");
+    // Card 6232d9b4: third-party server calls never reach the record, and the strip says so.
+    await expect(page.getByTestId("mcp-facet-no-external")).toHaveText("Third-party server calls (Playwright, GitHub, Codescape, …) aren't recorded for codex sessions.");
 
     // Detail: what the record does not keep is said, not left blank.
     await page.getByTestId("mcp-call-2").click();
@@ -484,6 +547,7 @@ test.describe("session Loom MCP activity strip · codex (per-call record)", () =
     const { hits } = await openCodexSession(page, loomDaemon, null);
     await expect(page.getByTestId("mcp-activity")).toHaveAttribute("data-state", "empty");
     await expect(page.getByTestId("mcp-activity")).toContainText("No Loom MCP calls recorded for this codex session yet.");
+    await expect(page.getByTestId("mcp-activity-no-external")).toContainText("aren't recorded for codex sessions");
     await expect(page.getByTestId("mcp-activity-bar")).toHaveCount(0);
     expect(hits.record.length).toBeGreaterThanOrEqual(1);
   });

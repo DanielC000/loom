@@ -1,6 +1,8 @@
-// A session's calls into Loom's own MCP routers, parsed back out of the text GET
-// /api/sessions/:id/transcript already serves (daemon `pty/claude-transcript.ts` `extractText`):
-//   [tool] {<tag>} mcp__loom-<router>__<tool>(<JSON args>)   and   -> tool result {<tag>} (error): <body>
+// A session's MCP calls, parsed back out of the text GET /api/sessions/:id/transcript already serves
+// (daemon `pty/claude-transcript.ts` `extractText`):
+//   [tool] {<tag>} mcp__<server>__<tool>(<JSON args>)   and   -> tool result {<tag>} (error): <body>
+// Loom's own routers (`loom-*`) and third-party servers (Playwright, markitdown, GitHub, Codescape, ...)
+// alike: the transcript carries every tool call. Third-party calls get the `external` subsystem (card 6232d9b4).
 // Pure functions of the transcript, pinned by test/mcp-activity.mjs.
 //
 // @decision a9a7140c — `ok` / `error` (the transport's isError) / `pending` (no result yet) are facts;
@@ -10,7 +12,7 @@
 // out-of-order ts means NO time / NO duration (null), never a fabricated 0. Durations stay labelled approximate.
 import type { TranscriptTurn } from "./api";
 
-export type McpSubsystem = "board" | "fleet" | "gate" | "memory" | "inbox" | "self";
+export type McpSubsystem = "board" | "fleet" | "gate" | "memory" | "inbox" | "workspace" | "audit" | "external" | "self";
 export type McpOutcome = "ok" | "refused" | "error" | "pending";
 
 export interface McpLink { kind: "card" | "worker" | "gate" | "note" | "request"; id: string }
@@ -22,6 +24,7 @@ export interface McpCall {
   tag: string | null;
   /** Agent turn: the count of user-role turns (human or Loom-injected) seen before this call. */
   turn: number;
+  /** The MCP server's name as the session sees it (`loom-tasks`, `playwright`); codex: Loom's short router id. */
   router: string;
   tool: string;
   args: Record<string, unknown>;
@@ -41,10 +44,15 @@ export interface McpCall {
 
 export interface McpTurn { turn: number; calls: McpCall[] }
 
-const CALL_LINE = /^\[tool\](?: \{([^}]*)\})? mcp__loom-([a-z0-9-]+)__([A-Za-z0-9_]+)\((.*)\)$/;
+// The server name is the shortest run up to the first `__`, so `mcp__plugin_x__do_it` is server
+// `plugin_x`, tool `do_it`. A native tool (`Read`, `Bash`) has no `mcp__` prefix and never matches.
+const CALL_LINE = /^\[tool\](?: \{([^}]*)\})? mcp__([A-Za-z0-9_-]+?)__([A-Za-z0-9_-]+)\((.*)\)$/;
+
+/** Loom's own routers are the `loom-` servers; every other MCP server is a third-party one. */
+export const isLoomRouter = (router: string): boolean => router.startsWith("loom-");
 const RESULT_HEAD = /^-> tool result(?: \{([^}]*)\})?( \(error\))?(?:: ([\s\S]*))?$/;
 
-/** Parse every Loom MCP call out of a transcript, oldest first, each paired with its result. */
+/** Parse every MCP call out of a transcript, oldest first, each paired with its result. */
 export function parseMcpCalls(turns: readonly TranscriptTurn[]): McpCall[] {
   const calls: McpCall[] = [];
   const openByTag = new Map<string, McpCall>();
@@ -60,16 +68,17 @@ export function parseMcpCalls(turns: readonly TranscriptTurn[]): McpCall[] {
         let args: unknown;
         try { args = JSON.parse(m[4]!); } catch { continue; }
         const tool = m[3]!;
+        const router = m[2]!;
         const call: McpCall = {
           seq: calls.length + 1,
           tag: m[1] || null,
           turn,
-          router: `loom-${m[2]}`,
+          router,
           tool,
           args: args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {},
           outcome: "pending",
           result: null,
-          subsystem: subsystemOf(tool),
+          subsystem: isLoomRouter(router) ? subsystemOf(tool, router) : "external",
           at: validTs(t.ts),
           ms: null,
         };
@@ -81,7 +90,7 @@ export function parseMcpCalls(turns: readonly TranscriptTurn[]): McpCall[] {
     if (t.role === "tool_result") {
       for (const seg of splitResults(t.text)) {
         const call = seg.tag ? openByTag.get(seg.tag) : undefined;
-        if (!call) continue; // a non-Loom tool's result, or an untagged one we cannot pair
+        if (!call) continue; // a native tool's result, or an untagged one we cannot pair
         openByTag.delete(seg.tag!);
         call.outcome = classifyResult(seg.body, seg.error);
         call.result = seg.body;
@@ -147,7 +156,7 @@ export function durationBarPx(ms: number): number {
   return Math.max(3, Math.round(DURATION_BAR_MAX_PX * Math.min(1, f)));
 }
 
-export const SPAN_HINT = "Time from the first Loom call to the last answer in this turn (approximate).";
+export const SPAN_HINT = "Time from the first MCP call to the last answer in this turn (approximate).";
 
 /** Full local date and time, for a title where a bare clock time could be ambiguous (a turn past midnight). */
 export function fmtDateTime(iso: string): string {
@@ -218,16 +227,34 @@ export const SUBSYSTEMS: ReadonlyArray<{ key: McpSubsystem; label: string }> = [
   { key: "gate", label: "Gate" },
   { key: "memory", label: "Memory" },
   { key: "inbox", label: "Inbox" },
+  { key: "workspace", label: "Workspace" },
+  { key: "audit", label: "Audit" },
   { key: "self", label: "Self" },
+  { key: "external", label: "Other servers" },
 ];
 
-export function subsystemOf(tool: string): McpSubsystem {
-  if (tool.startsWith("tasks_")) return "board";
+/** The auditors' read-and-file routers: everything they offer is audit work except ending the session. */
+const AUDIT_ROUTERS: ReadonlySet<string> = new Set(["audit", "user-audit"]);
+/** Workspace admin: the tools that manage projects, agents, profiles, schedules, templates, skills and repos. */
+const WORKSPACE_TOOL = /^(?:project_|agent_|profile_|schedule_|template_|skill_|git_|list_all_(?:projects|agents|profiles|schedules)$|platform_config_get$|vault_write$)/;
+
+/**
+ * Which part of Loom a built-in router's tool touches. `router` is the server name with or without its
+ * `loom-` prefix (the transcript says `loom-audit`, the codex call record says `audit`). A third-party
+ * server's calls never come here: the parser files them under `external`.
+ */
+export function subsystemOf(tool: string, router = ""): McpSubsystem {
+  if (AUDIT_ROUTERS.has(router.replace(/^loom-/, ""))) return tool === "end_me" ? "self" : "audit";
+  if (tool.startsWith("tasks_") || tool.startsWith("project_task_") || tool === "list_all_tasks"
+    || tool.startsWith("board_")) return "board";
   if (tool === "worker_merge" || tool === "worker_merge_confirm" || tool === "merge_batch"
     || tool.startsWith("gate_") || tool === "run_gate") return "gate";
-  if (tool.startsWith("worker_")) return "fleet";
-  if (tool.startsWith("memory_") || tool === "decisions_for") return "memory";
-  if (tool === "question_ask" || tool.startsWith("task_request")) return "inbox";
+  if (tool.startsWith("worker_") || tool.startsWith("session_") || tool === "list_all_sessions"
+    || tool === "sessions_status" || tool === "transcript_read") return "fleet";
+  if (tool.startsWith("memory_") || tool === "decisions_for" || tool === "project_memory_search") return "memory";
+  if (tool.startsWith("question_") || tool.startsWith("task_request") || tool === "requests_list"
+    || tool === "decisions_list" || tool.startsWith("decision_")) return "inbox";
+  if (WORKSPACE_TOOL.test(tool) || tool === "agent_prompt_search") return "workspace";
   return "self";
 }
 
@@ -339,13 +366,19 @@ function phrase(call: McpCall): Phrase {
   }
 }
 
-/** The call as a sentence. An error or a refusal reads "Tried to …", an unanswered call "Asking Loom to …". */
+/** A third-party server's call: its tool name, and which server it went to. */
+const externalPhrase = (call: McpCall): Phrase => ["Called", "call", call.tool, `on ${call.router}`];
+
+/** The call as a sentence. An error or a refusal reads "Tried to …", an unanswered call "Asking Loom to …"
+ *  ("Asking <server> to …" for a third-party server). */
 export function sentenceOf(call: McpCall): McpSentence {
-  const [past, inf, object, tail] = phrase(call);
+  const external = call.subsystem === "external";
+  const [past, inf, object, tail] = external ? externalPhrase(call) : phrase(call);
   const lead = call.outcome === "error" || call.outcome === "refused" ? `Tried to ${inf}`
-    : call.outcome === "pending" ? `Asking Loom to ${inf}`
+    : call.outcome === "pending" ? `Asking ${external ? call.router : "Loom"} to ${inf}`
     : past;
-  return { lead, object, tail };
+  // "Asking playwright to call browser_navigate" already names the server once.
+  return { lead, object, tail: external && call.outcome === "pending" ? "" : tail };
 }
 
 export const sentenceText = (call: McpCall): string => {

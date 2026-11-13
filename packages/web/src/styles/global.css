@@ -2883,6 +2883,7 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-bead.refused { border-color: var(--loom-attn); background: color-mix(in oklab, var(--loom-attn) 18%, transparent); }
 .loom-mcp-bead .loom-mcp-gl { transform: scale(0.75); }
 .loom-mcp-bead .loom-mcp-gl.gate { transform: rotate(45deg) scale(0.62); }
+.loom-mcp-bead .loom-mcp-gl.external { transform: rotate(45deg) scale(0.6); }
 .loom-mcp-l2 {
   grid-column: 1;
   display: flex;
@@ -2947,6 +2948,10 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-gl.memory { border: 2px solid var(--loom-text-3); border-radius: 50%; }
 .loom-mcp-gl.inbox { border: 2px solid var(--loom-attn); border-radius: 1px; }
 .loom-mcp-gl.self { border: 2px solid var(--loom-text-2); border-radius: 50%; }
+/* Card 6232d9b4: workspace admin, the auditors' routers, and third-party servers (a hollow diamond: off Loom). */
+.loom-mcp-gl.workspace { background: var(--loom-accent); border-radius: 1px; }
+.loom-mcp-gl.audit { background: var(--loom-text-2); clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.loom-mcp-gl.external { border: 1.5px solid var(--loom-text-2); transform: rotate(45deg) scale(0.78); }
 
 /* Expanded: facet rail + turn-grouped log. The height bound sits on the BODY, never the log alone
    (card d3d10823): the one row is `minmax(0, 1fr)`, so it grows to the taller column up to max-height,
@@ -3034,6 +3039,9 @@ button.loom-atlas-node.is-branch.is-open {
 .loom-mcp-bar3 i.gate, .loom-mcp-stack i.gate { background: var(--loom-work); }
 .loom-mcp-bar3 i.inbox, .loom-mcp-stack i.inbox { background: var(--loom-attn); }
 .loom-mcp-bar3 i.self, .loom-mcp-stack i.self { background: var(--loom-text-2); }
+.loom-mcp-bar3 i.workspace, .loom-mcp-stack i.workspace { background: var(--loom-accent); }
+.loom-mcp-bar3 i.audit, .loom-mcp-stack i.audit { background: var(--loom-text-2); }
+.loom-mcp-bar3 i.external, .loom-mcp-stack i.external { background: color-mix(in oklab, var(--loom-text-3) 55%, transparent); }
 .loom-mcp-bar3 i.error, .loom-mcp-stack i.error { background: var(--loom-danger); }
 .loom-mcp-bar3 i.pending { background: var(--loom-text-3); }
 .loom-mcp-bar3 i.refused, .loom-mcp-stack i.refused { background: var(--loom-attn); }

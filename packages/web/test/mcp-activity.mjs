@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 
 const {
   parseMcpCalls, groupByTurn, sentenceOf, sentenceText, linksOf, applyFilter, emptyFilter, filterActive,
-  tally, subsystemOf, columnLabel, mcpPollInterval, MCP_POLL_ACTIVE_MS, MCP_POLL_IDLE_MS,
+  tally, subsystemOf, isLoomRouter, SUBSYSTEMS, columnLabel, mcpPollInterval, MCP_POLL_ACTIVE_MS, MCP_POLL_IDLE_MS,
   classifyResult, isUnclassified, REFUSED_HINT,
   durationMs, turnSpanMs, fmtMs, fmtClock, fmtDateTime, durationBarPx, DURATION_BAR_MAX_PX,
 } = await import("../src/lib/mcpActivity.ts");
@@ -108,6 +108,30 @@ assert.equal(subsystemOf("worker_spawn"), "fleet");
 assert.equal(subsystemOf("memory_read"), "memory");
 assert.equal(subsystemOf("question_ask"), "inbox");
 assert.equal(subsystemOf("my_context"), "self");
+// Card 6232d9b4: the built-in platform, setup and audit tools no longer all land in self.
+assert.equal(subsystemOf("project_create", "loom-platform"), "workspace");
+assert.equal(subsystemOf("agent_update", "loom-setup"), "workspace");
+assert.equal(subsystemOf("profile_assign", "loom-setup"), "workspace");
+assert.equal(subsystemOf("list_all_projects", "loom-platform"), "workspace");
+assert.equal(subsystemOf("git_commit", "loom-platform"), "workspace");
+assert.equal(subsystemOf("skill_write", "loom-platform"), "workspace");
+assert.equal(subsystemOf("project_task_create", "loom-platform"), "board"); // a card, not a project edit
+assert.equal(subsystemOf("list_all_tasks", "loom-platform"), "board");
+assert.equal(subsystemOf("list_all_sessions", "loom-platform"), "fleet");
+assert.equal(subsystemOf("session_spawn", "loom-setup"), "fleet");
+assert.equal(subsystemOf("project_memory_search", "loom-platform"), "memory");
+assert.equal(subsystemOf("question_pull", "loom-platform"), "inbox");
+assert.equal(subsystemOf("gate_history", "loom-orchestration"), "gate");
+// Every audit-router tool is audit work, whichever prefix it carries, except ending the session; the codex
+// record names the same router without the loom- prefix.
+for (const r of ["loom-audit", "loom-user-audit", "audit", "user-audit"]) {
+  for (const t of ["transcript_read", "repo_grep", "requests_list", "audit_file_finding", "skill_read"]) {
+    assert.equal(subsystemOf(t, r), "audit", `${r} ${t}`);
+  }
+  assert.equal(subsystemOf("end_me", r), "self", r);
+}
+assert.equal(subsystemOf("end_me", "loom-setup"), "self");
+assert.ok(SUBSYSTEMS.some((s) => s.key === "external"), "the facet rail can show third-party calls");
 
 // Filtering narrows, and each facet kind actually applies.
 const f = emptyFilter();
@@ -226,6 +250,63 @@ assert.deepEqual(tally(calls, "router"), [["loom-tasks", 3], ["loom-orchestratio
   assert.equal(durationBarPx(0), 3);
   assert.equal(durationBarPx(10 * 60_000), DURATION_BAR_MAX_PX);
   assert.ok(durationBarPx(42) < durationBarPx(1450), "longer call, longer bar");
+}
+
+// Third-party MCP servers (card 6232d9b4): any mcp__<server>__<tool> is a call; a native tool is not.
+{
+  const X = parseMcpCalls([
+    { role: "user", text: "check the page" },
+    {
+      role: "assistant",
+      text: [
+        call("ffff0001", "mcp__playwright__browser_navigate", { url: "http://127.0.0.1:5999/" }),
+        call("ffff0002", "Bash", { command: "ls mcp__x__y" }), // native: no mcp__ prefix at the name
+        call("ffff0003", "mcp__claude-in-chrome__read_page", { tabId: 3 }),
+        call("ffff0004", "mcp__loom-platform__project_create", { name: "x" }),
+        call("ffff0005", "mcp__plugin_kit_fs__read_file", { path: "a" }),
+        call("ffff0006", "mcp__markitdown__convert_to_markdown", { uri: "file:///a.pdf" }),
+        "[tool] {ffff0007} mcp_playwright_browser_click({})", // single underscores: not an MCP name
+      ].join("\n"),
+    },
+    {
+      role: "tool_result",
+      text: [
+        "-> tool result {ffff0001}: ### Page state\n- Page URL: http://127.0.0.1:5999/\n- Page Title: Loom",
+        "-> tool result {ffff0002}: a.txt",
+        `-> tool result {ffff0003} (error): {"error":"no tab"}`,
+        '-> tool result {ffff0004}: {"id":"p1"}',
+      ].join("\n"),
+    },
+  ]);
+  assert.deepEqual(X.map((c) => c.tool), ["browser_navigate", "read_page", "project_create", "read_file", "convert_to_markdown"]);
+  assert.deepEqual(X.map((c) => c.router), ["playwright", "claude-in-chrome", "loom-platform", "plugin_kit_fs", "markitdown"]);
+  assert.deepEqual(X.map((c) => c.subsystem), ["external", "external", "workspace", "external", "external"]);
+  assert.deepEqual(X.map((c) => c.outcome), ["ok", "error", "ok", "pending", "pending"]);
+  // The result body is paired and kept as served (multi-line).
+  assert.equal(X[0].result, "### Page state\n- Page URL: http://127.0.0.1:5999/\n- Page Title: Loom");
+  assert.equal(X[0].args.url, "http://127.0.0.1:5999/");
+  assert.equal(isLoomRouter("playwright"), false);
+  assert.equal(isLoomRouter("loom-tasks"), true);
+  // The sentence names the server, and an unanswered third-party call is not "asking Loom".
+  assert.equal(sentenceText(X[0]), "Called browser_navigate on playwright");
+  assert.equal(sentenceText(X[1]), "Tried to call read_page on claude-in-chrome");
+  assert.equal(sentenceText(X[4]), "Asking markitdown to call convert_to_markdown");
+  // A third-party tool that shares a Loom tool's name is still not phrased as the Loom tool.
+  const lookalike = parseMcpCalls([{ role: "assistant", text: call("ffff0010", "mcp__github__tasks_update", { id: "a9a7140c", columnKey: "review" }) }]);
+  assert.equal(lookalike[0].subsystem, "external");
+  assert.equal(sentenceText({ ...lookalike[0], outcome: "ok" }), "Called tasks_update on github");
+  // The server tally and filter see third-party servers beside Loom's routers.
+  assert.deepEqual(tally(X, "router").map(([r]) => r), ["claude-in-chrome", "loom-platform", "markitdown", "playwright", "plugin_kit_fs"]);
+  assert.deepEqual(applyFilter(X, { ...emptyFilter(), router: "playwright" }).map((c) => c.seq), [1]);
+  assert.deepEqual(applyFilter(X, { ...emptyFilter(), subsystems: new Set(["external"]) }).map((c) => c.seq), [1, 2, 4, 5]);
+  // A large answer arrives already cut at 2 KB by the daemon; the parser keeps exactly that, no more.
+  const big = "x".repeat(2048) + "... [+50000 chars truncated]";
+  const B = parseMcpCalls([
+    { role: "assistant", text: call("ffff0020", "mcp__playwright__browser_snapshot", {}) },
+    { role: "tool_result", text: `-> tool result {ffff0020}: ${big}` },
+  ]);
+  assert.equal(B[0].result, big);
+  assert.equal(isUnclassified(B[0]), true);
 }
 
 // A transcript with no Loom calls (e.g. a codex session's different markers) parses to nothing.

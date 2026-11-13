@@ -531,7 +531,7 @@ export function TerminalCard({
   // and the classic cards keep their height. Keyed so a reused node never shows A's filters or open rows
   // under B. A node with a RAIL renders it below the split, full width, instead (see `atlasBody`).
   const mcpSection = atlasNode ? (
-    <section className="loom-atlas-nodesec" data-testid="session-node-mcp" aria-label="Loom MCP activity">
+    <section className="loom-atlas-nodesec" data-testid="session-node-mcp" aria-label="MCP activity">
       <McpActivity key={session.id} sessionId={session.id} harness={session.harness} busy={!!session.busy} />
     </section>
   ) : null;
