@@ -2787,6 +2787,16 @@ export class ForkLiveManagerError extends Error {
   }
 }
 
+/** Every KNOWN refusal `adoptOrphanedWorkers` can throw (wrong role/project, old manager not stopped, halted
+ *  or superseded recycle, no live workers, a failed non-worker step). Lets `POST
+ *  /api/sessions/:id/adopt-orphaned-workers` map exactly these to a 409 while an unexpected throw stays a 500. */
+export class AdoptOrphanedWorkersRefusalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AdoptOrphanedWorkersRefusalError";
+  }
+}
+
 /** Card 6745e4bc (Code Review round 2): every KNOWN refusal `repinSessionGrants`/`repinCapabilitySurface`
  *  can throw — role-out-of-scope, the companion redirect, the codex+restrictedTools combination (card
  *  `b94fcb72`), and a stale-id refusal (archived, or superseded by a recycle successor). Lets
@@ -18424,11 +18434,21 @@ export class SessionService {
       { name: "pendingOwnerMessage", run: () => { this.db.reparentPendingOwnerMessage(oldManagerId, freshId); } },
       { name: "capQueue", run: () => { this.capQueue.reparent(oldManagerId, freshId); } },
     ];
+    const failedSteps = SessionService.runOwnershipStepsWithOneRetry(steps, "recycle", oldManagerId, freshId);
+    return { reparentedWorkers, failedSteps };
+  }
+
+  /** The retry-once-per-failed-step runner shared by `attemptManagerOwnershipTransfer` and `adoptOrphanedWorkers`
+   *  (log text is parameterised only by `tag`, so recycle's lines are unchanged). Never throws; returns the names
+   *  of steps still failing after their one retry. */
+  private static runOwnershipStepsWithOneRetry(
+    steps: Array<{ name: string; run: () => void }>, tag: string, oldId: string, newId: string,
+  ): string[] {
     const runPass = (list: typeof steps): string[] => {
       const failed: string[] = [];
       for (const s of list) {
         try { s.run(); } catch (e) {
-          console.error(`[recycle] manager ownership-transfer step "${s.name}" failed for ${oldManagerId.slice(0, 8)} -> ${freshId.slice(0, 8)}:`, (e as Error).message);
+          console.error(`[${tag}] manager ownership-transfer step "${s.name}" failed for ${oldId.slice(0, 8)} -> ${newId.slice(0, 8)}:`, (e as Error).message);
           failed.push(s.name);
         }
       }
@@ -18439,10 +18459,83 @@ export class SessionService {
       const retrySet = new Set(failedSteps);
       failedSteps = runPass(steps.filter((s) => retrySet.has(s.name)));
       for (const name of failedSteps) {
-        console.error(`[recycle] manager ownership-transfer step "${name}" STILL failing after retry for ${oldManagerId.slice(0, 8)} -> ${freshId.slice(0, 8)}`);
+        console.error(`[${tag}] manager ownership-transfer step "${name}" STILL failing after retry for ${oldId.slice(0, 8)} -> ${newId.slice(0, 8)}`);
       }
     }
-    return { reparentedWorkers, failedSteps };
+    return failedSteps;
+  }
+
+  /**
+   * @decision 11ca11fd — worker move stays LAST (the commit point); never expose this on a manager/worker surface.
+   */
+  adoptOrphanedWorkers(
+    oldManagerId: string, newManagerId: string, trigger: "human-rest" | "platform-lead" = "human-rest",
+  ): { oldManagerId: string; newManagerId: string; workerIds: string[]; reparentedWorkers: number } {
+    const refuse = (m: string): never => { throw new AdoptOrphanedWorkersRefusalError(m); };
+    const oldM = this.db.getSession(oldManagerId);
+    const newM = this.db.getSession(newManagerId);
+    if (!oldM) refuse(`session ${oldManagerId} not found`);
+    if (!newM) refuse(`session ${newManagerId} not found`);
+    if (oldManagerId === newManagerId) refuse("the old and new manager are the same session");
+    if (oldM!.role !== "manager") refuse(`session ${oldManagerId.slice(0, 8)} is not a manager (role ${oldM!.role ?? "none"})`);
+    if (newM!.role !== "manager") refuse(`session ${newManagerId.slice(0, 8)} is not a manager (role ${newM!.role ?? "none"})`);
+    if (oldM!.projectId !== newM!.projectId) refuse("the old and new manager belong to different projects");
+    // Only an exited/none manager counts as stopped: `starting` (a resume/respawn in flight, or crash recovery
+    // resuming the manager before its workers) and `live` both refuse.
+    if (oldM!.processState !== "exited" && oldM!.processState !== "none") {
+      refuse(`manager ${oldManagerId.slice(0, 8)} is ${oldM!.processState === "live" ? "still live" : `not stopped (${oldM!.processState})`} — stop it first; only a stopped manager's workers can be adopted`);
+    }
+    if (isSupersededByRecycle(this.db, oldManagerId)) refuse(`manager ${oldManagerId.slice(0, 8)} was superseded by a recycle — its recycle owns the fleet`);
+    if (currentHaltedSuccessor(this.db, oldManagerId)) {
+      refuse(`manager ${oldManagerId.slice(0, 8)} has an unresolved halted recycle — use recycle_reattempt (the sanctioned forward path, which also carries its queue), not adopt`);
+    }
+    if (newM!.processState !== "live" || newM!.archivedAt || isSupersededByRecycle(this.db, newManagerId)) {
+      refuse(`manager ${newManagerId.slice(0, 8)} is not a live, current manager of this project`);
+    }
+    const workerIds = this.db.listWorkers(oldManagerId).filter((w) => w.processState === "live").map((w) => w.id);
+    if (workerIds.length === 0) refuse(`manager ${oldManagerId.slice(0, 8)} has no live workers to adopt`);
+    const steps: Array<{ name: string; run: () => void }> = [
+      { name: "wakes", run: () => { this.db.reparentWakes(oldManagerId, newManagerId); } },
+      { name: "questions", run: () => { this.db.reparentQuestions(oldManagerId, newManagerId); } },
+      { name: "eventTriggers", run: () => { this.db.reparentEventTriggerTargets(oldManagerId, newManagerId); } },
+      { name: "pollJobs", run: () => { this.db.reparentPollJobTargets(oldManagerId, newManagerId); } },
+      { name: "webhooks", run: () => { this.db.reparentWebhookTargets(oldManagerId, newManagerId); } },
+      // Merge-aware (never the recycle overwrite): the live target may hold its own open episode.
+      { name: "pendingOwnerMessage", run: () => { this.db.mergePendingOwnerMessage(oldManagerId, newManagerId); } },
+      { name: "capQueue", run: () => { this.capQueue.reparent(oldManagerId, newManagerId); } },
+    ];
+    const failedSteps = SessionService.runOwnershipStepsWithOneRetry(steps, "adopt", oldManagerId, newManagerId);
+    if (failedSteps.length > 0) {
+      refuse(`ownership-transfer step(s) failed (${failedSteps.join(", ")}); no worker was moved — re-run this adopt to finish it. ` +
+        `Resuming the old manager instead would leave it without the wakes/questions/owner message already moved to the new one`);
+    }
+    const reparentedWorkers = this.db.reparentLiveWorkers(oldManagerId, newManagerId);
+    try {
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: newManagerId, workerSessionId: oldManagerId,
+        kind: "orphaned_workers_adopted", detail: { workerIds, reparentedWorkers, trigger },
+      });
+    } catch (e) {
+      console.error(`[adopt] audit event failed for ${oldManagerId.slice(0, 8)} -> ${newManagerId.slice(0, 8)}:`, (e as Error).message);
+    }
+    try {
+      const cur = this.db.getSession(oldManagerId);
+      if (cur?.lastError?.startsWith("[loom:orphaned-fleet]")) this.db.setLastError(oldManagerId, null);
+    } catch { /* banner cleanup is best-effort */ }
+    try {
+      const lines = workerIds.map((wid) => {
+        const w = this.db.getSession(wid);
+        const t = w?.taskId ? this.db.getTask(w.taskId) : undefined;
+        return `- worker ${wid} — task ${w?.taskId ?? "none"}${t ? ` "${t.title}"` : ""}`;
+      });
+      this.enqueueDurableNudge(newManagerId, "manager",
+        `[loom:adopted-workers] You now own ${workerIds.length} live worker(s) from stopped manager ${oldManagerId} (handed over by ${trigger === "platform-lead" ? "the Platform Lead" : "the owner"}); ` +
+        `their reports will arrive from it, review/merge/message/stop work as for your own:\n${lines.join("\n")}`);
+    } catch (e) {
+      console.error(`[adopt] adopted-workers notice failed for ${newManagerId.slice(0, 8)}:`, (e as Error).message);
+    }
+    return { oldManagerId, newManagerId, workerIds, reparentedWorkers };
   }
 
   /** Shared by the recycle carry and the spawn-time carry: a stale context-recycle nudge / emergency redirect. */
@@ -20125,7 +20218,9 @@ export class SessionService {
           session.id,
           `[loom:orphaned-fleet] This ${session.role} exited while ${liveWorkers.length} worker(s)/child ` +
           `session(s) were still live — they are now parentless. Resume this session (it will re-adopt ` +
-          `them) or reparent/stop them via a sibling manager. Loom did NOT auto-archive so this stays visible.`,
+          `them), or start a manager for this project and have the Platform Lead (session_adopt_orphaned_workers) ` +
+          `or the owner (POST /api/sessions/${session.id}/adopt-orphaned-workers) hand them to it. ` +
+          `Loom did NOT auto-archive so this stays visible.`,
         );
         return; // do NOT archive — stay on the live rail, visible + resumable
       }

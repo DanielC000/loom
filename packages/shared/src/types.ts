@@ -2268,6 +2268,8 @@ export type OrchestrationEventKind =
   // surface from its live Profile; `detail` carries { diff }. Audit-only, excluded from the same four
   // kind-groupings as `agent_profile_rebind` above for the same reason.
   | "grants_repinned"
+  // @decision 11ca11fd — audit-only (same bucket as `grants_repinned`): never add it to an event-trigger, gate or report-resolution kind set.
+  | "orphaned_workers_adopted"
   // OBSERVABILITY ONLY — records whether a PRIVATE, presence-gated per-project discovery block was
   // appended to a spawn/recycle's startupPrompt, filed at all FIVE real injection call sites in the
   // daemon's own `sessions/service.ts`. WHAT the block is and WHY it's gated stays documented
@@ -2426,7 +2428,7 @@ const ORCHESTRATION_EVENT_KIND_MEMBERSHIP: Record<OrchestrationEventKind, true> 
   manager_session_barred: true,
   vault_index_lock_stale: true,
   vault_index_lock_cleared: true,
-  profile_grant_reach: true, agent_profile_rebind: true, grants_repinned: true,
+  profile_grant_reach: true, agent_profile_rebind: true, grants_repinned: true, orphaned_workers_adopted: true,
   process_survived_kill: true,
   trust_lock_degraded: true,
   wake_target_redirected: true,

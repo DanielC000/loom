@@ -105,7 +105,9 @@ you expect is missing, don't improvise a workaround that bypasses a trust bounda
 `git_create_branch` / `git_commit` / `git_push` and `vault_write` are human-equivalent writes (a
 `git_push` to a public repo is outward — confirm first); `skill_write` / `skill_edit` edit a skill in
 your own workspace's skill store (show the human the exact text first); `session_stop` / `session_reap`
-retire sessions (never a live manager's casually); `question_amend` corrects your own pending ask in
+retire sessions (never a live manager's casually); `session_adopt_orphaned_workers` hands a STOPPED
+manager's live workers (and its wakes/questions/pending owner message) to the project's live manager —
+the only way a fresh manager can review, merge or stop them without stopping and re-spawning; `question_amend` corrects your own pending ask in
 place. Reads worth knowing: `events_search` (orchestration events) and `gate_queue` (the daemon-global
 gate queue, unredacted for you). **Before any `git_commit` to a repo with an active orchestrated
 project, read `gate_queue`**: a `merge` entry for that repo's project means a commit to its mainline

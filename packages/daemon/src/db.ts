@@ -2047,7 +2047,7 @@ const DURABLE_AUDIT_EVENT_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<O
   // Security / trust-boundary
   "credential_revoked", "credential_undeliverable", "manager_manage", "deploy", "worker_gate", "discovery_block_injection",
   "engine_session_rotated", "codex_auto_commit", "restart_orphaned_ops", "mainline_moved_outside_loom", "vault_autocommit_refused_code_repo",
-  "vault_index_lock_stale", "vault_index_lock_cleared", "agent_profile_rebind", "grants_repinned", "ssh_command_run", "ssh_host_key_repinned",
+  "vault_index_lock_stale", "vault_index_lock_cleared", "agent_profile_rebind", "grants_repinned", "orphaned_workers_adopted", "ssh_command_run", "ssh_host_key_repinned",
   // Cross-board / cross-project escalation trail
   "platform_escalate", "escalation_triaged", "audit_finding", "workspace_audit_suggestion",
   "cross_project_message", "assistant_relay_message", "session_message", "session_steer_dropped",
@@ -8655,6 +8655,21 @@ export class Db {
     this.db.prepare(
       "UPDATE sessions SET pending_owner_msg_excerpt = ?, pending_owner_msg_at = ?, pending_owner_msg_count = ? WHERE id = ?",
     ).run(pending.excerpt, pending.at, pending.count, newSessionId);
+    this.notifySessionChanged(newSessionId);
+    this.clearPendingOwnerMessage(oldSessionId);
+  }
+  /** Merge-aware twin of `reparentPendingOwnerMessage`, used ONLY by `adoptOrphanedWorkers`: the target is a
+   *  LIVE manager that may already hold its own open episode, so a plain overwrite would break first-message-wins
+   *  (card 788ed7f4). Keeps the EARLIER `at` (and its excerpt) and sums the counts; the source is cleared. */
+  mergePendingOwnerMessage(oldSessionId: string, newSessionId: string): void {
+    const pending = this.getPendingOwnerMessage(oldSessionId);
+    if (!pending) return;
+    const target = this.getPendingOwnerMessage(newSessionId);
+    if (!target) { this.reparentPendingOwnerMessage(oldSessionId, newSessionId); return; }
+    const keep = Date.parse(pending.at) < Date.parse(target.at) ? pending : target;
+    this.db.prepare(
+      "UPDATE sessions SET pending_owner_msg_excerpt = ?, pending_owner_msg_at = ?, pending_owner_msg_count = ? WHERE id = ?",
+    ).run(keep.excerpt, keep.at, pending.count + target.count, newSessionId);
     this.notifySessionChanged(newSessionId);
     this.clearPendingOwnerMessage(oldSessionId);
   }

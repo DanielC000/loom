@@ -2455,6 +2455,26 @@ export class PlatformMcpRouter {
     );
 
     server.registerTool(
+      "session_adopt_orphaned_workers",
+      {
+        description:
+          `Hand a STOPPED manager's still-live workers to the project's current live manager, so the new manager can review, merge, message or stop them (otherwise a worker is "not your worker" to anyone but its recorded parent). Moves the old manager's live workers plus its wakes, open questions, event-trigger/poll-job/webhook wake targets, pending owner message and cap-queue entries, then files an audit event. Both ids accept a full session id OR an unambiguous ${MIN_ID_PREFIX_LEN}-char id-prefix. Refuses ({error}) when: the old manager is not stopped (live or starting — stop it first); the new session is not a live, current manager of the SAME project; the two are the same session; the old manager was superseded by a recycle or has an unresolved halted recycle (use recycle_reattempt instead); or it has no live workers. Non-worker state moves first and the workers last, so on an {error} no worker has moved: re-run to finish the adopt (resuming the old manager instead would leave it without the wakes/questions/owner message already moved). On success the new manager is sent a notice listing each adopted worker. Mirrors the human REST route POST /api/sessions/:id/adopt-orphaned-workers.`,
+        inputSchema: strictShape({ oldManagerId: z.string(), newManagerId: z.string() }),
+      },
+      async ({ oldManagerId, newManagerId }) => {
+        const oldR = resolveSessionByIdOrPrefix(oldManagerId);
+        if ("error" in oldR) return ok({ error: oldR.error });
+        const newR = resolveSessionByIdOrPrefix(newManagerId);
+        if ("error" in newR) return ok({ error: newR.error });
+        try {
+          return ok(sessions.adoptOrphanedWorkers(oldR.session.id, newR.session.id, "platform-lead"));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
       "session_reap",
       {
         description:

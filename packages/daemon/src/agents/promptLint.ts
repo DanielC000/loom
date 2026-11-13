@@ -43,7 +43,7 @@ export const PLATFORM_TOOLS: readonly string[] = [
   "project_get", "project_init", "project_memory_search", "project_task_create", "project_task_get", "project_task_update",
   "project_update", "question_amend", "question_ask", "question_cancel", "question_pull", "question_resolve",
   "recycle_me", "resume_doc_check", "schedule_create", "schedule_delete", "schedule_get", "schedule_update",
-  "session_message", "session_reap", "session_spawn", "session_stop", "session_transcript", "skill_edit",
+  "session_adopt_orphaned_workers", "session_message", "session_reap", "session_spawn", "session_stop", "session_transcript", "skill_edit",
   "skill_list", "skill_write", "template_apply", "template_list", "vault_write",
 ];
 

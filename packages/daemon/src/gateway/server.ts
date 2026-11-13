@@ -29,7 +29,7 @@ import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS, CommondirPinConflictEr
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR, SecondLiveManagerError, ForkLiveManagerError, RepinGrantsRefusalError } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR, SecondLiveManagerError, ForkLiveManagerError, RepinGrantsRefusalError, AdoptOrphanedWorkersRefusalError } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
@@ -7095,6 +7095,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // @decision 6745e4bc round 2 — map ONLY a known refusal to 409; an unexpected throw (e.g. a
       // data-integrity "project not found") rethrows for Fastify's default handler to surface as a 500.
       if (e instanceof RepinGrantsRefusalError) return reply.code(409).send({ error: e.message });
+      throw e;
+    }
+  });
+  // @decision 11ca11fd — HUMAN-ONLY: hand a stopped manager's live workers to the project's live manager.
+  // Tier-0 loopback-only (deliberately NOT in trust-tier.ts's Tier-1 list); the only MCP twin is the Platform Lead tool.
+  app.post("/api/sessions/:id/adopt-orphaned-workers", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const newManagerId = (req.body as { newManagerId?: unknown } | null)?.newManagerId;
+    if (typeof newManagerId !== "string" || !newManagerId) return reply.code(400).send({ error: "newManagerId (string) is required" });
+    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    if (!deps.db.getSession(newManagerId)) return reply.code(404).send({ error: "new manager session not found" });
+    try {
+      return reply.send(deps.sessions.adoptOrphanedWorkers(id, newManagerId, "human-rest"));
+    } catch (e) {
+      if (e instanceof AdoptOrphanedWorkersRefusalError) return reply.code(409).send({ error: e.message });
       throw e;
     }
   });
