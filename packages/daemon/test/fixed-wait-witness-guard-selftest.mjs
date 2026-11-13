@@ -409,12 +409,12 @@ check(`isWaitIdiomLine: a one-line block comment ("/** ${SLEEP_KW}(20); */") is 
 {
   const fakeListing = (stdout) => () => stdout;
   const found = listUntrackedTestFiles("/fake/repo", "packages/daemon/test/*.mjs",
-    fakeListing("packages/daemon/test/new-thing.mjs\npackages/daemon/test/other-thing.mjs\n"));
+    fakeListing("packages/daemon/test/new-thing.mjs\0packages/daemon/test/other-thing.mjs\0"));
   check("listUntrackedTestFiles: parses a multi-line git ls-files listing into a trimmed array",
     JSON.stringify(found) === JSON.stringify(["packages/daemon/test/new-thing.mjs", "packages/daemon/test/other-thing.mjs"]));
 }
 {
-  const empty = listUntrackedTestFiles("/fake/repo", "packages/daemon/test/*.mjs", () => "\n");
+  const empty = listUntrackedTestFiles("/fake/repo", "packages/daemon/test/*.mjs", () => "");
   check("listUntrackedTestFiles: an empty git ls-files listing returns []", JSON.stringify(empty) === "[]");
 }
 {

@@ -410,8 +410,10 @@ export function resolveCurrentHeadSha(repoRoot, execFileSyncFn = execFileSync) {
  */
 export function listUntrackedTestFiles(repoRoot, testGlob, execFileSyncFn = execFileSync) {
   try {
-    const raw = execFileSyncFn("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "--", testGlob], { encoding: "utf8" });
-    return raw.split("\n").map((l) => l.trim()).filter(Boolean);
+    const raw = execFileSyncFn("git", ["-C", repoRoot, "ls-files", "--others", "--exclude-standard", "-z", "--", testGlob], { encoding: "utf8" });
+    // NUL-delimited (card 4dea1939): the default newline listing C-quotes a non-ASCII name ("\303\251.md"
+    // in double quotes, core.quotePath), which then matches no real file on disk.
+    return raw.split("\0").filter(Boolean);
   } catch {
     return null; // git itself failed (not "found none") — caller distinguishes via null, doesn't fail on it
   }
