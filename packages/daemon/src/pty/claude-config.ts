@@ -527,7 +527,7 @@ export interface EnsureTrustedResult {
 /**
  * Pre-clear the things that block an unattended spawned `claude` from reaching SessionStart:
  *
- *  1. The workspace-trust dialog ("Is this a project you trust?") — the CLI's own trust writer, on
+ *  1. The workspace-trust dialog (both wordings: "...a project you trust?" and claude 2.1.323's "...a project you created or one you trust?") — the CLI's own trust writer, on
  *     clicking "Yes, I trust this folder", persists ONLY `hasTrustDialogAccepted:true` (per `isTrusted`'s
  *     own card-17237fba doc above — `hasCompletedProjectOnboarding` is stripped from every project entry
  *     on every CLI save, so it's never a real persisted signal). Loom's own write below still sets BOTH

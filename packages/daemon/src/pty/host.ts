@@ -1420,6 +1420,10 @@ export function isResumeSummaryGate(flatCollapsed: string): boolean {
  * The single shared source for both detectors below — never re-derive a copy.
  */
 const WORKSPACE_TRUST_RE = /isthisaprojectyou(?:createdoroneyou)?trust/i;
+/** The external-imports dialog's question and the MCP-enable dialog's two sub-patterns (collapsed text) — shared by every detector below. */
+const EXTERNAL_IMPORTS_RE = /externalimports/i;
+const MCP_SERVER_RE = /mcpserver/i;
+const REJECT_ALL_RE = /rejectall/i;
 
 /**
  * Card 01160ae3: known blocking-dialog signatures that can stall an unattended spawn BEFORE SessionStart
@@ -1431,7 +1435,7 @@ const WORKSPACE_TRUST_RE = /isthisaprojectyou(?:createdoroneyou)?trust/i;
  */
 export function detectBlockingDialogSignature(flatCollapsed: string): string | null {
   // "Allow external CLAUDE.md file imports? ... Enter to confirm · Esc to cancel" (card b180791a).
-  if (/externalimports/i.test(flatCollapsed)) return "external-imports";
+  if (EXTERNAL_IMPORTS_RE.test(flatCollapsed)) return "external-imports";
   // The workspace-trust dialog (see claude-config.ts's own doc; both wordings, WORKSPACE_TRUST_RE).
   if (WORKSPACE_TRUST_RE.test(flatCollapsed)) return "workspace-trust";
   // The per-project "N new MCP servers found — enable?" prompt — same test as the existing bootScan
@@ -1444,7 +1448,7 @@ export function detectBlockingDialogSignature(flatCollapsed: string): string | n
 // @decision e29923e3 — the ONE shared test for the MCP-enable signature (the detection site below, and
 // detectBlockingDialogSignature's own branch, both use this, never a re-derived copy). See record.
 export function isMcpServerEnableSignature(flatCollapsed: string): boolean {
-  return /mcpserver/i.test(flatCollapsed) && /rejectall/i.test(flatCollapsed);
+  return MCP_SERVER_RE.test(flatCollapsed) && REJECT_ALL_RE.test(flatCollapsed);
 }
 
 /**
@@ -1470,7 +1474,7 @@ export function detectNewestBlockingDialogSignature(flatCollapsed: string): stri
   };
   const candidates: Array<{ name: string; pos: number }> = [];
 
-  const externalImports = lastIndex(/externalimports/gi);
+  const externalImports = lastIndex(new RegExp(EXTERNAL_IMPORTS_RE.source, "gi"));
   if (externalImports >= 0) candidates.push({ name: "external-imports", pos: externalImports });
 
   const workspaceTrust = lastIndex(new RegExp(WORKSPACE_TRUST_RE.source, "gi"));
@@ -1479,7 +1483,10 @@ export function detectNewestBlockingDialogSignature(flatCollapsed: string): stri
   // Compound: isMcpServerEnableSignature is the shared boolean test (never re-derived — see the
   // e29923e3 decision record); position is computed separately, from the SAME two sub-patterns it tests.
   if (isMcpServerEnableSignature(flatCollapsed)) {
-    candidates.push({ name: "mcp-server-enable", pos: Math.max(lastIndex(/mcpserver/gi), lastIndex(/rejectall/gi)) });
+    candidates.push({
+      name: "mcp-server-enable",
+      pos: Math.max(lastIndex(new RegExp(MCP_SERVER_RE.source, "gi")), lastIndex(new RegExp(REJECT_ALL_RE.source, "gi"))),
+    });
   }
 
   if (candidates.length > 0) {
@@ -1536,10 +1543,18 @@ const MODAL_LIVE_CHROME_RE = /shift\+?tabtocycle|accepteditson|planmodeon|automo
 /** Option rows a specific dialog draws under its question (collapsed). Only dialogs whose real rows were captured. */
 const MODAL_OPTION_ROWS: Readonly<Record<string, RegExp>> = { "workspace-trust": /yes,itrustthisfolder/gi };
 
+/** Per specific signature: the question's sub-patterns (its end = the LATER of them). Exhaustive over the specific names. */
+const MODAL_QUESTION_RES: Readonly<Record<string, readonly RegExp[]>> = {
+  "workspace-trust": [WORKSPACE_TRUST_RE],
+  "external-imports": [EXTERNAL_IMPORTS_RE],
+  "mcp-server-enable": [MCP_SERVER_RE, REJECT_ALL_RE],
+};
+
 /**
  * Structure check for a specific signature (PURE). `live`: question followed by the dialog's footer/option rows
  * (and no redrawn composer box after them); `stale`: that structure followed by the composer box; `quoted`: bare
- * question text with the live frame's chrome after it; `live` also for bare text with no chrome (fail visible).
+ * question text with the live frame's chrome after it, ONLY for a signature whose option rows are known
+ * (MODAL_OPTION_ROWS); a signature without them keeps the old verdict, `live` (fail toward visible).
  */
 function classifySpecificModal(
   name: string,
@@ -1551,18 +1566,18 @@ function classifySpecificModal(
     for (const m of flat.matchAll(new RegExp(re.source, "gi"))) last = (m.index ?? 0) + m[0].length;
     return last;
   };
-  const qStart = name === "workspace-trust" ? ends(WORKSPACE_TRUST_RE)
-    : name === "external-imports" ? ends(/externalimports/)
-    : Math.max(ends(/mcpserver/), ends(/rejectall/));
-  const q = Math.max(qStart, 0);
+  const questionRes = MODAL_QUESTION_RES[name];
+  if (!questionRes) return "live";
+  const q = Math.max(...questionRes.map(ends));
   const footerAfter = footer !== null && Math.min(footer.escIdx, footer.enterIdx) >= q;
   const rowsRe = MODAL_OPTION_ROWS[name];
   const rowsEnd = rowsRe ? ends(rowsRe) : -1;
-  const rowsAfter = rowsEnd >= q && rowsEnd >= 0;
+  const rowsAfter = rowsEnd >= q;
   if (footerAfter || rowsAfter) {
     const structureEnd = Math.max(footerAfter ? footer!.footerEnd : -1, rowsAfter ? rowsEnd : -1);
     return MODAL_COMPOSER_BOX_RE.test(flat.slice(structureEnd)) ? "stale" : "live";
   }
+  if (!rowsRe) return "live";
   return MODAL_LIVE_CHROME_RE.test(flat.slice(q)) ? "quoted" : "live";
 }
 /** @decision 20ff76de — how long a mid-session hold lasts before the ONE owner escalation (never a timeout into the Enter ladder). */

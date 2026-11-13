@@ -340,6 +340,14 @@ try {
   fq.feed("● The dialog says: Enter to confirm · Esc to cancel" + COMPOSER_BOX);
   host.submit(QTE, "hello quoted");
   check("(F3) a quoted footer in ordinary output never engages (ordinary retry ladder)", await waitUntil(() => enters(fq) > 1, 3000) && midEvents(QTE).length === 0);
+  // F3b: an assistant reply quoting the OLD-wording trust question (named, never typed out here), ending on a chunk that
+  // ends with "cancel" (the candidate gate) after the live frame's chrome: quoted output, never a modal
+  const QTT = "sess-quoted-trust";
+  const fqt = spawnOne(QTT, "manager");
+  fqt.feed("● The trust question reads: Is this a project you trust?\n⏵⏵ accept edits on (shift+tab to cycle) · ctrl+c to cancel");
+  check("(F3b) a quoted trust question + live chrome, chunk ending in 'cancel', freezes no candidate", host.live.get(QTT).modalCandidate == null);
+  host.submit(QTT, "hello quoted trust");
+  check("(F3b) ...and never engages the hold (ordinary retry ladder)", await waitUntil(() => enters(fqt) > 1, 3000) && midEvents(QTT).length === 0 && host.live.get(QTT).midSessionModal == null);
   // F4: the session's OWN echoed prompt carrying the footer text
   const ECH = "sess-echo";
   const fx = spawnOne(ECH, "manager");

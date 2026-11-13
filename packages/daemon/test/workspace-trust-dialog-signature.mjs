@@ -43,14 +43,14 @@ check("question + option row, no footer yet, is structure -> detected",
   detectMidSessionModal("Is this a project you trust?\r\n❯ No, exit\r\n  Yes, I trust this folder") === "workspace-trust");
 // Sibling signatures that matched on bare text: quoted (chrome after) is not a modal; with footer it is.
 const chrome = "\r\n⏵⏵ accept edits on (shift+tab to cycle)";
-check("external-imports: bare words in a reply with live chrome after are NOT a modal",
-  detectMidSessionModal("● You can allow external imports in CLAUDE.md" + chrome) === null);
 check("external-imports: real shape (question + footer) is detected",
   detectMidSessionModal("Allow external CLAUDE.md file imports?\r\n❯ No, disable external imports\r\n  Yes, allow external imports\r\nEnter to confirm · Esc to cancel") === "external-imports");
-check("mcp-server-enable: bare tokens in a reply with live chrome after are NOT a modal",
-  detectMidSessionModal("● an mcp server may offer reject all" + chrome) === null);
 check("mcp-server-enable: bare tokens with no chrome (unconfirmed real shape) stay detected",
   detectMidSessionModal("2 new MCP servers found\r\n❯ Enable\r\n  Reject all") === "mcp-server-enable");
+check("mcp-server-enable: no captured option rows -> the old verdict holds even with chrome after (fail visible)",
+  detectMidSessionModal("2 new MCP servers found\r\n❯ Enable\r\n  Reject all" + chrome) === "mcp-server-enable");
+check("external-imports: no captured option rows -> bare words with chrome after keep the old verdict (detected)",
+  detectMidSessionModal("● You can allow external imports in CLAUDE.md" + chrome) === "external-imports");
 check("quoted full mock dialog followed by the redrawn composer box is NOT a modal",
   detectMidSessionModal("Is this a project you trust?\r\n❯ No, exit\r\n  Yes, I trust this folder\r\nEnter to confirm · Esc to cancel\r\n" + "─".repeat(40) + "❯ ") === null);
 
