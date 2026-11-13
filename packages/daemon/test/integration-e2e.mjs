@@ -39,10 +39,11 @@ import { encodeProjectDir } from "../dist/sessions/transcript.js";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { registerForCleanup, unregister } from "./_tmp-fixture.mjs";
 import { commitAll } from "./_git-commit.mjs";
+import { readLoopbackToken } from "./_loopback-auth.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
 const BASE = `http://127.0.0.1:${process.env.LOOM_PORT || 4317}`;
 const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) })).json();
-const postRaw = (u, b) => fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b ?? {}) });
+const postRaw = (u, b) => fetch(BASE + u, { method: "POST", headers: { "content-type": "application/json", ...(u.startsWith("/internal/") ? { authorization: `Bearer ${readLoopbackToken(process.env.LOOM_HOME)}` } : {}) }, body: JSON.stringify(b ?? {}) });
 const get = async (u) => (await fetch(BASE + u)).json();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

@@ -177,6 +177,10 @@ function guardWsMessage(route: string, handler: (raw: Buffer, isBinary: boolean)
 // in the same Bearer header). Never widen: a new entry needs an exact pattern AND authRunKey called first.
 export const LOOPBACK_GUARD_KEY_AUTHED_EXEMPT: readonly string[] = ["/api/runs", "/api/runs/:id/cancel"];
 
+// @decision a31b18fa — the ONLY /internal/* routes exempt from the loopback-secret guard; never add one
+// without an equivalent credential. /internal/hook carries its own per-session hookToken.
+export const INTERNAL_BEARER_EXEMPT: readonly string[] = ["/internal/hook"];
+
 /** Upper bound for the raw vault-file serving route. Vault attachments are normally small (images,
  *  PDFs); this is a guard against streaming a pathologically large file, not a real working limit —
  *  a file over the cap is refused with 413 rather than streamed. */
@@ -796,13 +800,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // ("does an agent need this from a shell?"), not trust-tier.ts's "is this safe for a remote human?".
   //
   //   - Scope: every non-GET/HEAD `/api/*` route, PLUS the `/ws/term` and `/ws/companion` upgrades (both
-  //     viewing AND writing — card 351e89af), PLUS `POST /internal/shutdown`/`/internal/update` (card
-  //     93249b52). Untouched: `/mcp/:sessionId`, `POST /internal/hook` (deliberate — see the comment at
-  //     `isGuardedInternalWrite` below), `/hooks/*`, `/oauth/callback`, `/ws/fleet`. GET reads are
-  //     deliberately NOT gated (settled policy, card 214caa53 GAP 2) — filesystem access already grants
-  //     the same read surface, so gating adds no material barrier at real cost to the UI/CLI/health probes.
-  //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` and the two `/internal/*`
-  //     routes (constant-time compared); for the WS upgrades, the same secret via the remote tier's own
+  //     viewing AND writing — card 351e89af), PLUS EVERY method on every `/internal/*` route
+  //     (default-deny, card a31b18fa; the only exemption is `INTERNAL_BEARER_EXEMPT`, i.e.
+  //     `POST /internal/hook` — see the comment at `isGuardedInternal` below). Untouched: `/mcp/:sessionId`,
+  //     `/hooks/*`, `/oauth/callback`, `/ws/fleet`. `/api/*` GET reads are deliberately NOT gated (settled
+  //     policy, card 214caa53 GAP 2) — filesystem access already grants the same read surface, so gating
+  //     adds no material barrier at real cost to the UI/CLI/health probes; `/internal/*` GETs ARE gated (operator/admin
+  //     surface, not the viewport read API — a31b18fa).
+  //   - Credential: `Authorization: Bearer <deps.loopbackSecret>` for `/api/*` writes and every guarded
+  //     `/internal/*` route (constant-time compared); for the WS upgrades, the same secret via the remote tier's own
   //     `Sec-WebSocket-Protocol: loom.v1, loom.bearer.<secret>` mechanism — reused verbatim, not
   //     reinvented; the web client sends only this now (gatewayCredential.ts's `socketAuth`). Optional
   //     dep — ABSENT ⇒ no-op (partial-stub tests stay byte-identical); `index.ts` (the only real boot
@@ -841,11 +847,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Card 9497bb7e: /internal/merge-quarantine/clear-broad-union joins the SAME set and tier — it
       // destroys a whole union's own `genuineContributorKeys`-guarded victim set (its `dryRun:true` form
       // included, since the SAME route handles both and nothing should distinguish them at this gate).
-      const isGuardedInternalWrite = req.method === "POST" &&
-        (routePattern === "/internal/shutdown" || routePattern === "/internal/update" ||
-          routePattern === "/internal/merge-quarantine/clear" || routePattern === "/internal/merge-quarantine/clear-by-path" ||
-          routePattern === "/internal/merge-quarantine/clear-broad-union");
-      if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket && !isGuardedInternalWrite) return;
+      //
+      // @decision a31b18fa — /internal/* is DEFAULT-DENY: every method on every route requires the
+      // bearer unless the pattern is in INTERNAL_BEARER_EXEMPT. A new /internal route is guarded
+      // without anyone remembering to list it.
+      const isGuardedInternal = routePattern.startsWith("/internal/") && !INTERNAL_BEARER_EXEMPT.includes(routePattern);
+      if (!isGuardedApiWrite && !isTermSocket && !isCompanionSocket && !isGuardedInternal) return;
       // This check is what scopes the hook to loopback, not a defensive no-op: a non-loopback caller
       // reaching here either already passed/failed the trust-tier wall above, or has no non-loopback bind
       // to reach at all.
@@ -3558,7 +3565,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // triggers the SAME path the SIGINT/SIGTERM handlers run. Exits 0 (clean stop), NOT 75 (the
   // supervisor's RESTART sentinel — a stop must never relaunch).
   // @decision 93249b52 — loopback-IP alone is not enough; this route is also covered by the loopback-
-  // secret bearer guard above (`isGuardedInternalWrite`) — stopping the daemon is too large a capability
+  // secret bearer guard above (`isGuardedInternal`) — stopping the daemon is too large a capability
   // for a co-resident agent to reach unauthenticated.
   app.post("/internal/shutdown", async (req, reply) => {
     if (classOf(req).kind !== "loopback") return reply.code(403).send("forbidden");
@@ -3635,7 +3642,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // was never a registered Loom project (or no longer is), which `/clear` above structurally cannot:
   // that route resolves projectId+repoKey through the DB first, so an orphaned latch (its repoPath isn't
   // bound to ANY project) has nothing for it to resolve. SAME trust tier as `/clear` (loopback +
-  // isGuardedInternalWrite above); its own `repoPath` form calls `clearMergeQuarantineByRecordedPath`
+  // isGuardedInternal above); its own `repoPath` form calls `clearMergeQuarantineByRecordedPath`
   // directly (never `clearMergeQuarantineReporting` — there is no project to resolve here) — this
   // route is strictly a wider address space (repoPath/id instead of projectId/repoKey), never a weaker
   // check; deliberately allowed to also clear a CURRENTLY-REGISTERED repo's quarantine (same bearer+
@@ -3751,10 +3758,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { ok: true, dryRun: false, ...rest };
   });
 
-  // --- Merge-quarantine read-only list (card c0be9bf9) — loopback-only, deliberately NOT covered by the
-  // isGuardedInternalWrite bearer guard (decision 214caa53: GET reads are settled policy as ungated —
-  // filesystem access already grants the same read surface, and these paths are already readable on disk
-  // under LOOM_HOME). Gives a human the id(s)/repoPath of every active (or boot-pending-unresolvable)
+  // --- Merge-quarantine read-only list (card c0be9bf9) — loopback-only, and covered by the default-deny
+  // isGuardedInternal bearer guard like every /internal route (card a31b18fa; it exposes repo paths and
+  // quarantine reasons). Gives a human the id(s)/repoPath of every active (or boot-pending-unresolvable)
   // quarantine, and whether it's still bound to a currently-registered project, BEFORE they call
   // `/clear-by-path`. `ids` is quarantineLatchFileIdsFor(e)'s own id list; `id` is kept as `ids[0]` for a
   // caller that only ever expects one. A genuinely corrupt/unparsable latch matching NO in-memory entry is

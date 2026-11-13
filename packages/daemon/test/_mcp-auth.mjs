@@ -22,11 +22,17 @@
 // seam — minting a duplicate test-only token for a session that already has a real one is pointless and
 // makes `verifyMcpToken`'s own "prefer the real Live entry" precedence untested.
 
+import { readLoopbackToken, authHeaders } from "./_loopback-auth.mjs";
+
 /** Mints a valid mcpToken for `sessionId` against a real, already-running daemon at `base` (e.g.
  *  `http://127.0.0.1:4318`). Throws with a clear message on any non-200 (e.g. the daemon wasn't started
  *  with LOOM_TEST=1, or a real session already exists for this id). */
 export async function mintTestMcpToken(base, sessionId) {
-  const res = await fetch(`${base}/internal/test/mcp-session/${encodeURIComponent(sessionId)}`, { method: "POST" });
+  // /internal/* is default-deny under the loopback-secret guard (card a31b18fa): a REAL daemon mints
+  // <LOOM_HOME>/gateway-loopback.key before listening, so send it when this process knows that LOOM_HOME.
+  let headers;
+  try { headers = authHeaders(readLoopbackToken(process.env.LOOM_HOME ?? ""), false); } catch { headers = undefined; }
+  const res = await fetch(`${base}/internal/test/mcp-session/${encodeURIComponent(sessionId)}`, { method: "POST", headers });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`mintTestMcpToken(${sessionId}) failed: ${res.status} ${body}`);

@@ -132,7 +132,9 @@ let currentDaemonBaseURL: string | undefined;
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     if (
       currentDaemonBaseURL !== undefined && currentLoopbackSecret !== undefined &&
-      url.startsWith(currentDaemonBaseURL) && method !== "GET" && method !== "HEAD"
+      url.startsWith(currentDaemonBaseURL) &&
+      // Writes always; /internal/* any method (the daemon default-denies it — card a31b18fa).
+      ((method !== "GET" && method !== "HEAD") || url.startsWith(`${currentDaemonBaseURL}/internal/`))
     ) {
       const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
       if (!headers.has("authorization")) headers.set("authorization", `Bearer ${currentLoopbackSecret}`);

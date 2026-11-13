@@ -69,6 +69,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // a URL on this guard again. (H2)/(I2) flip the old positive-control proof into a negative one: the SAME
 // `?token=` value that used to be ACCEPTED (with no subprotocol offer at all) is now REJECTED. The remote
 // Tier-1 `?token=` fallback (trust-tier.mjs) is a separate mechanism, untouched here.
+import dc from "node:diagnostics_channel";
 import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
@@ -345,12 +346,44 @@ try {
   check("(S) POSITIVE CONTROL: POST /internal/merge-quarantine/clear-broad-union with the CORRECT secret reaches the real handler (200, not 401)",
     cbuRightAuth.statusCode === 200);
 
-  // ===================== (R) card c0be9bf9: GET /internal/merge-quarantine/list stays UNGATED by the bearer secret =====================
-  // Deliberate (decision 214caa53: GET reads are settled policy as ungated) — same negative-scope shape as
-  // (N)'s proof for /internal/hook: even with loopbackSecret wired, a GET here needs no Authorization header.
-  const listNoAuth = await appWithSecret.inject({ method: "GET", url: "/internal/merge-quarantine/list", headers: H });
-  check("(R) GET /internal/merge-quarantine/list with NO auth header still succeeds (deliberately ungated, decision 214caa53)",
-    listNoAuth.statusCode === 200);
+  // ===================== (R) card a31b18fa: /internal/* is DEFAULT-DENY (GET included) =====================
+  // Supersedes c0be9bf9's "list stays ungated": /internal is the operator surface, not the viewport read
+  // API (214caa53's /api/* GET policy is untouched — (E) above still proves /api GETs are open).
+  const listGet = (bearer) => appWithSecret.inject({ method: "GET", url: "/internal/merge-quarantine/list", headers: authH(bearer) });
+  check("(R) GET /internal/merge-quarantine/list with NO auth header → 401 (was 200 pre-fix)", (await listGet(undefined)).statusCode === 401);
+  check("(R) GET /internal/merge-quarantine/list with a WRONG bearer → 401", (await listGet("not-the-real-secret")).statusCode === 401);
+  check("(R) POSITIVE CONTROL: GET /internal/merge-quarantine/list with the CORRECT secret → 200", (await listGet(SECRET)).statusCode === 200);
+
+  // (T) SELF-MAINTAINING: collect EVERY /internal route the real server registers (a diagnostics-channel
+  // subscription installs an onRoute hook on the instance at creation, before any route exists) plus two
+  // routes planted afterwards, and assert 401 without the secret for each pattern not in the exemption list.
+  // A route added to server.ts without a decision is therefore covered with no edit here.
+  const seenInternal = new Map(); // "METHOD pattern" -> {method, url}
+  const onInit = ({ fastify }) => fastify.addHook("onRoute", (r) => {
+    if (typeof r.url !== "string" || !r.url.startsWith("/internal/")) return;
+    for (const m of [].concat(r.method)) if (m !== "HEAD" && m !== "OPTIONS") seenInternal.set(`${m} ${r.url}`, { method: m, url: r.url.replace(/:[A-Za-z]+/g, "x1") });
+  });
+  dc.subscribe("fastify.initialization", onInit);
+  const plantedApp = await buildServer({
+    db, pty: ptyStub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub,
+    userAuditMcp: stub, setupMcp: stub, runMcp: stub, control: stub, usageStatus: stub, loopbackSecret: SECRET,
+  });
+  dc.unsubscribe("fastify.initialization", onInit);
+  try {
+    // Planted-route control: routes added under /internal with no decision at all are refused by default.
+    plantedApp.get("/internal/zzz-planted", async () => ({ planted: true }));
+    plantedApp.post("/internal/hook-lookalike", async () => ({ planted: true }));
+    const exempt = new Set(["POST /internal/hook"]);
+    check("(T) the collector saw the real routes (>= 10) AND both planted ones", seenInternal.size >= 10 &&
+      seenInternal.has("GET /internal/zzz-planted") && seenInternal.has("POST /internal/hook-lookalike") && seenInternal.has("POST /internal/hook"));
+    for (const [key, { method, url }] of seenInternal) {
+      if (exempt.has(key)) continue;
+      const res = await plantedApp.inject({ method, url, headers: H, payload: method === "GET" ? undefined : {} });
+      check(`(T) ${key} with NO auth header → 401`, res.statusCode === 401);
+    }
+    const pYes = await plantedApp.inject({ method: "GET", url: "/internal/zzz-planted", headers: authH(SECRET) });
+    check("(T) planted route reachable with the correct secret (control: it exists)", pYes.statusCode === 200);
+  } finally { await plantedApp.close(); }
 
   // ===================== (P) GAP 1 fail-closed: an UNDETERMINABLE peer address (card 214caa53) =====================
   // Pre-fix, `req.socket?.remoteAddress ?? ""` on an empty address fell through `!LOOPBACK.has("")` (true)
@@ -433,20 +466,12 @@ try {
       /routePattern === ["']\/ws\/term\/:sessionId["']/.test(codeSlice));
     check("(G) v3: the guard also matches the /ws/companion upgrade route by pattern (card 351e89af)",
       /routePattern === ["']\/ws\/companion\/:sessionId["']/.test(codeSlice));
-    // (G) card 93249b52: the guard's route-matching literally names /internal/shutdown + /internal/update,
-    // and does NOT name /internal/hook — corroborates the behavioral (L)/(M)/(N) proof above structurally.
-    check("(G) the guard matches /internal/shutdown by pattern", /["']\/internal\/shutdown["']/.test(codeSlice));
-    check("(G) the guard matches /internal/update by pattern", /["']\/internal\/update["']/.test(codeSlice));
+    // The guard no longer names individual /internal routes (card a31b18fa: default-deny), and must not
+    // name /internal/hook inline — its exemption lives only in INTERNAL_BEARER_EXEMPT.
     check("(G) the guard does NOT match /internal/hook by pattern", !/["']\/internal\/hook["']/.test(codeSlice));
-    // (G) card c0be9bf9: the guard's route-matching also names /internal/merge-quarantine/clear-by-path
-    // (the no-project-resolution twin, same tier) — corroborates the behavioral (Q) proof above structurally.
-    check("(G) the guard matches /internal/merge-quarantine/clear-by-path by pattern", /["']\/internal\/merge-quarantine\/clear-by-path["']/.test(codeSlice));
-    // (G) card 9497bb7e: the guard's route-matching also names /internal/merge-quarantine/clear-broad-union
-    // (same tier) — corroborates the behavioral (S) proof above structurally.
-    check("(G) the guard matches /internal/merge-quarantine/clear-broad-union by pattern", /["']\/internal\/merge-quarantine\/clear-broad-union["']/.test(codeSlice));
-    // And GET /internal/merge-quarantine/list must NOT be named by the guard at all — it's deliberately
-    // ungated (decision 214caa53), corroborating (R)'s behavioral proof structurally.
-    check("(G) the guard does NOT match /internal/merge-quarantine/list by pattern", !/["']\/internal\/merge-quarantine\/list["']/.test(codeSlice));
+    check("(G) the guard consults INTERNAL_BEARER_EXEMPT", /INTERNAL_BEARER_EXEMPT\.includes\(routePattern\)/.test(codeSlice));
+    // card a31b18fa: /internal/* is default-deny — the guard matches the PREFIX, not a list of routes.
+    check("(G) a31b18fa: the guard matches /internal/ by prefix (default-deny)", /routePattern\.startsWith\(["']\/internal\/["']\)/.test(codeSlice));
     // (G) card 214caa53: GAP 1's empty-address check — both PRESENCE and ORDERING. This check's whole job
     // is an ordering claim (the empty-address reject must run BEFORE the LOOPBACK-set membership check,
     // not be folded into or come after it — see server.ts's own comment for why), so verify the ordering

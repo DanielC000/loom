@@ -1459,7 +1459,7 @@ function remediationTextFor(ownRepoPaths: string[], ambiguous: AmbiguousIdentiti
   // @decision 9497bb7e — the project-resolved `/clear` route named below only exists when a project is
   // registered at the contributor's own path; never name it unconditionally. `clear-broad-union` refuses
   // outright for a provenanceUnknown entry — never name it for that shape either. See the decision record.
-  const manualEditClause = `a manual edit, never a REST call: find ${JSON.stringify(ownRepoPaths)}'s own latch file by its latch id (GET /internal/merge-quarantine/list; it may be named '<id>.json' or 'pending-<id>.json'), confirm the file's own repoPath matches, independently confirm no process is still running under every contributor's own path too, then delete it and restart the daemon; once every contributor is cleared (whichever of these ways actually applied to it), clear-by-path with one of ${JSON.stringify(ownRepoPaths)} releases whatever still remains.${ownKeyAlsoReleasedClause}`;
+  const manualEditClause = `a manual edit, never a REST call: find ${JSON.stringify(ownRepoPaths)}'s own latch file by its latch id (GET /internal/merge-quarantine/list ${INTERNAL_ROUTE_CREDENTIAL_HINT}; it may be named '<id>.json' or 'pending-<id>.json'), confirm the file's own repoPath matches, independently confirm no process is still running under every contributor's own path too, then delete it and restart the daemon; once every contributor is cleared (whichever of these ways actually applied to it), clear-by-path with one of ${JSON.stringify(ownRepoPaths)} releases whatever still remains.${ownKeyAlsoReleasedClause}`;
   // @decision 9497bb7e — `canUseBroadUnion` is `broadUnionTargetFor(repoPath).accepts`, computed once by
   // the caller from the SAME shared function clearBroadUnion itself calls — never a guess. See record.
   const noProjectEscape = !canUseBroadUnion
@@ -9656,7 +9656,7 @@ export function clearMergeQuarantineByRecordedPath(repoPath: string): { wasQuara
   // record, round 7).
   return {
     wasQuarantined: false,
-    reason: `no active or pending quarantine is stored under the exact repoPath '${repoPath}' — see GET /internal/merge-quarantine/list for the exact recorded repoPath/id to clear by`,
+    reason: `no active or pending quarantine is stored under the exact repoPath '${repoPath}' — see GET /internal/merge-quarantine/list ${INTERNAL_ROUTE_CREDENTIAL_HINT} for the exact recorded repoPath/id to clear by`,
     liftedRepoPaths: [], stillBlockedCoOccupants: [],
   };
 }
@@ -10412,7 +10412,7 @@ const QUARANTINE_LATCH_ID_PATTERN = /^[0-9a-f]{24}$/;
  */
 export function clearMergeQuarantineLatchFile(id: string): { ok: true; wasQuarantined: boolean; liftedRepoPaths: string[]; releasedRepoPaths?: string[]; releasedStillBlockedRepoPaths?: ReleasedStillBlockedEntry[]; addressedRepoPaths?: string[]; stillQuarantined?: true; refusedBeforeClear?: true; reason?: string; latchKept?: true; referencingRepoPaths?: string[]; contentKeptRepoPaths?: string[]; contentKeptBlockedBy?: ContentKeptBlockedByEntry[]; stillBlockedCoOccupants: BlockedCoOccupant[] } | { ok: false; reason: string } {
   if (!QUARANTINE_LATCH_ID_PATTERN.test(id)) {
-    return { ok: false, reason: `invalid latch id '${id}' — expected a 24-hex-character id (see GET /internal/merge-quarantine/list)` };
+    return { ok: false, reason: `invalid latch id '${id}' — expected a 24-hex-character id (see GET /internal/merge-quarantine/list ${INTERNAL_ROUTE_CREDENTIAL_HINT})` };
   }
   const resolvedDir = path.resolve(MERGE_QUARANTINE_DIR);
   const finalPath = path.resolve(resolvedDir, `${id}.json`);
@@ -10866,6 +10866,10 @@ export function partitionQuarantinesByRegistration(
  * `activeMergeQuarantineFor`: when repoPath is unresolvable and has its OWN recorded (diverted) entry,
  * name THAT one — never an unrelated repo's entry that merely occupies the same walked-up key.
  */
+/** Credential clause for human-facing text that points at a `/internal/merge-quarantine/*` route: every
+ *  `/internal/*` route requires the loopback secret (card a31b18fa). */
+export const INTERNAL_ROUTE_CREDENTIAL_HINT = "(every /internal route needs the header `Authorization: Bearer <contents of <LOOM_HOME>/gateway-loopback.key>`)";
+
 export function assertRepoNotQuarantined(repoPath: string): { ok: true } | { ok: false; reason: string } {
   const q = resolveQuarantineFor(repoPath);
   if (!q) return { ok: true };
