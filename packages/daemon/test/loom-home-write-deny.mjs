@@ -77,7 +77,7 @@ requireHermeticEnv();
 // PART 1c — `toClaudeAbsoluteGlob` (Ruling A): the documented `//`-absolute form, both path shapes
 // =====================================================================================================
 {
-  const { toClaudeAbsoluteGlob } = await import("../dist/pty/loom-home-deny.js");
+  const { toClaudeAbsoluteGlob } = await import("../dist/pty/permission-rules.js");
   check("POSIX-shaped absolute path -> doubled leading slash (the documented //<path> form)",
     toClaudeAbsoluteGlob("/home/user/.loom/skills") === "//home/user/.loom/skills");
   check("Windows-shaped drive-letter path -> //<lowercase-drive>/<rest>, no colon",
@@ -92,7 +92,8 @@ requireHermeticEnv();
 // PART 2 — the pure rule-building function, in isolation
 // =====================================================================================================
 const { ensureDirs, LOOM_HOME_WRITE_DENY_REGISTRY, LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY, SCRATCH_ROOT_DIR, WORKSPACE_ROOT, RUNS_DIR } = await import("../dist/paths.js");
-const { loomHomeWriteDenyRules, withLoomHomeWriteDenyForSpawn, toClaudeAbsoluteGlob, LOOM_HOME_REAL } = await import("../dist/pty/loom-home-deny.js");
+const { loomHomeWriteDenyRules, withLoomHomeWriteDenyForSpawn, LOOM_HOME_REAL } = await import("../dist/pty/loom-home-deny.js");
+const { toClaudeAbsoluteGlob, claudeAbsoluteRules } = await import("../dist/pty/permission-rules.js");
 
 // Card eefbbe61 — the exact resolved //-absolute glob for each root the registries must NEVER deny.
 // Matching against these exact absolute paths (never a bare "/tmp/scratch"/"/workspaces"/"/runs"
@@ -136,11 +137,9 @@ check("LOOM_HOME_WRITE_DENY_REGISTRY never lists WORKSPACE_ROOT's own basename",
 check("LOOM_HOME_WRITE_DENY_REGISTRY never lists RUNS_DIR's own basename",
   !LOOM_HOME_WRITE_DENY_REGISTRY.some((e) => e.relPath === path.basename(RUNS_DIR)));
 
-const ruleForEntries = (entries) => new Set(entries.map((e) => {
-  const abs = path.join(LOOM_HOME_REAL, e.relPath);
-  const glob = toClaudeAbsoluteGlob(abs);
-  return e.kind === "dir" ? `Edit(${glob}/**)` : `Edit(${glob})`;
-}));
+// Card 8d0ba38b: every absolute form for an entry — the `//` form, plus win32's plain `C:/` sibling.
+const ruleForEntries = (entries) => new Set(entries.flatMap((e) =>
+  claudeAbsoluteRules("Edit", path.join(LOOM_HOME_REAL, e.relPath), e.kind === "dir" ? "/**" : "")));
 
 // --- fix round 2, item 1: for an EXEMPT role (platform ONLY — NOT setup, see the per-entry note below),
 // the output is an EXACT map over the main registry ONLY — no instruction-registry rules, no readdir, no

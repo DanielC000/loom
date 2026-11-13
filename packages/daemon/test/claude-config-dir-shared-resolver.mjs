@@ -36,7 +36,7 @@ const {
   engineTranscriptPath, resolveTranscriptFile, listAllTranscriptIds, encodeProjectDir,
   transcriptRootReadDenyRules, otherProjectTranscriptDenyRules, TRANSCRIPT_ROOT_READ_DENY_RULE,
 } = await import("../dist/pty/claude-transcript.js");
-const { toClaudeAbsoluteGlob } = await import("../dist/pty/loom-home-deny.js");
+const { toClaudeAbsoluteGlob } = await import("../dist/pty/permission-rules.js");
 
 const ROLE_DENY = TRANSCRIPT_ROOT_READ_DENY_RULE;
 const fakeCwd = (tag) => path.resolve(`/fake/ccdsr-${tag}`);
@@ -117,8 +117,10 @@ const sessionId = (i) => `${Date.now()}-${process.pid}-${String(i).padStart(4, "
     `Read(${projectsRoot.replace(/\\/g, "/")}/*-ccdsr-other-*/**)`,
     `Read(${projectsRoot.replace(/\\/g, "/")}/${encodeProjectDir("/repos/ccdsr-other")}/**)`,
   ];
+  // Card 8d0ba38b: forms are emitted per-pattern (`//` form then plain sibling), not all-`//` then all-plain.
   const expectedOtherRules = process.platform === "win32"
-    ? ["Read(~/.claude/projects/*-ccdsr-other-*/**)", `Read(~/.claude/projects/${encodeProjectDir("/repos/ccdsr-other")}/**)`, ...expectedOtherAbsolute, ...expectedOtherPlainSlashed]
+    ? ["Read(~/.claude/projects/*-ccdsr-other-*/**)", `Read(~/.claude/projects/${encodeProjectDir("/repos/ccdsr-other")}/**)`,
+        expectedOtherAbsolute[0], expectedOtherPlainSlashed[0], expectedOtherAbsolute[1], expectedOtherPlainSlashed[1]]
     : ["Read(~/.claude/projects/*-ccdsr-other-*/**)", `Read(~/.claude/projects/${encodeProjectDir("/repos/ccdsr-other")}/**)`, ...expectedOtherAbsolute];
   check("A: otherProjectTranscriptDenyRules() ALSO adds the absolute-path siblings, built from CLAUDE_CONFIG_DIR (two more plain-slashed siblings on win32)",
     JSON.stringify(otherRules) === JSON.stringify(expectedOtherRules));

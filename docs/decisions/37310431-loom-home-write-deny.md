@@ -592,8 +592,10 @@ instance throughout), but is disclosed here rather than silently left. The fix: 
 - Do not deny `RUNS_DIR`, `SCRATCH_ROOT_DIR`, or `WORKSPACE_ROOT` — see "Deliberate exclusions" above.
 - Do not claim the Bash coverage (finding 4) is a structural guarantee — it is a measured, CLI-version-
   sensitive, model-mediated classifier behavior. Re-measure after a `claude` CLI upgrade.
-- Do not claim POSIX real-spawn coverage for this deny — it is UNVERIFIED on a real POSIX host; that
-  verification belongs to card `8d0ba38b-927a-4e1c-9684-6cc77e2f93c6`, not this one.
+- Do not claim POSIX real-spawn coverage for THIS card's LOOM_HOME `Edit()` rules specifically — card
+  `8d0ba38b` measured the `//` form (vs the inert single-slash form) on WSL for `Read()` and `Edit()` with a
+  generic scratch path, not these exact LOOM_HOME paths. `toClaudeAbsoluteGlob` now lives in
+  `pty/permission-rules.ts` (moved by that card; import it from there, not from `loom-home-deny.ts`).
 - Do not import anything that transitively loads `paths.js` in a daemon test before that test has set
   `process.env.LOOM_HOME` (prefer `useOwnLoomHome` + `requireHermeticEnv`, called first) — see the
   Incident section above for what actually happens when this is gotten wrong.

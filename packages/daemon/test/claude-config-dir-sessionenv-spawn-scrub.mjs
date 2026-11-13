@@ -46,7 +46,7 @@ useOwnLoomHome("loom-ccdses-"); // sets LOOM_HOME before any dist import — pat
 const { buildSpawnEnv } = await import("../dist/pty/host.js");
 const { claudeConfigHome, isClaudeConfigDirEnvKey } = await import("../dist/pty/claude-config.js");
 const { transcriptRootReadDenyRules } = await import("../dist/pty/claude-transcript.js");
-const { toClaudeAbsoluteGlob } = await import("../dist/pty/loom-home-deny.js");
+const { toClaudeAbsoluteGlob } = await import("../dist/pty/permission-rules.js");
 
 const sandboxHome = mkdtempManaged("loom-ccdses-home-");
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME

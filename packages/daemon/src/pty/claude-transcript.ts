@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { lineTimestamp, type TranscriptTurn, type TranscriptParseOpts } from "./adapter.js";
 import { claudeUserSettingsDir } from "./claude-config.js";
-import { toClaudeAbsoluteGlob } from "./loom-home-deny.js";
+import { claudeAbsoluteRules } from "./permission-rules.js";
 
 /**
  * @decision 2b099e48 — this file OWNS every `~/.claude/projects/...` literal path and Claude Code
@@ -50,8 +50,8 @@ export const TRANSCRIPT_ROOT_READ_DENY_RULE = "Read(~/.claude/projects/**)";
  * The transcript-root deny rule(s) for the CURRENT process env. Always includes
  * {@link TRANSCRIPT_ROOT_READ_DENY_RULE} unconditionally (byte-identical to before this function
  * existed when CLAUDE_CONFIG_DIR is unset) — PLUS, only when CLAUDE_CONFIG_DIR is set, an ADDITIONAL
- * absolute-path rule pointed at the real relocated root — PLUS, only on win32, a THIRD sibling in the
- * plain forward-slashed drive-letter form (see {@link claudeProjectsRootPlainSlashedGlob}'s own doc).
+ * absolute-path rule pointed at the real relocated root (`claudeAbsoluteRules`, `pty/permission-rules.ts`:
+ * the documented `//` form, plus on win32 only the plain `C:/…` sibling).
  *
  * @decision a92a0913 — all applicable rules apply once CLAUDE_CONFIG_DIR is set, never a replace:
  * neither absolute-path FORM is proven to be the one the real `Read()` parser honours — see this
@@ -60,8 +60,7 @@ export const TRANSCRIPT_ROOT_READ_DENY_RULE = "Read(~/.claude/projects/**)";
 export function transcriptRootReadDenyRules(): string[] {
   const rules = [TRANSCRIPT_ROOT_READ_DENY_RULE];
   if (process.env.CLAUDE_CONFIG_DIR) {
-    rules.push(`Read(${claudeProjectsRootAbsoluteGlob()}/**)`);
-    if (process.platform === "win32") rules.push(`Read(${claudeProjectsRootPlainSlashedGlob()}/**)`);
+    rules.push(...claudeAbsoluteRules("Read", claudeProjectsRoot(), "/**"));
   }
   return rules;
 }
@@ -81,18 +80,11 @@ export function otherProjectTranscriptDenyRules(otherProjectId: string, otherPro
     `Read(~/.claude/projects/${encodeProjectDir(otherProjectRepoPath)}/**)`,
   ];
   if (process.env.CLAUDE_CONFIG_DIR) {
-    const base = claudeProjectsRootAbsoluteGlob();
+    const root = claudeProjectsRoot();
     rules.push(
-      `Read(${base}/*-${otherProjectId}-*/**)`,
-      `Read(${base}/${encodeProjectDir(otherProjectRepoPath)}/**)`,
+      ...claudeAbsoluteRules("Read", root, `/*-${otherProjectId}-*/**`),
+      ...claudeAbsoluteRules("Read", root, `/${encodeProjectDir(otherProjectRepoPath)}/**`),
     );
-    if (process.platform === "win32") {
-      const plainBase = claudeProjectsRootPlainSlashedGlob();
-      rules.push(
-        `Read(${plainBase}/*-${otherProjectId}-*/**)`,
-        `Read(${plainBase}/${encodeProjectDir(otherProjectRepoPath)}/**)`,
-      );
-    }
   }
   return rules;
 }
@@ -129,26 +121,6 @@ function rememberResolvedPath(engineSessionId: string, filePath: string): void {
  */
 function claudeProjectsRoot(): string {
   return path.join(claudeUserSettingsDir(), "projects");
-}
-
-/** {@link claudeProjectsRoot}, converted to the CLI's documented universal-absolute glob form (see
- *  `pty/loom-home-deny.ts`'s `toClaudeAbsoluteGlob`) — the base every CLAUDE_CONFIG_DIR-set absolute
- *  deny-rule sibling is built from. */
-function claudeProjectsRootAbsoluteGlob(): string {
-  return toClaudeAbsoluteGlob(claudeProjectsRoot());
-}
-
-/**
- * {@link claudeProjectsRoot}, in the PLAIN forward-slashed drive-letter form (`C:/…`, same transform
- * `SETTINGS_DIR_READ_DENY_RULE` already uses — `pty/claude-settings.ts`) — a SECOND, different absolute
- * glob shape from {@link claudeProjectsRootAbsoluteGlob}'s `//c/…` universal-absolute form. win32 only;
- * no POSIX sibling — `toClaudeAbsoluteGlob`'s POSIX output already IS the plain path, one slash deeper.
- *
- * @decision a92a0913 — see this file's own decision record (round 3) for why BOTH forms are emitted
- * on win32 rather than picking one — neither is proven as the one the real `Read()` parser honours.
- */
-function claudeProjectsRootPlainSlashedGlob(): string {
-  return claudeProjectsRoot().replace(/\\/g, "/");
 }
 
 export function resolveTranscriptFile(cwd: string, engineSessionId: string): string | null {

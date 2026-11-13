@@ -112,7 +112,7 @@ requireHermeticEnv({ port: true });
 
 const { ensureDirs, LOOM_HOME } = await import("../dist/paths.js");
 ensureDirs();
-const { toClaudeAbsoluteGlob } = await import("../dist/pty/loom-home-deny.js");
+const { toClaudeAbsoluteGlob } = await import("../dist/pty/permission-rules.js");
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");

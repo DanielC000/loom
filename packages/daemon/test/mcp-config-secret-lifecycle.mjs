@@ -78,8 +78,9 @@ const { MCP_TOKEN_ENV_VAR } = await import("../dist/pty/codex-host.js");
 const {
   sessionMcpConfigPath, unlinkSessionMcpConfig, writeSessionMcpConfig,
   sessionSettingsPath, unlinkSessionSettings, mcpTokenRidesEnv,
-  SETTINGS_DIR_READ_DENY_RULE, withSettingsDirDenyForSpawn,
+  SETTINGS_DIR_READ_DENY_RULE, SETTINGS_DIR_READ_DENY_RULES, withSettingsDirDenyForSpawn,
 } = await import("../dist/pty/claude-settings.js");
+const { toClaudeAbsoluteGlob } = await import("../dist/pty/permission-rules.js");
 const { sweepOrphanedSettingsDirSecrets } = await import("../dist/pty/mcp-config-gc.js");
 const { ensureDirs, SETTINGS_DIR, WORKTREES_DIR } = await import("../dist/paths.js");
 const { Db } = await import("../dist/db.js");
@@ -282,19 +283,22 @@ registerForCleanup(WORKTREES_DIR);
     }
   }
 
-  check("SETTINGS_DIR_READ_DENY_RULE = Read(<SETTINGS_DIR, forward-slashed>/**)",
-    SETTINGS_DIR_READ_DENY_RULE === `Read(${SETTINGS_DIR.replace(/\\/g, "/")}/**)`);
+  // Card 8d0ba38b: the documented `//<path>` absolute form (a single leading slash is inert on POSIX).
+  check("SETTINGS_DIR_READ_DENY_RULE = Read(<documented // absolute form of SETTINGS_DIR>/**)",
+    SETTINGS_DIR_READ_DENY_RULE === `Read(${toClaudeAbsoluteGlob(SETTINGS_DIR)}/**)` && SETTINGS_DIR_READ_DENY_RULE.startsWith("Read(//"));
   check("SETTINGS_DIR_READ_DENY_RULE has no backslashes (glob-safe on Windows)", !SETTINGS_DIR_READ_DENY_RULE.includes("\\"));
 
   const empty = withSettingsDirDenyForSpawn({ mode: "acceptEdits", allow: [], deny: [] });
-  check("withSettingsDirDenyForSpawn: empty deny -> rule added", empty.deny.length === 1 && empty.deny[0] === SETTINGS_DIR_READ_DENY_RULE);
+  check("withSettingsDirDenyForSpawn: empty deny -> every SETTINGS_DIR form added",
+    empty.deny.length >= 1 && SETTINGS_DIR_READ_DENY_RULES.every((r) => empty.deny.includes(r)) && empty.deny[0] === SETTINGS_DIR_READ_DENY_RULE);
 
   const CUSTOM_DENY = "Bash(rm -rf /:*)";
   const withCustom = withSettingsDirDenyForSpawn({ mode: "acceptEdits", allow: [], deny: [CUSTOM_DENY] });
   check("withSettingsDirDenyForSpawn: unions with a project's own custom deny (never replaces)",
-    withCustom.deny.includes(CUSTOM_DENY) && withCustom.deny.includes(SETTINGS_DIR_READ_DENY_RULE) && withCustom.deny.length === 2);
+    withCustom.deny.includes(CUSTOM_DENY) && withCustom.deny.includes(SETTINGS_DIR_READ_DENY_RULE)
+    && withCustom.deny.length === 1 + SETTINGS_DIR_READ_DENY_RULES.length);
 
-  const already = { mode: "acceptEdits", allow: [], deny: [SETTINGS_DIR_READ_DENY_RULE] };
+  const already = { mode: "acceptEdits", allow: [], deny: [...SETTINGS_DIR_READ_DENY_RULES] };
   check("withSettingsDirDenyForSpawn: idempotent — same object reference when already present",
     withSettingsDirDenyForSpawn(already) === already);
 }

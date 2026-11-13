@@ -30,6 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { mkdtempManaged, registerForCleanup, finishAndExit } from "./_tmp-fixture.mjs";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { toClaudeAbsoluteGlob, claudeAbsoluteRules } from "../dist/pty/permission-rules.js"; // pure: no LOOM_HOME-derived state
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -43,8 +44,9 @@ function ruleCoversPath(rule, absPath) {
   const m = /^Read\((.+)\/\*\*\)$/.exec(rule);
   if (!m) return false;
   const base = m[1];
-  const normalized = absPath.replace(/\\/g, "/");
-  return normalized === base || normalized.startsWith(`${base}/`);
+  // Card 8d0ba38b: rules are now the documented `//<path>` form (plus win32's plain `C:/…`), so compare
+  // the candidate in BOTH of its glob shapes.
+  return [absPath.replace(/\\/g, "/"), toClaudeAbsoluteGlob(absPath)].some((c) => c === base || c.startsWith(`${base}/`));
 }
 
 // @decision 37310431 — LOOM_HOME must be assigned, and (for this file) the junction/symlink alias must
@@ -98,7 +100,7 @@ if (aliasOk) {
   check("SETTINGS_DIR_READ_DENY_RULES still includes the RAW rule (back-compat; the alias path itself stays denied)",
     SETTINGS_DIR_READ_DENY_RULES.includes(SETTINGS_DIR_READ_DENY_RULE));
   check("SETTINGS_DIR_READ_DENY_RULES ALSO includes a rule rooted at the RESOLVED real path",
-    SETTINGS_DIR_READ_DENY_RULES.some((r) => r === `Read(${SETTINGS_DIR_REAL}/**)`));
+    claudeAbsoluteRules("Read", SETTINGS_DIR_REAL, "/**").every((rr) => SETTINGS_DIR_READ_DENY_RULES.includes(rr)));
   check("the real-path rule covers a sibling session's secret file reached via the REAL (non-alias) path",
     SETTINGS_DIR_READ_DENY_RULES.some((r) => ruleCoversPath(r, sidFile)));
   check("the raw rule covers the SAME file reached via the ALIAS path",

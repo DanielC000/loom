@@ -2,6 +2,7 @@ import path from "node:path";
 import type { SessionRole } from "@loom/shared";
 import { LOOM_HOME, LOOM_HOME_WRITE_DENY_REGISTRY, LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY } from "../paths.js";
 import { canonicalizeExistingPath, comparisonKey } from "../projects/repos.js";
+import { claudeAbsoluteRules } from "./permission-rules.js";
 
 /**
  * LOOM_HOME, resolved through the SAME junction/symlink-collapsing helper every other path-identity
@@ -15,33 +16,12 @@ import { canonicalizeExistingPath, comparisonKey } from "../projects/repos.js";
  */
 export const LOOM_HOME_REAL = canonicalizeExistingPath(LOOM_HOME).replace(/\\/g, "/");
 
-function toForwardSlash(p: string): string {
-  return p.replace(/\\/g, "/");
-}
-
-/**
- * Convert an absolute, forward-slashed path into the Claude Code CLI's documented UNIVERSAL-ABSOLUTE
- * glob form — `//<path>` on POSIX, `//<drive-letter>/<rest>` on Windows (lowercase drive, no colon). A
- * single leading slash is documented as relative to the SETTINGS FILE's own directory, not an absolute
- * anchor, so a bare `Edit(/home/u/.loom/**)` from a --settings file probably matches nothing real on
- * POSIX. This is the ONE helper that emits the documented form, used for every rule this module builds,
- * on every OS — see card 37310431's decision record, Ruling A.
- */
-export function toClaudeAbsoluteGlob(absPath: string): string {
-  const slashed = toForwardSlash(absPath);
-  const winDrive = /^(?<drive>[A-Za-z]):\/(?<rest>.*)$/.exec(slashed);
-  if (winDrive?.groups) {
-    return `//${winDrive.groups.drive!.toLowerCase()}/${winDrive.groups.rest}`;
-  }
-  return `/${slashed}`;
-}
-
 /** A directory gets a recursive `Edit(<path>/**)` glob; a file gets an exact `Edit(<path>)` — the CLI's
  *  matcher only accepts the literal form for a file (confirmed: `Write(...)` entries are REJECTED
- *  outright, and only `Edit(...)` is a recognized rule name — see the card 37310431 decision record). */
-function ruleFor(absPath: string, kind: "file" | "dir"): string {
-  const p = toClaudeAbsoluteGlob(absPath);
-  return kind === "dir" ? `Edit(${p}/**)` : `Edit(${p})`;
+ *  outright, and only `Edit(...)` is a recognized rule name — see the card 37310431 decision record).
+ *  Every absolute form (`//` always, plus win32's plain `C:/`) comes from `claudeAbsoluteRules`. */
+function rulesFor(absPath: string, kind: "file" | "dir"): string[] {
+  return claudeAbsoluteRules("Edit", absPath, kind === "dir" ? "/**" : "");
 }
 
 export interface LoomHomeDenyOptions {
@@ -99,13 +79,13 @@ export interface LoomHomeDenyOptions {
 export function loomHomeWriteDenyRules(opts: LoomHomeDenyOptions): string[] {
   const rules = new Set<string>();
   for (const entry of LOOM_HOME_WRITE_DENY_REGISTRY) {
-    rules.add(ruleFor(path.join(LOOM_HOME_REAL, entry.relPath), entry.kind));
+    for (const r of rulesFor(path.join(LOOM_HOME_REAL, entry.relPath), entry.kind)) rules.add(r);
   }
   const role: SessionRole | null = opts.role ?? null;
   if (role !== null) {
     for (const entry of LOOM_HOME_INSTRUCTION_WRITE_DENY_REGISTRY) {
       if (entry.exemptRoles.includes(role)) continue;
-      rules.add(ruleFor(path.join(LOOM_HOME_REAL, entry.relPath), entry.kind));
+      for (const r of rulesFor(path.join(LOOM_HOME_REAL, entry.relPath), entry.kind)) rules.add(r);
       const candidates = entry.platformRoot === "repoPath"
         ? (opts.platformHomePaths?.repoPaths ?? [])
         : (opts.platformHomePaths?.vaultPath ? [opts.platformHomePaths.vaultPath] : []);
@@ -113,7 +93,7 @@ export function loomHomeWriteDenyRules(opts: LoomHomeDenyOptions): string[] {
         if (!candidate) continue;
         const reboundReal = canonicalizeExistingPath(candidate).replace(/\\/g, "/");
         if (comparisonKey(reboundReal) !== comparisonKey(LOOM_HOME_REAL)) {
-          rules.add(ruleFor(path.join(reboundReal, entry.relPath), entry.kind));
+          for (const r of rulesFor(path.join(reboundReal, entry.relPath), entry.kind)) rules.add(r);
         }
       }
     }

@@ -67,7 +67,7 @@ const { PtyHost, withTranscriptRootDenyForSpawn, TRANSCRIPT_ROOT_DENY_ROLES, tra
   await import("../dist/pty/host.js");
 const { otherProjectTranscriptDenyRules, encodeProjectDir } = await import("../dist/pty/claude-transcript.js");
 const { claudeJsonPath, claudeConfigHome } = await import("../dist/pty/claude-config.js");
-const { toClaudeAbsoluteGlob } = await import("../dist/pty/loom-home-deny.js");
+const { toClaudeAbsoluteGlob } = await import("../dist/pty/permission-rules.js");
 
 // Card a92a0913: this file ALREADY sets CLAUDE_CONFIG_DIR above (for the ensureTrusted concern) — so
 // every transcript-root deny computed below now ALSO carries the absolute-path sibling rule, not just
@@ -163,11 +163,9 @@ for (const role of ["worker", "run", null, undefined]) {
     "Read(~/.claude/projects/*-proj-other-*/**)",
     `Read(~/.claude/projects/${encodeProjectDir("/repos/other")}/**)`,
     `Read(${expectedAbsoluteBase}/*-proj-other-*/**)`,
+    ...(WIN32 ? [`Read(${expectedPlainBase}/*-proj-other-*/**)`] : []),
     `Read(${expectedAbsoluteBase}/${encodeProjectDir("/repos/other")}/**)`,
-    ...(WIN32 ? [
-      `Read(${expectedPlainBase}/*-proj-other-*/**)`,
-      `Read(${expectedPlainBase}/${encodeProjectDir("/repos/other")}/**)`,
-    ] : []),
+    ...(WIN32 ? [`Read(${expectedPlainBase}/${encodeProjectDir("/repos/other")}/**)`] : []),
   ];
   check("otherProjectTranscriptDenyRules returns the two documented home-relative shapes, PLUS their absolute-path siblings (two more plain-slashed siblings on win32, CLAUDE_CONFIG_DIR is set)",
     JSON.stringify(otherRules) === JSON.stringify(expectedOtherRules));
@@ -211,7 +209,8 @@ if (process.platform !== "win32") {
   // real-write assertion in THIS file (which predates that card) must account for it too, or an exact
   // length/equality check here goes stale the moment that unrelated card lands. Import the real constant
   // rather than hand-copying its literal value, so this file can never drift from it independently.
-  const { SETTINGS_DIR_READ_DENY_RULE } = await import("../dist/pty/claude-settings.js");
+  const { SETTINGS_DIR_READ_DENY_RULES } = await import("../dist/pty/claude-settings.js");
+  const SETTINGS_RULE_SET = new Set(SETTINGS_DIR_READ_DENY_RULES);
   // Card 37310431 (round 2): the LOOM_HOME write-deny is now a FLAT, registry-only map with no per-role
   // logic (no readdir, no disk dependency) — so its exact rule set can be computed in-process and
   // compared EXACTLY, rather than hand-deriving a shape-only "every other entry starts with Edit(" check
@@ -253,9 +252,9 @@ if (process.platform !== "win32") {
     const writtenWorker = readWrittenDeny(sidWorker) ?? [];
     const expectedLoomHomeWorker = loomHomeWriteDenyRules({ role: "worker", sessionId: sidWorker });
     check("(real) worker spawn: WRITTEN settings.json permissions.deny has NO role-scoped (transcript-root) entry leaked", !writtenWorker.includes(ROLE_DENY));
-    check("(real) worker spawn: WRITTEN settings.json permissions.deny carries the unconditional SETTINGS_DIR rule (card ed0757d6)", writtenWorker.includes(SETTINGS_DIR_READ_DENY_RULE));
+    check("(real) worker spawn: WRITTEN settings.json permissions.deny carries the unconditional SETTINGS_DIR rule(s) (card ed0757d6)", SETTINGS_DIR_READ_DENY_RULES.every((r) => writtenWorker.includes(r)));
     check("(real) worker spawn: every OTHER entry is EXACTLY the LOOM_HOME write-deny's own computed rule set (card 37310431) — no more, no fewer, never an unaccounted third source",
-      JSON.stringify(writtenWorker.filter((r) => r !== SETTINGS_DIR_READ_DENY_RULE).sort()) === JSON.stringify([...expectedLoomHomeWorker].sort()));
+      JSON.stringify(writtenWorker.filter((r) => !SETTINGS_RULE_SET.has(r)).sort()) === JSON.stringify([...expectedLoomHomeWorker].sort()));
     check("(real) worker spawn: at least one LOOM_HOME write-deny rule was actually added (so the check above can fail)", expectedLoomHomeWorker.length > 0);
 
     // (c) role="assistant" with a project's OWN custom deny — union survives through the REAL write.
@@ -270,11 +269,11 @@ if (process.platform !== "win32") {
     // below (same posture as ROLE_DENY/CUSTOM_DENY/SETTINGS_DIR_READ_DENY_RULE).
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the absolute-path transcript-root sibling", customWritten.includes(ABSOLUTE_PROJECTS_DENY));
     check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the win32 plain-slashed sibling (round 3, card a92a0913)", customWritten.includes(PLAIN_SLASHED_PROJECTS_DENY));
-    check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", customWritten.includes(SETTINGS_DIR_READ_DENY_RULE));
+    check("(real) assistant+custom-deny spawn: WRITTEN settings.json ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", SETTINGS_DIR_READ_DENY_RULES.every((r) => customWritten.includes(r)));
     // Card 37310431 (round 2): same exact-comparison fix as (b) above — see that block's comment for why.
     const expectedLoomHomeCustom = loomHomeWriteDenyRules({ role: "assistant", sessionId: sidCustom });
     check("(real) assistant+custom-deny spawn: every OTHER entry is EXACTLY the LOOM_HOME write-deny's own computed rule set, never an unaccounted third source",
-      JSON.stringify(customWritten.filter((r) => r !== CUSTOM_DENY && r !== ROLE_DENY && r !== ABSOLUTE_PROJECTS_DENY && r !== PLAIN_SLASHED_PROJECTS_DENY && r !== SETTINGS_DIR_READ_DENY_RULE).sort()) === JSON.stringify([...expectedLoomHomeCustom].sort()));
+      JSON.stringify(customWritten.filter((r) => r !== CUSTOM_DENY && r !== ROLE_DENY && r !== ABSOLUTE_PROJECTS_DENY && r !== PLAIN_SLASHED_PROJECTS_DENY && !SETTINGS_RULE_SET.has(r)).sort()) === JSON.stringify([...expectedLoomHomeCustom].sort()));
     check("(real) assistant+custom-deny spawn: at least one LOOM_HOME write-deny rule was actually added (so the check above can fail)", expectedLoomHomeCustom.length > 0);
 
     // (d)-(f) card d78f8217: manager/platform/setup are now BLANKET-denied too.
@@ -312,11 +311,11 @@ if (process.platform !== "win32") {
       expectedOther.every((r) => scopedDeny.includes(r)));
     check("(real, project-scoped) worker's deny does NOT include the blanket root rule (worker never gets the blanket)",
       !EXPECTED_TRANSCRIPT_ROOT_RULES.some((r) => scopedDeny.includes(r)));
-    check("(real, project-scoped) worker's deny ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", scopedDeny.includes(SETTINGS_DIR_READ_DENY_RULE));
+    check("(real, project-scoped) worker's deny ALSO carries the unconditional SETTINGS_DIR rule (card ed0757d6)", SETTINGS_DIR_READ_DENY_RULES.every((r) => scopedDeny.includes(r)));
     // Card 37310431 (round 2): same exact-comparison fix as (b)/(c) above — see (b)'s comment for why.
     const expectedLoomHomeScoped = loomHomeWriteDenyRules({ role: "worker", sessionId: sidScopedWorker });
     check("(real, project-scoped) worker's deny: every entry beyond the other-project rules + SETTINGS_DIR is EXACTLY the LOOM_HOME write-deny's own computed rule set, never an unaccounted third source",
-      JSON.stringify(scopedDeny.filter((r) => !expectedOther.includes(r) && r !== SETTINGS_DIR_READ_DENY_RULE).sort()) === JSON.stringify([...expectedLoomHomeScoped].sort()));
+      JSON.stringify(scopedDeny.filter((r) => !expectedOther.includes(r) && !SETTINGS_RULE_SET.has(r)).sort()) === JSON.stringify([...expectedLoomHomeScoped].sort()));
     check("(real, project-scoped) worker's deny: at least one LOOM_HOME write-deny rule was actually added (so the check above can fail)", expectedLoomHomeScoped.length > 0);
 
     // A worker spawned FOR one of the "other" projects gets denied the OTHER two, but not its own.

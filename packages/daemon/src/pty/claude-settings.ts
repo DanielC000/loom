@@ -4,6 +4,7 @@ import type { PermissionPolicy } from "@loom/shared";
 import { LOOM_HOME, BASH_LOOM_HOME_GUARD_SCRIPT, SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DECISION_RECORDS_SCRIPT, DECISION_RECORDS_DEDUPE_DIR, COMMENT_ANCHOR_LINT_SCRIPT, PORT } from "../paths.js";
 import { WATCHED_TOOLS } from "./tool-attribution.js";
 import { canonicalizeExistingPath, comparisonKey } from "../projects/repos.js";
+import { claudeAbsoluteRules } from "./permission-rules.js";
 
 /** @decision d15c9f36 — derived from `tool-attribution.ts`'s `WATCHED_TOOLS`, the single source for both
  *  this matcher and `WATCHED_TOOL_NAMES` — widen `WATCHED_TOOLS`, not this string. See record. */
@@ -445,13 +446,11 @@ export function mcpTokenRidesEnv(platform: NodeJS.Platform = process.platform): 
  * updated doc) — only the `${LOOM_MCP_TOKEN}` env-var-name placeholder; the real value rides the spawned
  * process's own env instead. On POSIX, the literal mcpToken value still rides this file, unchanged from
  * before this card (see `mcpTokenRidesEnv`'s own doc for why). Glob-style, absolute (SETTINGS_DIR is not
- * guaranteed to live under the engine's own homedir), forward-slashed to match the CLI's gitignore-style
- * deny syntax on Windows.
+ * guaranteed to live under the engine's own homedir), built via `claudeAbsoluteRules` (the documented `//`
+ * form; this singular export is that form only, {@link SETTINGS_DIR_READ_DENY_RULES} carries every form).
  *
  * @decision ed0757d6 — see record for the read-bypass this closes and why it was previously uncovered.
  */
-export const SETTINGS_DIR_READ_DENY_RULE = `Read(${SETTINGS_DIR.replace(/\\/g, "/")}/**)`;
-
 /**
  * SETTINGS_DIR resolved through the SAME junction/symlink-collapsing helper `LOOM_HOME_REAL`
  * (`pty/loom-home-deny.ts`) uses — `canonicalizeExistingPath` (`projects/repos.ts`) — resolved ONCE at
@@ -475,10 +474,14 @@ export const SETTINGS_DIR_REAL = canonicalizeExistingPath(SETTINGS_DIR).replace(
  * @decision f2bb9dbe — see record for why arbitrary Bash code remains an accepted residual this closes
  * only the tool-dispatch (Read/Glob) path, not a filesystem boundary.
  */
-export const SETTINGS_DIR_READ_DENY_RULES: readonly string[] =
+export const SETTINGS_DIR_READ_DENY_RULES: readonly string[] = Object.freeze(
   comparisonKey(SETTINGS_DIR_REAL) === comparisonKey(SETTINGS_DIR.replace(/\\/g, "/"))
-    ? Object.freeze([SETTINGS_DIR_READ_DENY_RULE])
-    : Object.freeze([SETTINGS_DIR_READ_DENY_RULE, `Read(${SETTINGS_DIR_REAL}/**)`]);
+    ? claudeAbsoluteRules("Read", SETTINGS_DIR, "/**")
+    : [...claudeAbsoluteRules("Read", SETTINGS_DIR, "/**"), ...claudeAbsoluteRules("Read", SETTINGS_DIR_REAL, "/**")],
+);
+
+/** The primary (documented `//`) form of the raw-dir rule — `SETTINGS_DIR_READ_DENY_RULES[0]`, one computation. */
+export const SETTINGS_DIR_READ_DENY_RULE: string = SETTINGS_DIR_READ_DENY_RULES[0]!;
 
 /**
  * Union {@link SETTINGS_DIR_READ_DENY_RULES} into `permission.deny`, unconditionally — every role, no

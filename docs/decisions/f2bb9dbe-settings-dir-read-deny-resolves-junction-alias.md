@@ -85,8 +85,11 @@ at all.
 - Do not join a candidate onto `LOOM_HOME_REAL` instead of resolving `SETTINGS_DIR` directly — a junction
   could be planted at the `tmp/settings` level itself, not only at `LOOM_HOME`'s own root; resolving the
   full path catches both.
-- Do not change `SETTINGS_DIR_READ_DENY_RULE`'s glob prefix form (single leading slash, no `//` prefix)
-  as part of this fix — that is a deliberately separate, not-yet-built card (`8d0ba38b`, per
+- (Superseded by card `8d0ba38b`, which DID change the prefix form: the rules are now built by
+  `claudeAbsoluteRules` in `pty/permission-rules.ts` — the documented `//<path>` form, plus the plain `C:/`
+  form on win32 — because the single-slash form measured INERT on POSIX. Never hand-build the prefix again.)
+  Original text: do not change `SETTINGS_DIR_READ_DENY_RULE`'s glob prefix form (single leading slash, no
+  `//` prefix) as part of this fix — that was a deliberately separate card (`8d0ba38b`, per
   `37310431`'s own "Ruling A"); conflating the two changes would make either one harder to review or
   revert independently.
 - Do not claim this closes the general "any alias that reaches the real directory" case — it closes only
