@@ -1415,6 +1415,13 @@ export function isResumeSummaryGate(flatCollapsed: string): boolean {
 }
 
 /**
+ * The workspace-trust dialog's question over collapseBoot()'d text: the older wording
+ * (`...a project you trust?`) AND claude 2.1.323's (`...a project you created or one you trust?`).
+ * The single shared source for both detectors below — never re-derive a copy.
+ */
+const WORKSPACE_TRUST_RE = /isthisaprojectyou(?:createdoroneyou)?trust/i;
+
+/**
  * Card 01160ae3: known blocking-dialog signatures that can stall an unattended spawn BEFORE SessionStart
  * (detect + notify only — never auto-answered). Checked in priority order; the first match names the
  * signature for the durable event + nudge. Input is collapseBoot()'d output, same convention as
@@ -1425,8 +1432,8 @@ export function isResumeSummaryGate(flatCollapsed: string): boolean {
 export function detectBlockingDialogSignature(flatCollapsed: string): string | null {
   // "Allow external CLAUDE.md file imports? ... Enter to confirm · Esc to cancel" (card b180791a).
   if (/externalimports/i.test(flatCollapsed)) return "external-imports";
-  // The workspace-trust dialog ("Is this a project you trust?" — see claude-config.ts's own doc).
-  if (/isthisaprojectyoutrust/i.test(flatCollapsed)) return "workspace-trust";
+  // The workspace-trust dialog (see claude-config.ts's own doc; both wordings, WORKSPACE_TRUST_RE).
+  if (WORKSPACE_TRUST_RE.test(flatCollapsed)) return "workspace-trust";
   // The per-project "N new MCP servers found — enable?" prompt — same test as the existing bootScan
   // dismiss-scan above (mcpPromptHandled), reused here rather than re-derived.
   if (isMcpServerEnableSignature(flatCollapsed)) return "mcp-server-enable";
@@ -1466,7 +1473,7 @@ export function detectNewestBlockingDialogSignature(flatCollapsed: string): stri
   const externalImports = lastIndex(/externalimports/gi);
   if (externalImports >= 0) candidates.push({ name: "external-imports", pos: externalImports });
 
-  const workspaceTrust = lastIndex(/isthisaprojectyoutrust/gi);
+  const workspaceTrust = lastIndex(new RegExp(WORKSPACE_TRUST_RE.source, "gi"));
   if (workspaceTrust >= 0) candidates.push({ name: "workspace-trust", pos: workspaceTrust });
 
   // Compound: isMcpServerEnableSignature is the shared boolean test (never re-derived — see the
