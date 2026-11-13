@@ -86,6 +86,23 @@ try {
   const fbOut = runHook(writeNote("unfenced.md", "# Meta\n\n```\nUPDATE: quoted\n```\n\nUPDATE: but this one is real.\n"));
   check("append marker outside the fence (with one also inside) → flagged", !!fbOut && /append marker/i.test(fbOut.hookSpecificOutput.additionalContext));
 
+  // b2) scar patterns inside INLINE code spans → exempt (incl. multi-backtick); the same patterns in real prose → flagged.
+  const fiIn = runHook(writeNote("inline.md",
+    "# Meta\n\nThe lint flags `~~strike~~` and a line starting with:\n\n> see ``UPDATE: x`` or ``~~a ` b~~`` or `Note (2026):` here\n\nClean prose.\n"));
+  check("scar patterns inside inline `code` / ``multi-backtick`` spans → no flag", fiIn === null);
+  const fiStrike = runHook(writeNote("inline-strike.md", "# Meta\n\nSpan `~~ok~~` but ~~real strike~~ in prose.\n"));
+  check("real prose ~~strike~~ next to an inline-code one → still flagged",
+    !!fiStrike && /struck-through/i.test(fiStrike.hookSpecificOutput.additionalContext));
+  const fiUpd = runHook(writeNote("inline-upd.md", "# Meta\n\n`code` span first.\n\nUPDATE: real marker `UPDATE:` quoted.\n"));
+  check("real UPDATE: marker line with an inline-code span → still flagged",
+    !!fiUpd && /append marker/i.test(fiUpd.hookSpecificOutput.additionalContext));
+  const fiOpen = runHook(writeNote("inline-unclosed.md", "# Meta\n\nUnclosed ` tick then ~~real strike~~ here.\n"));
+  check("an unclosed backtick does NOT swallow the rest of the line → still flagged",
+    !!fiOpen && /struck-through/i.test(fiOpen.hookSpecificOutput.additionalContext));
+  const fiMismatch = runHook(writeNote("inline-mismatch.md", "# Meta\n\n``a ` b`` then ~~real~~ and `x`.\n"));
+  check("mismatched-length backticks inside a double-backtick span handled; prose strike still flagged",
+    !!fiMismatch && /struck-through/i.test(fiMismatch.hookSpecificOutput.additionalContext));
+
   // c) broken wikilink with NO opt-in → no flag (default off); same note with doc-lint-links: true → flagged.
   const fcOff = runHook(writeNote("redlink.md", "# Red\n\nSee [[Nonexistent]] and [[Fire Studio]].\n"));
   check("broken wikilink, no opt-in → no flag (default off)", fcOff === null);

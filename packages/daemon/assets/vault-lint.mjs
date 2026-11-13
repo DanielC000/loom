@@ -10,7 +10,7 @@
 // False-positive guards (driven by real production noise):
 //   - `doc-lint: false` in the note's leading YAML frontmatter → skip ALL checks, stay silent.
 //   - Scar/correction patterns (UPDATE:/EDIT:, Note (YYYY):, ~~strike~~) inside a ```fenced code
-//     block``` are legitimate quoting (meta-docs about doc hygiene) and are NOT flagged.
+//     block``` or an inline `code span` are legitimate quoting (meta-docs about doc hygiene) and are NOT flagged.
 //   - The broken-wikilink check is OPT-IN (default OFF): this vault uses intentional red-links and
 //     cross-project links a single-subfolder index can't resolve. Enable per-note with
 //     `doc-lint-links: true` in frontmatter. Append-scar + oversized checks stay default-on.
@@ -64,12 +64,18 @@ function listVaultNoteKeys(vaultPath) {
 
 // rule 2 — rewrite in place, never append "UPDATE:" / "EDIT:" / "Note (YYYY):" / ~~struck-through~~.
 // Patterns inside a ```fenced code block``` are exempt (legitimate quoting, e.g. a doc ABOUT scars).
+// Inline `code spans` (single line) are exempt too: a run of N backticks opens a span that closes at the
+// next run of EXACTLY N backticks (so ``a ` b`` is one span); an unclosed run stays literal text.
+function stripInlineCode(line) {
+  return line.replace(/(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)/g, " ");
+}
 function checkAppendScars(content) {
   const hits = [];
   let inFence = false, sawNote = false, sawStrike = false;
-  content.split(/\r?\n/).forEach((line, i) => {
-    if (/^\s{0,3}(`{3,}|~{3,})/.test(line)) { inFence = !inFence; return; } // fence open/close
+  content.split(/\r?\n/).forEach((rawLine, i) => {
+    if (/^\s{0,3}(`{3,}|~{3,})/.test(rawLine)) { inFence = !inFence; return; } // fence open/close
     if (inFence) return; // scars quoted inside a code block are legitimate, not a hit
+    const line = stripInlineCode(rawLine);
     if (/^\s{0,3}>?\s*\*{0,2}(UPDATE|EDIT)\b\s*\*{0,2}\s*:/i.test(line)) {
       hits.push(`line ${i + 1}: append marker "${line.trim().slice(0, 48)}"`);
     }
