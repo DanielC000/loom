@@ -518,7 +518,7 @@ test.describe("session Loom MCP activity strip · codex (per-call record)", () =
     await expect(page.getByTestId("mcp-call-3-dur")).toHaveCount(0);
     await expect(page.getByTestId("mcp-refused-legend")).toHaveText("! refused: the tool returned an error envelope.");
     // Card 6232d9b4: third-party server calls never reach the record, and the strip says so.
-    await expect(page.getByTestId("mcp-facet-no-external")).toHaveText("Third-party server calls (Playwright, GitHub, Codescape, …) aren't recorded for codex sessions.");
+    await expect(page.getByTestId("mcp-facet-no-external")).toHaveText("Third-party server calls (Playwright, GitHub, …) aren't recorded for codex sessions.");
 
     // Detail: what the record does not keep is said, not left blank.
     await page.getByTestId("mcp-call-2").click();

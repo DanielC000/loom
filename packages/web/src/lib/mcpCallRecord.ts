@@ -77,7 +77,7 @@ export const RECORD_SPAN_HINT = "Time from the first recorded call's start to th
 export const RECORD_NOT_KEPT = "Arguments and answer aren't recorded for codex calls.";
 export const RECORD_GROUP_LABEL = "All calls · codex records no turns";
 /** The record is written by Loom's own routers, so a codex session's third-party server calls never reach it (card 6232d9b4). */
-export const RECORD_NO_EXTERNAL = "Third-party server calls (Playwright, GitHub, Codescape, …) aren't recorded for codex sessions.";
+export const RECORD_NO_EXTERNAL = "Third-party server calls (Playwright, GitHub, …) aren't recorded for codex sessions.";
 
 /**
  * The record query's options. Disabled for every non-codex session, so a claude session never fetches

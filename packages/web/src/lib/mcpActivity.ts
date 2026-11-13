@@ -1,7 +1,7 @@
 // A session's MCP calls, parsed back out of the text GET /api/sessions/:id/transcript already serves
 // (daemon `pty/claude-transcript.ts` `extractText`):
 //   [tool] {<tag>} mcp__<server>__<tool>(<JSON args>)   and   -> tool result {<tag>} (error): <body>
-// Loom's own routers (`loom-*`) and third-party servers (Playwright, markitdown, GitHub, Codescape, ...)
+// Loom's own routers (`loom-*`) and third-party servers (Playwright, markitdown, GitHub, ...)
 // alike: the transcript carries every tool call. Third-party calls get the `external` subsystem (card 6232d9b4).
 // Pure functions of the transcript, pinned by test/mcp-activity.mjs.
 //
