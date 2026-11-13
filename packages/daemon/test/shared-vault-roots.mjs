@@ -71,8 +71,8 @@ const initRepo = (dir) => { fs.mkdirSync(dir, { recursive: true }); git(dir, "in
   const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.name.endsWith(".ts") ? [path.join(d, e.name)] : []));
   const files = walk(srcDir).map((f) => ({ f: path.relative(srcDir, f).replace(/\\/g, "/"), s: stripComments(fs.readFileSync(f, "utf8")) }));
   const writers = files.filter((x) => x.s.includes("setPlatformConfig(")).map((x) => x.f).sort();
-  check(`(3) setPlatformConfig( is called only by db.ts (definition), the human REST PATCH and the seed — saw: ${writers.join(", ")}`,
-    JSON.stringify(writers) === JSON.stringify(["db.ts", "gateway/server.ts", "vault/shared-roots-seed.ts"]));
+  check(`(3) setPlatformConfig( is called only by db.ts (definition), the human REST PATCH, the seed and the one-shot boot migration that strips retired keys (setup/retire-operator.ts; it only removes a retired key from the stored blob, never sets sharedVaultRoots) — saw: ${writers.join(", ")}`,
+    JSON.stringify(writers) === JSON.stringify(["db.ts", "gateway/server.ts", "setup/retire-operator.ts", "vault/shared-roots-seed.ts"]));
   const mentions = files.filter((x) => x.f.startsWith("mcp/") && x.s.includes("sharedVaultRoots")).map((x) => x.f).sort();
   check(`(3) among agent-facing MCP routers only mcp/platform.ts (the platform schemas) names sharedVaultRoots — saw: ${mentions.join(", ")}`,
     JSON.stringify(mentions) === JSON.stringify(["mcp/platform.ts"]));

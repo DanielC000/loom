@@ -5275,7 +5275,7 @@ export class Db {
       this.db.prepare("DELETE FROM project_memory_history WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM project_memory WHERE project_id = ?").run(id); // fts rows follow via its delete trigger
       this.db.prepare("DELETE FROM project_links WHERE project_a_id = ? OR project_b_id = ?").run(id, id);
-      this.db.prepare("DELETE FROM questions WHERE project_id = ?").run(id);
+      if (this.db.prepare("DELETE FROM questions WHERE project_id = ?").run(id).changes > 0) this.notifyQuestionsChanged();
       this.db.prepare("DELETE FROM card_policy_matches WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)").run(id);
       this.db.prepare("DELETE FROM card_policy_waivers WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)").run(id);
       this.db.prepare("DELETE FROM card_policy_matches_v2 WHERE project_id = ?").run(id);

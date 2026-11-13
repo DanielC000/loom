@@ -37,7 +37,7 @@ function uninstrumented(text) {
     routers += r.total;
     if (r.bad.length) offenders.push(f);
   }
-  check(`(A) the census sees the 8 routers' \`new McpServer(\` sites (saw ${routers})`, routers === 8);
+  check(`(A) the census sees the 7 routers' \`new McpServer(\` sites (saw ${routers})`, routers === 7);
   check(`(A) every \`new McpServer(\` is followed by instrumentServer( (offenders: ${JSON.stringify(offenders)})`, offenders.length === 0);
   // negative control on the detector itself, against a real router's text with the call removed
   const real = fs.readFileSync(path.join(dir, "run.ts"), "utf8");
