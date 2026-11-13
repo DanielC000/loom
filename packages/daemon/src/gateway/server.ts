@@ -493,6 +493,11 @@ export function redactAlertWebhookHistoryEntry(entry: ProjectConfigHistoryEntry)
   };
 }
 
+/** resume()'s own "this session cannot be resumed" refusals — a 409 on every route that resumes (resume, restore). */
+function isResumeRefusal(e: unknown): boolean {
+  return e instanceof Error && (e.message === "session has no engine id to resume" || e.message.startsWith("session is no longer resumable"));
+}
+
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // trustProxy is DELIBERATELY left at its default (false): Fastify would otherwise derive `req.ip` from an
   // attacker-controlled X-Forwarded-For. Every trust decision here goes through `classOf` (gateway/trust-tier.ts
@@ -6965,12 +6970,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (e instanceof SecondLiveManagerError) return reply.code(409).send({ error: e.message, holderSessionId: e.holderSessionId });
       // A missing session is a 404; a session that cannot be resumed (no engine id / transcript gone /
       // worktree gone) is a 409 carrying resume()'s own reason — never a generic 500.
-      if (e instanceof Error) {
-        if (e.message === "session not found") return reply.code(404).send({ error: e.message });
-        if (e.message === "session has no engine id to resume" || e.message.startsWith("session is no longer resumable")) {
-          return reply.code(409).send({ error: e.message });
-        }
-      }
+      if (e instanceof Error && e.message === "session not found") return reply.code(404).send({ error: e.message });
+      if (isResumeRefusal(e)) return reply.code(409).send({ error: (e as Error).message });
       throw e;
     }
   });
@@ -7752,6 +7753,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // throw SecondLiveManagerError — same honest 409 shape as /resume's own mapping above, not the
       // generic 400 every other restoreSession failure gets.
       if (e instanceof SecondLiveManagerError) return reply.code(409).send({ error: e.message, holderSessionId: e.holderSessionId });
+      // restoreSession → resume(): the same "cannot be resumed" refusals /resume maps to 409.
+      if (isResumeRefusal(e)) return reply.code(409).send({ error: (e as Error).message });
       return reply.code(400).send({ error: (e as Error).message });
     }
   });
@@ -7759,7 +7762,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
     try { return reply.send(deps.sessions.deleteArchivedSession(id)); }
-    catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
+    catch (e) {
+      // A live (not-archived) session is a refusal of the request → 409; anything else keeps the prior 400.
+      if (e instanceof Error && e.message === "only an archived session can be permanently deleted") return reply.code(409).send({ error: e.message });
+      return reply.code(400).send({ error: (e as Error).message });
+    }
   });
   // A single archived session BY ID, cross-project — added so a by-id consumer (a deep-linked
   // SessionView, an attention-queue "Open") never depends on that session still sitting on the FIRST
