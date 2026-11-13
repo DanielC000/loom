@@ -8878,6 +8878,17 @@ export class Db {
     return r ? toSession(r) : undefined;
   }
   /**
+   * Manager sessions of one agent that are NOT live, most recently created first, excluding `excludeId`
+   * (the fresh spawn itself). Read by the spawn-time carry of a stopped manager's undelivered inbound
+   * queue; archived rows are deliberately included (an exit with no live workers is auto-archived, yet its
+   * durable queue may still be unresolved). Bounded — only the most recent few can matter.
+   */
+  listNonLiveManagersForAgent(agentId: string, excludeId: string, limit = 10): Session[] {
+    return (this.db.prepare(
+      "SELECT * FROM sessions WHERE agent_id = ? AND role = 'manager' AND process_state != 'live' AND id != ? ORDER BY created_at DESC LIMIT ?",
+    ).all(agentId, excludeId, limit) as Row[]).map(toSession);
+  }
+  /**
    * Currently-LIVE worker sessions across all projects — the BusyWorkerWatcher's and IdleWatcher's work
    * set (stuck-busy / idle-unreported). Includes ROLE-LESS children too (`role IS NULL`, e.g. a
    * role-less consultation worker spawned under a manager) — a manager-parented, role-less session is

@@ -41,7 +41,10 @@ const now = new Date().toISOString();
 const db = new Db();
 // workerReport's manager notification is the only pty touch on this path; a stub returning {delivered}
 // keeps it hermetic (delivered-live ⇒ no boarded strand backstop).
-const ptyStub = { enqueueStdin() { return { delivered: true }; } };
+// hasPendingLogicalId:true models every seeded durable row as still HELD in the worker's live queue (it will
+// drain) — since card a84e5d67 the guard keys on that; a row NOT in the live queue is re-driven or accepted
+// (worker-done-dead-sender-direction.mjs covers those two shapes).
+const ptyStub = { enqueueStdin() { return { delivered: true }; }, hasPendingLogicalId() { return true; } };
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;

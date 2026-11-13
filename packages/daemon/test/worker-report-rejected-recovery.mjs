@@ -72,7 +72,7 @@ db.appendEvent({
   kind: "session_message_queued", detail: { msgId, text: "[loom:from-manager]\nSTOP — redo it", sender: mgrId },
 });
 
-const ptyStub = { enqueueStdin() { return { delivered: true }; } };
+const ptyStub = { enqueueStdin() { return { delivered: true }; }, hasPendingLogicalId() { return true; } }; // card a84e5d67: rows modelled as held in the live queue
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
 // ═══════════════════════════ (1)+(2) REFUSAL + persisted content ═══════════════════════════════════════

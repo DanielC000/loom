@@ -51,7 +51,7 @@ const db = new Db();
 // which is exactly the path under test here. Pinned to 3 (2 more than the single manager-authored
 // instruction seeded below) so the queue-depth note's own text is exercised, not just its absence.
 const LIVE_QUEUE_DEPTH = 3;
-const ptyStub = { enqueueStdin() { return { delivered: true }; }, getPendingQueueDepth() { return LIVE_QUEUE_DEPTH; } };
+const ptyStub = { enqueueStdin() { return { delivered: true }; }, getPendingQueueDepth() { return LIVE_QUEUE_DEPTH; }, hasPendingLogicalId() { return true; } }; // card a84e5d67: rows modelled as held in the live queue
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;

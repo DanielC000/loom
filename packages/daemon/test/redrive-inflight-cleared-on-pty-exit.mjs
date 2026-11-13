@@ -24,8 +24,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // exactly mirroring whether the fix exists at all:
 //   (NO-CLEANUP) `onPtyExit` is never called — byte-identical to pre-fix code (which never had this
 //       method, or `clearRedriveInFlightForExit`, or any call site for it) — and reproduces the bug
-//       exactly: the same-process resume is blocked, the durable record stays unresolved, and
-//       workerReport(done) is REFUSED forever (RED).
+//       exactly: the same-process resume is blocked and the durable record stays unresolved. Since card
+//       a84e5d67 workerReport(done) no longer refuses forever: the stranded row is re-driven, refused
+//       once, and the retry is accepted (RED half of the original bug, now deadlock-free).
 //   (WITH-CLEANUP) `onPtyExit(recipientId)` is called, exactly mirroring the real `PtyHostEvents.onExit`
 //       wiring (`sessions.onPtyExit(sessionId)` in index.ts) — the same-process resume succeeds, the
 //       message delivers, the durable record resolves, and workerReport(done) is ALLOWED (GREEN).
@@ -151,9 +152,16 @@ try {
     // still fires because the durable record looks exactly like genuinely-unconsumed direction.
     pty.setBusy(P.workerId, false);
     const rpt = await sessions.workerReport(P.workerId, { status: "done", summary: "finished my work" });
-    check("(RED) workerReport(done) is REFUSED — the stuck done-guard (card cd390610's own symptom)",
-      rpt.reported === false && rpt.refused === true);
-    check("(RED) task STAYS in_progress", db.getTask(P.taskId).columnKey === "in_progress");
+    // Card a84e5d67: the guard no longer trusts the stale in-flight mark — the row is NOT in the worker's
+    // live queue (stranded), so the first done is refused ONCE with the row RE-DRIVEN, and the retry is
+    // accepted: the permanent deadlock (refused forever) is gone even without the exit cleanup.
+    check("(RED) workerReport(done) is refused ONCE, the stranded row re-driven (no longer a permanent deadlock)",
+      rpt.reported === false && rpt.refused === true && /RE-DELIVERED/.test(rpt.error));
+    check("(RED) task stays in_progress after the first refusal", db.getTask(P.taskId).columnKey === "in_progress");
+    pty.drainOne(P.workerId);
+    const rpt2 = await sessions.workerReport(P.workerId, { status: "done", summary: "finished my work (retry)" });
+    check("(RED) the retry after the re-driven direction drained is ACCEPTED — no deadlock",
+      rpt2.reported === true && !rpt2.refused && db.getTask(P.taskId).columnKey === "review");
   }
 
   // ===================== WITH-CLEANUP — the fix (GREEN) =====================

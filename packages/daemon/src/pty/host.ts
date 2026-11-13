@@ -11961,6 +11961,12 @@ export class PtyHost {
     return this.findAnyLive(sessionId)?.pending.length;
   }
 
+  /** Card a84e5d67: is an entry with this logical id (a durable record's rootMsgId/msgId) currently held in
+   *  the session's live FIFO? Harness-agnostic (`findAnyLive`); false for a session that isn't live. */
+  hasPendingLogicalId(sessionId: string, logicalId: string): boolean {
+    return (this.findAnyLive(sessionId)?.pending ?? []).some((m) => m.logicalId === logicalId);
+  }
+
   /**
    * Card d8eaa381: milliseconds elapsed since the CURRENT turn's busy rose (`Live.busySince`), or `null`
    * if no turn is currently in flight (idle — nothing to measure), or `undefined` if the session isn't

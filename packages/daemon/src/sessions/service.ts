@@ -4497,6 +4497,7 @@ export class SessionService {
     // the role==="manager" branch (the only one that ever computes codescapeStatus above). Card 40738f24:
     // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
     if (codescapeStatus) this.recordDiscoveryBlockInjection({ managerSessionId: session.id }, codescapeStatus);
+    if (role === "manager") this.carryStoppedManagerQueueToNewManager(session);
     return { ...session, processState: "live" };
   }
 
@@ -4612,6 +4613,7 @@ export class SessionService {
     // Card badba5a8: observability only — record whether the codescape block was injected. Card 40738f24:
     // folded onto the shared best-effort recordDiscoveryBlockInjection helper (see its own doc).
     this.recordDiscoveryBlockInjection({ managerSessionId: session.id }, codescapeStatus);
+    this.carryStoppedManagerQueueToNewManager(session);
     return { ...session, processState: "live" };
   }
 
@@ -9950,7 +9952,9 @@ export class SessionService {
           reportEventId, // card d09d58e7 — restore the tag onto the re-enqueued entry itself so `purgeQueuedByReportEventIds` can match a redriven copy exactly like a fresh one
         },
       );
-      if (r.delivered || r.position !== undefined) {
+      // @decision a84e5d67 — a codex HELD entry reports `{queued:true, deliveryState:"queued"}` with NO
+      // `position`; counting only `position` read a really-queued codex redrive as "stuck".
+      if (r.delivered || r.position !== undefined || r.queued === true || r.deliveryState === "queued") {
         // Card bcaeab8d DoD-4: before this fix, the ONLY log line anywhere in the redrive machinery was the
         // decline branch above (retiring a stale row) — the branch that actually re-sends logged nothing at
         // any spelling, which is exactly why a prior peer's log census of `redrive`/`session_message_queued`
@@ -10006,7 +10010,9 @@ export class SessionService {
     if (supersededByRedirect) return "superseded-by-redirect";
     if (e.taskId) {
       const alreadyReported = timeline.some((ev, i) =>
-        ev.id !== e.id && isLater(ev, i) && ev.kind === "worker_report" && ev.taskId === e.taskId);
+        // @decision a84e5d67 — only a later `done` counts: a mid-task progress/blocked checkpoint must not
+        // retire a stranded direction the worker never saw.
+        ev.id !== e.id && isLater(ev, i) && ev.kind === "worker_report" && ev.taskId === e.taskId && ev.detail?.status === "done");
       if (alreadyReported) return "already-reported";
     }
     return undefined;
@@ -14521,6 +14527,7 @@ export class SessionService {
    */
   private carryPendingToSuccessor(
     oldId: string, successorId: string, flushed: QueuedMessage[], durableRecords: OrchestrationEvent[],
+    opts: { carriedFromLabel?: boolean } = {},
   ): { failedRefs: string[] } {
     const failedRefs: string[] = [];
     for (const m of flushed) {
@@ -14579,7 +14586,11 @@ export class SessionService {
       // prefix FIRST so a later strip still finds it.
       const strippedText = stripPossibleDuplicateFrame(text);
       const dupFramePrefix = text.slice(0, text.length - strippedText.length); // "" when no dup frame present
-      const carriedText = PEER_MESSAGE_FRAME_RE.test(strippedText)
+      // @decision a84e5d67 — a spawn-time carry from a STOPPED (not recycled) manager labels EVERY carried
+      // message `[loom:carried-from <old8>]` (dup tag stays first); the recycle label below is peer-only.
+      const carriedText = opts.carriedFromLabel
+        ? `${dupFramePrefix}[loom:carried-from ${oldId.slice(0, 8)}]\n${strippedText.replace(/^\[loom:carried-from [^\]\n]*\]\n/, "")}`
+        : PEER_MESSAGE_FRAME_RE.test(strippedText)
         ? `${dupFramePrefix}[loom:inherited-by-recycle · predecessor:${oldId.slice(0, 8)}]\nThe manager session this peer message was originally addressed to recycled before it could deliver/read it — you are its successor and have no context on any earlier exchange in this thread. Read it accordingly.\n\n${strippedText}`
         : text;
       // Card d09d58e7: carry `reportEventId` forward — without it, a worker-report nudge still queued on a
@@ -16065,6 +16076,9 @@ export class SessionService {
     // forgot-to-commit safety net for the ACCIDENTAL case is intact.
     let autoRetireNoCommit = false;
     let autoRetireTrigger: "no-commit-role" | "declared-no-op" | undefined;
+    // Card a84e5d67: set when this `done` is ACCEPTED despite unresolved manager direction that could not be
+    // delivered to this worker (not in its live queue and not re-drivable).
+    let undeliverableDirection: { count: number; msgIds: string[] } | undefined;
     if (report.status === "done") {
       // PENDING-DIRECTION PRE-CHECK (board card dcb25bd9): REFUSE a done-report while the worker still has
       // UNRESOLVED manager direction queued. The real incident: a worker raced to `done` on a SUPERSEDED
@@ -16080,9 +16094,31 @@ export class SessionService {
       // so refusing here forces the worker to end its turn, drain the (coalesced) direction into its next
       // turn, act on it, THEN re-report. Mirrors the uncommitted-files refusal shape exactly (task NOT moved).
       if (managerSessionId) {
-        const pending = this.db
+        const managerPending = this.db
           .listUnresolvedQueuedMessagesForWorker(workerSessionId)
           .filter((e) => e.detail?.sender === managerSessionId);
+        // @decision a84e5d67 — key on DELIVERABILITY, never sender liveness: in the live queue ⇒ refuse (it
+        // drains); stranded ⇒ re-drive + refuse; undeliverable by re-drive ⇒ accept with a warning.
+        const redrivenIds = new Set<string>();
+        const hasLiveView = typeof this.pty.hasPendingLogicalId === "function";
+        const undeliverable: OrchestrationEvent[] = [];
+        const refusing: OrchestrationEvent[] = [];
+        for (const e of managerPending) {
+          const msgId = typeof e.detail?.msgId === "string" ? e.detail.msgId : null;
+          const rootId = typeof e.detail?.rootMsgId === "string" ? e.detail.rootMsgId : null;
+          const inLiveQueue = (): boolean => hasLiveView && [rootId, msgId].some((id) => id !== null && this.pty.hasPendingLogicalId(workerSessionId, id));
+          if (inLiveQueue()) { refusing.push(e); continue; }
+          if (msgId) this.clearRedriveInFlight(msgId); // not in the live queue ⇒ any in-flight mark is stale
+          let outcome: ReturnType<SessionService["redriveQueuedMessage"]> = "stuck";
+          try { outcome = this.redriveQueuedMessage(e); } catch { /* treat as undeliverable */ }
+          if (outcome === "reEnqueued") { refusing.push(e); if (msgId) redrivenIds.add(msgId); }
+          else if (inLiveQueue()) refusing.push(e); // the live queue is the truth: a re-drive result that reads "stuck" may still have queued it
+          else undeliverable.push(e);
+        }
+        const pending = refusing;
+        if (pending.length === 0 && undeliverable.length > 0) {
+          undeliverableDirection = { count: undeliverable.length, msgIds: undeliverable.map((e) => e.detail?.msgId).filter((id): id is string => typeof id === "string") };
+        }
         if (pending.length > 0) {
           // Board card 50162e6b: name the queued instruction TEXT (not just a count) so the worker can
           // judge for itself whether this is a genuine superseding redirect or a redundant nudge it
@@ -16142,9 +16178,12 @@ export class SessionService {
           // "not a function" against exactly that class of stub (batch-gate finding). Missing the method
           // degrades to no note at all, never a regression, no hard dependency a stub must opt into.
           const liveQueueDepth = typeof this.pty.getPendingQueueDepth === "function" ? (this.pty.getPendingQueueDepth(workerSessionId) ?? null) : null;
-          const queueNote = liveQueueDepth !== null && liveQueueDepth > pending.length
-            ? ` Your live send queue actually holds ${liveQueueDepth} entries right now (${liveQueueDepth - pending.length} more from other senders or Loom's own nudges, ahead of or alongside these) — only ONE entry drains per turn you complete, so fully clearing it may take more than one more turn.`
+          const redriveNote = redrivenIds.size > 0
+            ? ` ${redrivenIds.size} of these had been stranded outside your live queue and Loom has just RE-DELIVERED them — end this turn so they drain.`
             : "";
+          const queueNote = redriveNote + (liveQueueDepth !== null && liveQueueDepth > pending.length
+            ? ` Your live send queue actually holds ${liveQueueDepth} entries right now (${liveQueueDepth - pending.length} more from other senders or Loom's own nudges, ahead of or alongside these) — only ONE entry drains per turn you complete, so fully clearing it may take more than one more turn.`
+            : "");
           const error = isRepeat
             ? `worker_report(done) REFUSED (again) — the SAME ${pending.length} instruction(s) from your manager are still unconsumed (unchanged since your last refusal):\n${pendingList}\n` +
               `Nothing NEW has arrived, so this doesn't look like a fresh supersede — RECONCILE against it (act on it, or if your work already satisfies it, say so) THEN re-report done. Your task stays in_progress.${queueNote}`
@@ -16388,6 +16427,11 @@ export class SessionService {
       }
     }
 
+    if (undeliverableDirection) {
+      const note = `[loom:undeliverable-direction] ${undeliverableDirection.count} queued manager instruction(s) could not be delivered to this worker (stale, retired, or no live queue to re-drive onto); this done was ACCEPTED rather than refused. The reviewing manager should check whether that direction changes the work.`;
+      warning = warning ? `${warning} ${note}` : note;
+    }
+
     // Task move by status: done → the `review` lane (ready for the manager's diff review), blocked →
     // the `parked` lane, progress → no move. Role-resolved off the worker-project config (never the
     // hardcoded "review"/"waiting" keys); an absent lane leaves the card put (no orphaning move).
@@ -16445,6 +16489,7 @@ export class SessionService {
         // immediately when the commit lands (see the codex-auto-commit block above), which exists
         // independently of whether this worker_report event ever gets written at all.
         ...(codexAutoCommit ? { codexAutoCommit } : {}),
+        ...(undeliverableDirection ? { undeliverableDirection } : {}),
       },
     });
 
@@ -18400,6 +18445,63 @@ export class SessionService {
     return { reparentedWorkers, failedSteps };
   }
 
+  /** Shared by the recycle carry and the spawn-time carry: a stale context-recycle nudge / emergency redirect. */
+  private static isStaleContextNudgeText(text: string): boolean {
+    const stripped = stripPossibleDuplicateFrame(text);
+    return stripped.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || stripped.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
+  }
+
+  /** Max age of a durable row the spawn-time carry will move (card a84e5d67); measured per hop. */
+  private static readonly CARRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+  /**
+   * Card a84e5d67 — a FRESH manager spawn (not a recycle successor) inherits the undelivered durable
+   * inbound queue of the most recent STOPPED manager of the same agent, labelled `[loom:carried-from <old8>]`.
+   * The exited pty's in-memory queue is gone, but its durable `session_message_queued` rows stay unresolved
+   * and, with no recycle successor, nothing else would ever move them. Re-mint-then-supersede reuses
+   * `carryPendingToSuccessor` (dup-tag first, old→new msgId link). Best-effort post-spawn bookkeeping: a
+   * failure never fails the spawn, but a message that could not be carried is BOARDED, never dropped.
+   * @decision a84e5d67 — never carry from a recycle-superseded predecessor (its recycle carry owns the
+   * queue) and never from a LIVE manager; only the single most recent candidate that has unresolved rows.
+   */
+  private carryStoppedManagerQueueToNewManager(fresh: Session): void {
+    this.bestEffortPostSpawn("carrying a stopped manager's undelivered queue", fresh.id, () => {
+      let oldId: string | null = null;
+      let rows: OrchestrationEvent[] = [];
+      for (const cand of this.db.listNonLiveManagersForAgent(fresh.agentId, fresh.id)) {
+        if (cand.projectId !== fresh.projectId || isSupersededByRecycle(this.db, cand.id)) continue;
+        // Bounds (card a84e5d67): agent-authored rows only (never Loom's own warning/system nudges), nothing a
+        // redrive would retire as stale, nothing older than the age cap, no stale context nudge.
+        const unresolved = this.db.listUnresolvedQueuedMessagesForWorker(cand.id).filter((rec) => {
+          const text = typeof rec.detail?.text === "string" ? rec.detail.text : null;
+          if (text === null || SessionService.isStaleContextNudgeText(text)) return false;
+          const sender = typeof rec.detail?.sender === "string" ? rec.detail.sender : rec.managerSessionId;
+          if (rec.detail?.kind === "warning" || !sender || sender === "system") return false;
+          if (Date.now() - new Date(rec.ts).getTime() > SessionService.CARRY_MAX_AGE_MS) return false;
+          return !this.staleQueuedMessageReason(cand.id, rec);
+        });
+        if (unresolved.length > 0) { oldId = cand.id; rows = unresolved; break; }
+      }
+      if (!oldId) return;
+      let failedRefs: string[];
+      try {
+        failedRefs = this.carryPendingToSuccessor(oldId, fresh.id, [], rows, { carriedFromLabel: true }).failedRefs;
+      } catch (e) {
+        failedRefs = [`carry-threw:${(e as Error).message}`];
+      }
+      if (failedRefs.length === 0) return;
+      const now = new Date().toISOString();
+      this.db.insertTask({
+        id: randomUUID(),
+        projectId: fresh.projectId,
+        title: `Undelivered messages of stopped manager ${oldId.slice(0, 8)} could not be carried to ${fresh.id.slice(0, 8)}`,
+        body: `Spawning manager \`${fresh.id}\` found ${rows.length} undelivered inbound message(s) of the stopped manager \`${oldId}\`, but carrying ${failedRefs.length} of them failed (refs: ${failedRefs.join(", ")}). They remain unresolved on the old manager's durable queue; read them via its orchestration events.`,
+        columnKey: this.columnKeyForProjectRole(fresh.projectId, "defaultLanding") ?? "backlog",
+        position: Date.now(), priority: DEFAULT_TASK_PRIORITY, createdAt: now, updatedAt: now, version: 1,
+      });
+    });
+  }
+
   /**
    * The pending-queue-carry step of a manager ownership transfer — the durable-queue DB read +
    * `pty.flushPending` + `carryPendingToSuccessor`, with the stale-context-nudge filtering.
@@ -18434,10 +18536,7 @@ export class SessionService {
     if (!pendingCarryHardFailed) {
       // @decision 248abf9b — strip a leading possible-duplicate tag before EITHER prefix check, or a
       // give-up re-mint of the durable emergency redirect defeats this purge and carries it to the successor.
-      const isStaleContextNudge = (text: string): boolean => {
-        const stripped = stripPossibleDuplicateFrame(text);
-        return stripped.startsWith(CONTEXT_RECYCLE_NUDGE_PREFIX) || stripped.startsWith(`[${CONTEXT_EMERGENCY_REDIRECT_TAG}]`);
-      };
+      const isStaleContextNudge = SessionService.isStaleContextNudgeText;
       const carried: QueuedMessage[] = [];
       for (const m of flushedRaw) {
         if (isStaleContextNudge(m.text)) {
