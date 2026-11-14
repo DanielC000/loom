@@ -9,6 +9,7 @@ import { registerTranscriptReadTools } from "./transcript-read.js";
 import { registerRepoReadTools } from "./repo-read.js";
 import { auditRequestItem, pageRequests } from "./questionTool.js";
 import { strictShape } from "./arg-alias.js";
+import { validatePresetSuggestion } from "../presetValidation.js";
 import { instrumentServer } from "./call-record.js";
 // Card 40f4cae9: the `fields:[...]` projection carried forward from `tasks_list` (card 23fde5f8) — reuse
 // the SAME generic `pickFields` rather than a second projector.
@@ -200,7 +201,9 @@ export class AuditMcpRouter {
       },
       async ({ label, prompt, rationale }) => {
         try {
-          const res = db.suggestPresetPrompt({ label, prompt, rationale: rationale ?? null });
+          const invalid = validatePresetSuggestion({ label, prompt, rationale });
+          if (invalid) return ok({ error: invalid });
+          const res = db.suggestPresetPrompt({ label: label.trim(), prompt, rationale: rationale?.trim() ?? null });
           return ok(res.deduped ? { deduped: true, reason: res.reason } : { created: true, id: res.suggestion.id });
         } catch (e) {
           return ok({ error: (e as Error).message });

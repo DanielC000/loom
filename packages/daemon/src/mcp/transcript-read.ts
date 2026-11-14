@@ -56,13 +56,13 @@ export function registerTranscriptReadTools(
         "(or scope:\"all\") to include finished workers when auditing worker behavior. Optional projectId " +
         "narrows to one project. DEFAULT returns a lightweight SUMMARY per session (id, projectId, " +
         "projectName, agentId, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, " +
-        "model, ctxInputTokens, ctxTurns) — enough to feed (projectId, id, archived: archivedAt!=null) into " +
+        "model, ctxInputTokens, ctxTurns, turnSeq) — enough to feed (projectId, id, archived: archivedAt!=null) into " +
         "transcript_read" +
         (opts.agentPromptToolName ? `, and \`agentId\` into ${opts.agentPromptToolName}` : "") +
         "; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. " +
         "`ctxTurns` is a CONTEXT METER (how much of the model window is used), NOT the transcript length — " +
         "never use it to decide how many turns to page; transcript_read reports the real length via " +
-        "totalTurns/nextOffset. Pass full:true for whole session records. The default summary " +
+        "totalTurns/nextOffset. `turnSeq` counts Loom-turns (submit → completion), a different unit from `ctxTurns` — never compare them. Pass full:true for whole session records. The default summary " +
         `feed is capped at ${DEFAULT_SESSION_SUMMARY_CAP} rows (newest-first); pass an explicit limit/offset ` +
         "to page past it.",
       inputSchema: strictShape({

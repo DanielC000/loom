@@ -13,6 +13,7 @@ import { GatewayTokenSocketRegistry } from "./token-sockets.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde, projectWorkDir, measureDirBytesBoundedAsync, ARCHIVE_WORK_DIR_MEASURE_BOUNDS, questionAttachmentDir, PRE_PURGE_BACKUP_DIR } from "../paths.js";
 import { QUESTION_ID_RE, ATTACHMENT_ID_RE, attachmentServeContentType, resolveStoredAttachmentFile, attachmentContentDisposition, deriveAttachmentKind, sanitizeBasename } from "../mcp/attachments.js";
 import { deleteProjectWorkDir } from "../projects/work-dir.js";
+import { PRESET_LABEL_MAX, PRESET_PROMPT_MAX, validatePresetField, validatePresetSuggestion } from "../presetValidation.js";
 import { takePrePurgeBackup } from "../orchestration/db-backup.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import { buildServedStatusAsync, currentWebBundle } from "../served-status.js";
@@ -225,18 +226,6 @@ const isTaskPriority = (v: unknown): v is Task["priority"] => v === "p0" || v ==
 // and the end-user "workspace-auditor". Mirrors the Schedule.kind union (any new kind goes here too).
 const isScheduleKind = (v: unknown): v is Schedule["kind"] => v === "manager" || v === "auditor" || v === "workspace-auditor";
 
-/** Bounds for the Preset Prompts REST surface (label = short button text; prompt = the text to send). */
-const PRESET_LABEL_MAX = 200;
-const PRESET_PROMPT_MAX = 10_000;
-const PRESET_RATIONALE_MAX = 2_000;
-/** Validate a preset string field: must be a non-blank string within its bound. Returns an error
- *  message (for a 400) or null when valid. */
-const validatePresetField = (name: string, v: unknown, max: number): string | null => {
-  if (typeof v !== "string") return `${name} must be a string`;
-  if (v.trim().length === 0) return `${name} must not be empty`;
-  if (v.length > max) return `${name} must be at most ${max} characters`;
-  return null;
-};
 
 export interface GatewayDeps {
   /** Test seam only: replaces the pre-delete DB snapshot the purge and permanent-delete routes take
@@ -1636,12 +1625,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/preset-prompt-suggestions", async () => deps.db.listPresetPromptSuggestions());
   app.post("/api/preset-prompt-suggestions", async (req, reply) => {
     const b = (req.body ?? {}) as { label?: unknown; prompt?: unknown; rationale?: unknown };
-    const err = validatePresetField("label", b.label, PRESET_LABEL_MAX) ?? validatePresetField("prompt", b.prompt, PRESET_PROMPT_MAX);
+    const err = validatePresetSuggestion(b);
     if (err) return reply.code(400).send({ error: err });
-    if (b.rationale !== undefined && b.rationale !== null) {
-      if (typeof b.rationale !== "string") return reply.code(400).send({ error: "rationale must be a string" });
-      if (b.rationale.length > PRESET_RATIONALE_MAX) return reply.code(400).send({ error: `rationale must be at most ${PRESET_RATIONALE_MAX} characters` });
-    }
     const rationale = typeof b.rationale === "string" ? b.rationale.trim() : null;
     const res = deps.db.suggestPresetPrompt({ label: (b.label as string).trim(), prompt: b.prompt as string, rationale });
     if (res.deduped) return reply.code(200).send({ deduped: true, reason: res.reason });

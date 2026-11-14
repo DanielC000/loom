@@ -9,6 +9,7 @@ import { registerScopedRepoReadTools, type ScopedRootResolution } from "./repo-r
 import { skillListData } from "./skillTools.js";
 import { readSkill, isValidSkillName } from "../skills/store.js";
 import { strictShape } from "./arg-alias.js";
+import { validatePresetSuggestion } from "../presetValidation.js";
 import { instrumentServer } from "./call-record.js";
 import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
@@ -226,7 +227,9 @@ export class WorkspaceAuditMcpRouter {
       },
       async ({ label, prompt, rationale }) => {
         try {
-          const res = db.suggestPresetPrompt({ label, prompt, rationale: rationale ?? null });
+          const invalid = validatePresetSuggestion({ label, prompt, rationale });
+          if (invalid) return ok({ error: invalid });
+          const res = db.suggestPresetPrompt({ label: label.trim(), prompt, rationale: rationale?.trim() ?? null });
           return ok(res.deduped ? { deduped: true, reason: res.reason } : { created: true, id: res.suggestion.id });
         } catch (e) {
           return ok({ error: (e as Error).message });
