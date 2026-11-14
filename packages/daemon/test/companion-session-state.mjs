@@ -56,7 +56,7 @@ function seedSession(db, id, projectId, role, opts = {}) {
   db.insertSession({
     id, projectId, agentId, engineSessionId: `eng-${id}`, title: opts.title ?? null, cwd: projectId,
     processState: opts.processState ?? "live", resumability: "resumable", busy: opts.busy ?? false,
-    createdAt: now, lastActivity: now, lastError: null, role, taskId: opts.taskId ?? null,
+    createdAt: now, lastActivity: opts.lastActivity ?? now, lastError: null, role, taskId: opts.taskId ?? null,
   });
 }
 const tmpDb = () => new Db(path.join(tmpHome, `${randomUUID()}.db`));
@@ -112,6 +112,57 @@ try {
   check("(d) state:\"exited\": excludes the ungranted project's exited session", !exited.sessions.some((s) => s.sessionId === exitedInB));
   check("(d) state:\"all\": excludes BOTH of the ungranted project's sessions",
     !all.sessions.some((s) => s.sessionId === liveInB) && !all.sessions.some((s) => s.sessionId === exitedInB));
+
+  // (e) a session stopped THROUGH LOOM is archived on exit (archiveOnExit) — it must still be listed under
+  // exited/all, flagged archived + resumable, and distinguishable from a dead (unresumable) exit.
+  const stoppedA = "stopped-a";
+  seedSession(db, stoppedA, projA, "worker", { processState: "exited" });
+  db.archiveSession(stoppedA);
+  const deadA = "dead-a";
+  seedSession(db, deadA, projA, "worker", { processState: "exited" });
+  db.setResumability(deadA, "dead");
+  db.archiveSession(deadA);
+  const stoppedB = "stopped-b";
+  seedSession(db, stoppedB, projB, "worker", { processState: "exited" });
+  db.archiveSession(stoppedB);
+  const exited2 = await call(client, "sessions_status", { state: "exited" });
+  const row = exited2.sessions.find((s) => s.sessionId === stoppedA);
+  check("(e) exited: lists the archived stopped session", !!row);
+  check("(e) exited: row is flagged archived + resumable", row?.archived === true && row?.resumability === "resumable");
+  check("(e) exited: an archived DEAD exit is omitted (noise for find-one-to-resume)", !exited2.sessions.some((s) => s.sessionId === deadA));
+  check("(e) all: an archived DEAD exit is kept and flagged resumability dead", (await call(client, "sessions_status", { state: "all" })).sessions.find((s) => s.sessionId === deadA)?.resumability === "dead");
+  check("(e) exited: an unarchived exit is flagged archived:false", exited2.sessions.find((s) => s.sessionId === exitedInA)?.archived === false);
+  check("(e) exited: ungranted project's archived session stays hidden", !exited2.sessions.some((s) => s.sessionId === stoppedB));
+  const all2 = await call(client, "sessions_status", { state: "all" });
+  check("(e) all: includes the archived stopped session", all2.sessions.some((s) => s.sessionId === stoppedA));
+  const live2 = await call(client, "sessions_status", {});
+  check("(e) default live view still excludes archived stopped sessions", !live2.sessions.some((s) => s.sessionId === stoppedA));
+
+  // (f) bounded + newest-first: 60 archived stopped sessions with strictly increasing lastActivity (> the 50 default cap).
+  const base = Date.parse("2030-01-01T00:00:00.000Z");
+  for (let i = 0; i < 60; i++) {
+    const id = `bulk-${String(i).padStart(2, "0")}`;
+    seedSession(db, id, projA, "worker", { processState: "exited", lastActivity: new Date(base + i * 1000).toISOString() });
+    db.archiveSession(id);
+  }
+  const capped = await call(client, "sessions_status", { state: "exited" });
+  check("(f) exited: capped at the default 50 rows", capped.sessions.length === 50);
+  check("(f) exited: truncated:true when over the cap", capped.truncated === true);
+  const expectedTotal = 60 + 1 /* stopped-a */ + 1 /* exited-a (unarchived) */;
+  check("(f) exited: total is the true matching count", capped.total === expectedTotal);
+  check("(f) exited: newest activity first (bulk-59 leads, bulk-10 is last kept)",
+    capped.sessions[0].sessionId === "bulk-59" && capped.sessions[49].sessionId === "bulk-10");
+  check("(f) exited: the oldest rows are the ones dropped", !capped.sessions.some((s) => s.sessionId === "bulk-00" || s.sessionId === stoppedA));
+  const small = await call(client, "sessions_status", { state: "exited", limit: 3 });
+  check("(f) explicit limit honoured", small.sessions.length === 3 && small.truncated === true && small.total === expectedTotal);
+  const huge = await call(client, "sessions_status", { state: "all", limit: 100000 });
+  check("(f) limit is clamped to the max (200)", huge.sessions.length <= 200);
+  const allCapped = await call(client, "sessions_status", { state: "all" });
+  check("(f) all: capped with total/truncated", allCapped.sessions.length === 50 && allCapped.truncated === true && allCapped.total > 50);
+  const fits = await call(client, "sessions_status", { state: "exited", limit: 200 });
+  check("(f) truncated:false when everything fits", fits.truncated === false && fits.sessions.length === expectedTotal && fits.total === expectedTotal);
+  const liveAfter = await call(client, "sessions_status", {});
+  check("(f) live view unbounded and its shape unchanged (no total/truncated)", !("total" in liveAfter) && !("truncated" in liveAfter));
 
   await client.close();
   db.close();

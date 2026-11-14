@@ -547,6 +547,9 @@ export interface CompanionCapability {
  * projects. Lowest-risk lever in the catalog (no writes, no injection-guard primitives needed) — this is
  * the template every later lever copies.
  */
+const SESSIONS_STATUS_DEFAULT_LIMIT = 50;
+const SESSIONS_STATUS_MAX_LIMIT = 200;
+
 const SESSION_STATUS: CompanionCapability = {
   slug: "session-status",
   supportsMode: ["read"],
@@ -560,11 +563,19 @@ const SESSION_STATUS: CompanionCapability = {
           "ONE of your granted projects — passing a project you were NOT granted is rejected with an " +
           "{error}; omitting it returns every granted project's sessions. `state` (default \"live\") " +
           "filters by PROCESS lifecycle: \"live\" = only currently-live sessions (the default — matches " +
-          "today's behavior exactly); \"exited\" = only stopped/exited sessions (so you can find one to " +
-          "resume); \"all\" = both.",
-        inputSchema: { project: z.string().optional(), state: z.enum(["live", "exited", "all"]).optional() },
+          "today's behavior exactly); \"exited\" = only stopped/exited sessions, archived ones included " +
+          "(so you can find one to resume); \"all\" = both. Each row carries `archived` and `resumability` " +
+          "(\"resumable\" = session_resume can bring it back; \"dead\" = it cannot). \"exited\" omits archived " +
+          "rows that are already unresumable; \"all\" keeps them. \"exited\"/\"all\" are newest-activity-first " +
+          "and capped at `limit` rows (default " + SESSIONS_STATUS_DEFAULT_LIMIT + ", max " + SESSIONS_STATUS_MAX_LIMIT +
+          ") and also return `total` (matching rows) and `truncated` (true when more exist than were returned); " +
+          "\"live\" is unbounded.",
+        inputSchema: {
+          project: z.string().optional(), state: z.enum(["live", "exited", "all"]).optional(),
+          limit: z.number().int().positive().optional(),
+        },
       },
-      async ({ project, state }) => {
+      async ({ project, state, limit }) => {
         // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
         // scoped projects — it can only ever NAME a project already granted, never widen scope.
         if (project !== undefined && !ctx.scope.projectIds.has(project)) {
@@ -576,15 +587,30 @@ const SESSION_STATUS: CompanionCapability = {
         // NARROW, pre-existing predicate (processState === "live" exactly, not "non-exited") so the
         // default (state omitted) is byte-identical to this tool's behavior before this card.
         const wantState = state ?? "live";
-        const sessions = db.listAllSessions()
+        // A session stopped through Loom is ARCHIVED on exit (archiveOnExit), so the exited/all views must
+        // read the archive-inclusive list or they miss exactly the sessions this view exists to find. The
+        // default "live" view keeps the narrow non-archived list. Scope (targetProjects) is applied the
+        // same way to both — only sessions in already-granted projects are ever listed.
+        const base = wantState === "live" ? db.listAllSessions() : db.listAllSessionsIncludingArchived();
+        const matched = base
           .filter((s) => !!s.projectId && targetProjects.has(s.projectId))
           .filter((s) => wantState === "all" ? true : s.processState === wantState)
-          .map((s) => ({
-            sessionId: s.id, projectId: s.projectId, projectName: s.projectName,
-            role: s.role ?? null, busy: s.busy, processState: s.processState,
-            taskId: s.taskId ?? null, title: s.title ?? null,
-          }));
-        return ok({ sessions });
+          // "exited" is the find-one-to-resume view: an ARCHIVED row that is already unresumable is noise.
+          // ("all" keeps every row.)
+          .filter((s) => wantState !== "exited" || !(s.archivedAt != null && s.resumability === "dead"));
+        const rows = (list: typeof matched) => list.map((s) => ({
+          sessionId: s.id, projectId: s.projectId, projectName: s.projectName,
+          role: s.role ?? null, busy: s.busy, processState: s.processState,
+          taskId: s.taskId ?? null, title: s.title ?? null,
+          archived: s.archivedAt != null, resumability: s.resumability,
+        }));
+        // The live set is naturally small: unbounded, response shape unchanged.
+        if (wantState === "live") return ok({ sessions: rows(matched) });
+        // Archived history grows forever, so exited/all are newest-activity-first and capped.
+        const cap = Math.min(limit ?? SESSIONS_STATUS_DEFAULT_LIMIT, SESSIONS_STATUS_MAX_LIMIT);
+        const newestFirst = [...matched].sort((a, b) => (a.lastActivity < b.lastActivity ? 1 : a.lastActivity > b.lastActivity ? -1 : 0));
+        const page = newestFirst.slice(0, cap);
+        return ok({ sessions: rows(page), total: matched.length, truncated: matched.length > page.length });
       },
     );
   },
