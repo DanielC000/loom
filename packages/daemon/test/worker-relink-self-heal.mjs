@@ -180,9 +180,44 @@ check("a too-short (<8 char) non-full ref returns found:false, not a partial mat
 // ============================ (4) scoping: a genuinely unrelated manager's worker is NEVER relinked ============================
 warnBuf.length = 0;
 const relinkOther = await call("worker_relink", { workerSessionId: "w-b" });
-check("worker_relink(w-b) on NEW (unrelated lineage) reports found:true but relinked:false",
-  relinkOther.found === true && relinkOther.relinked === false);
-check("worker_relink(w-b) reports the UNCHANGED owner MGR_B, not NEW", relinkOther.parentSessionId === "MGR_B");
+const relinkUnknownShape = await call("worker_relink", { workerSessionId: "does-not-exist" });
+check("worker_relink(w-b) on NEW (unrelated lineage) returns EXACTLY the unknown-id shape (no found:true, no parent id)",
+  JSON.stringify(relinkOther) === JSON.stringify(relinkUnknownShape)
+  && relinkOther.found === false && relinkOther.parentSessionId === null);
+check("the foreign response carries no session id anywhere", !JSON.stringify(relinkOther).includes("MGR_B"));
+
+// Cross-PROJECT: a worker whose manager lives in ANOTHER project (card 3a664af3).
+const xProj = "proj-relink-x";
+db.insertProject({ id: xProj, name: "RelinkX", repoPath: xProj, vaultPath: xProj, config: {}, createdAt: now, archivedAt: null });
+db.insertAgent({ id: "agent-relink-x", projectId: xProj, name: "t", startupPrompt: "orchestrate", position: 0 });
+db.insertSession({
+  id: "MGR_X", projectId: xProj, agentId: "agent-relink-x", engineSessionId: "eng-MGR_X", title: null, cwd: xProj,
+  processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+  lastError: null, role: "manager", ctxInputTokens: null, ctxTurns: null, model: null, recycledFrom: null,
+});
+db.insertSession({
+  id: "bbbbbbbb-1111-1111-1111-111111111111", projectId: xProj, agentId: "agent-relink-x", engineSessionId: "eng-wx", title: null, cwd: xProj,
+  processState: "exited", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+  lastError: null, role: "worker", parentSessionId: "MGR_X", taskId: "tk-wx", branch: "loom/wx",
+});
+const xFull = await call("worker_relink", { workerSessionId: "bbbbbbbb-1111-1111-1111-111111111111" });
+check("cross-project worker_relink (full id) returns EXACTLY the unknown-id shape",
+  JSON.stringify(xFull) === JSON.stringify(relinkUnknownShape));
+const xPrefix = await call("worker_relink", { workerSessionId: "bbbbbbbb" });
+check("cross-project worker_relink (8-char prefix) returns EXACTLY the unknown-id shape",
+  JSON.stringify(xPrefix) === JSON.stringify(relinkUnknownShape));
+check("cross-project responses carry no foreign session id", !JSON.stringify([xFull, xPrefix]).includes("MGR_X"));
+// A prefix shared by one own-lineage and one foreign session must not turn ambiguous (that would name the foreign id).
+seedWorker("cccccccc-1111-1111-1111-111111111111", "NEW");
+db.insertSession({
+  id: "cccccccc-2222-2222-2222-222222222222", projectId: xProj, agentId: "agent-relink-x", engineSessionId: "eng-wx2", title: null, cwd: xProj,
+  processState: "exited", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+  lastError: null, role: "worker", parentSessionId: "MGR_X", taskId: "tk-wx2", branch: "loom/wx2",
+});
+const mixed = await call("worker_relink", { workerSessionId: "cccccccc" });
+check("a prefix matching one own + one foreign session resolves to the own one, never naming the foreign id",
+  mixed.found === true && !JSON.stringify(mixed).includes("cccccccc-2222"));
+check("the foreign worker's parent is untouched", db.getSession("bbbbbbbb-1111-1111-1111-111111111111").parentSessionId === "MGR_X");
 check("w-b's parent_session_id in the DB is untouched", db.getSession("w-b").parentSessionId === "MGR_B");
 check("an unrelated-lineage lookup is NOT logged as a desync (it's a legitimate denial, not a repair)",
   warnBuf.length === 0);

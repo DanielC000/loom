@@ -3810,8 +3810,9 @@ export class OrchestrationMcpRouter {
           "picking one or collapsing into the same found:false a real miss returns. Returns {found, " +
           "wasStale, relinked, parentSessionId} — relinked (and wasStale, always " +
           "equal) is true only if a stale link was actually repaired just now; false with found:true means " +
-          "NOTHING was relinked — check `parentSessionId` to tell why: equal to your OWN session id means " +
-          "it was already correctly linked, any other id means the worker genuinely isn't yours.",
+          "NOTHING was relinked because it was already correctly linked (parentSessionId is your own " +
+          "session id). A session outside your own lineage returns exactly the same not-found shape " +
+          "(found:false, parentSessionId:null) as a nonexistent id.",
         inputSchema: strictShape({ workerSessionId: z.string() }),
       },
       async ({ workerSessionId }) => {
@@ -3824,9 +3825,18 @@ export class OrchestrationMcpRouter {
         // falls back to a prefix scan. An ambiguous prefix gets its OWN distinct signal — never silently
         // resolved to either candidate, and never collapsed into the same found:false a genuine miss
         // returns (card ba41b402 defect 2: those two states used to be byte-identical to the caller).
+        // A session outside THIS manager's own lineage (another manager, another project) must be
+        // indistinguishable from a nonexistent one: the same not-found shape, no ids — so every candidate
+        // below is filtered to what the caller may read BEFORE resolution (an ambiguous-prefix error must
+        // not name a foreign session id either).
+        const notFound = { found: false, wasStale: false, relinked: false, parentSessionId: null };
         let before = db.getSession(workerSessionId);
+        if (before && !workerReadableByManager(before)) return ok(notFound);
         if (!before) {
-          const r = resolveIdPrefix(db.findSessionsByIdPrefix(workerSessionId), workerSessionId);
+          const r = resolveIdPrefix(
+            db.findSessionsByIdPrefix(workerSessionId).filter((c) => workerReadableByManager(c)),
+            workerSessionId,
+          );
           if (r.kind === "ambiguous") {
             return ok({
               found: false, wasStale: false, relinked: false, parentSessionId: null,
@@ -3835,7 +3845,7 @@ export class OrchestrationMcpRouter {
           }
           if (r.kind === "found") before = r.record;
         }
-        if (!before) return ok({ found: false, wasStale: false, relinked: false, parentSessionId: null });
+        if (!before) return ok(notFound);
         const fullId = before.id;
         const alreadyLinked = before.parentSessionId === managerSessionId;
         const owned = workerReadableByManager(before);
