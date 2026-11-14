@@ -11016,6 +11016,18 @@ function cleanupResidueFlags(cleanup: { message: string; quarantined?: boolean; 
   return { residuePossible: true };
 }
 
+/** Diagnostic-only tail of a failed `git merge --squash`'s error text for the refusal `reason`: control chars stripped, whitespace collapsed, the canonical repo path replaced by `<repo>` (and `\` normalized so the match works on Windows), capped to the LAST {@link SQUASH_FAILURE_TAIL_MAX} chars. Never consulted for any decision — only appended to a reason string. */
+const SQUASH_FAILURE_TAIL_MAX = 300;
+export function boundedSquashFailureTail(message: string | undefined, repoPath: string): string {
+  if (!message) return "";
+  const norm = (s: string) => s.replace(/\\/g, "/");
+  let t = norm(message).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ");
+  const repo = norm(repoPath).replace(/\/+$/, "");
+  if (repo) t = t.split(repo).join("<repo>");
+  t = t.replace(/\s+/g, " ").trim();
+  return t.length > SQUASH_FAILURE_TAIL_MAX ? `…${t.slice(-SQUASH_FAILURE_TAIL_MAX)}` : t;
+}
+
 // `opId` (board card 5a7692a4): purely for attribution on the in-memory danger-window tracker (see
 // merge-danger-window.ts) — a caller with no op identity handy (a test, or any future caller) just gets an
 // unattributed window entry (repo/branch only), never a functional difference in what this function does.
@@ -11499,7 +11511,11 @@ async function mergeBranchLocked(
           ...cleanupResidueFlags(cleanup),
         };
       }
-      return { ok: false, reason: cleanup ? `git merge --squash failed (${cleanup.message})` : "git merge --squash failed", ...cleanupResidueFlags(cleanup) };
+      // The failing step + a bounded, redacted tail of git's own error, so a manager can tell a real
+      // environment failure from a conflict (the bare text used to hide it). Reason text only.
+      const squashTail = boundedSquashFailureTail(rawErrorMessage, repoPath);
+      const squashHead = squashTail ? `git merge --squash failed: ${squashTail}` : "git merge --squash failed";
+      return { ok: false, reason: cleanup ? `${squashHead} (${cleanup.message})` : squashHead, ...cleanupResidueFlags(cleanup) };
     }
     // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
     // handling is unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
