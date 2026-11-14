@@ -11,7 +11,7 @@ import {
   isLoomHomeOrAncestor,
   OPERATIONAL_HOME_GIT_WRITE_ERROR,
 } from "../vault/versioner.js";
-import { withCanonicalIndexLock } from "./repo-lock.js";
+import { withCanonicalIndexLock, RepoQuarantinedError } from "./repo-lock.js";
 import {
   withTimeout,
   boundedSimpleGit,
@@ -721,10 +721,46 @@ export class GitWriter {
               raisedToken = enterMergeQuarantine(this.repoPath, "(GitWriter commit)", unconfirmedKillReason(`${label} could not be confirmed dead after a kill: ${(e as Error).message}`));
             }
           };
+          // Card af9e70b9 — snapshot the index as a tree BEFORE `add -A`, so a failure after it can put the
+          // index back to exactly its pre-call state (pre-existing residue included, this call's own
+          // staging removed). `write-tree` only writes objects; it fails on an unmerged index, in which
+          // case there is no snapshot and nothing is restored (the old behaviour).
+          let indexSnapshot: string | undefined;
+          try {
+            const out = (await killableCanonicalRaw(this.repoPath, ["write-tree"], this.localMs, "git write-tree", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled)).trim();
+            if (/^[0-9a-f]{40,64}$/.test(out)) indexSnapshot = out;
+          } catch (e) {
+            if (treeDeathUnconfirmed(e)) quarantineOnUnconfirmedKill(e, "git write-tree");
+            if (treeDeathUnconfirmed(e) || e instanceof RepoQuarantinedError) throw e;
+          }
+          // HEAD before `add -A` ("" = unborn). The commit-step catch only restores while HEAD is still this:
+          // a failure AFTER git wrote the commit (a post-commit hook, a confirmed kill past the write) must
+          // never read-tree the pre-call snapshot, which would stage a reversal of the landed commit.
+          const readHead = async (): Promise<string> => {
+            try {
+              return (await killableCanonicalRaw(this.repoPath, ["rev-parse", "--verify", "-q", "HEAD"], this.localMs, "git rev-parse HEAD", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled)).trim();
+            } catch (e) {
+              if (treeDeathUnconfirmed(e)) quarantineOnUnconfirmedKill(e, "git rev-parse HEAD");
+              if (treeDeathUnconfirmed(e) || e instanceof RepoQuarantinedError) throw e;
+              return "";
+            }
+          };
+          const headBefore = await readHead();
+          // Restores the snapshot unless a kill went unconfirmed (the tree may still be live — never touch
+          // the index then; the quarantine path owns that case).
+          const restoreIndex = async (cause: unknown): Promise<void> => {
+            if (!indexSnapshot || treeDeathUnconfirmed(cause) || cause instanceof RepoQuarantinedError) return;
+            try {
+              await killableCanonicalRaw(this.repoPath, ["read-tree", indexSnapshot], this.localMs, "git read-tree (restore index)", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
+            } catch (re) {
+              quarantineOnUnconfirmedKill(re, "git read-tree");
+            }
+          };
           try {
             await killableCanonicalRaw(this.repoPath, paths ? ["add", "-A", "--", ...paths] : ["add", "-A"], this.localMs, "git add -A", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             quarantineOnUnconfirmedKill(e, "git add -A");
+            await restoreIndex(e);
             throw e;
           }
           const staged = await withTimeout(git.status(), this.localMs, "git status (post-add)");
@@ -738,6 +774,14 @@ export class GitWriter {
             await killableCanonicalRaw(this.repoPath, ["commit", "-F", messageFile.file, ...(paths ? ["--", ...paths] : [])], this.localMs, "git commit", this.killableGitFactory(), localNonInteractiveEnv(), onTreeDeathSettled);
           } catch (e) {
             quarantineOnUnconfirmedKill(e, "git commit");
+            if (!indexSnapshot || treeDeathUnconfirmed(e) || e instanceof RepoQuarantinedError) throw e;
+            let headNow: string | undefined;
+            try { headNow = await readHead(); } catch { headNow = undefined; }
+            if (headNow === headBefore) {
+              await restoreIndex(e);
+            } else if (e instanceof Error) {
+              e.message += ` — the commit may have landed despite this failure (HEAD is ${headNow === undefined ? "unknown" : `now ${headNow || "unborn"}`}, was ${headBefore || "unborn"}); the index was left untouched`;
+            }
             throw e;
           }
           const hash = (await withTimeout(git.revparse(["HEAD"]), this.localMs, "git rev-parse HEAD")).trim();
