@@ -2758,6 +2758,10 @@ export class CodexForkUnsupportedError extends Error {
   }
 }
 
+/** Leading text of resume()'s refusal of a worker whose task already has a live worker (or a merge in
+ *  flight) — the REST resume/restore routes map any message starting with it to an honest 409. */
+export const TASK_CLAIM_RESUME_REFUSAL_PREFIX = "cannot resume this worker: its task";
+
 /** Card 0368c784: `startNew`/`startManager` refusing a second live-or-starting manager for the same
  *  agent — thrown by `refuseSecondLiveManager`. `holderSessionId` names the session already holding
  *  the slot, so a caller can surface it without re-parsing the message text. */
@@ -3404,17 +3408,40 @@ export class SessionService {
    * @decision 641cc62c — THE shared spawn-side "may I claim this task's worktree?" predicate — spawnWorker
    * and recycleWorker both call this before any side effect, so the two paths can never diverge.
    */
-  private claimTaskWorktreeRefusal(taskId: string | null, excludeSessionId?: string): string | undefined {
+  private claimTaskWorktreeRefusal(taskId: string | null, excludeSessionId?: string, verifyLive?: (sessionId: string) => boolean): string | undefined {
     if (!taskId) return undefined;
-    const liveHolder = this.db.liveSessionIdForTask(taskId);
+    // @decision 936dd348 — `verifyLive` is passed ONLY by resume() (real pty liveness); never pass it from
+    // spawn/recycle (raw DB flag, "re-spawn" wording) and never drop it from resume().
+    const liveHolder = verifyLive
+      ? this.db.listLiveSessionsForTask(taskId).find((s) => s.id !== excludeSessionId && verifyLive(s.id))?.id
+      : this.db.liveSessionIdForTask(taskId);
     if (liveHolder && liveHolder !== excludeSessionId) {
-      return `already has a live worker (${liveHolder}); stop or recycle it before re-spawning`;
+      return `already has a live worker (${liveHolder}); stop or recycle it before ${verifyLive ? "resuming" : "re-spawning"}`;
     }
     const mergeInFlightOpId = this.mergeInFlightOpIdForTask(taskId);
     if (mergeInFlightOpId) {
-      return `has a merge for this task in flight [op ${mergeInFlightOpId}]; re-spawn after it settles`;
+      return `has a merge for this task in flight [op ${mergeInFlightOpId}]; ${verifyLive ? "resume" : "re-spawn"} after it settles`;
     }
     return undefined;
+  }
+  /**
+   * @decision 936dd348 — the resume-time task claim for a worker row: a spawn/recycle in flight for the
+   * task (inFlightSpawnTaskIds — the createWorktree window, before any row is live), else the shared
+   * claim predicate on VERIFIED liveness. Undefined for a non-worker / taskless row. THE one source for
+   * resume() and for the crash-recovery watcher's no-attempt skip (via {@link findTaskClaimRefusal}).
+   */
+  private resumeTaskClaimRefusal(session: Session): string | undefined {
+    if (session.role !== "worker" || !session.taskId) return undefined;
+    if (this.inFlightSpawnTaskIds.has(session.taskId)) {
+      return `has a spawn or recycle in flight; resume after it settles`;
+    }
+    return this.claimTaskWorktreeRefusal(session.taskId, session.id, (id) => this.pty.isAlive(id));
+  }
+  /** @decision 936dd348 — read-only twin of resume()'s task-claim check, for the crash-recovery watcher:
+   *  a refusal here is structural (another worker / a merge holds the task), never a crash. */
+  findTaskClaimRefusal(sessionId: string): string | undefined {
+    const s = this.db.getSession(sessionId);
+    return s ? this.resumeTaskClaimRefusal(s) : undefined;
   }
   /**
    * @decision 641cc62c — THE shared REVERSE-direction predicate: confirmWorkerMergeTracked's `onOpMinted`
@@ -5106,6 +5133,11 @@ export class SessionService {
         throw new Error("a live Platform Lead session already exists — only one may run at a time on this install");
       }
     }
+    // @decision 936dd348 — one live worker per task holds across a resume too: the SAME predicate
+    // worker_spawn/worker_recycle use, judged on VERIFIED `pty.isAlive` (like 39b58667, never the raw DB
+    // flag) and never lifted by allowSuperseded — a human stops the other worker first.
+    const claimRefusal = this.resumeTaskClaimRefusal(session);
+    if (claimRefusal) throw new Error(`${TASK_CLAIM_RESUME_REFUSAL_PREFIX} ${claimRefusal}`);
     const config = resolveConfig(project.config);
     // @decision e98877b1 — on agent-row-missing resume, still apply the role-keyed pin via
     // withRolePermissionModeCyclesPin(config.permission, session.role), keyed off the row's PINNED role
@@ -8662,7 +8694,7 @@ export class SessionService {
     // signature; a hermetic test injects a fixed result so it can assert the withheld-vs-emitted "code is
     // live" wording deterministically, without a real git checkout + rebuilt dist.
     opts: { resumeOne?: (id: string) => ResumeOneResult; now?: Date; deployStaleness?: DeployStalenessResult } = {},
-  ): { resumed: string[]; skippedParked: string[]; failed: string[]; retiredSkipped: string[]; setupResumeSuperseded: string[] } {
+  ): { resumed: string[]; skippedParked: string[]; failed: string[]; retiredSkipped: string[]; setupResumeSuperseded: string[]; taskClaimSkipped: { sessionId: string; reason: string }[] } {
     const now = opts.now ?? new Date();
     // Card bba7a8ec: this method is synchronous and reads NO git. Its one production caller (index.ts, inside
     // an async boot) pre-reads `currentDeployStalenessAsync()` and passes it as `opts.deployStaleness`; a call
@@ -8690,6 +8722,9 @@ export class SessionService {
     // for a stale duplicate setup row) is EXPECTED boot housekeeping, not a crash — kept OUT of `failed`
     // (which feeds the unconditional fleet_resume_failed "worker-crashed" owner page) and tracked here instead.
     const setupResumeSuperseded: string[] = [];
+    // @decision 936dd348 — workers resume() refused because their task already has a live worker / an
+    // in-flight merge or spawn: housekeeping like the setup collapse above, kept OUT of `failed`.
+    const taskClaimSkipped: { sessionId: string; reason: string }[] = [];
     // Card 5a9a963b: identity for each fleet-wide resume failure, captured alongside `failed` itself so
     // the Platform Lead (the one recipient with cross-project reach — `list_all_sessions` — to actually
     // investigate one) can be told WHICH session, not just a count. Read from the captured
@@ -8950,6 +8985,14 @@ export class SessionService {
           } catch (appendErr) {
             console.warn(`[restart] appendEvent(setup_resume_superseded) failed for ${e.sessionId.slice(0, 8)}: ${(appendErr as Error)?.message ?? appendErr}`);
           }
+          continue;
+        }
+        // @decision 936dd348 — a worker held back because its task already has a live worker (or a merge/
+        // spawn in flight) is NOT a crash: skipped with its reason, never in `failed` (fleet_resume_failed page).
+        if (e.role === "worker" && typeof rawAttempt === "object" && rawAttempt && rawAttempt.ok === false
+          && typeof rawAttempt.reason === "string" && rawAttempt.reason.startsWith(TASK_CLAIM_RESUME_REFUSAL_PREFIX)) {
+          taskClaimSkipped.push({ sessionId: e.sessionId, reason: rawAttempt.reason });
+          console.log(`[restart] resumeFleetOnBoot: worker ${e.sessionId.slice(0, 8)} NOT resumed (not a failure) — ${rawAttempt.reason}`);
           continue;
         }
         const attempt = normalizeResumeOneResult(rawAttempt);
@@ -9347,7 +9390,7 @@ export class SessionService {
     // call already ran (idempotent via `aggregateFiled`) or nothing in the fleet failed.
     fileFleetResumeFailedAggregate();
 
-    return { resumed, skippedParked, failed, retiredSkipped, setupResumeSuperseded };
+    return { resumed, skippedParked, failed, retiredSkipped, setupResumeSuperseded, taskClaimSkipped };
   }
 
   /**
@@ -9560,7 +9603,15 @@ export class SessionService {
       const failedWorkerDetail: { workerSessionId: string; taskId: string | null; reportedState: CrashOrphanedWorker["reportedState"]; awaitingReview: boolean; reason: string | null }[] = [];
       for (const w of workers) {
         const workerParked = isParked(w.workerSessionId);
-        const workerAttempt = normalizeResumeOneResult(resumeOne(w.workerSessionId));
+        const workerRaw = resumeOne(w.workerSessionId);
+        // @decision 936dd348 — task already held by another live worker / in-flight merge or spawn: not a
+        // crash, so never counted in `failed`/`failedCount` (those feed the "could not resume" summary).
+        if (typeof workerRaw === "object" && workerRaw && workerRaw.ok === false
+          && typeof workerRaw.reason === "string" && workerRaw.reason.startsWith(TASK_CLAIM_RESUME_REFUSAL_PREFIX)) {
+          console.log(`[crash-recovery] worker ${w.workerSessionId.slice(0, 8)} NOT resumed (not a failure) — ${workerRaw.reason}`);
+          continue;
+        }
+        const workerAttempt = normalizeResumeOneResult(workerRaw);
         if (!workerAttempt.ok) {
           failed.push(w.workerSessionId); failedCount++;
           failedWorkerDetail.push({

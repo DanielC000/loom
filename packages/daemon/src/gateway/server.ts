@@ -30,7 +30,7 @@ import { inTestMode, PENDING_OWNER_MSG_EXCERPT_MAX_CHARS, CommondirPinConflictEr
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell, HUMAN_COMPOSER_SENDER_ID } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, PLATFORM_SESSION_FORK_BARRED_ERROR, SecondLiveManagerError, ForkLiveManagerError, RepinGrantsRefusalError, AdoptOrphanedWorkersRefusalError } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject, CodexForkUnsupportedError, SETUP_SESSION_FORK_BARRED_ERROR, SETUP_SESSION_RESUME_BARRED_ERROR, TASK_CLAIM_RESUME_REFUSAL_PREFIX, PLATFORM_SESSION_FORK_BARRED_ERROR, SecondLiveManagerError, ForkLiveManagerError, RepinGrantsRefusalError, AdoptOrphanedWorkersRefusalError } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { findInboundBacklinksBulk } from "../sessions/project-memory-backlinks.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
@@ -488,7 +488,7 @@ export function redactAlertWebhookHistoryEntry(entry: ProjectConfigHistoryEntry)
 
 /** resume()'s own "this session cannot be resumed" refusals — a 409 on every route that resumes (resume, restore). */
 function isResumeRefusal(e: unknown): boolean {
-  return e instanceof Error && (e.message === "session has no engine id to resume" || e.message.startsWith("session is no longer resumable"));
+  return e instanceof Error && (e.message === "session has no engine id to resume" || e.message.startsWith("session is no longer resumable") || e.message.startsWith(TASK_CLAIM_RESUME_REFUSAL_PREFIX));
 }
 
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {

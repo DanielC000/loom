@@ -1737,6 +1737,7 @@ async function main(): Promise<void> {
     // Card 63edeb55: a manager refused by resume()'s SecondLiveManagerError check never crashed — see
     // CrashRecoveryDeps.findSupersedingLiveManager's own doc.
     findSupersedingLiveManager: (id) => sessions.findSupersedingLiveManager(id),
+    findTaskClaimRefusal: (id) => sessions.findTaskClaimRefusal(id), // card 936dd348
   });
   crashRecoveryWatcher.start();
   console.log(`[boot] crash-recovery watchdog on (tick ${crashRecoveryMs}ms)`);
@@ -1911,7 +1912,7 @@ async function main(): Promise<void> {
     clearRestartIntent();
     // Card bba7a8ec: resumeFleetOnBoot is synchronous and reads no git; the staleness it (and each resumed
     // manager's kickoff) needs is read HERE, off the event loop, and handed in — never recomputed per session.
-    const { resumed, skippedParked, failed, retiredSkipped, setupResumeSuperseded } = sessions.resumeFleetOnBoot(
+    const { resumed, skippedParked, failed, retiredSkipped, setupResumeSuperseded, taskClaimSkipped } = sessions.resumeFleetOnBoot(
       restartIntent,
       // `.catch`: the restart intent is already consumed above, so a failed read must never abort the fleet
       // resume — `undefined` falls back to resumeFleetOnBoot's honest "not checked at boot" wording.
@@ -1925,6 +1926,8 @@ async function main(): Promise<void> {
       // Card 39b58667: EXPECTED housekeeping (a stale duplicate setup row collapsing), never a failure —
       // logged separately from `failed` above on purpose.
       (setupResumeSuperseded.length ? `, ${setupResumeSuperseded.length} stale duplicate setup session(s) superseded (see setup_resume_superseded)` : "") +
+      // Card 936dd348: a worker whose task already has a live worker — not a failure either.
+      (taskClaimSkipped.length ? `, ${taskClaimSkipped.length} worker(s) not resumed because their task is already held (see the [restart] lines above)` : "") +
       ` (requester ${restartIntent.managerSessionId.slice(0, 8)})`,
     );
   } else if (crashOrphanedWorkers.length > 0 || crashOrphanedManagers.length > 0) {

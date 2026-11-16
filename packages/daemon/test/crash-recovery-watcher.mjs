@@ -52,7 +52,7 @@ const at = (ms) => new Date(NOW.getTime() + ms);
 // fallback branch specifically, pass `enqueueDurableNudge: null` (the explicit "no dep" sentinel — distinct
 // from simply not passing the option, which now means "give me the default wired stub"). Passing an actual
 // function (as (17a)/(17b) below do, to inspect their OWN call log) still works unchanged.
-function makeEnv({ projectConfig = {}, enqueueDurableNudge, findSupersedingLiveManager, resume: resumeOverride } = {}) {
+function makeEnv({ projectConfig = {}, enqueueDurableNudge, findSupersedingLiveManager, findTaskClaimRefusal, resume: resumeOverride } = {}) {
   const dbFile = path.join(os.tmpdir(), `loom-crash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`);
   const db = new Db(dbFile);
   const projId = `cp-${Math.random().toString(36).slice(2, 8)}`;
@@ -76,7 +76,7 @@ function makeEnv({ projectConfig = {}, enqueueDurableNudge, findSupersedingLiveM
   const control = new OrchestrationControl();
   const watcher = new CrashRecoveryWatcher({
     db, control, pty, resume, stabilityMs: STABILITY_MS, enqueueDurableNudge: dep,
-    findSupersedingLiveManager,
+    findSupersedingLiveManager, findTaskClaimRefusal,
   });
   return { dbFile, db, projId, agentId, resumes, enqueued, durableCalls, control, watcher, resume };
 }
@@ -821,6 +821,43 @@ function cleanup(e) {
   check("(22) CONTROL: it still ESCALATES once past the cap with the crash-loop banner — findSupersedingLiveManager being wired (and returning null) does not suppress a REAL crash loop",
     evKinds(e, "s22", "session_recovery_abandoned").length === 1 &&
     typeof e.db.getSession("s22").lastError === "string" && e.db.getSession("s22").lastError.startsWith("[loom:crash-loop]"));
+  cleanup(e);
+}
+
+// ====== (23) CARD 936dd348 — a worker refused because its TASK is held is NOT a crash loop (and never paged) ======
+{
+  let held = true;
+  const e = makeEnv({ findTaskClaimRefusal: (id) => (held && id === "w23" ? "has a live worker (other-23)" : null) });
+  seedSession(e, "mgr23", { role: "manager", processState: "live" });
+  seedSession(e, "w23", { role: "worker", parentSessionId: "mgr23", taskId: "t23" });
+  die(e, "w23", NOW);
+  // Well past the default cap of 3 — resume() would refuse every time while the task stays held.
+  for (let i = 1; i <= 5; i++) e.watcher.tick(at(i * 1000));
+  check("(23) a worker whose task is held is NEVER resumed", e.resumes.length === 0);
+  check("(23) no session_resume_attempt is ever filed for it (no attempts burned toward the cap)", evKinds(e, "w23", "session_resume_attempt").length === 0);
+  check("(23) no session_recovery_abandoned escalation", evKinds(e, "w23", "session_recovery_abandoned").length === 0);
+  check("(23) NO false [loom:crash-loop] banner on lastError", e.db.getSession("w23").lastError === null);
+  check("(23) the live parent manager is never paged", e.enqueued.length === 0 && e.durableCalls.length === 0);
+  held = false; // the holder is gone — the very next tick resumes normally (the skip is not sticky)
+  e.watcher.tick(at(6000));
+  check("(23) once the task is free, the NEXT tick resumes it with attempt 1 of 3 (nothing was burned)",
+    e.resumes.length === 1 && e.resumes[0] === "w23" && evKinds(e, "w23", "session_resume_attempt")[0]?.detail?.attempt === 1);
+  cleanup(e);
+}
+
+// === (24) CONTROL — a worker that the claim check does NOT refuse keeps the ordinary cap + page ===
+{
+  const attempts = [];
+  const alwaysFails = (id) => { attempts.push(id); throw new Error("boom-24 (unrelated resume failure)"); };
+  const e = makeEnv({ resume: alwaysFails, findTaskClaimRefusal: () => null });
+  seedSession(e, "mgr24", { role: "manager", processState: "live" });
+  seedSession(e, "w24", { role: "worker", parentSessionId: "mgr24", taskId: "t24" });
+  for (let i = 1; i <= 5; i++) { die(e, "w24", at(i * 1000)); e.watcher.tick(at(i * 1000 + 100)); }
+  check("(24) CONTROL: a genuine worker resume failure is still attempted and capped at 3", attempts.length === 3);
+  check("(24) CONTROL: it still escalates with the crash-loop banner and pages the live parent",
+    evKinds(e, "w24", "session_recovery_abandoned").length === 1
+    && String(e.db.getSession("w24").lastError).startsWith("[loom:crash-loop]")
+    && e.enqueued.some((m) => m.id === "mgr24" && /crash-loop/.test(m.text)));
   cleanup(e);
 }
 

@@ -80,6 +80,14 @@ export interface CrashRecoveryDeps {
    * attempt for this one refusal reason. Any OTHER resume failure keeps the pre-existing accounting.
    */
   findSupersedingLiveManager?: (sessionId: string) => string | null | undefined;
+  /**
+   * OPTIONAL: would `resume(sessionId)` refuse a WORKER right now because its task already has another
+   * live worker / an in-flight merge or spawn (`SessionService.findTaskClaimRefusal`)? Returns the reason
+   * or `null`/`undefined`. ABSENT keeps the pre-card behavior.
+   * @decision 936dd348 — checked BEFORE `session_resume_attempt` is filed, workers only; a held task is
+   * structural, never a crash, so it never counts toward the cap or pages `[loom:crash-loop]`.
+   */
+  findTaskClaimRefusal?: (sessionId: string) => string | null | undefined;
   /** OPTIONAL: enqueue a cheap heads-up to a dead worker's live parent manager on give-up. The required,
    *  role-agnostic surface is the Mission-Control attention event + lastError; this is additive. */
   pty?: CrashRecoveryPty;
@@ -356,7 +364,7 @@ export class CrashRecoveryWatcher {
   }
 
   tick(now: Date = new Date()): void {
-    const { db, resume, control, pty, enqueueDurableNudge, findSupersedingLiveManager } = this.deps;
+    const { db, resume, control, pty, enqueueDurableNudge, findSupersedingLiveManager, findTaskClaimRefusal } = this.deps;
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
     const fileEvent = (s: { id: string; parentSessionId?: string | null; taskId?: string | null }, kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>): void => {
@@ -444,6 +452,9 @@ export class CrashRecoveryWatcher {
       // ever recorded, same "not actually a candidate right now" posture as isSupersededByRecycle above —
       // see docs/decisions/63edeb55-crash-recovery-second-live-manager-is-not-a-crash.md.
       if (s.role === "manager" && findSupersedingLiveManager?.(s.id)) continue;
+      // Card 936dd348 — same posture for a worker whose task is held by another live worker / a merge:
+      // skip BEFORE the attempt is recorded (and before the cap check below can page a crash-loop).
+      if (s.role === "worker" && findTaskClaimRefusal?.(s.id)) continue;
 
       // Exited with an UNRECOVERED death.
       if (attempts >= maxAttempts) {
