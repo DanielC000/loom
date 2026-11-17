@@ -8399,11 +8399,12 @@ export class Db {
    */
   setContextCountersIfUnchanged(
     id: string, c: { ctxInputTokens: number; ctxTurns: number; model?: string | null }, expectedCtxUpdatedAt: string | null,
+    nowIso: string = new Date().toISOString(),
   ): boolean {
     const info = this.db.prepare(
       "UPDATE sessions SET ctx_input_tokens = ?, ctx_turns = ?, model = COALESCE(?, model), ctx_updated_at = ? " +
       "WHERE id = ? AND busy = 1 AND ctx_updated_at IS ?",
-    ).run(c.ctxInputTokens, c.ctxTurns, c.model ?? null, new Date().toISOString(), id, expectedCtxUpdatedAt);
+    ).run(c.ctxInputTokens, c.ctxTurns, c.model ?? null, nowIso, id, expectedCtxUpdatedAt);
     if (info.changes > 0) this.notifySessionChanged(id);
     return info.changes > 0;
   }

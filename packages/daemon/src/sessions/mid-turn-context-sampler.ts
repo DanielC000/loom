@@ -6,6 +6,9 @@ export interface MidTurnContextSamplerDeps {
   db: Db;
   /** Tick cadence (ms); defaults to 60s. Injectable so a test drives tick() directly. */
   intervalMs?: number;
+  /** Clock for the `ctx_updated_at` stamp; defaults to the wall clock. Injectable so a test can drive
+   *  two ticks to two distinct stamps instead of depending on real time advancing between them. */
+  now?: () => Date;
 }
 
 /**
@@ -57,7 +60,7 @@ export class MidTurnContextSampler {
       // doc for why it returns null rather than a stale cached value in every one of those cases.
       db.setContextCountersIfUnchanged(
         s.id, { ctxInputTokens: sample.inputTokens, ctxTurns: sample.turns, model: sample.model },
-        expectedCtxUpdatedAt,
+        expectedCtxUpdatedAt, (this.deps.now?.() ?? new Date()).toISOString(),
       );
     }
   }

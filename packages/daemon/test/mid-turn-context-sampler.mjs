@@ -499,7 +499,13 @@ try {
   const f3 = fileFor(cwd3, eng3);
   fs.writeFileSync(f3, turnLine("w3-m0", { in: 10_000, out: 10, cc: 0, cr: 0 }) + "\n");
 
-  const sampler3 = new MidTurnContextSampler({ db: db3, intervalMs: 3_600_000 });
+  // Injected clock: each tick gets its own, strictly later stamp (both after mkSession's real lastActivity),
+  // so "ctxUpdatedAt advanced" never depends on real time moving between two ticks (same-ms on fast runners).
+  const clockBase3 = Date.now() + 60_000;
+  let clockStep3 = 0;
+  const sampler3 = new MidTurnContextSampler({
+    db: db3, intervalMs: 3_600_000, now: () => new Date(clockBase3 + 1_000 * clockStep3++),
+  });
   await sampler3.tick();
   let row3 = db3.getSession("w3");
   check("3 after tick #1 (still busy, never a Stop): ctxInputTokens advances from null to the transcript's reading",
