@@ -34,6 +34,16 @@ const cleanupPids = [];
 const cleanupFiles = [];
 const newDir = (name) => { const d = path.join(root, name); fs.mkdirSync(d); return d; };
 const run = (script, ...args) => spawnSync(process.execPath, [script, ...args], { encoding: "utf8", timeout: 90000, env: { ...process.env, LOOM_DEV_SERVER_PORT_TIMEOUT_MS: "1500" } });
+// Reads the tracking record a `start` wrote. When `start` failed (nonzero) or the file is missing/unparseable,
+// returns null and FAILS the check with the helper's own stdout/stderr — never a thrown ENOENT that hides it.
+const readStarted = (label, st, file) => {
+  if (st.status === 0) {
+    try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { console.log(`  diag: start exited 0 but tracking file unreadable (${e.code || e.message}): ${file}`); }
+  }
+  console.log(`  diag: ${label} start status=${st.status} signal=${st.signal} error=${st.error?.message}\n    stdout=${(st.stdout || "").trim()}\n    stderr=${(st.stderr || "").trim()}`);
+  check(`${label} (a) CONTROL: start succeeded and wrote its tracking file`, false);
+  return null;
+};
 // A stranger this test owns: idles forever; extra argv lets it carry lookalike text on its command line.
 const stranger = (...extraArgs) => {
   const c = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)", "--", ...extraArgs], { stdio: "ignore", windowsHide: true });
@@ -49,7 +59,8 @@ async function serveStaticCases(label, script) {
     const dir = newDir(`${label}-a`);
     cleanupFiles.push(trackFor(dir));
     const st = run(script, "start", dir);
-    const rec = JSON.parse(fs.readFileSync(trackFor(dir), "utf8"));
+    const rec = readStarted(label, st, trackFor(dir));
+    if (!rec) return;
     cleanupPids.push(rec.pid);
     const alive = st.status === 0 && isAlive(rec.pid);
     const stop = run(script, "stop", dir);
@@ -85,7 +96,8 @@ async function devServerCases(script) {
     const dir = newDir(`${label}-a`);
     cleanupFiles.push(trackFile(dir));
     const st = run(script, "start", dir, "--", process.execPath, path.join(root, "idle.cjs"));
-    const rec = JSON.parse(fs.readFileSync(trackFile(dir), "utf8"));
+    const rec = readStarted(label, st, trackFile(dir));
+    if (!rec) return;
     cleanupPids.push(rec.pid);
     const alive = st.status === 0 && isAlive(rec.pid);
     const stop = run(script, "stop", dir);
