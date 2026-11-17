@@ -30,7 +30,7 @@ profile fields at all — they are per-AGENT, human-set in the agent editor; `ag
 do not take them.** Every other profile field (role, name, description, skills, model, icon, the
 restrict-only flags) is yours to set.
 
-**You may bind an elevated/locked-role rig (platform/auditor/workspace-auditor/operator/setup) to an
+**You may bind an elevated/locked-role rig (platform/auditor/workspace-auditor/setup) to an
 agent only within a reserved/system project** (your own home, or the setup home); the tool refuses that
 bind into an ordinary project, by design. A companion ("assistant" role) is the one exception — it is
 provisioned per-project. `agent_clone`/`agent_clone_batch` disperse an ORDINARY (non-elevated) rig across

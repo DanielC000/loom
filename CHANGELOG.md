@@ -4,6 +4,34 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.33.0] — 2026-11-17
+
+**A security-hardening and session-reliability release, and the first since the 0.32.0 Atlas UI.** It tightens what a worker's shell and the daemon's internal routes can reach, retires the Operator role, adds the worker lane rail, a backed-up purge for archived projects and a manager-to-manager worker handover, and fixes a run of boot-dialog, permission-mode and vault-safety edge cases. One change is breaking for anyone who used the Operator role — read the first item under *Changed*.
+
+### Added
+- **A worker lane rail on a manager's session page.** The manager's session shows each of its workers as a lane beside the terminal, with a start-aligned lane strip on phone widths.
+- **Third-party MCP server calls show in a session's MCP activity card.** Calls a session makes to the MCP servers Loom mounts for it (the browser, document-conversion, GitHub and code-graph servers) now appear alongside Loom's own, with their timings and outcomes.
+- **A backed-up, human-confirmed purge for archived projects.** An archived project can be permanently deleted after a per-kind preview of what goes with it; a database backup is taken first (kept outside the normal rotation), and the guards are re-checked after the backup.
+- **Hand a stopped manager's live workers to the project's new manager.** A human, or the Platform Lead, can adopt the workers a stopped manager left behind onto the project's live manager; pending owner messages are merged, a starting or halted old manager is refused, and the new manager is told what it adopted. A stopped manager's undelivered inbound queue is likewise carried to the project's next manager instead of being dropped, and a worker's `done` report is no longer refused over direction from a sender that is gone.
+- **A vault's versioner can start without a daemon restart.** A vault the daemon refused at boot (not under a shared vault root) now starts its versioner as soon as `sharedVaultRoots` is updated to include it.
+- **The Atlas nav and agent cards are tidier**, following the owner's 2026-11-11 feedback.
+
+### Changed
+- **Breaking: the Operator role and its `loom-operator` MCP router are retired.** The role was off by default (`platform.operatorEnabled`) and could not be spawned from the web UI, so most installs are unaffected. For an install that did use it, the first boot after upgrading migrates what is left: operator-role session rows become plain; the seeded Operator agent is deleted when it is still pristine and kept untouched otherwise; the seeded "Elevated Operator" profile is deleted when it is still pristine and no surviving agent uses it; and every other operator-role profile, including one you made yourself, keeps its name, description, skills and model with its role set to plain. Anything that ran as an Operator loses the elevated tool surface (git and vault writes, `my_project`). **Upgrade note:** if you relied on an Operator agent, rebind it to the Platform Lead or to a role that carries what you need.
+- **Security: every `/internal` route now requires the daemon's loopback secret by default.** A new `/internal` route is denied unless it is explicitly exempted, instead of being open unless someone remembered to guard it.
+- **Security: a worker's Bash commands that name the real Loom home database, its backups or its secret files are refused.** This covers the database, backups, the secret key, the loopback key, the `.env` file and session settings, including through quoting, `./..` traversal and `<`/`>` separators; the guard fails closed on a malformed home argument and caps the command length it will inspect.
+- **Project paths are checked against other projects' vaults.** A `vaultPath` that aliases or lies inside another project's repo, and a `repoPath` or `repos[]` entry that would contain another project's existing vault, are now refused. A shared vault root is exempted only on an explicit fact, and a vault whose git root is an unrecognized ancestor repo is no longer auto-committed (the owner is alerted instead).
+- **Permission deny rules are written in Claude Code's documented absolute `//` form** through one shared helper, so a deny on an absolute path means what it says.
+
+### Fixed
+- **Session start-up and permission modes.** A `default` permission-mode climb is confirmed from the real footer after the key press rather than from the last labeled token; the start-up mode cycle waits out a boot dialog that is still settling before pressing Shift+Tab; both wordings of the workspace-trust dialog (including Claude Code 2.1.323's) are recognized; and the mid-session modal detector needs the dialog's real structure rather than just its question text, keeping the old verdict for signatures without option rows.
+- **Worker and merge safety.** A resume or archive-restore of a worker is refused when its task already has a live worker; a non-conflict squash refusal now carries git's own error text; a failed `GitWriter` commit unstages what it staged; and a `worker_relink` on a session outside the caller's lineage returns the same unknown-id answer as a missing one.
+- **Clearer errors from the API.** Spawning on an unknown agent, or resuming a session with no engine transcript, returns a 4xx instead of a 500, and restore and archive-delete refusals return 409 instead of a blanket 400.
+- **Companion and suggestions.** `sessions_status` can find a stopped session to resume, and `preset_suggestion_suggest` validates its label the same way the REST suggestion route does.
+- **Project deletion refreshes the Inbox.** Deleting a project now notifies the questions listener, so its open requests clear straight away.
+- **Contributor tooling.** `vault-lint` no longer flags edit-scar patterns inside inline code, the EOL guard now catches untracked bare-LF files with non-ASCII names, and a few Atlas layout fixes (phone-width setup wizard and Platform node grids, consistent terminal card sizes).
+- **Many smaller internal test and reliability fixes** are not listed individually.
+
 ## [0.32.0] — 2026-11-11
 
 **The final TypeScript release before the Rust port.** This release brings a Graphite/Ink & Signal visual refresh with a system/light/dark theme and a keyboard-friendlier board, a rebuilt "Atlas" web UI that replaces the previous one outright, SSH connections that agents can use under an owner-approval hold, opt-in per-card policies, context-exhaustion protection for workers and Companions, and a large round of merge, session and skill-safety hardening. It also carries two breaking environment changes and the removal of the previous web UI — read the upgrade notes under *Changed*.
